@@ -23,7 +23,8 @@ class SettingsView(ft.Container):
             password=True, 
             can_reveal_password=True,
             value=current_token,
-            width=400
+            width=400,
+            on_submit=self.save_and_verify
         )
         
         self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=ft.Colors.GREY)

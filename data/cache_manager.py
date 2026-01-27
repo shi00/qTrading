@@ -353,6 +353,13 @@ class CacheManager:
             rows = await cursor.fetchall()
             return set(row[0] for row in rows)
 
+    async def get_cached_indicator_dates(self):
+        """Get all dates that have indicator data (for integrity check)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT DISTINCT trade_date FROM daily_indicators")
+            rows = await cursor.fetchall()
+            return set(row[0] for row in rows)
+
     async def get_sync_stats(self):
         """Get sync statistics for UI display"""
         async with aiosqlite.connect(self.db_path) as db:

@@ -154,78 +154,83 @@ class DataProcessor:
         
         return df_quotes if df_quotes is not None else df_basic
 
-    async def sync_historical_data(self, days=250, progress_callback=None):
+
+    async def sync_historical_data(self, days=365, progress_callback=None, cancel_event=None):
         """
-        Sync historical data for the specified number of days.
-        INCREMENTAL: Only fetches dates not already in cache (resumable).
-        
-        :param days: Number of trading days to sync (default 250 = ~1 year)
-        :param progress_callback: Optional callback function(current, total, message)
+        Sync historical data for the last N days using concurrency.
         """
-        logger.info(f"[DataProcessor] Starting incremental historical sync for {days} days...")
+        logger.info(f"[DataProcessor] Starting historical sync for last {days} days...")
         
-        end_date = self.get_latest_trade_date()
-        start = datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=int(days * 1.5))
-        start_date = start.strftime('%Y%m%d')
+        end_date = datetime.datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
         
-        # Get all required trade dates
-        all_trade_dates = self.get_trade_dates(start_date, end_date)[-days:]
+        # Get actual trading dates (inverse order: new -> old)
+        trade_dates = self.get_trade_dates(start_date, end_date)
+        trade_dates.sort(reverse=True)
         
-        # Get already cached dates
-        cached_dates = await self.cache.get_cached_trade_dates()
+        # === Breakpoint Resume Logic ===
+        try:
+            # 1. Get dates that have Quotes
+            cached_quotes_dates = await self.cache.get_cached_trade_dates()
+            
+            # 2. Get dates that have Indicators
+            cached_ind_dates = await self.cache.get_cached_indicator_dates()
+            
+            # 3. Intersection: Dates that have BOTH
+            existing_dates = cached_quotes_dates.intersection(cached_ind_dates)
+            
+            # 4. Filter out existing dates
+            original_count = len(trade_dates)
+            trade_dates = [d for d in trade_dates if d not in existing_dates]
+            skipped_count = original_count - len(trade_dates)
+            
+            if skipped_count > 0:
+                logger.info(f"[DataProcessor] ⏭️ Breakpoint resume: Skipped {skipped_count} already synced days.")
+        except Exception as e:
+            logger.warning(f"[DataProcessor] Failed to check cached dates: {e}, will sync all.")
+
+        total_days = len(trade_dates)
+        logger.info(f"[DataProcessor] Found {total_days} missing trading dates to sync.")
         
-        # Filter to only sync missing dates
-        missing_dates = [d for d in all_trade_dates if d not in cached_dates]
+        # Concurrency control (5 concurrent requests is safe for 2000+ points)
+        semaphore = asyncio.Semaphore(5) 
         
-        total_required = len(all_trade_dates)
-        already_cached = len(all_trade_dates) - len(missing_dates)
-        to_sync = len(missing_dates)
-        
-        logger.info(f"[DataProcessor] 📊 Required: {total_required} dates, Cached: {already_cached}, To sync: {to_sync}")
-        
-        if to_sync == 0:
-            logger.info("[DataProcessor] ✅ All data already cached, nothing to sync!")
-            if progress_callback:
-                progress_callback(total_required, total_required, "已有全部数据")
-            return {'quotes': 0, 'indicators': 0, 'skipped': already_cached}
-        
-        loop = asyncio.get_running_loop()
-        
-        quotes_total = 0
-        indicators_total = 0
-        
-        for i, date in enumerate(missing_dates):
-            try:
-                # Fetch data for missing date
-                df_quotes = await loop.run_in_executor(None, lambda d=date: self.api.get_daily_quotes(trade_date=d))
-                df_basic = await loop.run_in_executor(None, lambda d=date: self.api.get_daily_basic(trade_date=d))
-                
-                # Save to cache
-                if df_quotes is not None and not df_quotes.empty:
-                    quotes_total += await self.cache.save_daily_quotes(df_quotes)
-                if df_basic is not None and not df_basic.empty:
-                    indicators_total += await self.cache.save_daily_indicators(df_basic)
-                
-                # Progress callback - show overall progress including cached
-                current_total = already_cached + i + 1
-                if progress_callback:
-                    progress_callback(current_total, total_required, f"同步 {date} (新增 {i+1}/{to_sync})")
-                
-                # Rate limiting
-                if (i + 1) % 20 == 0:
-                    logger.info(f"[DataProcessor] Progress: {i+1}/{to_sync} new dates synced...")
-                    await asyncio.sleep(0.5)
+        async def sync_one_day_safe(date, idx):
+            # Check for cancellation before starting work
+            if cancel_event and cancel_event.is_set():
+                return
+
+            async with semaphore:
+                # Double check inside semaphore (in case it waited)
+                if cancel_event and cancel_event.is_set():
+                    return
                     
-            except Exception as e:
-                logger.error(f"[DataProcessor] ⚠️ Error syncing {date}: {e}")
-                continue
-        
-        # Update sync status
-        await self.cache.update_sync_status('daily_quotes', end_date, quotes_total)
-        await self.cache.update_sync_status('daily_indicators', end_date, indicators_total)
-        
-        logger.info(f"[DataProcessor] ✅ Incremental sync complete! New quotes: {quotes_total}, Skipped: {already_cached}")
-        return {'quotes': quotes_total, 'indicators': indicators_total, 'skipped': already_cached}
+                try:
+                    # Sync this day
+                    await self.sync_daily_market_snapshot(date)
+                    # Update progress
+                    if progress_callback:
+                        progress_callback(idx + 1, total_days, f"正在同步 {date} ...")
+                except Exception as e:
+                    logger.error(f"Failed to sync {date}: {e}")
+
+        # Create tasks
+        tasks = []
+        for i, date in enumerate(trade_dates):
+            if cancel_event and cancel_event.is_set():
+                break
+            tasks.append(sync_one_day_safe(date, i))
+            
+        # Run in batches
+        if tasks:
+            await asyncio.gather(*tasks)
+            
+        if cancel_event and cancel_event.is_set():
+            logger.warning("[DataProcessor] Sync cancelled by user.")
+            return 0
+            
+        logger.info("[DataProcessor] ✅ Historical sync complete.")
+        return total_days
 
     async def sync_financial_reports(self, periods=None):
         """

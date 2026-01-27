@@ -17,7 +17,10 @@ class ScreenerView(ft.Container):
         self.strategy_mgr = StrategyManager()
         self.data_processor = DataProcessor()
         self.review_mgr = ReviewManager()
-        self.current_results = None  # Store results for detail lookup
+        self.current_results = None  # To be deprecated by full_results
+        self.full_results = None
+        self.page_no = 1
+        self.page_size = 50
         
         # Controls
         self.strategy_dropdown = ft.Dropdown(
@@ -48,6 +51,21 @@ class ScreenerView(ft.Container):
         self.status_text = ft.Text("准备就绪")
         self.save_switch = ft.Switch(label="自动保存复盘记录", value=True)
         
+        # Pagination UI
+        self.prev_btn = ft.IconButton(
+            ft.Icons.ARROW_BACK_IOS, 
+            tooltip="上一页",
+            on_click=lambda e: self.change_page(-1),
+            disabled=True
+        )
+        self.next_btn = ft.IconButton(
+            ft.Icons.ARROW_FORWARD_IOS, 
+            tooltip="下一页", 
+            on_click=lambda e: self.change_page(1),
+            disabled=True
+        )
+        self.page_info = ft.Text("第 0 页 / 共 0 页")
+        
         # Stock detail dialog
         self.detail_dialog = StockDetailDialog()
 
@@ -67,7 +85,13 @@ class ScreenerView(ft.Container):
                     controls=[self.results_table],
                     expand=True,
                     scroll=ft.ScrollMode.AUTO
-                )
+                ),
+                # Pagination Controls
+                ft.Row([
+                    self.prev_btn,
+                    self.page_info,
+                    self.next_btn
+                ], alignment=ft.MainAxisAlignment.CENTER)
             ],
             expand=True
         )
@@ -125,6 +149,8 @@ class ScreenerView(ft.Container):
                 self.status_text.value = "无数据，请先在设置中同步数据"
                 self.status_text.color = ft.Colors.ORANGE
                 self.results_table.rows = []
+                self.full_results = None
+                self.update_pagination_controls()
                 self.progress_ring.visible = False
                 self.update()
                 return
@@ -137,17 +163,21 @@ class ScreenerView(ft.Container):
                 self.status_text.color = ft.Colors.RED
                 logger.error(f"Strategy filter error: {traceback.format_exc()}")
                 self.results_table.rows = []
+                self.full_results = None
+                self.update_pagination_controls()
                 self.progress_ring.visible = False
                 self.update()
                 return
             
             # 3. Store results and update UI
-            self.current_results = result_df
+            self.full_results = result_df
+            self.page_no = 1
             
             if result_df is None or result_df.empty:
                 self.status_text.value = "未找到符合条件的股票"
                 self.status_text.color = ft.Colors.ORANGE
                 self.results_table.rows = []
+                self.update_pagination_controls()
             else:
                 count = len(result_df)
                 msg = f"筛选完成，命中 {count} 只股票"
@@ -159,7 +189,7 @@ class ScreenerView(ft.Container):
                 
                 self.status_text.value = msg
                 self.status_text.color = ft.Colors.GREEN
-                self.update_table(result_df)
+                self.render_table()
                 
         except Exception as ex:
             self.status_text.value = f"执行出错: {str(ex)[:50]}"
@@ -171,11 +201,11 @@ class ScreenerView(ft.Container):
 
     def show_stock_detail(self, ts_code: str):
         """Show detail dialog for a stock"""
-        if self.current_results is None:
+        if self.full_results is None:
             return
         
         # Find stock data
-        stock_row = self.current_results[self.current_results['ts_code'] == ts_code]
+        stock_row = self.full_results[self.full_results['ts_code'] == ts_code]
         if stock_row.empty:
             return
         
@@ -185,10 +215,34 @@ class ScreenerView(ft.Container):
         self.page.dialog = self.detail_dialog
         self.page.update()
 
-    def update_table(self, df):
+    def change_page(self, delta):
+        if self.full_results is None:
+            return
+        
+        start = (self.page_no + delta - 1) * self.page_size
+        if start < 0 or start >= len(self.full_results):
+            return
+            
+        self.page_no += delta
+        self.render_table()
+        self.update()
+
+    def render_table(self):
+        if self.full_results is None or self.full_results.empty:
+            self.results_table.rows = []
+            self.update_pagination_controls()
+            return
+            
+        # Pagination Logic
+        total_items = len(self.full_results)
+        start_idx = (self.page_no - 1) * self.page_size
+        end_idx = min(start_idx + self.page_size, total_items)
+        
+        # Slice for current page
+        page_data = self.full_results.iloc[start_idx:end_idx]
+        
         rows = []
-        # Limit to top 50 for UI performance
-        for _, row in df.head(50).iterrows():
+        for _, row in page_data.iterrows():
             # Safe value extraction with defaults
             code = str(row.get('ts_code', ''))
             name = str(row.get('name', '')) if 'name' in row else ''
@@ -228,3 +282,18 @@ class ScreenerView(ft.Container):
                 ft.DataCell(detail_btn),
             ]))
         self.results_table.rows = rows
+        self.update_pagination_controls()
+        
+    def update_pagination_controls(self):
+        if self.full_results is None or self.full_results.empty:
+            self.prev_btn.disabled = True
+            self.next_btn.disabled = True
+            self.page_info.value = "第 0 页 / 共 0 页"
+            return
+            
+        total_items = len(self.full_results)
+        total_pages = (total_items + self.page_size - 1) // self.page_size
+        
+        self.prev_btn.disabled = (self.page_no <= 1)
+        self.next_btn.disabled = (self.page_no >= total_pages)
+        self.page_info.value = f"第 {self.page_no} 页 / 共 {total_pages} 页 (共 {total_items} 条)"

@@ -3,6 +3,7 @@ from utils.config_handler import ConfigHandler
 from data.tushare_client import TushareClient
 from data.data_processor import DataProcessor
 import tushare as ts
+import asyncio
 
 class OnboardingWizard(ft.Container):
     """
@@ -16,7 +17,7 @@ class OnboardingWizard(ft.Container):
     
     def __init__(self, page, on_complete=None):
         super().__init__()
-        self.page = page
+        self.app_page = page
         self.on_complete = on_complete  # Callback when wizard completes
         self.current_step = 0
         self.expand = True
@@ -27,7 +28,8 @@ class OnboardingWizard(ft.Container):
             password=True,
             can_reveal_password=True,
             width=400,
-            hint_text="可在 tushare.pro 个人中心获取"
+            hint_text="可在 tushare.pro 个人中心获取",
+            on_submit=self._verify_token
         )
         self.token_status = ft.Text("", size=12)
         
@@ -136,8 +138,41 @@ class OnboardingWizard(ft.Container):
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+    async def _handle_quick_sync(self, e):
+        await self._start_sync(quick=True)
+
+    async def _handle_full_sync(self, e):
+        await self._start_sync(quick=False)
+
+    async def _handle_cancel_sync(self, e):
+        """Cancel the running sync task"""
+        if hasattr(self, 'cancel_event'):
+            self.cancel_event.set()
+            self.sync_status.value = "正在取消..."
+            self.sync_status.color = ft.Colors.RED
+            self.btn_cancel_sync.disabled = True
+            self.update()
+
     def _build_step2(self):
         """Step 2: Data Sync"""
+        self.btn_quick_sync = ft.ElevatedButton(
+            "仅同步今日 (快)", 
+            icon=ft.Icons.FLASH_ON,
+            on_click=self._handle_quick_sync
+        )
+        self.btn_full_sync = ft.ElevatedButton(
+            "完整同步 (3年)", 
+            icon=ft.Icons.CLOUD_SYNC,
+            on_click=self._handle_full_sync
+        )
+        self.btn_cancel_sync = ft.ElevatedButton(
+            "取消", 
+            icon=ft.Icons.CANCEL,
+            color=ft.Colors.RED,
+            visible=False,
+            on_click=self._handle_cancel_sync
+        )
+        
         return ft.Column(
             [
                 ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=48, color=ft.Colors.BLUE),
@@ -145,20 +180,18 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=10),
                 ft.Text(
                     "选股策略需要历史数据支持。\n"
-                    "完整同步约需10-15分钟，也可选择仅同步近期数据。",
+                    "完整同步约需3-5分钟 (5倍并发)，也可选择仅同步今日数据。",
                     size=13, color=ft.Colors.GREY_700,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=20),
+                ft.Row(
+                    [self.btn_quick_sync, self.btn_full_sync, self.btn_cancel_sync],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
+                ft.Container(height=20),
                 self.sync_progress,
                 self.sync_status,
-                ft.Container(height=20),
-                ft.Row([
-                    ft.OutlinedButton("仅同步今日", icon=ft.Icons.TODAY, 
-                                     on_click=lambda e: self._start_sync(quick=True)),
-                    ft.ElevatedButton("完整同步 (3年)", icon=ft.Icons.CLOUD_DOWNLOAD, 
-                                     on_click=lambda e: self._start_sync(quick=False)),
-                ], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Container(height=10),
                 ft.TextButton("跳过此步骤", on_click=self._skip_sync),
             ],
@@ -255,57 +288,89 @@ class OnboardingWizard(ft.Container):
 
     async def _start_sync(self, quick=False):
         """Start data sync"""
+        # Disable sync buttons, show cancel button
+        self.btn_quick_sync.disabled = True
+        self.btn_full_sync.disabled = True
+        self.btn_cancel_sync.visible = True
+        self.btn_cancel_sync.disabled = False
+        
         self.sync_status.value = "正在初始化..."
+        self.sync_status.color = ft.Colors.BLUE
         self.sync_progress.value = None  # Indeterminate
         self.update()
         
+        # Initialize cancel event
+        self.cancel_event = asyncio.Event()
+        self.cancel_event.clear()
+        
         try:
+            import logging
+            logger = logging.getLogger(__name__)
+            
             processor = DataProcessor()
             await processor.init_data()
             
             if quick:
-                # Quick sync: just today's data
+                # Quick sync
                 self.sync_status.value = "同步今日数据..."
                 self.update()
                 await processor.sync_daily_market_snapshot()
                 self.sync_status.value = "✅ 今日数据同步完成"
+                self.sync_status.color = ft.Colors.GREEN
             else:
                 # Full sync
                 self.sync_status.value = "同步股票列表..."
                 self.update()
                 await processor.sync_stock_basic()
                 
+                if self.cancel_event.is_set():
+                    raise asyncio.CancelledError("User cancelled")
+
                 self.sync_status.value = "同步历史行情 (耗时较长)..."
                 self.sync_progress.value = 0
                 self.update()
                 
-                # Sync with progress
                 days = 750
                 def update_progress(current, total, msg):
                     self.sync_progress.value = current / total
-                    self.sync_status.value = f"进度: {current}/{total} - {msg}"
+                    self.sync_status.value = f"{msg} ({int(current/total*100)}%)"
                     self.update()
                 
-                await processor.sync_historical_data(days=days, progress_callback=update_progress)
+                # Pass cancel_event to processor
+                await processor.sync_historical_data(
+                    days=days, 
+                    progress_callback=update_progress,
+                    cancel_event=self.cancel_event
+                )
                 
-                self.sync_status.value = "同步财务数据..."
-                self.sync_progress.value = None
-                self.update()
-                await processor.sync_financial_reports()
-                
-                self.sync_status.value = "✅ 完整数据同步完成"
-            
-            self.sync_progress.value = 1
-            self.sync_status.color = ft.Colors.GREEN
+                if self.cancel_event.is_set():
+                     self.sync_status.value = "❌ 同步已取消"
+                     self.sync_status.color = ft.Colors.RED
+                     self.sync_progress.value = 0
+                else:
+                    self.sync_status.value = "✅ 历史数据同步完成"
+                    self.sync_status.color = ft.Colors.GREEN
+                    self.sync_progress.value = 1
+
             self.update()
             
-            # Auto-advance after 1 second
-            await self._next_step()
-            
+            if not self.cancel_event.is_set():
+                await asyncio.sleep(1)
+                await self._next_step()
+                
         except Exception as ex:
+            import traceback
+            logger.error(f"Sync error: {traceback.format_exc()}")
             self.sync_status.value = f"❌ 同步失败: {str(ex)[:40]}"
             self.sync_status.color = ft.Colors.RED
             self.sync_progress.value = 0
+            self.update()
+            
+        finally:
+            # Always re-enable buttons and hide cancel
+            self.btn_quick_sync.disabled = False
+            self.btn_full_sync.disabled = False
+            self.btn_cancel_sync.visible = False
             self.update()
 
     async def _skip_sync(self, e):
