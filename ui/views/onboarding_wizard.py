@@ -4,6 +4,10 @@ from data.tushare_client import TushareClient
 from data.data_processor import DataProcessor
 import tushare as ts
 import asyncio
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
 
 class OnboardingWizard(ft.Container):
     """
@@ -58,9 +62,9 @@ class OnboardingWizard(ft.Container):
         
         # Progress indicator
         self.step_indicators = ft.Row(
-            [self._create_step_indicator(i, ["Token配置", "数据同步", "定时任务", "完成"]) 
-             for i in range(4)],
+            self._build_step_indicators(),
             alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         
         self.content = ft.Column(
@@ -79,8 +83,29 @@ class OnboardingWizard(ft.Container):
             expand=True,
         )
 
+    def _build_step_indicators(self):
+        """Build the list of controls for step indicators including arrows"""
+        labels = ["Token配置", "数据同步", "定时任务", "完成"]
+        controls = []
+        for i in range(4):
+            # Add step indicator
+            controls.append(self._create_step_indicator(i, labels))
+            
+            # Add arrow connector if not the last step
+            if i < 3:
+                is_completed = i < self.current_step
+                color = ft.Colors.GREEN if is_completed else ft.Colors.GREY_300
+                controls.append(
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.ARROW_RIGHT_ALT, color=color, size=24),
+                        padding=ft.padding.symmetric(horizontal=5),
+                        offset=ft.transform.Offset(0, -0.2) # Slight visual adjustment
+                    )
+                )
+        return controls
+
     def _create_step_indicator(self, index, labels):
-        """Create step indicator dot"""
+        """Create step indicator dot with step number"""
         is_active = index == self.current_step
         is_completed = index < self.current_step
         
@@ -94,21 +119,22 @@ class OnboardingWizard(ft.Container):
             color = ft.Colors.GREY_400
             icon = ft.Icons.RADIO_BUTTON_UNCHECKED
         
+        font_weight = ft.FontWeight.BOLD if is_active else ft.FontWeight.NORMAL
+        
         return ft.Column(
             [
-                ft.Icon(icon, color=color, size=24),
-                ft.Text(labels[index], size=10, color=color),
+                ft.Text(f"步骤{index + 1}", size=12, color=color, weight=font_weight),
+                ft.Icon(icon, color=color, size=28), # Slightly larger icon
+                ft.Text(labels[index], size=12, color=color, weight=font_weight),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=2,
             width=80,
         )
 
     def _update_indicators(self):
         """Update step indicators"""
-        labels = ["Token配置", "数据同步", "定时任务", "完成"]
-        self.step_indicators.controls = [
-            self._create_step_indicator(i, labels) for i in range(4)
-        ]
+        self.step_indicators.controls = self._build_step_indicators()
         self.step_container.content = self.steps_content[self.current_step]
         self.update()
 
@@ -188,6 +214,7 @@ class OnboardingWizard(ft.Container):
                 ft.Row(
                     [self.btn_quick_sync, self.btn_full_sync, self.btn_cancel_sync],
                     alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 ft.Container(height=20),
                 self.sync_progress,
@@ -212,7 +239,10 @@ class OnboardingWizard(ft.Container):
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=20),
-                self.schedule_enabled,
+                ft.Row(
+                    [self.schedule_enabled],
+                    alignment=ft.MainAxisAlignment.CENTER
+                ),
                 ft.Text("* 需要程序在后台运行", size=11, color=ft.Colors.GREY_500),
                 ft.Container(height=20),
                 ft.Row([
@@ -304,9 +334,6 @@ class OnboardingWizard(ft.Container):
         self.cancel_event.clear()
         
         try:
-            import logging
-            logger = logging.getLogger(__name__)
-            
             processor = DataProcessor()
             await processor.init_data()
             
@@ -358,8 +385,11 @@ class OnboardingWizard(ft.Container):
                 await asyncio.sleep(1)
                 await self._next_step()
                 
+        except asyncio.CancelledError:
+            logger.info("Sync task was cancelled by user")
+            self.sync_status.value = "❌ 同步已取消"
+            self.sync_status.color = ft.Colors.ORANGE
         except Exception as ex:
-            import traceback
             logger.error(f"Sync error: {traceback.format_exc()}")
             self.sync_status.value = f"❌ 同步失败: {str(ex)[:40]}"
             self.sync_status.color = ft.Colors.RED

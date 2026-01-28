@@ -1,15 +1,170 @@
 import aiosqlite
+import asyncio
 import pandas as pd
 import datetime
 import os
 import config
+from utils.config_handler import ConfigHandler
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CacheManager:
     def __init__(self, db_path=None):
         self.db_path = db_path or config.DB_PATH
+        self.queue = asyncio.Queue(maxsize=ConfigHandler.get_db_queue_size()) # Ring buffer / Queue
+        self.writer_task = None
+        self._running = False
+        self._closing = False # New flag to prevent restart during close
+
+    async def start(self):
+        """Start the background DB writer task"""
+        if self._closing:
+            return # Don't start if we are closing
+            
+        if not self._running:
+            self._running = True
+            self.writer_task = asyncio.create_task(self._db_writer_loop())
+            logger.info("[CacheManager] DB Writer started.")
+
+    async def close(self):
+        """Stop the writer task and wait for queue to empty"""
+        if self._closing:
+            return 
+            
+        self._closing = True
+        
+        if self._running:
+            logger.info("[CacheManager] Stopping DB Writer... waiting for queue to empty.")
+            # We assume the producer has stopped producing before calling close()
+            # or we accept that some late items might be rejected if we enforced it strictly.
+            await self.queue.put(None) # Sentinel
+            
+            if self.writer_task:
+                try:
+                    await self.writer_task
+                except Exception as e:
+                    logger.error(f"[CacheManager] Writer task error during close: {e}")
+            
+            self._running = False
+            self._closing = False # Reset if we want to restart later? Or keep closed.
+            logger.info("[CacheManager] DB Writer stopped.")
+
+    async def _db_writer_loop(self):
+        """Background loop to consume SQL tasks and write to DB"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Enable WAL mode for better concurrency
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("PRAGMA synchronous=NORMAL;")
+            await db.commit()
+            
+            while True:
+                try:
+                    # Get first task
+                    task = await self.queue.get()
+                    
+                    if task is None: # Sentinel
+                        self.queue.task_done()
+                        break
+                    
+                    MAX_BATCH_ROWS = 20000
+                    current_batch_rows = 0
+                    
+                    # Calculate rows for the first task
+                    if task is not None:
+                         _, first_params, first_is_many = task
+                         current_batch_rows += len(first_params) if first_is_many else 1
+
+                    tasks = [task]
+                    # Batch retrieval (drain queue up to limit) to optimize commits
+                    try:
+                        # Grab up to 50 more items, BUT stop if we hit row limit
+                        for _ in range(50): 
+                            if current_batch_rows >= MAX_BATCH_ROWS:
+                                # Smart break: we have enough data for a good transaction
+                                break
+                                
+                            t = self.queue.get_nowait()
+                            
+                            if t is None:
+                                tasks.append(t)
+                                break
+                                
+                            # Inspect task size
+                            _, params, is_many = t
+                            row_count = len(params) if is_many else 1
+                            current_batch_rows += row_count
+                            
+                            tasks.append(t)
+                            
+                    except asyncio.QueueEmpty:
+                        pass
+                    
+                    # Execute batch
+                    transaction_active = False
+                    try:
+                        for item in tasks:
+                            if item is None: continue
+                            
+                            sql, params, is_many = item
+                            if is_many:
+                                await db.executemany(sql, params)
+                            else:
+                                await db.execute(sql, params)
+                            transaction_active = True
+                        
+                        if transaction_active:
+                            await db.commit()
+                            
+                    except Exception as e:
+                        print(f"[CacheManager] Batch Commit Failed: {e}")
+                        try:
+                            await db.rollback()
+                        except:
+                            pass
+                        
+                        # Fallback: Retry items one by one to isolate the bad apple
+                        print(f"[CacheManager] Retrying {len(tasks)} items individually...")
+                        for retry_item in tasks:
+                            if retry_item is None: continue
+                            try:
+                                sql, params, is_many = retry_item
+                                if is_many:
+                                    await db.executemany(sql, params)
+                                else:
+                                    await db.execute(sql, params)
+                                await db.commit()
+                            except Exception as inner_e:
+                                print(f"[CacheManager] Item Retry Failed: {inner_e}") # Log bad item
+                                # We discard this specific bad item and continue
+                                try:
+                                    await db.rollback()
+                                except:
+                                    pass
+
+                    # Mark all as done
+                    for _ in tasks:
+                        self.queue.task_done()
+                        
+                    # Handle stop signal if it was in the batch
+                    if any(t is None for t in tasks):
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"[CacheManager] Critical Loop Error: {e}")
+                    await asyncio.sleep(1) # Prevent tight loop on crash
 
     async def init_db(self):
         """Initialize database tables with enhanced schema"""
+        # Ensure writer is started
+        await self.start()
+        
+        # We still do init synchronously (or waiting on queue) to ensure tables exist before usage
+        # But since this is DDL, it's safer to run it directly or strictly wait for it.
+        # Given init_db is called at startup, we run it directly here before the queue loop really gets busy,
+        # OR we just queue it. 
+        # Better: Run directly to ensure tables exist immediately for subsequent reads.
         async with aiosqlite.connect(self.db_path) as db:
             # Optimize performance
             await db.execute("PRAGMA journal_mode=WAL;")  # Write-Ahead Logging
@@ -249,16 +404,18 @@ class CacheManager:
 
     async def clear_all_cache(self):
         """Clear all cached data from database tables"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM daily_quotes")
-            await db.execute("DELETE FROM daily_indicators")
-            await db.execute("DELETE FROM financial_reports")
-            await db.execute("DELETE FROM moneyflow_daily")
-            await db.execute("DELETE FROM northbound_holding")
-            await db.execute("DELETE FROM sync_status")
-            # Keep stock_basic as it's relatively static
-            await db.commit()
-        print("[Cache] All cache data cleared.")
+        # Push clear commands to queue
+        tables = ["daily_quotes", "daily_indicators", "financial_reports", "moneyflow_daily", 
+                  "northbound_holding", "sync_status", "screening_history", "top_list", "block_trade"]
+        
+        for table in tables:
+            await self.queue.put((f"DELETE FROM {table}", (), False))
+        
+        # For clearing, we probably want to ensure it's done? 
+        # For now, fire and forget is fine, but user might expect immediate empty data.
+        # If strict consistency is needed, we'd need a way to wait for queue empty.
+        # Using a simple sleep or exposing a join is enough for now.
+        print("[Cache] Clear command queued.")
 
     # ========== Stock Basic ==========
     async def save_stock_basic(self, df):
@@ -275,13 +432,16 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO stock_basic 
                 (ts_code, symbol, name, area, industry, market, list_date, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
         
         return len(df)
 
@@ -306,13 +466,16 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO daily_quotes 
                 (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
         
         return len(df)
 
@@ -400,14 +563,17 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO daily_indicators 
                 (ts_code, trade_date, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm,
                  total_mv, circ_mv, total_share, float_share, free_share, turnover_rate, turnover_rate_f)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
         
         return len(df)
 
@@ -442,18 +608,21 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO financial_reports 
                 (ts_code, end_date, ann_date, report_type, total_revenue, revenue,
                  n_income, n_income_attr_p, total_assets, total_liab,
                  total_hldr_eqy_exc_min_int, roe, roe_dt, grossprofit_margin,
                  netprofit_margin, debt_to_assets, or_yoy, netprofit_yoy)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
         
-        print(f"[Cache] Saved {len(df)} financial records.")
+        # print(f"[Cache] Queued {len(df)} financial records.")
         return len(df)
 
     async def get_latest_financials(self):
@@ -473,17 +642,41 @@ class CacheManager:
                 rows = await cursor.fetchall()
                 return pd.DataFrame(rows, columns=cols)
 
+    async def get_cached_financial_records(self, period=None):
+        """
+        Get all cached financial records (ts_code, end_date pairs) for breakpoint resume.
+        
+        :param period: Optional specific end_date to filter by
+        :return: Set of (ts_code, end_date) tuples that already exist in cache
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            if period:
+                cursor = await db.execute(
+                    "SELECT ts_code, end_date FROM financial_reports WHERE end_date = ?",
+                    (period,)
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT ts_code, end_date FROM financial_reports"
+                )
+            rows = await cursor.fetchall()
+            return set((row[0], row[1]) for row in rows)
+
     # ========== Sync Status ==========
     async def update_sync_status(self, table_name, last_data_date, record_count, status='success'):
         """Update sync status for a table"""
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if not self._running and not self._closing:
+            await self.start()
+            
+        sql = '''
                 INSERT OR REPLACE INTO sync_status 
                 (table_name, last_sync_date, last_data_date, record_count, status, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (table_name, now, last_data_date, record_count, status, now))
-            await db.commit()
+            '''
+        params = (table_name, now, last_data_date, record_count, status, now)
+        await self.queue.put((sql, params, False)) # Single execution
 
     async def get_sync_status(self, table_name=None):
         """Get sync status for tables"""
@@ -556,15 +749,18 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO moneyflow_daily 
                 (ts_code, trade_date, buy_sm_vol, buy_sm_amount, sell_sm_amount,
                  buy_md_amount, sell_md_amount, buy_lg_amount, sell_lg_amount,
                  buy_elg_amount, sell_elg_amount, net_mf_vol, net_mf_amount)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
         
         return len(df)
 
@@ -600,13 +796,16 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO northbound_holding 
                 (ts_code, trade_date, name, vol, ratio, exchange)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
         
         return len(df)
 
@@ -649,13 +848,16 @@ class CacheManager:
                 row['pct_chg']
             ))
             
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR IGNORE INTO screening_history 
                 (trade_date, strategy_name, ts_code, name, close, pct_chg)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', records)
-            await db.commit()
+            '''
+        # Note: records is a list of tuples, so we use True for is_many
+        await self.queue.put((sql, records, True))
             
         return len(records)
 
@@ -677,14 +879,17 @@ class CacheManager:
         """
         if not updates:
             return
+
             
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 UPDATE screening_history 
                 SET t1_price = ?, t1_pct = ?, t5_price = ?, t5_pct = ?
                 WHERE id = ?
-            ''', updates)
-            await db.commit()
+            '''
+        await self.queue.put((sql, updates, True))
 
     async def get_screening_history(self, strategy_name=None, limit=100):
         """Get screening history for UI"""
@@ -731,14 +936,18 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO top_list 
                 (trade_date, ts_code, name, close, pct_chg, turnover_rate, amount, 
                  l_sell, l_buy, l_amount, net_amount, net_rate, amount_rate, float_values, reason)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
+        
         return len(df)
 
     async def get_top_list(self, trade_date=None):
@@ -767,13 +976,17 @@ class CacheManager:
             if col not in df.columns:
                 df[col] = None
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany('''
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
                 INSERT OR REPLACE INTO block_trade 
                 (trade_date, ts_code, price, vol, amount, buyer, seller)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', df[cols].values.tolist())
-            await db.commit()
+            '''
+        params = df[cols].values.tolist()
+        await self.queue.put((sql, params, True))
+        
         return len(df)
 
     async def get_block_trade(self, trade_date=None):

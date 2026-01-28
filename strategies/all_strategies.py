@@ -17,7 +17,7 @@ class BaseStrategy(ABC):
 
 class ValueStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("价值投资", "寻找低估值、财务健康的优质蓝筹股")
+        super().__init__("价值投资", "标准：市盈率 5-20倍 | 市净率 0.5-3倍 | 股息率 > 2% (寻找低估值蓝筹)")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -42,7 +42,7 @@ class ValueStrategy(BaseStrategy):
 # --- 2. Growth Strategy ---
 class GrowthStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("高成长策略", "营收与利润高速增长，高ROE")
+        super().__init__("高成长策略", "标准：营收增长 > 20% | 净利增长 > 25% | ROE > 15%")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -62,7 +62,7 @@ class GrowthStrategy(BaseStrategy):
 # --- 3. Dividend Strategy ---
 class DividendStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("高股息策略", "股息率高且分红稳定的现金牛")
+        super().__init__("高股息策略", "标准：股息率(TTM) > 4% (防御性现金牛资产)")
         
     def filter(self, context):
         df = context.get('screening_data')
@@ -77,7 +77,7 @@ class DividendStrategy(BaseStrategy):
 # --- 4. Technical Breakout ---
 class TechnicalBreakoutStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("技术突破", "放量上涨，涨幅2-7%")
+        super().__init__("技术突破", "标准：当日涨幅 2-7% | 换手率 3-15% (放量活跃)")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -98,7 +98,7 @@ class TechnicalBreakoutStrategy(BaseStrategy):
 # --- 5. Northbound Capital ---
 class NorthboundStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("北向资金", "外资重仓标的")
+        super().__init__("北向资金", "标准：北向资金持股比例 > 5% (外资重仓股)")
 
     def filter(self, context):
         # This requires northbound holding data from cache
@@ -107,14 +107,14 @@ class NorthboundStrategy(BaseStrategy):
             # Fallback to screening_data with note
             return pd.DataFrame()
         
-        # Filter high holding ratio > 5%
-        mask = (df['ratio'] > 5)
+        # Filter high holding ratio > 5% and ensure A-Share code
+        mask = (df['ratio'] > 5) & (df['ts_code'].astype(str).str.endswith(('.SH', '.SZ')))
         return df[mask].sort_values('ratio', ascending=False)
 
 # --- 6. Oversold Rebound ---
 class OversoldStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("超跌反弹", "短期跌幅大，低估值")
+        super().__init__("超跌反弹", "标准：当日跌幅 > 3% | 市盈率 < 30 (短期错杀)")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -133,7 +133,7 @@ class OversoldStrategy(BaseStrategy):
 # --- 7. Institutional Buying (LHB) ---
 class InstitutionalStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("龙虎榜机构", "机构大笔净买入，关注资金动向")
+        super().__init__("龙虎榜机构", "标准：龙虎榜机构净买入 > 3000万 (主力资金抢筹)")
 
     def filter(self, context):
         # Requires top_list data
@@ -173,7 +173,7 @@ class ChipConcentrationStrategy(BaseStrategy):
 # --- 9. Block Trade ---
 class BlockTradeStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("大宗交易", "溢价或平价交易，关注主力吸筹")
+        super().__init__("大宗交易", "标准：大宗成交额 > 1000万 (关注主力吸筹)")
 
     def filter(self, context):
         block = context.get('block_trade')
@@ -207,7 +207,7 @@ class BlockTradeStrategy(BaseStrategy):
 # --- 10. High Quality Cashflow ---
 class CashFlowStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("现金流优质", "低负债，高盈利能力")
+        super().__init__("现金流优质", "标准：资产负债率 < 50% | ROE > 10% (稳健经营)")
     
     def filter(self, context):
         df = context.get('screening_data')
@@ -225,7 +225,7 @@ class CashFlowStrategy(BaseStrategy):
 # --- 11. Low PE Large Cap ---
 class LargePEStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("大盘低估", "大市值低PE蓝筹")
+        super().__init__("大盘低估", "标准：总市值 > 500亿 | 市盈率 < 15倍 (核心资产)")
     
     def filter(self, context):
         df = context.get('screening_data')

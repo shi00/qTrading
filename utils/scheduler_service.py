@@ -33,22 +33,39 @@ class SchedulerService:
         self._task = None
         self._last_update_date = None
         self._initialized = True
+        self._thread = None
+        self._loop = None
     
     def start(self):
-        """Start the scheduler background task"""
+        """Start the scheduler in a background thread with its own event loop"""
         if self._running:
             return
         
         self._running = True
-        self._task = asyncio.create_task(self._scheduler_loop())
+        
+        def run_scheduler():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            try:
+                self._loop.run_until_complete(self._scheduler_loop())
+            except Exception as e:
+                logger.error(f"[Scheduler] Thread error: {e}")
+            finally:
+                self._loop.close()
+        
+        import threading
+        self._thread = threading.Thread(target=run_scheduler, daemon=True)
+        self._thread.start()
         logger.info("[Scheduler] Started")
     
     def stop(self):
         """Stop the scheduler"""
         self._running = False
-        if self._task:
-            self._task.cancel()
-            self._task = None
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
+            self._thread = None
         logger.info("[Scheduler] Stopped")
     
     async def _scheduler_loop(self):

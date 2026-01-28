@@ -97,7 +97,7 @@ class ReviewManager:
                 if t1_date and t1_price is None:
                     # Check if we have data for t1_date in cache
                     # Optimization: Use cache instead of API if possible
-                    df = await self.cache.get_daily_quotes(trade_date=t1_date, ts_code=ts_code)
+                    df = await self.cache.get_daily_quotes(start_date=t1_date, end_date=t1_date, ts_code=ts_code)
                     if not df.empty:
                         t1_price = df.iloc[0]['close']
                         # Calculate pct change from entry (close)
@@ -107,7 +107,7 @@ class ReviewManager:
                 
                 # Fetch T+5 if needed and available
                 if t5_date and t5_price is None:
-                    df = await self.cache.get_daily_quotes(trade_date=t5_date, ts_code=ts_code)
+                    df = await self.cache.get_daily_quotes(start_date=t5_date, end_date=t5_date, ts_code=ts_code)
                     if not df.empty:
                         t5_price = df.iloc[0]['close']
                         if record['close']:

@@ -53,3 +53,5 @@ AStockScreener.spec
 
 # Gemini
 .gemini/
+
+.secret.key

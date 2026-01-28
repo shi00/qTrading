@@ -25,7 +25,7 @@ class StockDetailDialog(ft.AlertDialog):
         return ft.Row([
             ft.Text(f"{name}", size=20, weight=ft.FontWeight.BOLD),
             ft.Text(f"({code})", size=14, color=ft.Colors.GREY_600),
-        ])
+        ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
     
     def _build_content(self):
         """Build detail content with sections"""
@@ -166,7 +166,8 @@ class StockDetailDialog(ft.AlertDialog):
     
     def _close(self, e):
         self.open = False
-        self.page.update()
+        if self.page:
+            self.page.update()
 
     def update_data(self, stock_data: dict):
         """Update the dialog with new stock data"""
