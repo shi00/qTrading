@@ -1,83 +1,82 @@
-# AStockScreener (QTrading) - 智能A股选股器
+# AStockScreener (QTrading) - 智能A股 AI 交易员
 
-[![Build Android APK](https://github.com/shi00/qTrading/actions/workflows/build_android.yml/badge.svg)](https://github.com/shi00/qTrading/actions/workflows/build_android.yml)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]() [![Python](https://img.shields.io/badge/python-3.11+-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
 
-AStockScreener 是一个基于 Python/Flet 开发的跨平台（Windows/Android）A股智能选股工具。它集成了 Tushare Pro 数据接口，提供多种经典的量化选股策略，并支持本地数据缓存与增量更新。
+**AStockScreener** 不仅仅是一个选股器，它已经进化为一个具备 **"透明思考、实时反馈、自进化"** 能力的 AI 智能交易员。
 
-> **注意**：本项目需配合 [Tushare Pro](https://tushare.pro/) Token 使用 (建议 2000 积分以上以解锁全部功能)。
+利用 **DeepSeek/OpenAI** 大模型能力，它能像人类研究员一样，实时阅读新闻、财报和盘面数据，并 **实时(Streaming)** 展示其完整的思考推理过程。系统内置 **PVC (预测-验证-修正)** 闭环，能从历史盈亏中自动学习进化。
 
-## ✨ 主要功能
+> **注意**：本项目需配合 [Tushare Pro](https://tushare.pro/) Token 使用 (建议 2000 积分以上)。
 
-### 1. 核心策略 (10+)
-*   **💎 价值投资**: 筛选低估值 (低PE/PB)、高盈利 (高ROE) 的白马股。
-*   **🚀 高成长**: 捕捉营收与净利润高速增长 (双 >20%) 的潜力股。
-*   **💰 高股息**: 寻找高股息率 (>3%) 且分红稳定的防御性标的。
-*   **🌏 北向资金**: 跟踪陆股通 (Smart Money) 大幅增持的个股。
-*   **🏛️ 龙虎榜机构**: 挖掘机构席位大举净买入的强势股。
-*   **💼 大宗交易**: 监控溢价或平价成交的大宗交易数据。
-*   **📈 技术突破**: 识别放量突破均线的趋势启动形态。
-*   **🔄 超跌反弹**: 捕捉短期连续下跌后的反弹机会。
-*   **💵 现金流优质**: 筛选经营性现金流充沛、负债率健康的企业。
-*   **🏢 大盘低估**: (新增) 针对大盘股的特定低估值筛选。
+---
 
-### 2. 数据与系统
-*   **智能复盘系统**: 自动记录每日选股结果，并跟踪 T+1/T+5 日的收益表现 (实盘验证基础)。
-*   **本地数据库**: 使用 SQLite 存储历史行情与财务数据，支持增量更新，极速筛选。
-*   **断点续传**: 支持历史数据同步的断点续传功能。同步中断后再次运行时，会自动识别并跳过已完整下载（行情+指标）的日期，避免重复消耗配额。
-*   **定时任务**: 后台自动调度数据同步与复盘分析。
+## 🚀 核心特性 (Key Features)
 
-### 3. 用户界面 (UI)
-*   **跨平台**: 基于 [Flet](https://flet.dev) 构建，通过一套代码支持 Windows 桌面端与 Android 移动端。
-*   **可视化**: 交互式数据表格，股票详情弹窗 (行情、估值、财务一目了然)。
+### 1. 🧠 透明化 AI 决策 (Visible Thinking)
+*   **白盒推理**: 告别 AI "黑盒"。每一只股票的评分，你都能看到 AI 的完整 **思维链 (Chain of Thought)**。
+*   **多维分析**: 综合 **政策面(Policy)**、**全球映射(Global)**、**资金流(Capital)**、**技术面(Tech)**、**基本面(Fundamental)** 五维打分。
 
-## 🛠️ 安装与运行
+### 2. ⚡ 流式急速体验 (Streaming Experience)
+*   **实时反馈**: 采用 `Asyncio` 流式并发架构，AI 分析完一只股票 **立即显示**，无需漫长等待。
+*   **可视化进度**: 实时进度条与状态日志，让复杂的量化分析过程清晰可见。
 
-### 环境要求
+### 3. 🔄 自进化闭环 (PVC Loop)
+系统拥有自我学习能力：
+*   **Prediction**: 记录 AI 预测快照。
+*   **Verification**: T+1 日 17:00 自动复盘，计算超额收益 (Alpha)。
+*   **Correction**: 自动提取 "成功经验" 和 "失败教训"，动态注入到下一次 Prompt 中，实现 **越用越聪明**。
+
+### 4. 🛡️ 企业级安全与鲁棒性
+*   **Token 加密**: 本地 Tushare Token 采用 **AES-GCM** 军工级加密存储。
+*   **断点续传**: 数据同步支持断点续传，并在断网/报错时自动重试。
+*   **国际化 (I18n)**: 支持中/英双语界面。
+
+---
+
+## 🛠️ 快速开始 (Quick Start)
+
+### 1. 准备工作
 *   Python 3.11+
-*   Tushare Token
+*   Tushare Token (注册 [Tushare](https://tushare.pro/))
+*   DeepSeek API Key (或 OpenAI 兼容 Key)
 
-### 本地运行 (源码)
-
-1.  **克隆仓库**
-    ```bash
-    git clone https://github.com/shi00/qTrading.git
-    cd qTrading
-    ```
-
-2.  **安装依赖**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3.  **运行程序**
-    ```bash
-    python main.py
-    ```
-
-### 使用指南
-1.  **初始化配置**: 首次运行会进入向导，输入 Tushare Token 并同步基础数据。
-2.  **数据同步**: 建议在“设置”页点击“完整日更新”或“同步3年历史数据”以构建本地库。
-3.  **开始选股**: 在“选股器”页面选择策略，点击执行即可看到结果。
-4.  **复盘记录**: 勾选“自动保存复盘记录”，系统会自动跟踪后续涨跌幅。
-
-## 📦 打包与发布
-
-### Windows (.exe)
-项目使用 `PyInstaller` 进行打包：
+### 2. 安装与运行
 ```bash
-pyinstaller --name "AStockScreener" --onefile --noconsole --icon=NONE --hidden-import=flet --hidden-import=pandas --hidden-import=aiosqlite --hidden-import=tushare --hidden-import=plotly main.py
+# 克隆仓库
+git clone https://github.com/shi00/qTrading.git
+cd qTrading
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 运行 (自动进入向导模式)
+python main.py
 ```
 
-### Android (.apk)
-项目使用 GitHub Actions 进行云端构建。
-1.  Fork 本仓库。
-2.  在 `.github/workflows/build_android.yml` 中配置 (已默认配置)。
-3.  Push 代码到 `main` 分支，GitHub Actions 会自动构建并生成 APK Artifact。
+### 3. 首次配置
+1.  在向导中输入 Tushare Token 和 API Key。
+2.  点击 **"开始同步"** (Sync Data)，系统将拉取历史行情与财务数据。
+3.  进入 **"设置" (Settings)** 页，开启 "自动每日更新"。
 
-## 📝 待办事项 (TODO)
-- [ ] **K线图表**: 在详情页添加交互式 K 线图。
-- [ ] **AI 优化**: 接入大模型分析复盘记录，自动优化策略阈值。
-- [ ] **回测系统**: 提供简单的历史回测功能。
+### 4. 使用 AI 选股
+1.  进入 **"选股器" (Screener)**。
+2.  选择策略 **"AI 深度精选 (Beta)"**。
+3.  点击 **"执行筛选"**。
+4.  观察 **"AI 思考过程日志"** 区域，看着 AI 逐个分析股票。
+5.  点击任意股票 **"详情"**，展开 **"查看 AI 思考过程"** 阅读完整研报。
+
+---
+
+## 🏗️ 架构概览
+
+详见 [系统架构设计文档](architecture_design.md)。
+
+*   **UI**: Flet (Flutter based)
+*   **Data**: Tushare Pro + Asyncio Crawler
+*   **AI**: OpenAI Protocol (DeepSeek V3/R1 Recommended)
+*   **Storage**: AioSQLite + AES Encryption
+
+---
 
 ## 📄 开源协议
 MIT License

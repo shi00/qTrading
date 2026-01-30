@@ -35,6 +35,7 @@ class SchedulerService:
         self._initialized = True
         self._thread = None
         self._loop = None
+        self._lock = asyncio.Lock()  # Ensure mutual exclusion between update and prediction
     
     def start(self):
         """Start the scheduler in a background thread with its own event loop"""
@@ -95,9 +96,18 @@ class SchedulerService:
         if self._last_update_date == today:
             return
         
-        # Check if it's a weekday (trading day approximation)
-        if now.weekday() >= 5:  # Saturday or Sunday
-            return
+        # Check if it's a trading day (handles Chinese holidays)
+        # Import here to avoid circular imports
+        from data.tushare_client import TushareClient
+        try:
+            if not TushareClient().is_trading_day(today):
+                logger.debug(f"[Scheduler] Skipping - {today} is not a trading day")
+                return
+        except Exception as e:
+            # Fallback to weekday check if API fails
+            if now.weekday() >= 5:  # Saturday or Sunday
+                return
+            logger.warning(f"[Scheduler] Trade calendar check failed: {e}, using weekday fallback")
         
         # Parse scheduled time
         try:
@@ -112,26 +122,107 @@ class SchedulerService:
             logger.info(f"[Scheduler] Running scheduled update at {now.strftime('%H:%M')}")
             await self._run_update()
             self._last_update_date = today
-    
-    async def _run_update(self):
-        """Execute the data update"""
-        try:
-            processor = DataProcessor()
-            review_mgr = ReviewManager()
+
+        # Check for Evening AI Prediction (e.g. 20:00)
+        # Hardcoded for now or add config later. Design doc says 20:00/21:00.
+        # Let's target 20:30 to ensure news is ready.
+        pred_dt = now.replace(hour=20, minute=30, second=0, microsecond=0)
+        
+        # We need a separate tracking for prediction run to avoid double run
+        if not hasattr(self, '_last_pred_date'):
+            self._last_pred_date = None
             
+        if now >= pred_dt and self._last_pred_date != today:
+             logger.info(f"[Scheduler] Running Nightly AI Prediction at {now.strftime('%H:%M')}")
+             await self._run_prediction()
+             self._last_pred_date = today
+
+    async def _run_update(self):
+        """Execute the data update (16:30)"""
+        if self._lock.locked():
+            logger.warning("[Scheduler] Update skipped - Task already running")
+            return
+
+        async with self._lock:
+            try:
+                processor = DataProcessor()
+                review_mgr = ReviewManager()
+                
+                await processor.init_data()
+                
+                # Sync today's data (or whatever latest data)
+                result = await processor.sync_daily_market_snapshot()
+                logger.info(f"[Scheduler] Data update complete: {result}")
+                
+                # Update review performance (T+1, T+5)
+                await review_mgr.run_review()
+                logger.info(f"[Scheduler] Review performance updated.")
+            
+            except Exception as e:
+                logger.error(f"[Scheduler] Update failed: {e}")
+
+    async def _run_prediction(self):
+        """Execute AI Strategy (20:30)"""
+        # Wait for lock if update is running, with timeout circuit breaker
+        try:
+            # Try to acquire lock with 5-minute timeout
+            # If 16:30 update is stuck, we shouldn't wait forever
+            await asyncio.wait_for(self._lock.acquire(), timeout=300)
+        except asyncio.TimeoutError:
+            logger.error("[Scheduler] ⚠️ Lock acquisition timed out (5min). Previous task stuck? Skipping prediction.")
+            return
+
+        try:
+            logger.info("[Scheduler] Starting AI Strategy execution...")
+            from strategies.ai_strategy import AISelectionStrategy
+            from data.review_manager import ReviewManager
+            
+            processor = DataProcessor()
             await processor.init_data()
             
-            # Sync today's data (or whatever latest data)
-            result = await processor.sync_daily_market_snapshot()
-            logger.info(f"[Scheduler] Data update complete: {result}")
+            # Prepare context
+            # Requirements: "Agent starts analysis ONLY after today's complete data update"
             
-            # Update review performance (T+1, T+5)
-            await review_mgr.update_performance()
-            logger.info(f"[Scheduler] Review performance updated.")
+            # 1. Prepare Market Data (Branch Logic)
+            # This handles: Non-Trading Day, Pre-Close, Post-Close logic
+            target_date = await processor.prepare_market_data()
+            logger.info(f"[Scheduler] AI Analysis Target Date: {target_date}")
             
+            # 2. Get Data Context
+            # We must tell data processor WHICH date's data to load if it's not simply 'latest cache'
+            # But get_strategy_data currently just loads from cache tables.
+            # Assuming cache is now synced to target_date if needed.
+            
+            # Verify cache date matches (safety check)
+            latest_cached = await processor.cache.get_latest_trade_date()
+            if latest_cached != target_date:
+                 logger.error(f"[Scheduler] Critical Error: Cache date ({latest_cached}) != Target ({target_date}) after preparation.")
+                 return
+
+            # 2. Get Data Context
+            context = await processor.get_strategy_data()
+            if not context:
+                logger.error("[Scheduler] Failed to get strategy data context")
+                return
+            context['data_processor'] = processor
+            
+            # Run Strategy
+            strategy = AISelectionStrategy()
+            result_df = await strategy.filter(context)
+            
+            if result_df is not None and not result_df.empty:
+                # Save results automatically
+                rm = ReviewManager()
+                await rm.save_results("AI_Auto_Nightly", result_df)
+                logger.info(f"[Scheduler] AI Strategy completed. Saved {len(result_df)} candidates.")
+                
         except Exception as e:
-            logger.error(f"[Scheduler] Update failed: {e}")
-    
+            logger.error(f"[Scheduler] Prediction failed: {e}")
+        finally:
+            # Ensure lock is released
+            if self._lock.locked():
+                self._lock.release()
+
     def get_status(self) -> dict:
         """Get scheduler status for UI display"""
         enabled = ConfigHandler.is_auto_update_enabled()
@@ -142,8 +233,8 @@ class SchedulerService:
             'scheduled_time': scheduled_time,
             'running': self._running,
             'last_update': self._last_update_date,
+            'last_prediction': getattr(self, '_last_pred_date', None)
         }
-
 
 # Global scheduler instance
 scheduler = SchedulerService()

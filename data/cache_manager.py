@@ -10,12 +10,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 class CacheManager:
+    _instance = None
+    
+    def __new__(cls, db_path=None):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self, db_path=None):
+        if self._initialized:
+            return
+            
         self.db_path = db_path or config.DB_PATH
         self.queue = asyncio.Queue(maxsize=ConfigHandler.get_db_queue_size()) # Ring buffer / Queue
         self.writer_task = None
         self._running = False
         self._closing = False # New flag to prevent restart during close
+        self._initialized = True
 
     async def start(self):
         """Start the background DB writer task"""
@@ -180,9 +192,16 @@ class CacheManager:
                     industry TEXT,
                     market TEXT,
                     list_date TEXT,
+                    list_status TEXT,
                     updated_at TEXT
                 )
             ''')
+            
+            # Migration: Add list_status if not exists
+            try:
+                await db.execute("ALTER TABLE stock_basic ADD COLUMN list_status TEXT")
+            except Exception:
+                pass # Already exists
             
             # 2. Daily Quotes - Complete OHLCV data for technical analysis
             await db.execute('''
@@ -198,10 +217,17 @@ class CacheManager:
                     pct_chg REAL,
                     vol REAL,
                     amount REAL,
+                    adj_factor REAL, 
                     PRIMARY KEY (ts_code, trade_date)
                 )
             ''')
             
+            # Migration: Add adj_factor if not exists
+            try:
+                await db.execute("ALTER TABLE daily_quotes ADD COLUMN adj_factor REAL")
+            except Exception:
+                pass # Already exists
+                
             # 3. Daily Indicators - Valuation and market cap data
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS daily_indicators (
@@ -224,6 +250,10 @@ class CacheManager:
                     PRIMARY KEY (ts_code, trade_date)
                 )
             ''')
+            
+            # Performance: Add Index on trade_date
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_quotes_date ON daily_quotes(trade_date)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_indicators_date ON daily_indicators(trade_date)")
             
             # 4. Money Flow
             await db.execute('''
@@ -287,17 +317,32 @@ class CacheManager:
                 )
             ''')
 
-            # 7. Block Trade
+            # 9. Block Trades
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS block_trade (
-                    trade_date TEXT NOT NULL,
-                    ts_code TEXT NOT NULL,
+                    ts_code TEXT,
+                    trade_date TEXT,
                     price REAL,
-                    vol REAL,
+                    volume REAL,
                     amount REAL,
                     buyer TEXT,
                     seller TEXT,
-                    PRIMARY KEY (trade_date, ts_code, buyer, seller)
+                    reason TEXT,
+                    updated_at TEXT,
+                    PRIMARY KEY (ts_code, trade_date, buyer, seller)
+                )
+            ''')
+            
+            # 10. Market News (Real-time storage for AI)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS market_news (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT,
+                    tags TEXT,
+                    publish_time TEXT,
+                    source TEXT,
+                    created_at TEXT,
+                    UNIQUE(content, publish_time)
                 )
             ''')
             
@@ -326,38 +371,6 @@ class CacheManager:
                 )
             ''')
 
-            # 5. Money Flow - Daily fund flow data (资金流向)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS moneyflow_daily (
-                    ts_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    buy_sm_vol REAL,
-                    buy_sm_amount REAL,
-                    sell_sm_amount REAL,
-                    buy_md_amount REAL,
-                    sell_md_amount REAL,
-                    buy_lg_amount REAL,
-                    sell_lg_amount REAL,
-                    buy_elg_amount REAL,
-                    sell_elg_amount REAL,
-                    net_mf_vol REAL,
-                    net_mf_amount REAL,
-                    PRIMARY KEY (ts_code, trade_date)
-                )
-            ''')
-
-            # 6. Northbound Holding - HK Connect holdings (北向持股)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS northbound_holding (
-                    ts_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    name TEXT,
-                    vol REAL,
-                    ratio REAL,
-                    exchange TEXT,
-                    PRIMARY KEY (ts_code, trade_date)
-                )
-            ''')
 
             # 7. Sync Status Tracking (enhanced)
             await db.execute('''
@@ -385,10 +398,21 @@ class CacheManager:
                     t5_price REAL,
                     t1_pct REAL,
                     t5_pct REAL,
+                    ai_score INTEGER,
+                    ai_reason TEXT,
+                    prediction_result TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(trade_date, strategy_name, ts_code)
                 )
             ''')
+            
+            # Migration: Add AI columns if not exists (for existing users)
+            try:
+                await db.execute("ALTER TABLE screening_history ADD COLUMN ai_score INTEGER")
+                await db.execute("ALTER TABLE screening_history ADD COLUMN ai_reason TEXT")
+                await db.execute("ALTER TABLE screening_history ADD COLUMN prediction_result TEXT")
+            except Exception:
+                pass # Already exists
             
             # Create indexes for faster queries
             await db.execute('CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date)')
@@ -406,7 +430,7 @@ class CacheManager:
         """Clear all cached data from database tables"""
         # Push clear commands to queue
         tables = ["daily_quotes", "daily_indicators", "financial_reports", "moneyflow_daily", 
-                  "northbound_holding", "sync_status", "screening_history", "top_list", "block_trade"]
+                  "northbound_holding", "sync_status", "screening_history", "top_list", "block_trade", "market_news"]
         
         for table in tables:
             await self.queue.put((f"DELETE FROM {table}", (), False))
@@ -416,6 +440,44 @@ class CacheManager:
         # If strict consistency is needed, we'd need a way to wait for queue empty.
         # Using a simple sleep or exposing a join is enough for now.
         print("[Cache] Clear command queued.")
+
+    # ========== Review System ==========
+    async def get_pending_reviews(self):
+        """Get predictions that need T+1 review (no result yet)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Fetch recrods where prediction_result is NULL and crated > 1 day ago
+            # Actually, we just fetch all NULLs and let logic filter by date
+            query = "SELECT * FROM screening_history WHERE prediction_result IS NULL"
+            async with db.execute(query) as cursor:
+                cols = [desc[0] for desc in cursor.description]
+                rows = await cursor.fetchall()
+                return pd.DataFrame(rows, columns=cols)
+
+    async def get_learning_examples(self, limit=3):
+        """
+        Get best wins and worst losses for Few-Shot Learning.
+        Returns: (wins_df, losses_df)
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Get Wins
+            async with db.execute(
+                "SELECT * FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT ?", 
+                (limit,)
+            ) as cursor:
+                cols = [desc[0] for desc in cursor.description]
+                wins = await cursor.fetchall()
+                wins_df = pd.DataFrame(wins, columns=cols)
+                
+            # Get Losses
+            async with db.execute(
+                "SELECT * FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT ?", 
+                (limit,)
+            ) as cursor:
+                cols = [desc[0] for desc in cursor.description]
+                losses = await cursor.fetchall()
+                losses_df = pd.DataFrame(losses, columns=cols)
+                
+            return wins_df, losses_df
 
     # ========== Stock Basic ==========
     async def save_stock_basic(self, df):
@@ -427,7 +489,7 @@ class CacheManager:
         df = df.copy()
         df['updated_at'] = now
         
-        cols = ['ts_code', 'symbol', 'name', 'area', 'industry', 'market', 'list_date', 'updated_at']
+        cols = ['ts_code', 'symbol', 'name', 'area', 'industry', 'market', 'list_date', 'list_status', 'updated_at']
         for col in cols:
             if col not in df.columns:
                 df[col] = None
@@ -437,8 +499,8 @@ class CacheManager:
 
         sql = '''
                 INSERT OR REPLACE INTO stock_basic 
-                (ts_code, symbol, name, area, industry, market, list_date, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (ts_code, symbol, name, area, industry, market, list_date, list_status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
         params = df[cols].values.tolist()
         await self.queue.put((sql, params, True))
@@ -460,7 +522,7 @@ class CacheManager:
             return 0
         
         cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 
-                'pre_close', 'change', 'pct_chg', 'vol', 'amount']
+                'pre_close', 'change', 'pct_chg', 'vol', 'amount', 'adj_factor']
         df = df.copy()
         for col in cols:
             if col not in df.columns:
@@ -471,8 +533,8 @@ class CacheManager:
 
         sql = '''
                 INSERT OR REPLACE INTO daily_quotes 
-                (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
         params = df[cols].values.tolist()
         await self.queue.put((sql, params, True))
@@ -592,6 +654,27 @@ class CacheManager:
                 cols = [desc[0] for desc in cursor.description]
                 rows = await cursor.fetchall()
                 return pd.DataFrame(rows, columns=cols)
+
+    async def save_market_news(self, news_item):
+        """
+        Save a single news item to DB
+        news_item: dict with content, tags, publish_time, source
+        """
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        sql = '''
+            INSERT OR IGNORE INTO market_news 
+            (content, tags, publish_time, source, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        '''
+        params = (
+            news_item.get('content'),
+            news_item.get('tags'),
+            news_item.get('publish_time'),
+            news_item.get('source', 'Sina'),
+            now
+        )
+        await self.queue.put((sql, params, False))
 
     # ========== Financial Reports ==========
     async def save_financial_reports(self, df):
@@ -713,7 +796,7 @@ class CacheManager:
             # Join quotes, indicators, and latest financials
             query = '''
                 SELECT 
-                    b.ts_code, b.name, b.industry, b.list_date,
+                    b.ts_code, b.name, b.industry, b.list_date, b.list_status,
                     q.trade_date, q.close, q.pct_chg, q.vol, q.amount,
                     i.pe_ttm, i.pb, i.ps_ttm, i.dv_ttm, i.total_mv, i.circ_mv, i.turnover_rate,
                     f.roe, f.grossprofit_margin, f.debt_to_assets, f.or_yoy, f.netprofit_yoy
@@ -981,7 +1064,7 @@ class CacheManager:
 
         sql = '''
                 INSERT OR REPLACE INTO block_trade 
-                (trade_date, ts_code, price, vol, amount, buyer, seller)
+                (trade_date, ts_code, price, volume, amount, buyer, seller)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             '''
         params = df[cols].values.tolist()
@@ -1014,6 +1097,36 @@ class CacheManager:
                 return pd.DataFrame()
             
             return await self.get_northbound(trade_date=trade_date)
+
+    # ========== Market News ==========
+    async def save_market_news(self, news_item):
+        """Save a single news item (dict)"""
+        if not news_item:
+            return 0
+            
+        cols = ['content', 'tags', 'publish_time', 'source']
+        
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
+                INSERT OR IGNORE INTO market_news 
+                (content, tags, publish_time, source, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            '''
+        params = [news_item.get(c) for c in cols]
+        await self.queue.put((sql, params, False))
+        return 1
+
+    async def get_market_news(self, limit=50, offset=0):
+        """Get latest market news with pagination"""
+        query = "SELECT * FROM market_news ORDER BY publish_time DESC LIMIT ? OFFSET ?"
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, (limit, offset)) as cursor:
+                cols = [desc[0] for desc in cursor.description]
+                rows = await cursor.fetchall()
+                return pd.DataFrame(rows, columns=cols)
 
     # ========== Backward Compatibility ==========
     async def save_daily_data(self, df):

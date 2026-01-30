@@ -21,6 +21,8 @@ class AppColors:
     # 涨跌色 (A股习惯)
     UP = "#E53935"               # 涨幅红
     DOWN = "#4CAF50"             # 跌幅绿
+    RISE = UP                    # 别名 (for K-line chart)
+    FALL = DOWN                  # 别名 (for K-line chart)
     
     # 中性色
     BACKGROUND = "#F5F7FA"       # 页面背景
@@ -64,6 +66,21 @@ class AppStyles:
                 offset=ft.Offset(0, 2),
             )
         return style
+
+    @staticmethod
+    def dashboard_card(padding: int = 20) -> dict:
+        """Data dashboard card style"""
+        return {
+            "bgcolor": AppColors.SURFACE,
+            "border_radius": 16,
+            "padding": padding,
+            "shadow": ft.BoxShadow(
+                blur_radius=10,
+                color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK),
+                offset=ft.Offset(0, 4),
+            ),
+            "border": ft.border.all(1, ft.Colors.with_opacity(0.5, AppColors.BORDER))
+        }
     
     @staticmethod
     def primary_button() -> ft.ButtonStyle:

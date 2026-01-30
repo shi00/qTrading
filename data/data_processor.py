@@ -4,6 +4,7 @@ import asyncio
 import logging
 import traceback
 from data.tushare_client import TushareClient
+from data.news_fetcher import NewsFetcher
 from data.cache_manager import CacheManager
 from utils.config_handler import ConfigHandler
 
@@ -28,6 +29,7 @@ class DataProcessor:
         token = ConfigHandler.get_token()
         self.api = TushareClient(token=token)
         self.cache = CacheManager()
+        self._first_news_sync = True
         self._initialized = True
 
     async def close(self):
@@ -36,15 +38,32 @@ class DataProcessor:
             await self.cache.close()
 
     def get_latest_trade_date(self):
-        """Get most recent trade date"""
+        """
+        Get most recent actual trading date (handles holidays via API).
+        """
         now = datetime.datetime.now()
-        # If before 16:00, use yesterday
+        # If before 16:00, target is yesterday maximum
         if now.hour < 16:
-            now -= datetime.timedelta(days=1)
-        # Skip weekends
-        while now.weekday() >= 5:
-            now -= datetime.timedelta(days=1)
-        return now.strftime('%Y%m%d')
+            end_dt = now - datetime.timedelta(days=1)
+        else:
+            end_dt = now
+            
+        end_str = end_dt.strftime('%Y%m%d')
+        start_str = (end_dt - datetime.timedelta(days=15)).strftime('%Y%m%d')
+        
+        try:
+            # 1. API Method (Accurate)
+            dates = self.api.get_trade_dates(start_str, end_str)
+            if dates:
+                return dates[-1] # List is sorted asc
+        except Exception as e:
+            logger.warning(f"[DataProcessor] Failed to get latest trade date via API: {e}")
+
+        # 2. Fallback Heuristic
+        dt = end_dt
+        while dt.weekday() >= 5: # Skip weekends
+             dt -= datetime.timedelta(days=1)
+        return dt.strftime('%Y%m%d')
 
     def get_trade_dates(self, start_date, end_date):
         """Get list of actual trade dates using Tushare trade_cal API"""
@@ -69,6 +88,8 @@ class DataProcessor:
     async def init_data(self):
         """Initialize DB with enhanced schema"""
         await self.cache.init_db()
+        # Ensure stock basic info (including list_status) is up to date
+        await self.sync_stock_basic()
 
     async def should_sync_financials(self, force=False):
         """
@@ -149,7 +170,7 @@ class DataProcessor:
             official_dates = await loop.run_in_executor(None, lambda: self.api.get_trade_dates(start_date, end_date))
             
             if not official_dates:
-                return {'status': 'red', 'msg': '无法获取官方日历'}
+                return {'status': 'red', 'msg': 'Cannot get official calendar'}
                 
             # Ensure ascending order for correct indexing
             official_dates.sort()
@@ -268,15 +289,12 @@ class DataProcessor:
         df_quotes, df_basic = await asyncio.gather(future_quotes, future_basic)
         
         # Handle case where today's data is not ready
-        # Only apply fallback if we are syncing TODAY's data
         today_str = datetime.datetime.now().strftime('%Y%m%d')
-        if trade_date == today_str and (df_quotes is None or df_quotes.empty) and (df_basic is None or df_basic.empty):
-            prev_date = (datetime.datetime.strptime(trade_date, '%Y%m%d') - datetime.timedelta(days=1)).strftime('%Y%m%d')
-            logger.info(f"[DataProcessor] Today's data ({trade_date}) not ready, trying {prev_date}...")
-            future_quotes = loop.run_in_executor(None, lambda: self.api.get_daily_quotes(trade_date=prev_date))
-            future_basic = loop.run_in_executor(None, lambda: self.api.get_daily_basic(trade_date=prev_date))
-            df_quotes, df_basic = await asyncio.gather(future_quotes, future_basic)
-            trade_date = prev_date
+        # Logic removed: Do NOT silently fallback to yesterday if today is missing.
+        # This causes Scheduler mismatches. If data is missing, we should report it.
+        if trade_date == today_str and (df_quotes is None or df_quotes.empty):
+             logger.warning(f"[DataProcessor] Today's data ({trade_date}) not ready or empty.")
+             # We proceed, and it will be caught by "No quotes available" check below
         
         # Save to cache
         quotes_count = 0
@@ -303,6 +321,50 @@ class DataProcessor:
         
         return df_quotes if df_quotes is not None and not df_quotes.empty else df_basic
 
+
+
+    async def prepare_market_data(self):
+        """
+        Smart logic to prepare data for AI Analysis.
+        Handles:
+        1. Non-Trading Day: Use latest available close (3yr).
+        2. Trading Day (Pre-Close): Use yesterday's close.
+        3. Trading Day (Post-Close): Sync Today's data, then use Today.
+        
+        Returns:
+            str: The 'target_date' that analysis should use.
+        """
+        now = datetime.datetime.now()
+        today_str = now.strftime('%Y%m%d')
+        
+        # Determine if today is a trading day
+        is_trading_day = False
+        try:
+            is_trading_day = self.api.is_trading_day(today_str)
+        except:
+            # Fallback: weekday check
+            is_trading_day = now.weekday() < 5
+            
+        target_date = None
+        
+        # Branch 1 & 2: Non-Trading OR Pre-Closing (e.g. 14:00)
+        # We use "latest valid close" (yesterday or friday)
+        if not is_trading_day or now.hour < 16:
+             target_date = self.get_latest_trade_date()
+             logger.info(f"[DataProcessor] AI Analysis Target: {target_date} (Pre-Close/Holiday). No sync needed.")
+             
+        # Branch 3: Trading Day AND Post-Closing (e.g. 20:30)
+        else:
+            target_date = today_str
+            logger.info(f"[DataProcessor] AI Analysis Target: {target_date} (Post-Close). Checking sync...")
+            
+            # Check if synced
+            latest_cached = await self.cache.get_latest_trade_date()
+            if latest_cached != target_date:
+                logger.info(f"[DataProcessor] {target_date} data missing in cache. Forcing Sync...")
+                await self.sync_daily_market_snapshot(trade_date=target_date)
+                
+        return target_date
 
     async def sync_historical_data(self, days=365, progress_callback=None, cancel_event=None):
         """
@@ -373,7 +435,7 @@ class DataProcessor:
                     await self.sync_daily_market_snapshot(date)
                     
                     if progress_callback:
-                        progress_callback(idx + 1, total_days, f"正在同步 {date} ...")
+                        progress_callback(idx + 1, total_days, f"Syncing {date} ...")
                 except Exception as e:
                     logger.error(f"Failed to sync {date}: {e}")
                     failed_dates.append(date)
@@ -575,7 +637,7 @@ class DataProcessor:
             await asyncio.gather(*tasks)
             
             if progress_callback:
-                progress_callback(0, 0, f"已完成 {day_str} 的增量同步")
+                progress_callback(0, 0, f"Completed incremental sync for {day_str}")
 
         # Update status to NOW
         await self.cache.update_sync_status('financial_reports', datetime.datetime.now().strftime('%Y%m%d'), total_saved)
@@ -720,7 +782,7 @@ class DataProcessor:
                 if progress_callback and i % 100 == 0:
                     overall_progress = period_idx * total_stocks_all + (skipped_count + i)
                     overall_total = len(periods) * total_stocks_all
-                    progress_callback(overall_progress, overall_total, f"同步 {period} - {ts_code}")
+                    progress_callback(overall_progress, overall_total, f"Syncing {period} - {ts_code}")
             
             # Run batch
             await asyncio.gather(*tasks)
@@ -732,7 +794,7 @@ class DataProcessor:
         
         # Final progress update
         if progress_callback:
-            progress_callback(len(periods) * total_stocks_all, len(periods) * total_stocks_all, "财务数据同步完成")
+            progress_callback(len(periods) * total_stocks_all, len(periods) * total_stocks_all, "Financial data sync complete")
         
         if failed_stocks:
             logger.warning(f"[DataProcessor] ⚠️ {len(failed_stocks)} stock-period pairs failed (likely no data)")
@@ -957,31 +1019,32 @@ class DataProcessor:
         """
         Get market overview data for Home Screen.
         Returns Indices (SH, SZ, CYB) and Northbound Money Flow.
+        STRICT MODE: Uses 'date' as is. If data missing, returns empty placeholder.
         """
         try:
-            # 1. Determine date (latest cached or today)
-            date = await self.cache.get_latest_trade_date()
-            if not date:
-                 # Fallback to local calculation if cache empty
-                 date = datetime.datetime.now().strftime('%Y%m%d')
-                 # Adjust if weekend/holiday? Tushare API might return empty, handled below.
+            # 1. Determine date: Use REAL latest trading date from API, ignore stale local cache
+            # This ensures we try to fetch Today's data (or last Friday's) even if DB is old.
+            try:
+                now_str = datetime.datetime.now().strftime('%Y%m%d')
+                start_str = (datetime.datetime.now() - datetime.timedelta(days=20)).strftime('%Y%m%d')
+                
+                # Fetch valid trading dates from Tushare Calendar
+                dates = await asyncio.to_thread(self.api.get_trade_dates, start_str, now_str)
+                if dates and len(dates) > 0:
+                    date = dates[-1] # The most recent trading day
+                else:
+                    date = now_str # Fallback to today
+            except Exception as e:
+                logger.warning(f"Failed to fetch trade calendar, defaulting to today: {e}")
+                date = datetime.datetime.now().strftime('%Y%m%d')
             
-            logger.info(f"Fetching market overview for {date}...")
+            logger.info(f"Fetching market overview for target: {date}...")
 
             # 2. Fetch Indices
             # 000001.SH (Shanghai), 399001.SZ (Shenzhen), 399006.SZ (ChiNext)
-            indices_codes = ['000001.SH', '399001.SZ', '399006.SZ']
-            # We fetch all in one call if possible, or parallel
-            # Tushare index_daily supports single code. We might need loop or separated calls.
-            # Assuming loop for now or specific codes.
-            
-            # Use gather for concurrency
-            import asyncio
-            
-            # Fetch Index Data
-            # Note: Tushare index_daily usually takes one code. 
             async def get_idx(code, name):
                 df = await asyncio.to_thread(self.api.get_index_daily, ts_code=code, trade_date=date)
+                
                 if df is not None and not df.empty:
                     row = df.iloc[0]
                     change = row['pct_chg']
@@ -989,7 +1052,7 @@ class DataProcessor:
                         'name': name,
                         'value': f"{row['close']:.2f}",
                         'change': f"{change:+.2f}%",
-                        'color': 'red' if change >= 0 else 'green' # Red up, Green down
+                        'color': 'red' if change >= 0 else 'green' 
                     }
                 return {'name': name, 'value': '-', 'change': '-', 'color': 'grey'}
 
@@ -998,7 +1061,6 @@ class DataProcessor:
                 df = await asyncio.to_thread(self.api.get_moneyflow_hsgt, trade_date=date)
                 if df is not None and not df.empty:
                     row = df.iloc[0]
-                    # Tushare returns string or float, ensure float for math
                     try:
                         val = float(row['north_money'])
                     except (ValueError, TypeError):
@@ -1006,26 +1068,124 @@ class DataProcessor:
                         
                     return {
                         'name': '北向资金',
-                        'value': f"{val/100:.2f}亿" if abs(val) > 100 else f"{val:.0f}万", # adjust unit
+                        'value': f"{val/100:.2f}亿" if abs(val) > 100 else f"{val:.0f}万",
                         'sub': "流入" if val > 0 else "流出"
                     }
                 return {'name': '北向资金', 'value': '-', 'sub': '-'}
             
-            idx_results, hsgt = await asyncio.gather(
-                asyncio.gather(
-                    get_idx('000001.SH', '上证指数'),
-                    get_idx('399001.SZ', '深证成指'),
-                    get_idx('399006.SZ', '创业板指')
-                ),
-                get_hsgt()
+            # 4. Fetch Hot Concepts (Parallel with remaining indices)
+            hot_concepts_task = NewsFetcher.get_hot_concepts(limit=8)
+
+            # Run parallel
+            results = await asyncio.gather(
+                get_idx('000001.SH', '上证指数'),
+                get_idx('399001.SZ', '深证成指'),
+                get_idx('399006.SZ', '创业板指'),
+                get_hsgt(),
+                hot_concepts_task
             )
             
+            idx_results = [results[0], results[1], results[2]]
+            hsgt = results[3]
+            hot_concepts = results[4]
+            
             return {
-                'date': date,
-                'indices': idx_results, # List of dicts
-                'hsgt': hsgt
+                'date': date, 
+                'indices': idx_results, 
+                'hsgt': hsgt,
+                'hot_concepts': hot_concepts
             }
 
         except Exception as e:
             logger.error(f"Failed to get market overview: {e}")
             return None
+
+    async def sync_market_news(self, limit=None):
+        """
+        Fetch real-time market news and save to DB.
+        Also cleans up legacy test data.
+        
+        :param limit: Number of news items to fetch. 
+                      If None, defaults to 200 on first run (Deep Sync), 20 otherwise.
+        """
+        # Auto Deep Sync Logic
+        if limit is None:
+            if getattr(self, '_first_news_sync', True):
+                limit = 200
+                self._first_news_sync = False
+                logger.info("[DataProcessor] 🚀 Deep Sync triggered for startup (limit=200)")
+            else:
+                limit = 20
+        
+        logger.info(f"[DataProcessor] Syncing market news (limit={limit})...")
+        try:
+            # 1. Cleanup Test Data (safe to do frequently, it's fast)
+            # Remove any news with content like "Test News Item%"
+            await self.cache.queue.put(("DELETE FROM market_news WHERE content LIKE 'Test News Item%'", (), False))
+            
+            # 2. Fetch Real News
+            # Use get_latest_global_news which fetches from Cailianshe/Major Portals
+            news_items = await NewsFetcher.get_latest_global_news(limit=limit)
+            
+            if not news_items:
+                logger.warning("[DataProcessor] No news fetched.")
+                return 0
+                
+            count = 0
+            for item in news_items:
+                # Map fields to DB schema
+                # DB: content, tags, publish_time, source
+                # API: title, content, time
+                
+                title = item.get('title', '')
+                content = item.get('content', '')
+                time_str = str(item.get('time', ''))
+                
+                # Format: "Title: Content"
+                full_content = f"{title}: {content}" if title and content else (title or content)
+                
+                # Check for "Test" in real content just in case? Unlikely.
+                
+                mapped_item = {
+                    'content': full_content,
+                    'tags': 'Market', # Default tag
+                    'publish_time': time_str,
+                    'source': 'CLS' # Cailianshe
+                }
+                
+                await self.cache.save_market_news(mapped_item)
+                count += 1
+                
+            logger.info(f"[DataProcessor] ✅ Synced {count} news items.")
+            return count
+            
+        except Exception as e:
+            logger.error(f"[DataProcessor] Error syncing market news: {e}")
+            return 0
+
+    async def get_stock_history(self, ts_code, days=365):
+        """
+        Get OHLC history for a stock for K-line chart.
+        Default 365 days (approx 1.5 year of calendar days).
+        """
+        try:
+            # Calculate date range
+            end_date = datetime.datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
+            
+            df = await self.cache.get_daily_quotes(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            
+            if df is None or df.empty:
+                return pd.DataFrame()
+                
+            # Make sure we have numeric types
+            cols = ['open', 'high', 'low', 'close', 'vol']
+            for col in cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+            # Sort ascending for chart (oldest first)
+            return df.sort_values('trade_date', ascending=True)
+        except Exception as e:
+            logger.error(f"[DataProcessor] Error fetching history for {ts_code}: {e}")
+            return pd.DataFrame()

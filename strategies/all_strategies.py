@@ -1,10 +1,19 @@
 from abc import ABC, abstractmethod
 import pandas as pd
+from ui.i18n import I18n
 
 class BaseStrategy(ABC):
-    def __init__(self, name, description):
-        self.name = name
-        self.description = description
+    def __init__(self, name_key, desc_key):
+        self._name_key = name_key
+        self._desc_key = desc_key
+
+    @property
+    def name(self):
+        return I18n.get(self._name_key)
+    
+    @property
+    def description(self):
+        return I18n.get(self._desc_key)
 
     @abstractmethod
     def filter(self, context):
@@ -17,7 +26,7 @@ class BaseStrategy(ABC):
 
 class ValueStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("价值投资", "标准：市盈率 5-20倍 | 市净率 0.5-3倍 | 股息率 > 2% (寻找低估值蓝筹)")
+        super().__init__("strategy_value_name", "strategy_value_desc")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -42,7 +51,7 @@ class ValueStrategy(BaseStrategy):
 # --- 2. Growth Strategy ---
 class GrowthStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("高成长策略", "标准：营收增长 > 20% | 净利增长 > 25% | ROE > 15%")
+        super().__init__("strategy_growth_name", "strategy_growth_desc")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -62,7 +71,7 @@ class GrowthStrategy(BaseStrategy):
 # --- 3. Dividend Strategy ---
 class DividendStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("高股息策略", "标准：股息率(TTM) > 4% (防御性现金牛资产)")
+        super().__init__("strategy_dividend_name", "strategy_dividend_desc")
         
     def filter(self, context):
         df = context.get('screening_data')
@@ -77,7 +86,7 @@ class DividendStrategy(BaseStrategy):
 # --- 4. Technical Breakout ---
 class TechnicalBreakoutStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("技术突破", "标准：当日涨幅 2-7% | 换手率 3-15% (放量活跃)")
+        super().__init__("strategy_tech_breakout_name", "strategy_tech_breakout_desc")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -98,7 +107,7 @@ class TechnicalBreakoutStrategy(BaseStrategy):
 # --- 5. Northbound Capital ---
 class NorthboundStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("北向资金", "标准：北向资金持股比例 > 5% (外资重仓股)")
+        super().__init__("strategy_northbound_name", "strategy_northbound_desc")
 
     def filter(self, context):
         # This requires northbound holding data from cache
@@ -114,7 +123,7 @@ class NorthboundStrategy(BaseStrategy):
 # --- 6. Oversold Rebound ---
 class OversoldStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("超跌反弹", "标准：当日跌幅 > 3% | 市盈率 < 30 (短期错杀)")
+        super().__init__("strategy_oversold_name", "strategy_oversold_desc")
 
     def filter(self, context):
         df = context.get('screening_data')
@@ -133,7 +142,7 @@ class OversoldStrategy(BaseStrategy):
 # --- 7. Institutional Buying (LHB) ---
 class InstitutionalStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("龙虎榜机构", "标准：龙虎榜机构净买入 > 3000万 (主力资金抢筹)")
+        super().__init__("strategy_institutional_name", "strategy_institutional_desc")
 
     def filter(self, context):
         # Requires top_list data
@@ -163,7 +172,7 @@ class InstitutionalStrategy(BaseStrategy):
 # --- 8. Shareholder Concentration ---
 class ChipConcentrationStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("筹码集中 (暂不可用)", "股东户数大幅减少")
+        super().__init__("strategy_chips_name", "strategy_chips_desc")
 
     def filter(self, context):
         # Placeholder: This requires quarterly shareholder data which is not in daily sync
@@ -173,7 +182,7 @@ class ChipConcentrationStrategy(BaseStrategy):
 # --- 9. Block Trade ---
 class BlockTradeStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("大宗交易", "标准：大宗成交额 > 1000万 (关注主力吸筹)")
+        super().__init__("strategy_block_trade_name", "strategy_block_trade_desc")
 
     def filter(self, context):
         block = context.get('block_trade')
@@ -198,7 +207,7 @@ class BlockTradeStrategy(BaseStrategy):
         if not result.empty:
             result = result.groupby('ts_code').agg({
                 'amount': 'sum',
-                'vol': 'sum',
+                'volume': 'sum',
                 'price': 'mean' # Weighted avg ideal but this is simple
             }).reset_index()
             
@@ -207,7 +216,7 @@ class BlockTradeStrategy(BaseStrategy):
 # --- 10. High Quality Cashflow ---
 class CashFlowStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("现金流优质", "标准：资产负债率 < 50% | ROE > 10% (稳健经营)")
+        super().__init__("strategy_cashflow_name", "strategy_cashflow_desc")
     
     def filter(self, context):
         df = context.get('screening_data')
@@ -225,7 +234,7 @@ class CashFlowStrategy(BaseStrategy):
 # --- 11. Low PE Large Cap ---
 class LargePEStrategy(BaseStrategy):
     def __init__(self):
-        super().__init__("大盘低估", "标准：总市值 > 500亿 | 市盈率 < 15倍 (核心资产)")
+        super().__init__("strategy_large_pe_name", "strategy_large_pe_desc")
     
     def filter(self, context):
         df = context.get('screening_data')
@@ -243,7 +252,11 @@ class LargePEStrategy(BaseStrategy):
 
 class StrategyManager:
     def __init__(self):
+        # Local import to avoid circular dependency
+        from strategies.ai_strategy import AISelectionStrategy
+        
         self.strategies = {
+            "ai_active": AISelectionStrategy(),
             "value": ValueStrategy(),
             "growth": GrowthStrategy(),
             "dividend": DividendStrategy(),

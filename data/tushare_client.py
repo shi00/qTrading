@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import datetime
 import config
+from utils.config_handler import ConfigHandler
 import logging
 import random
 
@@ -25,11 +26,13 @@ class TushareClient:
     
     def __init__(self, token=None):
         if self._initialized:
+            if token and token != self.token:
+                self.set_token(token)
             return
         
-        self.token = token or config.TS_TOKEN
-        self.timeout = 30  # Request timeout in seconds
-        self.max_retries = 3
+        self.token = token or ConfigHandler.get_token() or config.TS_TOKEN
+        self.timeout = ConfigHandler.get_request_timeout()  # Request timeout in seconds
+        self.max_retries = ConfigHandler.get_request_max_retries()
         
         if self.token:
             ts.set_token(self.token)
@@ -115,6 +118,46 @@ class TushareClient:
             return df['cal_date'].tolist()
         return []
 
+    def is_trading_day(self, date_str=None):
+        """
+        Check if a given date is a trading day (handles Chinese holidays).
+        
+        Args:
+            date_str: Date in YYYYMMDD format. If None, uses today.
+            
+        Returns:
+            bool: True if trading day, False if holiday/weekend
+            
+        Corner cases:
+        - API failure: Falls back to weekday check only
+        - Cache miss: Fetches from API
+        """
+        if date_str is None:
+            date_str = datetime.datetime.now().strftime('%Y%m%d')
+        
+        try:
+            # Fetch calendar for just this date
+            df = self._handle_api_call(
+                self.pro.trade_cal,
+                exchange='SSE',
+                start_date=date_str,
+                end_date=date_str
+            )
+            
+            if df is not None and not df.empty:
+                is_open = df.iloc[0].get('is_open', 0)
+                return str(is_open) == '1'
+            
+        except Exception as e:
+            logger.warning(f"[API] Trade calendar check failed: {e}, falling back to weekday check")
+        
+        # Fallback: Simple weekday check (Mon-Fri)
+        try:
+            dt = datetime.datetime.strptime(date_str, '%Y%m%d')
+            return dt.weekday() < 5
+        except:
+            return True  # Default to allowing if all else fails
+
     # ========== Stock Basic ==========
     
     def get_stock_basic(self):
@@ -134,15 +177,53 @@ class TushareClient:
     # ========== Daily Data ==========
     
     def get_daily_quotes(self, trade_date=None, start_date=None, end_date=None, ts_code=None):
-        """Get daily quotes"""
-        logger.debug(f"[API] fetching daily quotes for date={trade_date} code={ts_code}...")
-        return self._handle_api_call(
+        """Get daily quotes with adj_factor joined"""
+        logger.debug(f"[API] fetching daily quotes + adj_factor for date={trade_date} code={ts_code}...")
+        
+        # 1. Fetch Daily Quotes
+        df_daily = self._handle_api_call(
             self.pro.daily,
             ts_code=ts_code,
             start_date=start_date,
             end_date=end_date,
             trade_date=trade_date
         )
+        
+        if df_daily is None or df_daily.empty:
+            return df_daily
+            
+        # 2. Fetch Adj Factor
+        # Tushare adj_factor API has same signature logic
+        try:
+             df_adj = self._handle_api_call(
+                self.pro.adj_factor,
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                trade_date=trade_date
+            )
+             
+             if df_adj is not None and not df_adj.empty:
+                 # Merge logic
+                 # Tushare returns trade_date, ts_code, adj_factor
+                 # Ensure keys specifically
+                 if 'trade_date' in df_adj.columns and 'ts_code' in df_adj.columns:
+                     df_daily = pd.merge(
+                         df_daily, 
+                         df_adj[['ts_code', 'trade_date', 'adj_factor']], 
+                         on=['ts_code', 'trade_date'], 
+                         how='left'
+                     )
+        except Exception as e:
+            logger.warning(f"[API] Failed to fetch adj_factor: {e}, using default 1.0")
+            
+        # Fill NaN adj_factor with 1.0
+        if 'adj_factor' in df_daily.columns:
+            df_daily['adj_factor'] = df_daily['adj_factor'].fillna(1.0)
+        else:
+            df_daily['adj_factor'] = 1.0
+            
+        return df_daily
 
     def get_daily_basic(self, trade_date=None, ts_code=None):
         """Get daily basic indicators (PE, PB, Turnover, etc.)"""
@@ -259,6 +340,17 @@ class TushareClient:
             self.pro.disclosure_date,
             actual_date=date, 
             fields='ts_code,ann_date,end_date,actual_date'
+        )
+
+    def get_concept_detail(self, ts_code):
+        """
+        Get concepts for a specific stock (e.g. Lithium, Sora, etc.)
+        """
+        logger.debug(f"[API] fetching concept_detail for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.concept_detail,
+            ts_code=ts_code,
+            fields='id,concept_name'
         )
 
     # ========== Market Overview APIs ==========

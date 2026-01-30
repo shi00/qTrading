@@ -3,7 +3,69 @@ import os
 import config
 from utils.security_utils import SecurityManager
 
+
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
+
+DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
+
+## 1. 角色定调 (Role)
+你是一名拥有20年实战经验的中国A股资深量化基金经理。你的核心投资哲学是：**“政策指方向，资金选个股，技术找买点，财报排地雷”**。
+
+## 2. 硬性交易约束 (Hard Constraints)
+你必须严格遵守以下 `<rules>`，任何建议如有违背将被视为重大事故：
+
+<rules>
+1.  **T+1 铁律**: A股当日买入不可卖出。必须评估“隔夜风险”，严禁建议日内回转（T+0）。
+2.  **涨跌幅限制**:
+    *   主板: ±10%
+    *   科创板(688)/创业板(300): ±20%
+    *   ST/*ST: ±5%
+    *   (注意: 新股上市前5日无限制)
+3.  **交易时段**: 14:57-15:00 为收盘集合竞价，**不可撤单**。
+4.  **风控红线**: 严禁推荐 *ST、立案调查中、年报非标、商誉占净资产比重过高的公司。
+5.  **信源验证 (Source Verification)**:
+    *   **权威信源**: 央视新闻(CCTV)、新华社、证监会/交易所官网、上市公司公告。 -> **权重 1.2x**
+    *   **可信信源**: 财联社、证券时报、中国基金报。 -> **权重 1.0x**
+    *   **噪音/传闻**: "小道消息"、"网传"、"据外媒"。 -> **必须降权 (Confidence -20)**，除非有其他信源交叉验证。
+</rules>
+
+## 3. 分析维度与权重 (Analysis Framework)
+请按以下权重进行加权分析：
+
+<dimensions>
+*   **政策与宏观 (30%)**: "听党话，跟党走"。分析央行(LPR/降准)、国常会(新质生产力)、证监会监管风向。
+*   **全球映射 (Global Mapping)**: "美股映射 A 股"。必须分析 `<global_context>` 中的美股/港股表现，结合 `<stock_info>.concepts` 判断。
+    *   *Example*: 若概念含“特斯拉”，且美股TSLA大涨，则强烈看多。
+*   **资金博弈 (25%)**: 资金即动能。重点分析 `<capital_flow>` 中的北向资金和游资龙虎榜。
+*   **技术面 (20%)**: "千金难买牛回头"。在 `<technical_indicators>` 中寻找均线多头排列后的缩量回调买点。
+*   **基本面 (15%)**: 业绩防雷。关注 `<financials>` 中的营收增速、PEG及商誉风险。
+*   **情绪面 (10%)**: 感受市场温度。结合 `<recent_news>` 判断是贪婪还是恐慌。
+</dimensions>
+
+## 4. 输出规范 (Output Schema)
+用户将提供若干 XML 数据块。请分析后返回严格的 JSON 格式：
+
+```json
+{
+  "thinking": "<在此处详细输出你的思考过程/推理链 (Chain of Thought)，包含对每个维度的逐步分析>",
+  "score": <0-100, 整数>,
+  "decision": "<买入 / 增持 / 持有 / 减持 / 卖出 / 观望>",
+  "rules_check": {
+    "compliant": <true/false>,
+    "remarks": "<合规性检查备注，如：科创板波动大需轻仓>",
+    "source_reliability": "<High/Medium/Low - 必须基于信源评级>"
+  },
+  "analysis": {
+    "policy_driver": "<政策面摘要>",
+    "global_mapping": "<全球/美股映射逻辑，如：TSLA大涨利好拓普>",
+    "capital_flow": "<资金面摘要>",
+    "technical_signal": "<技术面摘要>",
+    "fundamental_quality": "<基本面摘要>"
+  },
+  "risk_warning": "<一句话核心风险>",
+  "summary": "<100字以内的专业投资建议，风格冷静客观>"
+}
+```"""
 
 class ConfigHandler:
     @staticmethod
@@ -142,3 +204,116 @@ class ConfigHandler:
     @staticmethod
     def set_sync_concurrency(concurrency):
         return ConfigHandler.save_config({"sync_concurrency": int(concurrency)})
+
+    @staticmethod
+    def get_config(key, default=None):
+        """Generic get method for any setting"""
+        config = ConfigHandler.load_config()
+        return config.get(key, default)
+
+    @staticmethod
+    def get_setting(key, default=None):
+        """Generic get method for any setting"""
+        config = ConfigHandler.load_config()
+        return config.get(key, default)
+
+    @staticmethod
+    def get_ai_config():
+        """Get all AI related clean config"""
+        config = ConfigHandler.load_config()
+        encrypted_key = config.get("ai_api_key", "")
+        
+        # Decrypt key
+        api_key = ""
+        if encrypted_key:
+            try:
+                api_key = SecurityManager.decrypt_data(encrypted_key)
+            except Exception:
+                # If decryption fails (e.g. plain text or wrong key), just use it or return empty
+                # For compatibility, if it looks short, maybe plain text? 
+                # Better safe: treat as invalid if decrypt fails unless we want auto-migration.
+                # Let's try to support auto-migration like tushare token
+                api_key = encrypted_key if len(encrypted_key) < 60 else ""
+                
+        return {
+            "ai_api_key": api_key,
+            "ai_base_url": config.get("ai_base_url", "https://api.deepseek.com"),
+            "ai_model_name": config.get("ai_model_name", "deepseek-chat")
+        }
+
+    @staticmethod
+    def save_ai_config(api_key, base_url, model_name):
+        """Save AI settings (API Key Encrypted)"""
+        encrypted_key = ""
+        if api_key:
+            encrypted_key = SecurityManager.encrypt_data(api_key)
+            
+        return ConfigHandler.save_config({
+            "ai_api_key": encrypted_key,
+            "ai_base_url": base_url,
+            "ai_model_name": model_name
+        })
+
+    @staticmethod
+    def get_ai_system_prompt():
+        """Get AI System Prompt (User defined or Default)"""
+        config = ConfigHandler.load_config()
+        return config.get("ai_system_prompt", DEFAULT_AI_PROMPT)
+
+    @staticmethod
+    def save_ai_system_prompt(prompt):
+        """Save AI System Prompt"""
+        return ConfigHandler.save_config({"ai_system_prompt": prompt})
+
+    # === New AI Tuning Parameters ===
+
+    @staticmethod
+    def get_ai_max_candidates():
+        config = ConfigHandler.load_config()
+        return config.get("ai_max_candidates", 30)
+
+    @staticmethod
+    def set_ai_max_candidates(val):
+        return ConfigHandler.save_config({"ai_max_candidates": int(val)})
+
+    @staticmethod
+    def get_strategy_min_turnover():
+        config = ConfigHandler.load_config()
+        return config.get("strategy_min_turnover", 2.0)
+
+    @staticmethod
+    def set_strategy_min_turnover(val):
+        return ConfigHandler.save_config({"strategy_min_turnover": float(val)})
+
+    @staticmethod
+    def get_ai_concurrency():
+        config = ConfigHandler.load_config()
+        return config.get("ai_concurrency", 5)
+
+    @staticmethod
+    def set_ai_concurrency(val):
+        return ConfigHandler.save_config({"ai_concurrency": int(val)})
+
+    # === API Robustness Parameters ===
+    
+    @staticmethod
+    def get_request_max_retries():
+        """Get max retries for API requests (Hidden from UI, default 3)"""
+        config = ConfigHandler.load_config()
+        return config.get("request_max_retries", 3)
+
+    @staticmethod
+    def get_request_timeout():
+        """Get timeout for API requests (Hidden from UI, default 30s)"""
+        config = ConfigHandler.load_config()
+        return config.get("request_timeout", 30)
+
+    # === Localization ===
+    @staticmethod
+    def get_locale():
+        config = ConfigHandler.load_config()
+        return config.get("locale", "zh")
+
+    @staticmethod
+    def set_locale(locale):
+        return ConfigHandler.save_config({"locale": locale})

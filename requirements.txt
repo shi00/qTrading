@@ -5,3 +5,7 @@ aiosqlite>=0.22.1
 plotly>=6.5.1
 requests>=2.32.5
 cryptography>=42.0.0
+
+akshare>=1.15.0
+openai>=1.10.0
+
