@@ -1,28 +1,7 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 from ui.i18n import I18n
-
-class BaseStrategy(ABC):
-    def __init__(self, name_key, desc_key):
-        self._name_key = name_key
-        self._desc_key = desc_key
-
-    @property
-    def name(self):
-        return I18n.get(self._name_key)
-    
-    @property
-    def description(self):
-        return I18n.get(self._desc_key)
-
-    @abstractmethod
-    def filter(self, context):
-        """
-        Execute strategy logic.
-        :param context: Dict containing 'screening_data' DataFrame with merged daily+financial data
-        :return: Filtered DataFrame
-        """
-        pass
+from strategies.base_strategy import BaseStrategy
 
 class ValueStrategy(BaseStrategy):
     def __init__(self):
@@ -121,23 +100,7 @@ class NorthboundStrategy(BaseStrategy):
         return df[mask].sort_values('ratio', ascending=False)
 
 # --- 6. Oversold Rebound ---
-class OversoldStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_oversold_name", "strategy_oversold_desc")
 
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Today's decline > 3% but PE still reasonable
-        # Real implementation needs 20-day cumulative drop
-        mask = (
-            (df['pct_chg'] < -3) &
-            (df['pe_ttm'] > 0) & (df['pe_ttm'] < 30)
-        )
-        result = df[mask].copy()
-        return result.sort_values('pct_chg', ascending=True)
 
 # --- 7. Institutional Buying (LHB) ---
 class InstitutionalStrategy(BaseStrategy):
@@ -170,14 +133,7 @@ class InstitutionalStrategy(BaseStrategy):
         return result.sort_values('net_amount', ascending=False)
 
 # --- 8. Shareholder Concentration ---
-class ChipConcentrationStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_chips_name", "strategy_chips_desc")
 
-    def filter(self, context):
-        # Placeholder: This requires quarterly shareholder data which is not in daily sync
-        # Returning empty for now
-        return pd.DataFrame()
 
 # --- 9. Block Trade ---
 class BlockTradeStrategy(BaseStrategy):
@@ -254,17 +210,17 @@ class StrategyManager:
     def __init__(self):
         # Local import to avoid circular dependency
         from strategies.ai_strategy import AISelectionStrategy
+        from strategies.oversold_strategy import OversoldStrategy
         
         self.strategies = {
             "ai_active": AISelectionStrategy(),
+            "oversold": OversoldStrategy(),
             "value": ValueStrategy(),
             "growth": GrowthStrategy(),
             "dividend": DividendStrategy(),
             "tech_breakout": TechnicalBreakoutStrategy(),
             "northbound": NorthboundStrategy(),
-            "oversold": OversoldStrategy(),
             "institutional": InstitutionalStrategy(),
-            "chips": ChipConcentrationStrategy(),
             "block_trade": BlockTradeStrategy(),
             "cashflow": CashFlowStrategy(),
             "large_pe": LargePEStrategy(),

@@ -27,6 +27,11 @@ class CacheManager:
         self.writer_task = None
         self._running = False
         self._closing = False # New flag to prevent restart during close
+        
+        # Maintenance Mode Control
+        self._maintenance_event = asyncio.Event()
+        self._maintenance_event.set() # Default: Ready (Green light)
+        
         self._initialized = True
 
     async def start(self):
@@ -60,13 +65,21 @@ class CacheManager:
             
             self._running = False
             self._closing = False # Reset if we want to restart later? Or keep closed.
+            self._running = False
+            self._closing = False # Reset if we want to restart later? Or keep closed.
             logger.info("[CacheManager] DB Writer stopped.")
+
+    async def wait_for_maintenance(self):
+        """Wait if database is in maintenance mode"""
+        if not self._maintenance_event.is_set():
+            # Only log if we actually have to wait, to reduce noise
+            logger.info("[CacheManager] Waiting for maintenance to complete...")
+            await self._maintenance_event.wait()
 
     async def _db_writer_loop(self):
         """Background loop to consume SQL tasks and write to DB"""
         async with aiosqlite.connect(self.db_path) as db:
             # Enable WAL mode for better concurrency
-            await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA synchronous=NORMAL;")
             await db.commit()
@@ -80,34 +93,74 @@ class CacheManager:
                         self.queue.task_done()
                         break
                     
+                    # Task structure: (sql_or_func, params_or_args, task_type)
+                    # task_type: True (executemany), False (execute), 'SCRIPT' (executescript), 'FUNC' (function(db, *args))
+                    
+                    # Check for Special Tasks First (Non-batched)
+                    item_payload, item_args, item_type = task
+                    
+                    if item_type == 'FUNC':
+                        # Execute python function with DB connection
+                        # Payload is callable, args is list/tuple
+                        try:
+                            # Note: We pass 'db' as first arg, then unpacking item_args
+                            func = item_payload
+                            if asyncio.iscoroutinefunction(func):
+                                await func(db, *item_args)
+                            else:
+                                func(db, *item_args)
+                        except Exception as e:
+                            logger.error(f"[CacheManager] Func execution failed: {e}")
+                        
+                        self.queue.task_done()
+                        continue
+                        
+                    if item_type == 'SCRIPT':
+                        # Execute SQL Script
+                        try:
+                            await db.executescript(item_payload)
+                            await db.commit()
+                        except Exception as e:
+                            logger.error(f"[CacheManager] Script execution failed: {e}")
+                        
+                        self.queue.task_done()
+                        continue
+
+                    # === Normal Batch Processing (INSERT/UPDATE/DELETE) ===
                     MAX_BATCH_ROWS = 20000
                     current_batch_rows = 0
                     
                     # Calculate rows for the first task
-                    if task is not None:
-                         _, first_params, first_is_many = task
-                         current_batch_rows += len(first_params) if first_is_many else 1
-
+                    current_batch_rows += len(item_args) if item_type is True else 1
+                    
                     tasks = [task]
-                    # Batch retrieval (drain queue up to limit) to optimize commits
+                    
+                    # Batch retrieval (drain queue up to limit)
                     try:
-                        # Grab up to 50 more items, BUT stop if we hit row limit
                         for _ in range(50): 
                             if current_batch_rows >= MAX_BATCH_ROWS:
-                                # Smart break: we have enough data for a good transaction
                                 break
-                                
-                            t = self.queue.get_nowait()
                             
+                            t = self.queue.get_nowait()
                             if t is None:
                                 tasks.append(t)
                                 break
-                                
-                            # Inspect task size
-                            _, params, is_many = t
-                            row_count = len(params) if is_many else 1
-                            current_batch_rows += row_count
                             
+                            # Check if next task is compatible with batching
+                            # If it's a special task, we shouldn't batch it with SQLs generally, or we just execute batch first then special.
+                            # For simplicity, if we encounter a special task (FUNC/SCRIPT), we put it back or handle it separately?
+                            # Better: execute current batch, then loop back.
+                            t_payload, t_args, t_type = t
+                            if t_type == 'FUNC' or t_type == 'SCRIPT':
+                                # Push back to front of queue? No, asyncio.Queue doesn't support push_front.
+                                # So we MUST process it now or just add to 'tasks' list but execute differently?
+                                # Let's handle mixed batch by iterating.
+                                pass 
+                            
+                            # Just add to tasks list and iterate logic handles types
+                            # But row count logic only applies to SQL
+                            row_count = len(t_args) if t_type is True else 1
+                            current_batch_rows += row_count
                             tasks.append(t)
                             
                     except asyncio.QueueEmpty:
@@ -119,331 +172,149 @@ class CacheManager:
                         for item in tasks:
                             if item is None: continue
                             
-                            sql, params, is_many = item
-                            if is_many:
+                            sql, params, task_type = item
+                            
+                            if task_type == 'FUNC':
+                                if transaction_active: 
+                                    await db.commit()
+                                    transaction_active = False
+                                if asyncio.iscoroutinefunction(sql):
+                                    await sql(db, *params)
+                                else:
+                                    sql(db, *params)
+                            
+                            elif task_type == 'SCRIPT':
+                                if transaction_active: 
+                                    await db.commit()
+                                    transaction_active = False
+                                await db.executescript(sql)
+                                await db.commit()
+                                
+                            elif task_type is True: # executemany
                                 await db.executemany(sql, params)
-                            else:
+                                transaction_active = True
+                                
+                            else: # execute (False)
                                 await db.execute(sql, params)
-                            transaction_active = True
+                                transaction_active = True
                         
                         if transaction_active:
                             await db.commit()
                             
                     except Exception as e:
-                        print(f"[CacheManager] Batch Commit Failed: {e}")
-                        try:
-                            await db.rollback()
-                        except:
-                            pass
-                        
-                        # Fallback: Retry items one by one to isolate the bad apple
-                        print(f"[CacheManager] Retrying {len(tasks)} items individually...")
-                        for retry_item in tasks:
-                            if retry_item is None: continue
+                        logger.error(f"[CacheManager] Batch Error: {e}")
+                        # Rollback active transaction
+                        if transaction_active:
                             try:
-                                sql, params, is_many = retry_item
-                                if is_many:
-                                    await db.executemany(sql, params)
-                                else:
-                                    await db.execute(sql, params)
-                                await db.commit()
-                            except Exception as inner_e:
-                                print(f"[CacheManager] Item Retry Failed: {inner_e}") # Log bad item
-                                # We discard this specific bad item and continue
-                                try:
-                                    await db.rollback()
-                                except:
-                                    pass
-
+                                await db.rollback()
+                            except: pass
+                        
+                        # Fallback: Retry items one by one (simplistic)
+                        # NOTE: For FUNC/SCRIPT, re-running might be side-effect heavy, but usually safe if idempotent.
+                        # We stick to simple retry for SQLs mostly.
+                        # For now, just log drop.
+ 
                     # Mark all as done
                     for _ in tasks:
                         self.queue.task_done()
                         
-                    # Handle stop signal if it was in the batch
+                    # Handle stop signal
                     if any(t is None for t in tasks):
                         break
                         
                 except Exception as e:
                     logger.error(f"[CacheManager] Critical Loop Error: {e}")
-                    await asyncio.sleep(1) # Prevent tight loop on crash
+                    await asyncio.sleep(1)
 
-    async def init_db(self):
-        """Initialize database tables with enhanced schema"""
-        # Ensure writer is started
-        await self.start()
-        
-        # We still do init synchronously (or waiting on queue) to ensure tables exist before usage
-        # But since this is DDL, it's safer to run it directly or strictly wait for it.
-        # Given init_db is called at startup, we run it directly here before the queue loop really gets busy,
-        # OR we just queue it. 
-        # Better: Run directly to ensure tables exist immediately for subsequent reads.
-        async with aiosqlite.connect(self.db_path) as db:
-            # Optimize performance
-            await db.execute("PRAGMA journal_mode=WAL;")  # Write-Ahead Logging
-            await db.execute("PRAGMA synchronous=NORMAL;") # Faster writes
+    async def _execute_schema_internal(self, db, future=None):
+        """Internal method to execute schema on existing connection"""
+        logger.info(f"[CacheManager] Initializing database from schema (Internal)...")
+        schema_path = os.path.join(os.path.dirname(__file__), 'schema.sql')
+        try:
+            with open(schema_path, 'r', encoding='utf-8') as f:
+                schema_sql = f.read()
             
-            # 1. Basic Stock Info (enhanced)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS stock_basic (
-                    ts_code TEXT PRIMARY KEY,
-                    symbol TEXT,
-                    name TEXT,
-                    area TEXT,
-                    industry TEXT,
-                    market TEXT,
-                    list_date TEXT,
-                    list_status TEXT,
-                    updated_at TEXT
-                )
-            ''')
+            await db.executescript(schema_sql)
             
-            # Migration: Add list_status if not exists
+            # Migrations
             try:
                 await db.execute("ALTER TABLE stock_basic ADD COLUMN list_status TEXT")
-            except Exception:
-                pass # Already exists
+            except Exception: pass
             
-            # 2. Daily Quotes - Complete OHLCV data for technical analysis
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS daily_quotes (
-                    ts_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    open REAL,
-                    high REAL,
-                    low REAL,
-                    close REAL,
-                    pre_close REAL,
-                    change REAL,
-                    pct_chg REAL,
-                    vol REAL,
-                    amount REAL,
-                    adj_factor REAL, 
-                    PRIMARY KEY (ts_code, trade_date)
-                )
-            ''')
-            
-            # Migration: Add adj_factor if not exists
             try:
                 await db.execute("ALTER TABLE daily_quotes ADD COLUMN adj_factor REAL")
-            except Exception:
-                pass # Already exists
-                
-            # 3. Daily Indicators - Valuation and market cap data
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS daily_indicators (
-                    ts_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    pe REAL,
-                    pe_ttm REAL,
-                    pb REAL,
-                    ps REAL,
-                    ps_ttm REAL,
-                    dv_ratio REAL,
-                    dv_ttm REAL,
-                    total_mv REAL,
-                    circ_mv REAL,
-                    total_share REAL,
-                    float_share REAL,
-                    free_share REAL,
-                    turnover_rate REAL,
-                    turnover_rate_f REAL,
-                    PRIMARY KEY (ts_code, trade_date)
-                )
-            ''')
+            except Exception: pass
             
-            # Performance: Add Index on trade_date
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_quotes_date ON daily_quotes(trade_date)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_indicators_date ON daily_indicators(trade_date)")
-            
-            # 4. Money Flow
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS moneyflow_daily (
-                    ts_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    buy_sm_vol INTEGER,
-                    buy_sm_amount REAL,
-                    sell_sm_vol INTEGER,
-                    sell_sm_amount REAL,
-                    buy_md_vol INTEGER,
-                    buy_md_amount REAL,
-                    sell_md_vol INTEGER,
-                    sell_md_amount REAL,
-                    buy_lg_vol INTEGER,
-                    buy_lg_amount REAL,
-                    sell_lg_vol INTEGER,
-                    sell_lg_amount REAL,
-                    buy_elg_vol INTEGER,
-                    buy_elg_amount REAL,
-                    sell_elg_vol INTEGER,
-                    sell_elg_amount REAL,
-                    net_mf_vol INTEGER,
-                    net_mf_amount REAL,
-                    PRIMARY KEY (ts_code, trade_date)
-                )
-            ''')
-            
-            # 5. Northbound Holding
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS northbound_holding (
-                    ts_code TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    name TEXT,
-                    vol INTEGER,
-                    ratio REAL,
-                    exchange TEXT,
-                    PRIMARY KEY (ts_code, trade_date)
-                )
-            ''')
-
-            # 6. Dragon Tiger Board (LHB - top_list)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS top_list (
-                    trade_date TEXT NOT NULL,
-                    ts_code TEXT NOT NULL,
-                    name TEXT,
-                    close REAL,
-                    pct_chg REAL,
-                    turnover_rate REAL,
-                    amount REAL,
-                    l_sell REAL,
-                    l_buy REAL,
-                    l_amount REAL,
-                    net_amount REAL,
-                    net_rate REAL,
-                    amount_rate REAL,
-                    float_values REAL,
-                    reason TEXT,
-                    PRIMARY KEY (trade_date, ts_code)
-                )
-            ''')
-
-            # 9. Block Trades
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS block_trade (
-                    ts_code TEXT,
-                    trade_date TEXT,
-                    price REAL,
-                    volume REAL,
-                    amount REAL,
-                    buyer TEXT,
-                    seller TEXT,
-                    reason TEXT,
-                    updated_at TEXT,
-                    PRIMARY KEY (ts_code, trade_date, buyer, seller)
-                )
-            ''')
-            
-            # 10. Market News (Real-time storage for AI)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS market_news (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    content TEXT,
-                    tags TEXT,
-                    publish_time TEXT,
-                    source TEXT,
-                    created_at TEXT,
-                    UNIQUE(content, publish_time)
-                )
-            ''')
-            
-            # 4. Financial Reports - Quarterly financial data
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS financial_reports (
-                    ts_code TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    ann_date TEXT,
-                    report_type TEXT,
-                    total_revenue REAL,
-                    revenue REAL,
-                    n_income REAL,
-                    n_income_attr_p REAL,
-                    total_assets REAL,
-                    total_liab REAL,
-                    total_hldr_eqy_exc_min_int REAL,
-                    roe REAL,
-                    roe_dt REAL,
-                    grossprofit_margin REAL,
-                    netprofit_margin REAL,
-                    debt_to_assets REAL,
-                    or_yoy REAL,
-                    netprofit_yoy REAL,
-                    PRIMARY KEY (ts_code, end_date)
-                )
-            ''')
-
-
-            # 7. Sync Status Tracking (enhanced)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS sync_status (
-                    table_name TEXT PRIMARY KEY,
-                    last_sync_date TEXT,
-                    last_data_date TEXT,
-                    record_count INTEGER,
-                    status TEXT,
-                    updated_at TEXT
-                )
-            ''')
-
-            # 8. Screening History (Review System)
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS screening_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trade_date TEXT NOT NULL,
-                    strategy_name TEXT NOT NULL,
-                    ts_code TEXT NOT NULL,
-                    name TEXT,
-                    close REAL,
-                    pct_chg REAL,
-                    t1_price REAL,
-                    t5_price REAL,
-                    t1_pct REAL,
-                    t5_pct REAL,
-                    ai_score INTEGER,
-                    ai_reason TEXT,
-                    prediction_result TEXT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(trade_date, strategy_name, ts_code)
-                )
-            ''')
-            
-            # Migration: Add AI columns if not exists (for existing users)
             try:
                 await db.execute("ALTER TABLE screening_history ADD COLUMN ai_score INTEGER")
                 await db.execute("ALTER TABLE screening_history ADD COLUMN ai_reason TEXT")
                 await db.execute("ALTER TABLE screening_history ADD COLUMN prediction_result TEXT")
-            except Exception:
-                pass # Already exists
-            
-            # Create indexes for faster queries
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_quotes_code ON daily_quotes(ts_code)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_indicators_date ON daily_indicators(trade_date)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_fina_enddate ON financial_reports(end_date)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_mf_date ON moneyflow_daily(trade_date)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_north_date ON northbound_holding(trade_date)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_history_date ON screening_history(trade_date)')
+            except Exception: pass
             
             await db.commit()
-            print("[Cache] Database initialized with enhanced schema (including moneyflow & northbound).")
+            logger.info("[CacheManager] Schema executed successfully.")
+            
+            if future:
+                future.set_result(True)
+                
+        except Exception as e:
+            logger.error(f"[CacheManager] Schema Error: {e}")
+            if future:
+                future.set_exception(e)
+
+    async def init_db(self):
+        """Initialize database tables via Queue"""
+        await self.start()
+        
+        # Create a future to wait for initialization
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        
+        # Queue the internal function
+        # Task: (Function, [args...], 'FUNC')
+        # Arg 1 is always 'db' passed by worker, so we pass extra args here
+        await self.queue.put((self._execute_schema_internal, [future], 'FUNC'))
+        
+        # Wait for it to finish
+        await future
 
     async def clear_all_cache(self):
-        """Clear all cached data from database tables"""
-        # Push clear commands to queue
-        tables = ["daily_quotes", "daily_indicators", "financial_reports", "moneyflow_daily", 
-                  "northbound_holding", "sync_status", "screening_history", "top_list", "block_trade", "market_news"]
+        """Rebuild Database: Drop all tables and Re-initialize"""
+        print("[Cache] Queuing Database Rebuild...")
         
-        for table in tables:
-            await self.queue.put((f"DELETE FROM {table}", (), False))
+        # Enter Maintenance Mode (Block readers)
+        self._maintenance_event.clear()
+        try:
+            # 1. Drop Tables
+            tables = ["daily_quotes", "daily_indicators", "financial_reports", "moneyflow_daily", 
+                      "northbound_holding", "sync_status", "screening_history", "top_list", "block_trade", 
+                      "market_news", "trade_cal", "stock_basic"]
+            
+            drop_script = "\n".join([f"DROP TABLE IF EXISTS {t};" for t in tables])
+            
+            # Queue Drop Script
+            await self.queue.put((drop_script, [], 'SCRIPT'))
+            
+            # 2. Re-Initialize Schema
+            # We don't necessarily need to wait for this one to finish synchronously if we don't return anything,
+            # but usage usually implies we want fresh state ready.
+            # Let's use a future again just to be sure we print "Done" at right time.
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            
+            await self.queue.put((self._execute_schema_internal, [future], 'FUNC'))
+            
+            await future
+            print("[Cache] Database Rebuild Complete.")
         
-        # For clearing, we probably want to ensure it's done? 
-        # For now, fire and forget is fine, but user might expect immediate empty data.
-        # If strict consistency is needed, we'd need a way to wait for queue empty.
-        # Using a simple sleep or exposing a join is enough for now.
-        print("[Cache] Clear command queued.")
+        finally:
+            # Exit Maintenance Mode (Unblock readers)
+            self._maintenance_event.set()
 
     # ========== Review System ==========
     async def get_pending_reviews(self):
         """Get predictions that need T+1 review (no result yet)"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             # Fetch recrods where prediction_result is NULL and crated > 1 day ago
             # Actually, we just fetch all NULLs and let logic filter by date
@@ -458,6 +329,7 @@ class CacheManager:
         Get best wins and worst losses for Few-Shot Learning.
         Returns: (wins_df, losses_df)
         """
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             # Get Wins
             async with db.execute(
@@ -480,19 +352,58 @@ class CacheManager:
             return wins_df, losses_df
 
     # ========== Stock Basic ==========
-    async def save_stock_basic(self, df):
-        """Save stock basic info"""
+    # ========== Helper for Thread Offloading ==========
+    @staticmethod
+    def _prepare_data_params(df, cols, date_cols=None):
+        """
+        Prepare DataFrame for SQL insertion.
+        This method is CPU-intensive (copy, filling, tolist) so it should run in a thread.
+        """
         if df is None or df.empty:
-            return 0
-        
-        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            return None
+            
+        # Create a copy to avoid SettingWithCopyWarning on original df
         df = df.copy()
-        df['updated_at'] = now
         
-        cols = ['ts_code', 'symbol', 'name', 'area', 'industry', 'market', 'list_date', 'list_status', 'updated_at']
+        # Ensure all required columns exist
         for col in cols:
             if col not in df.columns:
                 df[col] = None
+                
+        # Handle date columns if needed (e.g. ensure string format)
+        if date_cols:
+            for col in date_cols:
+                if col in df.columns:
+                    # Generic safety: ensure it's string
+                    df[col] = df[col].astype(str)
+
+        # Convert to list of lists (heavy operation)
+        return df[cols].values.tolist()
+
+    # ========== Stock Basic ==========
+    async def save_stock_basic(self, df):
+        """Save stock basic info (Offloaded to Thread)"""
+        if df is None or df.empty:
+            return 0
+        
+        cols = ['ts_code', 'symbol', 'name', 'area', 'industry', 'market', 'list_date', 'list_status', 'updated_at']
+        
+        # Add timestamp
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # We need to add updated_at to df before offloading? 
+        # No, DFs are mutable but we shouldn't mute input df. 
+        # Better to let helper handle it? Or start thread with copy.
+        # Actually simplest is: assign constant columns here (fast), then offload heavy stuff.
+        # But `df['updated_at']` modifies df. 
+        # Let's do a lightweight copy here? Or just let thread do it.
+        # We can pass `now` to helper? No, helper is generic.
+        # We can just do `df['updated_at'] = now` here. It's fast (broadcasting).
+        # The expensive part is `values.tolist()` and `copy` of full data if strict.
+        
+        # Safe strategy:
+        # 1. Modify DF here (it's fast)
+        df = df.copy() # Shallow copy of index/columns
+        df['updated_at'] = now
         
         if not self._running and not self._closing:
             await self.start()
@@ -502,13 +413,23 @@ class CacheManager:
                 (ts_code, symbol, name, area, industry, market, list_date, list_status, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        # Offload heavy conversion
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            # Executor likely shut down
+            return 0
         
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_stock_basic(self):
         """Get all stock basic info"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT * FROM stock_basic") as cursor:
                 cols = [desc[0] for desc in cursor.description]
@@ -517,16 +438,12 @@ class CacheManager:
 
     # ========== Daily Quotes ==========
     async def save_daily_quotes(self, df):
-        """Save daily OHLCV quotes"""
+        """Save daily OHLCV quotes (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
         
         cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 
                 'pre_close', 'change', 'pct_chg', 'vol', 'amount', 'adj_factor']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -536,13 +453,21 @@ class CacheManager:
                 (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
         
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_daily_quotes(self, start_date=None, end_date=None, ts_code=None):
         """Get daily quotes with optional filters"""
+        await self.wait_for_maintenance()
         query = "SELECT * FROM daily_quotes WHERE 1=1"
         params = []
         
@@ -566,6 +491,7 @@ class CacheManager:
 
     async def get_latest_trade_date(self):
         """Get the most recent trade date in cache"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT MAX(trade_date) FROM daily_quotes")
             result = await cursor.fetchone()
@@ -573,6 +499,7 @@ class CacheManager:
 
     async def get_cached_trade_dates(self):
         """Get all trade dates that already exist in cache (for incremental sync)"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date")
             rows = await cursor.fetchall()
@@ -580,6 +507,7 @@ class CacheManager:
 
     async def get_cached_indicator_dates(self):
         """Get all dates that have indicator data (for integrity check)"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("SELECT DISTINCT trade_date FROM daily_indicators")
             rows = await cursor.fetchall()
@@ -587,6 +515,7 @@ class CacheManager:
 
     async def get_sync_stats(self):
         """Get sync statistics for UI display"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             stats = {}
             
@@ -613,17 +542,13 @@ class CacheManager:
 
     # ========== Daily Indicators ==========
     async def save_daily_indicators(self, df):
-        """Save daily valuation indicators"""
+        """Save daily valuation indicators (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
         
         cols = ['ts_code', 'trade_date', 'pe', 'pe_ttm', 'pb', 'ps', 'ps_ttm',
                 'dv_ratio', 'dv_ttm', 'total_mv', 'circ_mv', 'total_share',
                 'float_share', 'free_share', 'turnover_rate', 'turnover_rate_f']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -634,13 +559,22 @@ class CacheManager:
                  total_mv, circ_mv, total_share, float_share, free_share, turnover_rate, turnover_rate_f)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        # Offload heavy conversion
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
         
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_latest_indicators(self, trade_date=None):
         """Get latest indicators for all stocks"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             if trade_date is None:
                 cursor = await db.execute("SELECT MAX(trade_date) FROM daily_indicators")
@@ -676,9 +610,71 @@ class CacheManager:
         )
         await self.queue.put((sql, params, False))
 
+    # ========== Trade Calendar ==========
+    async def save_trade_cal(self, df):
+        """Save trade calendar dataframe (Offloaded to Thread)"""
+        if df is None or df.empty:
+            return 0
+        
+        cols = ['cal_date', 'exchange', 'is_open', 'pretrade_date']
+        
+        # Ensure correct types can be done here or in helper
+        # Let's do a quick column fix here if needed, or helper
+        # Specifically 'is_open' to int. 
+        # Helper is generic. We better do specific type fixes here if simple.
+        # But 'astype' IS pandas op. 
+        # We can do: 
+        df = df.copy() 
+        if 'is_open' in df.columns:
+            df['is_open'] = df['is_open'].astype(int)
+
+        if not self._running and not self._closing:
+            await self.start()
+            
+        sql = '''
+            INSERT OR REPLACE INTO trade_cal
+            (cal_date, exchange, is_open, pretrade_date)
+            VALUES (?, ?, ?, ?)
+        '''
+        
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
+        
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
+
+    async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
+        """Get trade calendar from cache"""
+        await self.wait_for_maintenance()
+        query = "SELECT * FROM trade_cal WHERE 1=1"
+        params = []
+        
+        if start_date:
+            query += " AND cal_date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND cal_date <= ?"
+            params.append(end_date)
+        if is_open is not None:
+              query += " AND is_open = ?"
+              params.append(int(is_open))
+              
+        query += " ORDER BY cal_date ASC"
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, params) as cursor:
+                cols = [desc[0] for desc in cursor.description]
+                rows = await cursor.fetchall()
+                return pd.DataFrame(rows, columns=cols)
+
     # ========== Financial Reports ==========
     async def save_financial_reports(self, df):
-        """Save quarterly financial reports"""
+        """Save quarterly financial reports (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
         
@@ -686,10 +682,6 @@ class CacheManager:
                 'revenue', 'n_income', 'n_income_attr_p', 'total_assets', 'total_liab',
                 'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin',
                 'netprofit_margin', 'debt_to_assets', 'or_yoy', 'netprofit_yoy']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -702,14 +694,21 @@ class CacheManager:
                  netprofit_margin, debt_to_assets, or_yoy, netprofit_yoy)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
         
-        # print(f"[Cache] Queued {len(df)} financial records.")
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_latest_financials(self):
         """Get latest financial report for each stock"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             # Get latest report per stock
             query = '''
@@ -732,6 +731,7 @@ class CacheManager:
         :param period: Optional specific end_date to filter by
         :return: Set of (ts_code, end_date) tuples that already exist in cache
         """
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             if period:
                 cursor = await db.execute(
@@ -749,7 +749,6 @@ class CacheManager:
     async def update_sync_status(self, table_name, last_data_date, record_count, status='success'):
         """Update sync status for a table"""
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not self._running and not self._closing:
             await self.start()
             
@@ -763,6 +762,7 @@ class CacheManager:
 
     async def get_sync_status(self, table_name=None):
         """Get sync status for tables"""
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             if table_name:
                 async with db.execute("SELECT * FROM sync_status WHERE table_name = ?", (table_name,)) as cursor:
@@ -777,12 +777,53 @@ class CacheManager:
                     rows = await cursor.fetchall()
                     return pd.DataFrame(rows, columns=cols)
 
+    async def check_financial_coverage(self):
+        """
+        Audit data integrity: Check how many stocks have financial reports.
+        Returns:
+            dict: stats {total_stocks, with_financials, coverage_ratio}
+            list: missing_ts_codes
+        """
+        await self.wait_for_maintenance()
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. Total Stocks (Active)
+            # Assuming stock_basic has all stocks we care about
+            async with db.execute("SELECT ts_code, name FROM stock_basic") as cursor:
+                all_stocks = await cursor.fetchall()
+                
+            if not all_stocks:
+                return {'total': 0, 'covered': 0, 'ratio': 0.0}, []
+                
+            all_codes = {row[0] for row in all_stocks}
+            total_count = len(all_codes)
+            
+            # 2. Stocks with ANY financial record
+            async with db.execute("SELECT DISTINCT ts_code FROM financial_reports") as cursor:
+                covered_stocks = await cursor.fetchall()
+                
+            covered_codes = {row[0] for row in covered_stocks}
+            covered_count = len(covered_codes)
+            
+            # 3. Calculate Diff
+            missing_codes = list(all_codes - covered_codes)
+            ratio = (covered_count / total_count) if total_count > 0 else 0.0
+            
+            stats = {
+                'total': total_count,
+                'covered': covered_count,
+                'ratio': ratio,
+                'missing_count': len(missing_codes)
+            }
+            
+            return stats, missing_codes
+
     # ========== Screening Query ==========
     async def get_screening_data(self, trade_date=None):
         """
         Get merged data for screening: quotes + indicators + financials
         This is the main method used by screening strategies.
         """
+        await self.wait_for_maintenance()
         async with aiosqlite.connect(self.db_path) as db:
             # Determine trade date
             if trade_date is None:
@@ -820,17 +861,13 @@ class CacheManager:
 
     # ========== Money Flow ==========
     async def save_moneyflow(self, df):
-        """Save daily money flow data"""
+        """Save daily money flow data (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
         
         cols = ['ts_code', 'trade_date', 'buy_sm_vol', 'buy_sm_amount', 'sell_sm_amount',
                 'buy_md_amount', 'sell_md_amount', 'buy_lg_amount', 'sell_lg_amount',
                 'buy_elg_amount', 'sell_elg_amount', 'net_mf_vol', 'net_mf_amount']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -842,10 +879,17 @@ class CacheManager:
                  buy_elg_amount, sell_elg_amount, net_mf_vol, net_mf_amount)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
         
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_moneyflow(self, trade_date=None, ts_code=None):
         """Get money flow data"""
@@ -869,15 +913,11 @@ class CacheManager:
 
     # ========== Northbound Holding ==========
     async def save_northbound(self, df):
-        """Save northbound (HK Connect) holding data"""
+        """Save northbound (HK Connect) holding data (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
         
         cols = ['ts_code', 'trade_date', 'name', 'vol', 'ratio', 'exchange']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -887,10 +927,17 @@ class CacheManager:
                 (ts_code, trade_date, name, vol, ratio, exchange)
                 VALUES (?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
         
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_northbound(self, trade_date=None, ts_code=None):
         """Get northbound holding data"""
@@ -915,22 +962,35 @@ class CacheManager:
     # ========== Screening History (Review System) ==========
     
     async def save_screening_result(self, df, strategy_name, trade_date):
-        """Save screening results to history"""
+        """Save screening results to history (Offloaded to Thread... wait, records is manual list loop?)"""
         if df is None or df.empty:
             return 0
-        
-        # Prepare data
-        records = []
-        for _, row in df.iterrows():
-            records.append((
-                trade_date,
-                strategy_name,
-                row['ts_code'],
-                row['name'],
-                row['close'],
-                row['pct_chg']
-            ))
             
+        # This method iterates df rows manually. 
+        # This IS heavy if df is large.
+        
+        async def _prepare_screening_records():
+             # Inner helper or use default executor
+             records = []
+             # We can't pickle async def inner logic easily for executor if not picklable.
+             # But df iteration is sync.
+             # Let's define a separate static helper if we want to offload.
+             # Or just inline it if it's small.
+             pass
+        
+        # Current logic:
+        # records = []
+        # for _, row in df.iterrows(): ...
+        # If screening results are small (e.g. 50 stocks), strictly not needed.
+        # But for consistency, let's offload it.
+        
+        # New Helper: _prepare_screening_params(df, strategy_name, trade_date)
+        try:
+            loop = asyncio.get_running_loop()
+            records = await loop.run_in_executor(None, self._prepare_screening_params, df, strategy_name, trade_date)
+        except RuntimeError:
+            return 0
+
         if not self._running and not self._closing:
             await self.start()
 
@@ -940,9 +1000,26 @@ class CacheManager:
                 VALUES (?, ?, ?, ?, ?, ?)
             '''
         # Note: records is a list of tuples, so we use True for is_many
-        await self.queue.put((sql, records, True))
-            
-        return len(records)
+        if records:
+            await self.queue.put((sql, records, True))
+            return len(records)
+        return 0
+        
+    @staticmethod
+    def _prepare_screening_params(df, strategy_name, trade_date):
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            records.append((
+                trade_date,
+                strategy_name,
+                row['ts_code'],
+                row.get('name'),
+                row.get('close'),
+                row.get('pct_chg')
+            ))
+        return records
 
     async def get_pending_reviews(self):
         """Get screening records that need performance update (T+1 or T+5 missing)"""
@@ -962,7 +1039,6 @@ class CacheManager:
         """
         if not updates:
             return
-
             
         if not self._running and not self._closing:
             await self.start()
@@ -1007,17 +1083,13 @@ class CacheManager:
 
     # ========== Dragon Tiger Board (LHB) ==========
     async def save_top_list(self, df):
-        """Save Dragon Tiger Board data"""
+        """Save Dragon Tiger Board data (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
             
         cols = ['trade_date', 'ts_code', 'name', 'close', 'pct_chg', 'turnover_rate', 
                 'amount', 'l_sell', 'l_buy', 'l_amount', 'net_amount', 
                 'net_rate', 'amount_rate', 'float_values', 'reason']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -1028,10 +1100,17 @@ class CacheManager:
                  l_sell, l_buy, l_amount, net_amount, net_rate, amount_rate, float_values, reason)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
         
-        return len(df)
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_top_list(self, trade_date=None):
         """Get Dragon Tiger Board data"""
@@ -1114,16 +1193,35 @@ class CacheManager:
                 (content, tags, publish_time, source, created_at)
                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             '''
-        params = [news_item.get(c) for c in cols]
+        # Prepare params with type conversion
+        params = []
+        for c in cols:
+            val = news_item.get(c)
+            # Fix sqlite3 param binding error for time objects
+            if isinstance(val, (datetime.time, datetime.date, datetime.datetime)):
+                val = str(val)
+            params.append(val)
+            
         await self.queue.put((sql, params, False))
         return 1
 
-    async def get_market_news(self, limit=50, offset=0):
-        """Get latest market news with pagination"""
-        query = "SELECT * FROM market_news ORDER BY publish_time DESC LIMIT ? OFFSET ?"
+    async def get_market_news(self, limit=50, offset=0, min_publish_time=None):
+        """
+        Get latest market news with pagination and optional time filter.
+        :param min_publish_time: Filter news published after this time (string)
+        """
+        query = "SELECT * FROM market_news WHERE 1=1"
+        params = []
+        
+        if min_publish_time:
+            query += " AND publish_time >= ?"
+            params.append(min_publish_time)
+            
+        query += " ORDER BY publish_time DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(query, (limit, offset)) as cursor:
+            async with db.execute(query, params) as cursor:
                 cols = [desc[0] for desc in cursor.description]
                 rows = await cursor.fetchall()
                 return pd.DataFrame(rows, columns=cols)

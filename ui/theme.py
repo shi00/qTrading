@@ -87,6 +87,7 @@ class AppStyles:
         """主按钮样式"""
         return ft.ButtonStyle(
             color=AppColors.TEXT_ON_PRIMARY,
+            icon_color=AppColors.TEXT_ON_PRIMARY,
             bgcolor=AppColors.PRIMARY,
             padding=ft.padding.symmetric(horizontal=24, vertical=12),
             shape=ft.RoundedRectangleBorder(radius=8),
@@ -98,6 +99,7 @@ class AppStyles:
         """强调按钮样式"""
         return ft.ButtonStyle(
             color=AppColors.TEXT_ON_PRIMARY,
+            icon_color=AppColors.TEXT_ON_PRIMARY,
             bgcolor=AppColors.ACCENT,
             padding=ft.padding.symmetric(horizontal=24, vertical=12),
             shape=ft.RoundedRectangleBorder(radius=8),

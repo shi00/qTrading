@@ -336,6 +336,7 @@ class I18n:
             "settings_snack_token_fail": "验证失败: {error}",
             "settings_trading_days": "(交易日)",
             "settings_snack_concurrency_set": "并发数已设置为 {val} (下次同步生效)",
+            "settings_snack_log_level": "日志级别已切换为 {level}",
             
             # Dialogs & Snacks
             "dialog_confirm_clear_title": "确认清理缓存",

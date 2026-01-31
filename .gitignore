@@ -40,6 +40,7 @@ flet-app.tar.gz
 
 # Project specific
 astock.db
+astock.db-*
 logs/
 user_settings.json
 config.py

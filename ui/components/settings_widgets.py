@@ -66,11 +66,12 @@ class ActionChip(ft.Container):
     Interactive chip for quick actions.
     """
     def __init__(self, icon, title, subtitle, on_click, is_primary=False):
-        super().__init__()
-        self.on_click = on_click
-        self.ink = True
-        self.border_radius = 12
-        self.padding = 15
+        super().__init__(
+            on_click=on_click,
+            ink=True,
+            border_radius=12,
+            padding=15
+        )
         
         base_color = AppColors.PRIMARY if is_primary else AppColors.TEXT_PRIMARY
         bg_color = AppColors.PRIMARY if is_primary else AppColors.SURFACE

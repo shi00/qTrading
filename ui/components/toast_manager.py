@@ -145,15 +145,23 @@ class ToastCard(ft.Container):
         self.update()
         
     async def start_timer(self):
-        # Wait for enter animation
-        await asyncio.sleep(0.3)
-        
-        while self.remaining > 0:
-            if not self.is_hovered:
-                self.remaining -= 0.1
-            await asyncio.sleep(0.1)
+        try:
+            # Wait for enter animation
+            await asyncio.sleep(0.3)
             
-        await self.dismiss()
+            while self.remaining > 0:
+                if not self.page:
+                    return # Page closed
+                if not self.is_hovered:
+                    self.remaining -= 0.1
+                await asyncio.sleep(0.1)
+                
+            await self.dismiss()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            # Task destroyed or other shutdown error
+            pass
 
     def _on_hover(self, e):
         self.is_hovered = e.data == "true"

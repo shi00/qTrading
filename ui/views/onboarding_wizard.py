@@ -3,7 +3,7 @@ from utils.config_handler import ConfigHandler
 from data.tushare_client import TushareClient
 from data.data_processor import DataProcessor
 from ui.i18n import I18n
-import tushare as ts
+
 import asyncio
 import traceback
 import logging
@@ -440,7 +440,7 @@ class OnboardingWizard(ft.Container):
                 ft.ElevatedButton(
                     I18n.get("wizard_btn_start"), 
                     icon=ft.Icons.ROCKET_LAUNCH,
-                    style=ft.ButtonStyle(bgcolor=AppColors.SUCCESS, color=AppColors.TEXT_ON_PRIMARY, padding=20),
+                    style=ft.ButtonStyle(bgcolor=AppColors.SUCCESS, color=AppColors.TEXT_ON_PRIMARY, icon_color=AppColors.TEXT_ON_PRIMARY, padding=20),
                     on_click=self._complete_wizard,
                 ),
             ],
@@ -462,12 +462,17 @@ class OnboardingWizard(ft.Container):
         self.update()
         
         try:
-            ts.set_token(token)
-            pro = ts.pro_api()
-            # Simple API call to verify
-            pro.trade_cal(exchange='', start_date='20250101', end_date='20250101')
+            # Use TushareClient for verification (ensures proxy/config compatibility)
+            from data.tushare_client import TushareClient
             
-            # Save token
+            # Temporary client for this token
+            client = TushareClient(token=token)
+            
+            # Verify by fetching calendar (lightweight)
+            # TushareClient expects YYYYMMDD string dates
+            dates = client.get_trade_dates(start_date='20250101', end_date='20250101')
+            
+            # Save token if successful
             ConfigHandler.save_config({"ts_token": token, "onboarding_complete": False})
             
             self.token_status.value = I18n.get("wizard_msg_token_success")
@@ -529,10 +534,23 @@ class OnboardingWizard(ft.Container):
                 self.update()
                 
                 days = 750
+
+    # ... (skipping context)
+
+                self.sync_status.value = I18n.get("wizard_status_history")
+                self.sync_progress.value = 0
+                self.update()
+                
+                days = 750
+                _last_update_ts = [0]
                 def update_progress(current, total, msg):
-                    self.sync_progress.value = current / total
-                    self.sync_status.value = f"{msg} ({int(current/total*100)}%)"
-                    self.update()
+                    import time
+                    now = time.time()
+                    if current == total or (now - _last_update_ts[0] > 0.1):
+                        self.sync_progress.value = current / total
+                        self.sync_status.value = f"{msg} ({int(current/total*100)}%)"
+                        self._safe_update()
+                        _last_update_ts[0] = now
                 
                 # Ensure DB is initialized before sync
                 await processor.init_data()

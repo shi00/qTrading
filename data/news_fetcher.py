@@ -7,42 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
-import os
-from contextlib import contextmanager
-
-@contextmanager
-def bypass_proxy_for_domestic(domain_substring="eastmoney.com"):
-    """
-    Temporarily add domain to NO_PROXY to bypass system proxy for domestic APIs.
-    This helps when users have global proxy that fails for domestic requests.
-    """
-    original_no_proxy = os.environ.get("NO_PROXY", "")
-    original_no_proxy_lower = os.environ.get("no_proxy", "")
-    
-    # Check if already bypassed (simple check)
-    if domain_substring in original_no_proxy or domain_substring in original_no_proxy_lower:
-        yield
-        return
-
-    # Add to NO_PROXY
-    # Use lowercase 'no_proxy' as requests/urllib usually checks both or specific
-    new_no_proxy = f"{original_no_proxy},{domain_substring}" if original_no_proxy else domain_substring
-    os.environ["NO_PROXY"] = new_no_proxy
-    os.environ["no_proxy"] = new_no_proxy # Set both for maximum compatibility
-    
-    try:
-        yield
-    finally:
-        # Restore
-        if original_no_proxy:
-            os.environ["NO_PROXY"] = original_no_proxy
-        else:
-            os.environ.pop("NO_PROXY", None)
-            
-        if original_no_proxy_lower:
-            os.environ["no_proxy"] = original_no_proxy_lower
-        else:
-            os.environ.pop("no_proxy", None)
+from utils.proxy_manager import ProxyManager
 
 class NewsFetcher:
     """
@@ -68,13 +33,17 @@ class NewsFetcher:
             
             # Run blocking akshare call in thread pool with proxy bypass
             def _fetch():
-                with bypass_proxy_for_domestic():
+                with ProxyManager.bypass_proxy_for_domestic():
                     return ak.stock_news_em(symbol=symbol)
 
-            df = await loop.run_in_executor(
-                NewsFetcher._executor,
-                _fetch
-            )
+            try:
+                df = await loop.run_in_executor(
+                    NewsFetcher._executor,
+                    _fetch
+                )
+            except RuntimeError:
+                # Executor shutdown
+                return []
             
             if df is None or df.empty:
                 logger.warning(f"[News] No news found for {ts_code}")
@@ -128,14 +97,17 @@ class NewsFetcher:
             
             # Using 'stock_telegraph_cls' (Cailianshe) for real-time flashes - very good for A-share
             def _fetch():
-                 with bypass_proxy_for_domestic("cls.cn"): # Cailianshe domain? Or just default
-                     with bypass_proxy_for_domestic(): # Default eastmoney too
+                 with ProxyManager.bypass_proxy_for_domestic("cls.cn"): # Cailianshe domain? Or just default
+                     with ProxyManager.bypass_proxy_for_domestic(): # Default eastmoney too
                         return ak.stock_info_global_cls()
 
-            df = await loop.run_in_executor(
-                NewsFetcher._executor,
-                _fetch
-            )
+            try:
+                df = await loop.run_in_executor(
+                    NewsFetcher._executor,
+                    _fetch
+                )
+            except RuntimeError:
+                return []
             
             if df is None or df.empty:
                 return []
@@ -144,9 +116,9 @@ class NewsFetcher:
             news_list = []
             for _, row in df.head(limit).iterrows():
                 news_list.append({
-                    'title': row.get('标题', '无标题'),
-                    'content': row.get('内容', ''),
-                    'time': row.get('发布时间', '')
+                    'title': row.get('标题') or row.get('title', '无标题'),
+                    'content': row.get('内容') or row.get('content', ''),
+                    'time': row.get('发布时间') or row.get('时间') or row.get('time', '')
                 })
             return news_list
             
@@ -168,7 +140,7 @@ class NewsFetcher:
             # Use 'stock_us_famous_spot_em' - "美股知名美股"
             
             def _fetch():
-                 with bypass_proxy_for_domestic():
+                 with ProxyManager.bypass_proxy_for_domestic():
                      return ak.stock_us_famous_spot_em()
 
             df = await loop.run_in_executor(
@@ -237,14 +209,14 @@ class NewsFetcher:
             def _fetch():
                 # Tier 1: EastMoney Concepts
                 try:
-                    with bypass_proxy_for_domestic():
+                    with ProxyManager.bypass_proxy_for_domestic():
                          return ak.stock_board_concept_name_em(), "concept"
                 except Exception as e:
                     logger.warning(f"[News] Tier 1 (EM Concept) failed: {e}")
                     
                 # Tier 2: THS Concepts
                 try:
-                    with bypass_proxy_for_domestic("10jqka.com.cn"):
+                    with ProxyManager.bypass_proxy_for_domestic("10jqka.com.cn"):
                          # columns: 日期, 概念名称, 成分股数量, 涨跌幅, ...
                          return ak.stock_board_concept_name_ths(), "ths_concept"
                 except Exception as e:
@@ -252,7 +224,7 @@ class NewsFetcher:
 
                 # Tier 3: EastMoney Industries (Last Resort)
                 try:
-                    with bypass_proxy_for_domestic():
+                    with ProxyManager.bypass_proxy_for_domestic():
                          return ak.stock_board_industry_name_em(), "industry"
                 except Exception as e:
                     logger.error(f"[News] All data sources for hot concepts failed: {e}")

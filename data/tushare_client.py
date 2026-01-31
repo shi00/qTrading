@@ -30,7 +30,7 @@ class TushareClient:
                 self.set_token(token)
             return
         
-        self.token = token or ConfigHandler.get_token() or config.TS_TOKEN
+        self.token = token or ConfigHandler.get_token()
         self.timeout = ConfigHandler.get_request_timeout()  # Request timeout in seconds
         self.max_retries = ConfigHandler.get_request_max_retries()
         
@@ -318,15 +318,20 @@ class TushareClient:
             end_date=end_date
         )
 
-    def get_fina_indicator(self, period, ts_code=None):
+    def get_fina_indicator(self, ts_code=None, period=None, start_date=None, end_date=None):
         """
         Get financial indicators (ROE, growth rates, etc.)
+        Can query by:
+        1. ts_code + start_date/end_date (Get history for one stock)
+        2. period (Get all stocks for one quarter - Requires permissions)
         """
-        logger.debug(f"[API] fetching fina_indicator for period={period}...")
+        logger.debug(f"[API] fetching fina_indicator for code={ts_code} period={period}...")
         return self._handle_api_call(
             self.pro.fina_indicator,
-            period=period,
             ts_code=ts_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
             fields='ts_code,end_date,roe,roe_waa,roe_dt,netprofit_margin,grossprofit_margin,debt_to_assets,q_sales_yoy,q_profit_yoy,or_yoy,netprofit_yoy'
         )
 

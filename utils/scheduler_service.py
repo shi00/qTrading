@@ -154,6 +154,10 @@ class SchedulerService:
                 result = await processor.sync_daily_market_snapshot()
                 logger.info(f"[Scheduler] Data update complete: {result}")
                 
+                # Sync Financial Reports (Incremental)
+                await processor.sync_financial_reports()
+                logger.info(f"[Scheduler] Financial reports sync complete.")
+                
                 # Update review performance (T+1, T+5)
                 await review_mgr.run_review()
                 logger.info(f"[Scheduler] Review performance updated.")

@@ -34,7 +34,6 @@ class HomeView(ft.Container):
         
         # HSGT Controls
         self.hsgt_value = ft.Text("--", size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY)
-        self.hsgt_value = ft.Text("--", size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY)
         self.hsgt_sub = ft.Text("--", size=12, color=ft.Colors.GREY_500)
         
         # Hot Concepts
@@ -68,10 +67,10 @@ class HomeView(ft.Container):
                 # Market Indices
                 ft.ResponsiveRow(
                     [
-                        self._build_market_card(I18n.get("home_index_sh"), self.sh_value, self.sh_change),
-                        self._build_market_card(I18n.get("home_index_sz"), self.sz_value, self.sz_change),
-                        self._build_market_card(I18n.get("home_index_cyb"), self.cyb_value, self.cyb_change),
-                        self._build_stat_card(I18n.get("home_northbound"), self.hsgt_value, self.hsgt_sub),
+                        self._build_dashboard_card(I18n.get("home_index_sh"), self.sh_value, self.sh_change),
+                        self._build_dashboard_card(I18n.get("home_index_sz"), self.sz_value, self.sz_change),
+                        self._build_dashboard_card(I18n.get("home_index_cyb"), self.cyb_value, self.cyb_change),
+                        self._build_dashboard_card(I18n.get("home_northbound"), self.hsgt_value, self.hsgt_sub),
                     ],
                 ),
                 ft.Container(height=10),
@@ -181,12 +180,9 @@ class HomeView(ft.Container):
              self.hsgt_value.color = ft.Colors.RED if I18n.get("home_inflow") in hsgt.get('sub', '') else ft.Colors.GREEN
              self.hsgt_sub.value = hsgt.get('sub', '--')
              
-             self.hsgt_sub.value = hsgt.get('sub', '--')
-             
              # Update Hot Concepts
              hot_concepts = data.get('hot_concepts', [])
              
-             # Always show the section title so user knows it exists
              # Always show the section title so user knows it exists
              controls_content = []
              if hot_concepts:
@@ -228,7 +224,21 @@ class HomeView(ft.Container):
     async def _load_news(self, load_more=False):
         try:
             offset = self.news_page * self.PAGE_SIZE
-            news_df = await self.processor.cache.get_market_news(limit=self.PAGE_SIZE, offset=offset)
+            
+            # Strict "Today Only" Policy
+            # Calculate Today 00:00:00
+            import datetime
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+            # Note: News time format might be 'YYYY-MM-DD HH:MM:SS' or just 'HH:MM' (if created today by some sources)
+            # But usually we store full date. If stored as HH:MM, comparison with YYYY-MM-DD might fail?
+            # Tushare/AKShare usually returns full date or we should assume.
+            # Safe bet: Filter by YYYY-MM-DD string match if we can't do comparison, but SQL string compare works for ISO format.
+            
+            news_df = await self.processor.cache.get_market_news(
+                limit=self.PAGE_SIZE, 
+                offset=offset,
+                min_publish_time=today_str 
+            )
             
             if not load_more:
                 self.news_list.controls.clear()
@@ -287,32 +297,13 @@ class HomeView(ft.Container):
             border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_200))
         )
 
-    def _build_market_card(self, name, value_control, change_control):
-        return ft.Container(
-            content=ft.Column([
-                ft.Text(name, size=14, color=AppColors.TEXT_SECONDARY, no_wrap=True),
-                value_control,
-                change_control,
-            ], spacing=5),
-            padding=20,
-            bgcolor=AppColors.SURFACE,
-            border_radius=12,
-            border=ft.border.all(1, AppColors.BORDER),
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=8,
-                color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-            ),
-            col={"xs": 6, "sm": 6, "md": 3, "lg": 3},
-        )
-    
-    def _build_stat_card(self, title, value_control, sub_control):
+    def _build_dashboard_card(self, title, control1, control2):
+        """Unified card builder for dashboard stats"""
         return ft.Container(
             content=ft.Column([
                 ft.Text(title, size=14, color=AppColors.TEXT_SECONDARY, no_wrap=True),
-                value_control,
-                sub_control,
+                control1,
+                control2,
             ], spacing=5),
             padding=20,
             bgcolor=AppColors.SURFACE,
@@ -356,33 +347,4 @@ class HomeView(ft.Container):
             col={"xs": 6, "sm": 4, "md": 3, "lg": 2}
         )
 
-    def _build_strategy_card(self, key, icon, title, desc):
-        def on_click_run(e):
-            if self.on_run_strategy and self.page:
-                self.page.run_task(self.on_run_strategy, key)
-                
-        return ft.Container(
-            content=ft.Column([
-                ft.Row([
-                    ft.Icon(icon, color=AppColors.PRIMARY, size=24),
-                    ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Text(desc, size=12, color=AppColors.TEXT_SECONDARY),
-                ft.ElevatedButton(
-                    text=I18n.get("home_run"), 
-                    on_click=on_click_run,
-                    style=AppStyles.primary_button(),
-                )
-            ], spacing=10),
-            padding=20,
-            bgcolor=AppColors.SURFACE,
-            border_radius=12,
-            border=ft.border.all(1, AppColors.BORDER),
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=8,
-                color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-            ),
-            col={"xs": 6, "sm": 6, "md": 3, "lg": 3},
-        )
+

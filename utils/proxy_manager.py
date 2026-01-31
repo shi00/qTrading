@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ class ProxyManager:
         "cninfo.com.cn",
         "push2.eastmoney.com",
         "push2his.eastmoney.com",
+        "tushare.pro",
+        "waditu.com",
         "cls.cn"
     ]
 
@@ -121,3 +124,39 @@ class ProxyManager:
                  pass
         
         return results
+
+    @staticmethod
+    @contextmanager
+    def bypass_proxy_for_domestic(domain_substring="eastmoney.com"):
+        """
+        Temporarily add domain to NO_PROXY to bypass system proxy for domestic APIs.
+        This helps when users have global proxy that fails for domestic requests.
+        Usage: with ProxyManager.bypass_proxy_for_domestic(): ...
+        """
+        original_no_proxy = os.environ.get("NO_PROXY", "")
+        original_no_proxy_lower = os.environ.get("no_proxy", "")
+        
+        # Check if already bypassed (simple check)
+        if domain_substring in original_no_proxy or domain_substring in original_no_proxy_lower:
+            yield
+            return
+
+        # Add to NO_PROXY
+        # Use lowercase 'no_proxy' as requests/urllib usually checks both or specific
+        new_no_proxy = f"{original_no_proxy},{domain_substring}" if original_no_proxy else domain_substring
+        os.environ["NO_PROXY"] = new_no_proxy
+        os.environ["no_proxy"] = new_no_proxy # Set both for maximum compatibility
+        
+        try:
+            yield
+        finally:
+            # Restore
+            if original_no_proxy:
+                os.environ["NO_PROXY"] = original_no_proxy
+            else:
+                os.environ.pop("NO_PROXY", None)
+                
+            if original_no_proxy_lower:
+                os.environ["no_proxy"] = original_no_proxy_lower
+            else:
+                os.environ.pop("no_proxy", None)

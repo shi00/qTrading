@@ -1,6 +1,7 @@
 import pandas as pd
 import datetime
 import asyncio
+import aiosqlite
 import logging
 import traceback
 from data.tushare_client import TushareClient
@@ -37,9 +38,10 @@ class DataProcessor:
         if self.cache:
             await self.cache.close()
 
-    def get_latest_trade_date(self):
+    async def get_latest_trade_date(self):
         """
-        Get most recent actual trading date (handles holidays via API).
+        Get absolute latest trading date (today or previous trading day).
+        Uses persistent calendar cache.
         """
         now = datetime.datetime.now()
         # If before 16:00, target is yesterday maximum
@@ -49,40 +51,49 @@ class DataProcessor:
             end_dt = now
             
         end_str = end_dt.strftime('%Y%m%d')
-        start_str = (end_dt - datetime.timedelta(days=15)).strftime('%Y%m%d')
+        start_str = (end_dt - datetime.timedelta(days=20)).strftime('%Y%m%d')
         
         try:
-            # 1. API Method (Accurate)
-            dates = self.api.get_trade_dates(start_str, end_str)
+            dates = await self.get_trade_dates(start_str, end_str)
             if dates:
-                return dates[-1] # List is sorted asc
+                return dates[-1]
         except Exception as e:
-            logger.warning(f"[DataProcessor] Failed to get latest trade date via API: {e}")
+            logger.warning(f"[DataProcessor] Failed to get latest trade date: {e}")
 
-        # 2. Fallback Heuristic
+        # Fallback
         dt = end_dt
-        while dt.weekday() >= 5: # Skip weekends
+        while dt.weekday() >= 5: 
              dt -= datetime.timedelta(days=1)
         return dt.strftime('%Y%m%d')
 
-    def get_trade_dates(self, start_date, end_date):
-        """Get list of actual trade dates using Tushare trade_cal API"""
+    async def get_trade_dates(self, start_date, end_date):
+        """
+        Get list of actual trade dates using Persistent DB Cache.
+        """
         try:
-            # Use trade calendar API for accurate dates
-            dates = self.api.get_trade_dates(start_date, end_date)
-            if dates:
-                return dates
+            # 1. Ensure Cache is warm
+            await self.ensure_trade_cal(end_date, required_start_date=start_date)
+            
+            # 2. Query Cache
+            cache_df = await self.cache.get_trade_cal(start_date=start_date, end_date=end_date, is_open=1)
+            
+            if not cache_df.empty:
+                return sorted(cache_df['cal_date'].tolist())
+                
         except Exception as e:
-            logger.warning(f"[DataProcessor] Trade calendar failed, using fallback: {e}")
+            logger.warning(f"[DataProcessor] Trade calendar sync failed, using fallback: {e}")
         
-        # Fallback: simple weekend skip
+        # Fallback if DB fails
         dates = []
-        current = datetime.datetime.strptime(start_date, '%Y%m%d')
-        end = datetime.datetime.strptime(end_date, '%Y%m%d')
-        while current <= end:
-            if current.weekday() < 5:
-                dates.append(current.strftime('%Y%m%d'))
-            current += datetime.timedelta(days=1)
+        try:
+            current = datetime.datetime.strptime(start_date, '%Y%m%d')
+            end = datetime.datetime.strptime(end_date, '%Y%m%d')
+            while current <= end:
+                if current.weekday() < 5:
+                    dates.append(current.strftime('%Y%m%d'))
+                current += datetime.timedelta(days=1)
+        except:
+            pass
         return dates
 
     async def init_data(self):
@@ -162,12 +173,15 @@ class DataProcessor:
         """
         try:
             # 1. Official Calendar (Last 3 Years)
-            end_date = self.get_latest_trade_date()
+            end_date = await self.get_latest_trade_date()
             start_date = (datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
             
             # Run blocking API call in executor
-            loop = asyncio.get_running_loop()
-            official_dates = await loop.run_in_executor(None, lambda: self.api.get_trade_dates(start_date, end_date))
+            # loop = asyncio.get_running_loop()
+            # official_dates = await loop.run_in_executor(None, lambda: self.api.get_trade_dates(start_date, end_date))
+            
+            # Use cached method
+            official_dates = await self.get_trade_dates(start_date, end_date)
             
             if not official_dates:
                 return {'status': 'red', 'msg': 'Cannot get official calendar'}
@@ -208,10 +222,15 @@ class DataProcessor:
                 if lag_days > 3:
                     status = 'red'
             
-            # Completeness check (3 years scope)
-            # If missing count is significant
-            if missing_count > 5: 
+            # 4. Financial Coverage
+            fin_stats, missing_fin_codes = await self.cache.check_financial_coverage()
+            fin_ratio = fin_stats.get('ratio', 0)
+            
+            # Status logic update
+            if fin_ratio < 0.8:
                 status = 'red'
+            elif fin_ratio < 0.98:
+                if status == 'green': status = 'yellow'
                 
             return {
                 'status': status,
@@ -220,7 +239,12 @@ class DataProcessor:
                 'lag_days': lag_days,
                 'missing_count': missing_count,
                 'total_days': total_days,
-                'coverage': f"{(total_days - missing_count)/total_days*100:.1f}%" if total_days > 0 else "0%"
+                'coverage': f"{(total_days - missing_count)/total_days*100:.1f}%" if total_days > 0 else "0%",
+                
+                # Financial Health
+                'financial_coverage': f"{fin_ratio*100:.1f}%",
+                'financial_missing_count': len(missing_fin_codes),
+                'financial_missing_codes': missing_fin_codes
             }
             
         except Exception as e:
@@ -264,57 +288,105 @@ class DataProcessor:
 
     async def sync_daily_market_snapshot(self, trade_date=None):
         """
-        Sync daily market data (quotes + indicators) for a single date.
-        This is the main method for daily updates.
+        Sync FULL daily market data for a single date.
+        Includes: Quotes, Indicators, MoneyFlow, Northbound, LHB, BlockTrade.
         """
         if trade_date is None:
-            trade_date = self.get_latest_trade_date()
+            trade_date = await self.get_latest_trade_date()
         
-        logger.info(f"[DataProcessor] Syncing market snapshot for {trade_date}...")
+        logger.info(f"[DataProcessor] Syncing full market snapshot for {trade_date}...")
         
-        # Check if already cached
+        # Check if already cached (Basic check only, assuming if quotes exist, others might too or we re-sync)
+        # Actually for historical sync, we might want to be smarter, but re-syncing ensuring completeness is safer.
         cached_date = await self.cache.get_latest_trade_date()
         if cached_date == trade_date:
-            logger.info(f"[DataProcessor] Cache hit! Data for {trade_date} already exists.")
-            df = await self.cache.get_screening_data(trade_date)
-            return df
-        
+            # We must be careful here. If we only checked quotes before, we might miss extended data.
+            # But "get_screening_data" only joins quotes/indicators.
+            # Let's assume if it sends a request for a specific date, it wants a sync.
+            pass
+
         loop = asyncio.get_running_loop()
         
-        # Fetch quotes and indicators in parallel
-        logger.info(f"[DataProcessor] Fetching from Tushare API...")
-        future_quotes = loop.run_in_executor(None, lambda: self.api.get_daily_quotes(trade_date=trade_date))
-        future_basic = loop.run_in_executor(None, lambda: self.api.get_daily_basic(trade_date=trade_date))
+        # Fetch ALL data types in parallel
+        logger.info(f"[DataProcessor] Fetching extended data from Tushare API...")
         
-        df_quotes, df_basic = await asyncio.gather(future_quotes, future_basic)
+        # We wrap each safe fetcher to handle permissions/empty data gracefully
+        async def fetch_safe(func, name):
+            try:
+                return await loop.run_in_executor(None, lambda: func(trade_date=trade_date))
+            except Exception as e:
+                if "权限" in str(e) or "2000" in str(e):
+                    logger.warning(f"[DataProcessor] ⚠️ Skipping {name} due to permission/points limit.")
+                else:
+                    logger.warning(f"[DataProcessor] Failed to fetch {name}: {e}")
+                return None
+
+        # Create tasks
+        t_quotes = fetch_safe(self.api.get_daily_quotes, "Daily Quotes")
+        t_basic = fetch_safe(self.api.get_daily_basic, "Daily Indicators")
+        t_mf = fetch_safe(self.api.get_moneyflow, "Money Flow")
+        t_north = fetch_safe(self.api.get_hk_hold, "Northbound")
+        t_lhb = fetch_safe(self.api.get_top_list, "Dragon Tiger")
+        t_block = fetch_safe(self.api.get_block_trade, "Block Trade")
         
-        # Handle case where today's data is not ready
+        results = await asyncio.gather(t_quotes, t_basic, t_mf, t_north, t_lhb, t_block)
+        df_quotes, df_basic, df_mf, df_north, df_lhb, df_block = results
+        
+        # Handle case where today's data is not ready (Quotes is the primary signal)
         today_str = datetime.datetime.now().strftime('%Y%m%d')
-        # Logic removed: Do NOT silently fallback to yesterday if today is missing.
-        # This causes Scheduler mismatches. If data is missing, we should report it.
         if trade_date == today_str and (df_quotes is None or df_quotes.empty):
              logger.warning(f"[DataProcessor] Today's data ({trade_date}) not ready or empty.")
-             # We proceed, and it will be caught by "No quotes available" check below
         
         # Save to cache
         quotes_count = 0
         indicators_count = 0
         
+        # 1. Quotes
         if df_quotes is not None and not df_quotes.empty:
             quotes_count = await self.cache.save_daily_quotes(df_quotes)
             await self.cache.update_sync_status('daily_quotes', trade_date, quotes_count)
             logger.info(f"[DataProcessor] ✅ Saved {quotes_count} daily quotes.")
         
         if quotes_count == 0:
-            raise Exception("No quotes available to save (API returned empty or processing failed)")
-
+            # If quotes failed, it's likely a non-trading day or serious issue, but we try saving others just in case?
+            # Usually if quotes fail, everything fails for that day.
+            # But we only raise if it's strictly required.
+             if trade_date != today_str:
+                logger.warning(f"[DataProcessor] No quotes available for {trade_date}.")
+                # We do NOT raise here to allow partial sync if possible, but usually we need quotes.
+        
+        # 2. Indicators
         if df_basic is not None and not df_basic.empty:
             indicators_count = await self.cache.save_daily_indicators(df_basic)
             await self.cache.update_sync_status('daily_indicators', trade_date, indicators_count)
             logger.info(f"[DataProcessor] ✅ Saved {indicators_count} daily indicators.")
+
+        # 3. Extended Data (MoneyFlow)
+        if df_mf is not None and not df_mf.empty:
+            c = await self.cache.save_moneyflow(df_mf)
+            await self.cache.update_sync_status('moneyflow_daily', trade_date, c)
+            logger.info(f"[DataProcessor] ✅ Saved {c} money flow records.")
+
+        # 4. Extended Data (Northbound)
+        if df_north is not None and not df_north.empty:
+            # Filter A-shares
+            df_north = df_north[df_north['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
+            if not df_north.empty:
+                c = await self.cache.save_northbound(df_north)
+                await self.cache.update_sync_status('northbound_holding', trade_date, c)
+                logger.info(f"[DataProcessor] ✅ Saved {c} northbound records.")
+
+        # 5. Extended Data (LHB)
+        if df_lhb is not None and not df_lhb.empty:
+            c = await self.cache.save_top_list(df_lhb)
+            logger.info(f"[DataProcessor] ✅ Saved {c} LHB records.")
+
+        # 6. Extended Data (Block Trade)
+        if df_block is not None and not df_block.empty:
+            c = await self.cache.save_block_trade(df_block)
+            logger.info(f"[DataProcessor] ✅ Saved {c} block trade records.")
         
-        # Return merged data for immediate use
-        # Return merged data for immediate use
+        # Return merged data for immediate use (Backward Compatibility)
         if df_quotes is not None and not df_quotes.empty and df_basic is not None and not df_basic.empty:
             df_merged = pd.merge(df_quotes, df_basic, on=['ts_code', 'trade_date'], how='outer', suffixes=('', '_ind'))
             return df_merged
@@ -350,7 +422,7 @@ class DataProcessor:
         # Branch 1 & 2: Non-Trading OR Pre-Closing (e.g. 14:00)
         # We use "latest valid close" (yesterday or friday)
         if not is_trading_day or now.hour < 16:
-             target_date = self.get_latest_trade_date()
+             target_date = await self.get_latest_trade_date()
              logger.info(f"[DataProcessor] AI Analysis Target: {target_date} (Pre-Close/Holiday). No sync needed.")
              
         # Branch 3: Trading Day AND Post-Closing (e.g. 20:30)
@@ -377,7 +449,7 @@ class DataProcessor:
         start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
         
         # Get actual trading dates (inverse order: new -> old)
-        trade_dates = self.get_trade_dates(start_date, end_date)
+        trade_dates = await self.get_trade_dates(start_date, end_date)
         trade_dates.sort(reverse=True)
         
         # === Breakpoint Resume Logic ===
@@ -435,7 +507,7 @@ class DataProcessor:
                     await self.sync_daily_market_snapshot(date)
                     
                     if progress_callback:
-                        progress_callback(idx + 1, total_days, f"Syncing {date} ...")
+                        progress_callback(idx + 1, total_days, f"[1/2] Syncing Market Data: {date}")
                 except Exception as e:
                     logger.error(f"Failed to sync {date}: {e}")
                     failed_dates.append(date)
@@ -451,13 +523,14 @@ class DataProcessor:
         if tasks:
             await asyncio.gather(*tasks)
             
-        if cancel_event and cancel_event.is_set():
-            logger.warning("[DataProcessor] Sync cancelled by user.")
-            return 0
+            if cancel_event and cancel_event.is_set():
+                logger.warning("[DataProcessor] Sync cancelled by user.")
+                return 0
             
-        if abort_sync:
-            logger.error("[DataProcessor] Sync aborted due to massive failures (Circuit Breaker).")
-            return len(trade_dates) - len(failed_dates)
+            if abort_sync:
+                logger.error("[DataProcessor] Sync aborted due to massive failures (Circuit Breaker).")
+                # Do NOT return here, proceed to financial sync attempt
+                # return len(trade_dates) - len(failed_dates)
 
         # === Smart Retry Mechanism ===
         if failed_dates:
@@ -496,15 +569,23 @@ class DataProcessor:
         else:
             logger.info("[DataProcessor] ✅ All failed dates recovered successfully!")
 
+        # === 3. Sync Financial Reports ===
+        logger.info("[DataProcessor] Starting Financial Data Sync...")
+        if progress_callback:
+             progress_callback(total_days, total_days, "[2/2] Preparing Financial Data...")
+             
+        await self.sync_financial_reports(progress_callback=progress_callback, cancel_event=cancel_event)
+
         logger.info("[DataProcessor] ✅ Historical sync final complete.")
         return total_days - len(failed_dates)
 
-    async def sync_financial_reports(self, periods=None, progress_callback=None, force=False):
+    async def sync_financial_reports(self, periods=None, progress_callback=None, force=False, cancel_event=None):
         """
         Sync financial reports using Hybrid Strategy (Full vs Incremental).
         
         :param periods: Explicit periods to sync (triggers Full Sync mode).
         :param force: Force Full Sync even if incremental applies.
+        :param cancel_event: Event to signal cancellation.
         """
         # Decisions:
         # 1. If periods is specified -> Users wants specific data -> Full Sync those periods
@@ -527,7 +608,7 @@ class DataProcessor:
                 logger.info("[DataProcessor] First run (no history) -> Using Full Sync Mode")
         
         if should_full_sync:
-            return await self._run_full_sync(periods, progress_callback)
+            return await self._run_full_sync(periods, progress_callback, cancel_event)
         else:
             return await self._run_incremental_sync(progress_callback)
 
@@ -645,165 +726,164 @@ class DataProcessor:
         return total_saved
 
 
-    async def _run_full_sync(self, periods=None, progress_callback=None):
+    async def _run_full_sync(self, periods=None, progress_callback=None, cancel_event=None):
         """
-        Original Full Sync Logic (Renamed).
-        Syncs list of periods for ALL stocks.
+        Full/Batch Sync Financial Data.
+        Strategy: Per-Stock Batch Sync (Query 3 Years of data).
         """
-        if periods is None:
-            # Calculate last 4 quarter end dates
-            now = datetime.datetime.now()
-            periods = []
-            for i in range(4):
-                quarter_end = now - datetime.timedelta(days=90 * (i + 1))
-                year = quarter_end.year
-                month = quarter_end.month
-                # Map to quarter end: Q1=0331, Q2=0630, Q3=0930, Q4=1231
-                if month <= 3:
-                    period = f"{year-1}1231"
-                elif month <= 6:
-                    period = f"{year}0331"
-                elif month <= 9:
-                    period = f"{year}0630"
-                else:
-                    period = f"{year}0930"
-                if period not in periods:
-                    periods.append(period)
+        import datetime
+        import asyncio
         
-        logger.info(f"[DataProcessor] Syncing financial reports for periods: {periods}")
+        if cancel_event and cancel_event.is_set():
+             logger.warning("[DataProcessor] Financial sync cancelled before start.")
+             return 0
+
+        # Calculate Time Range (3 Years + Buffer)
+        now = datetime.datetime.now()
+        end_date = now.strftime('%Y%m%d')
+        start_date = (now - datetime.timedelta(days=365*3 + 180)).strftime('%Y%m%d')
         
-        # Get stock list first
+        logger.info(f"[DataProcessor] Starting Per-Stock Batch Sync from {start_date} to {end_date}...")
+        
+        # Get stock list
         stock_df = await self.cache.get_stock_basic()
         if stock_df is None or stock_df.empty:
-            logger.warning("[DataProcessor] No stock list found. Syncing stock basic first...")
             await self.sync_stock_basic()
             stock_df = await self.cache.get_stock_basic()
-        
-        if stock_df is None or stock_df.empty:
-            logger.error("[DataProcessor] Failed to get stock list for financial sync.")
-            return 0
-        
-        all_stock_codes = stock_df['ts_code'].tolist()
-        total_stocks_all = len(all_stock_codes)
-        
-        # === Breakpoint Resume: Get all cached financial records ===
-        try:
-            cached_records = await self.cache.get_cached_financial_records()
-            logger.info(f"[DataProcessor] Found {len(cached_records)} cached financial records")
-        except Exception as e:
-            logger.warning(f"[DataProcessor] Failed to get cached records: {e}, syncing all")
-            cached_records = set()
-        
-        loop = asyncio.get_running_loop()
-        total_saved = 0
-        total_skipped = 0
-        
-        # Use configurable concurrency (rely on smart retry for rate limits)
-        concurrency = ConfigHandler.get_sync_concurrency()
-        semaphore = asyncio.Semaphore(concurrency)
-        logger.info(f"[DataProcessor] Financial sync concurrency: {concurrency}")
-        
-        # Track failures
-        failed_stocks = []
-        
-        async def sync_one_stock(ts_code, idx, period):
-            """Sync financial data for a single stock and period"""
-            nonlocal total_saved
             
+        all_stock_codes = stock_df['ts_code'].tolist()
+        if not all_stock_codes:
+            return 0
+            
+        total_stocks = len(all_stock_codes)
+        
+        # Concurrency Control
+        semaphore = asyncio.Semaphore(ConfigHandler.get_sync_concurrency()) 
+        
+        total_saved = 0
+        total_errors = 0
+        
+        async def sync_one_stock(ts_code, idx):
+            if cancel_event and cancel_event.is_set():
+                return
+
+            nonlocal total_saved, total_errors
             async with semaphore:
+                if cancel_event and cancel_event.is_set():
+                    return
+
                 try:
-                    # Add small delay to avoid rate limits
-                    await asyncio.sleep(0.1)
-                    
-                    # Fetch data for this stock
-                    df_indicator = await loop.run_in_executor(
-                        None, 
-                        lambda: self.api.get_fina_indicator(period=period, ts_code=ts_code)
+                    # Fetch 3 years data for this stock
+                    df = await asyncio.to_thread(
+                        self.api.get_fina_indicator, 
+                        ts_code=ts_code, 
+                        start_date=start_date, 
+                        end_date=end_date
                     )
                     
-                    if df_indicator is None or df_indicator.empty:
-                        return 0
-                    
-                    # Prepare data
-                    ind_cols = ['ts_code', 'end_date', 'roe', 'roe_dt', 'debt_to_assets', 
-                               'netprofit_margin', 'grossprofit_margin', 
-                               'or_yoy', 'netprofit_yoy']
-                    
-                    for col in ind_cols:
-                        if col not in df_indicator.columns:
-                            df_indicator[col] = None
-                    
-                    # Add missing schema columns
-                    schema_cols = ['ts_code', 'end_date', 'ann_date', 'report_type', 'total_revenue', 'revenue',
-                                 'n_income', 'n_income_attr_p', 'total_assets', 'total_liab', 
-                                 'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin', 
-                                 'netprofit_margin', 'debt_to_assets', 'or_yoy', 'netprofit_yoy']
-                    
-                    for col in schema_cols:
-                        if col not in df_indicator.columns:
-                            df_indicator[col] = None
-                    
-                    # Save
-                    count = await self.cache.save_financial_reports(df_indicator[schema_cols])
-                    total_saved += count
-                    return count
-                    
-                except Exception as e:
-                    if "每分钟" not in str(e) and "抱歉" not in str(e):  # Not a rate limit
-                        logger.debug(f"[DataProcessor] Failed {ts_code}: {e}")
-                    failed_stocks.append((ts_code, period))
-                    return 0
-        
-        # Process each period
-        for period_idx, period in enumerate(periods):
-            # === Breakpoint Resume: Filter out already cached stocks for this period ===
-            stocks_to_sync = [
-                ts_code for ts_code in all_stock_codes 
-                if (ts_code, period) not in cached_records
-            ]
-            skipped_count = total_stocks_all - len(stocks_to_sync)
-            total_skipped += skipped_count
-            
-            if skipped_count > 0:
-                logger.info(f"[DataProcessor] ⏭️ Period {period}: Skipped {skipped_count} already synced, {len(stocks_to_sync)} remaining")
-            
-            if not stocks_to_sync:
-                logger.info(f"[DataProcessor] ✅ Period {period}: All stocks already synced, skipping entirely")
-                continue
-            
-            logger.info(f"[DataProcessor] 📊 Processing period {period} ({period_idx+1}/{len(periods)}), {len(stocks_to_sync)} stocks...")
-            
-            # Create tasks only for stocks that need syncing
-            tasks = []
-            for i, ts_code in enumerate(stocks_to_sync):
-                tasks.append(sync_one_stock(ts_code, i, period))
+                    if df is not None and not df.empty:
+                        # Ensure Schema
+                        schema_cols = ['ts_code', 'end_date', 'ann_date', 'report_type', 'total_revenue', 'revenue',
+                                     'n_income', 'n_income_attr_p', 'total_assets', 'total_liab', 
+                                     'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin', 
+                                     'netprofit_margin', 'debt_to_assets', 'or_yoy', 'netprofit_yoy']
+                        
+                        for col in schema_cols:
+                            if col not in df.columns:
+                                df[col] = None
+                                
+                        count = await self.cache.save_financial_reports(df[schema_cols])
+                        total_saved += count
+                        
+                    if progress_callback and idx % 20 == 0:
+                        progress_callback(idx, total_stocks, f"[2/2] Syncing Financials: {ts_code}")
                 
-                # Update progress periodically
-                if progress_callback and i % 100 == 0:
-                    overall_progress = period_idx * total_stocks_all + (skipped_count + i)
-                    overall_total = len(periods) * total_stocks_all
-                    progress_callback(overall_progress, overall_total, f"Syncing {period} - {ts_code}")
+                except Exception as e:
+                    total_errors += 1
+                    logger.debug(f"Failed sync {ts_code}: {e}")
+                
+                await asyncio.sleep(0.05)
+
+        # Create tasks
+        tasks = [sync_one_stock(code, i) for i, code in enumerate(all_stock_codes)]
+        await asyncio.gather(*tasks)
+
+        current_period = now.strftime('%Y%m%d')
+        await self.cache.update_sync_status('financial_reports', current_period, total_saved)
+        
+        logger.info(f"[DataProcessor] ✅ Per-Stock Financial Sync complete. Saved {total_saved} records. Errors: {total_errors}")
+        return total_saved
+
+    async def repair_financial_data(self, ts_codes, progress_callback=None):
+        """
+        Targeted repair for specific stocks using Safe Sequential Sync.
+        Used by Health Check feature to fix 'limping' stocks.
+        """
+        if not ts_codes:
+            return 0
             
-            # Run batch
-            await asyncio.gather(*tasks)
+        # Calculate periods (Last 12 quarters - 3 Years)
+        now = datetime.datetime.now()
+        current_year = now.year
+        p_cands = []
+        for y in range(current_year, current_year - 4, -1):
+            p_cands.extend([f"{y}0331", f"{y}0630", f"{y}0930", f"{y}1231"])
+        periods = sorted([p for p in p_cands if p < now.strftime('%Y%m%d')], reverse=True)[:12]
+        
+        logger.info(f"[DataProcessor] 🚑 Starting repair for {len(ts_codes)} stocks over {len(periods)} periods...")
+        
+        # Concurrency & Logic (Strict Safe Mode)
+        semaphore = asyncio.Semaphore(1) 
+        loop = asyncio.get_running_loop()
+        
+        total_saved = 0
+        DELAY = 0.4 # Strict rate limit spacing
+        
+        for period_idx, period in enumerate(periods):
+            logger.info(f"[DataProcessor] 🚑 Repairing period {period} ({period_idx+1}/{len(periods)})...")
             
-            logger.info(f"[DataProcessor] ✅ Period {period} complete. Total saved so far: {total_saved}")
-            
-            # Brief pause between periods
-            await asyncio.sleep(1)
-        
-        # Final progress update
-        if progress_callback:
-            progress_callback(len(periods) * total_stocks_all, len(periods) * total_stocks_all, "Financial data sync complete")
-        
-        if failed_stocks:
-            logger.warning(f"[DataProcessor] ⚠️ {len(failed_stocks)} stock-period pairs failed (likely no data)")
-        
-        if total_skipped > 0:
-            logger.info(f"[DataProcessor] ⏭️ Breakpoint resume: Skipped {total_skipped} already cached records")
-        
-        await self.cache.update_sync_status('financial_reports', periods[0] if periods else '', total_saved)
-        logger.info(f"[DataProcessor] ✅ Financial sync complete! Total: {total_saved} new records")
+            async def repair_one(ts_code, idx):
+                nonlocal total_saved
+                async with semaphore:
+                    try:
+                        await asyncio.sleep(DELAY)
+                        
+                        df = await loop.run_in_executor(
+                            None, 
+                            lambda: self.api.get_fina_indicator(period=period, ts_code=ts_code)
+                        )
+                        
+                        if df is not None and not df.empty:
+                            # Verify Schema
+                            schema_cols = ['ts_code', 'end_date', 'ann_date', 'report_type', 'total_revenue', 'revenue',
+                                         'n_income', 'n_income_attr_p', 'total_assets', 'total_liab', 
+                                         'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin', 
+                                         'netprofit_margin', 'debt_to_assets', 'or_yoy', 'netprofit_yoy']
+                            
+                            for col in schema_cols:
+                                if col not in df.columns:
+                                    df[col] = None
+                                    
+                            count = await self.cache.save_financial_reports(df[schema_cols])
+                            total_saved += count
+                        
+                        # Progress update
+                        if progress_callback and idx % 10 == 0:
+                            current = period_idx * len(ts_codes) + idx
+                            total = len(periods) * len(ts_codes)
+                            progress_callback(current, total, f"Repairing {period} - {ts_code}")
+                            
+                    except Exception as e:
+                        if "Limit" not in str(e):
+                            logger.debug(f"[DataProcessor] Repair failed {ts_code}: {e}")
+
+            # Execute sequentially
+            for i, ts_code in enumerate(ts_codes):
+                await repair_one(ts_code, i)
+                if i % 50 == 0:
+                    await asyncio.sleep(0.01)
+                    
+        logger.info(f"[DataProcessor] ✅ Repair complete. Saved {total_saved} missing records.")
         return total_saved
 
     async def sync_moneyflow(self, trade_date=None):
@@ -1015,6 +1095,75 @@ class DataProcessor:
     async def sync_financial_report(self, period):
         """Backward compatibility wrapper"""
         return await self.sync_financial_reports(periods=[period])
+
+    # ========== Trade Calendar ==========
+    async def ensure_trade_cal(self, end_date, required_start_date=None):
+        """
+        Ensure trade calendar is synced covers [required_start_date, end_date].
+        Checks local DB first, fetches from API if needed.
+        """
+        try:
+            # Check range in DB
+            async with aiosqlite.connect(self.cache.db_path) as db:
+                async with db.execute("SELECT MIN(cal_date), MAX(cal_date) FROM trade_cal") as cursor:
+                    row = await cursor.fetchone()
+                    min_db_date = row[0] if row and row[0] else None
+                    max_db_date = row[1] if row and row[1] else None
+
+            # Calculate defaults if not provided
+            if required_start_date:
+                target_start = required_start_date
+            else:
+                # Default: End of current year, trace back 4 years
+                # e.g. 2026 -> Start 2022-01-01 (Matches user request for ~4 years history)
+                curr_year = int(end_date[:4])
+                target_start = datetime.date(curr_year - 4, 1, 1).strftime('%Y%m%d')
+            
+            # Scenario 1: DB is empty
+            if not min_db_date or not max_db_date:
+                 logger.info(f"[DataProcessor] Calendar cache empty. Initializing {target_start} to {end_date} (YearEnd)...")
+                 await self._fetch_and_save_cal(target_start, end_date)
+                 return
+
+            # Scenario 2: Need older history (backward sync)
+            if target_start < min_db_date:
+                 logger.info(f"[DataProcessor] Calendar cache missing history. Fetching {target_start} to {min_db_date}...")
+                 # Fetch up to min_db_date (exclusive? Tushare is inclusive, overlap is fine/safe)
+                 await self._fetch_and_save_cal(target_start, min_db_date)
+
+            # Scenario 3: Need future updates (forward sync)
+            if max_db_date < end_date:
+                 logger.info(f"[DataProcessor] Calendar cache outdated. Fetching {max_db_date} to {end_date} (YearEnd)...")
+                 await self._fetch_and_save_cal(max_db_date, end_date)
+
+        except Exception as e:
+            logger.error(f"[DataProcessor] Error in ensure_trade_cal: {e}")
+
+    async def _fetch_and_save_cal(self, start_str, end_str):
+        """Helper to fetch and save calendar range"""
+        try:
+            # Logic to extend end_str to Year End
+            current_year = int(end_str[:4])
+            fetch_end = datetime.date(current_year, 12, 31).strftime('%Y%m%d')
+            
+            # Logic to extend start_str? Usually exact start is fine.
+            # But if start_str is '20230520', maybe just fetch 20230101?
+            # Tushare API handles arbitary range fast.
+            
+            # Overlap safety: If fetching 20210101-20220101, and DB has 20220101...
+            # REPLACE INTO handles duplicates.
+            
+            # Adjust fetch_end if forward sync (max_date < end)
+            # If backward sync, we usually just want up to what we explicitly missed.
+            if end_str < fetch_end:
+                 fetch_end = fetch_end # Always try to complete the year of the END date.
+            
+            df = await asyncio.to_thread(self.api.get_trade_cal, start_str, fetch_end)
+            if df is not None and not df.empty:
+                await self.cache.save_trade_cal(df)
+                logger.debug(f"[DataProcessor] Synced calendar {len(df)} rows.")
+        except Exception as e:
+             logger.error(f"[DataProcessor] Failed to fetch calendar {start_str}-{end_str}: {e}")
     async def get_market_overview(self):
         """
         Get market overview data for Home Screen.
@@ -1025,15 +1174,29 @@ class DataProcessor:
             # 1. Determine date: Use REAL latest trading date from API, ignore stale local cache
             # This ensures we try to fetch Today's data (or last Friday's) even if DB is old.
             try:
-                now_str = datetime.datetime.now().strftime('%Y%m%d')
-                start_str = (datetime.datetime.now() - datetime.timedelta(days=20)).strftime('%Y%m%d')
+                now = datetime.datetime.now()
+                now_str = now.strftime('%Y%m%d')
+                start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
                 
-                # Fetch valid trading dates from Tushare Calendar
-                dates = await asyncio.to_thread(self.api.get_trade_dates, start_str, now_str)
-                if dates and len(dates) > 0:
-                    date = dates[-1] # The most recent trading day
+                # Smart Calendar Sync (Persistent Cache)
+                # Ensures we have calendar data up to year-end or at least today
+                await self.ensure_trade_cal(end_date=now_str)
+                
+                # Query strictly from local DB (now guaranteed to be synced)
+                cache_df = await self.cache.get_trade_cal(start_date=start_str, end_date=now_str, is_open=1)
+                
+                dates = []
+                if not cache_df.empty:
+                    dates = sorted(cache_df['cal_date'].tolist())
+                    logger.info(f"[DataProcessor] Using cached trade dates: {dates}")
+                
+                if dates:
+                    # Trust the cached (originally from API) calendar
+                    date = dates[-1]
                 else:
-                    date = now_str # Fallback to today
+                    logger.warning("[DataProcessor] No trade dates found in cache. Using Today.")
+                    date = now_str
+
             except Exception as e:
                 logger.warning(f"Failed to fetch trade calendar, defaulting to today: {e}")
                 date = datetime.datetime.now().strftime('%Y%m%d')
@@ -1119,9 +1282,8 @@ class DataProcessor:
         
         logger.info(f"[DataProcessor] Syncing market news (limit={limit})...")
         try:
-            # 1. Cleanup Test Data (safe to do frequently, it's fast)
-            # Remove any news with content like "Test News Item%"
-            await self.cache.queue.put(("DELETE FROM market_news WHERE content LIKE 'Test News Item%'", (), False))
+            # 1. Soft Cleanup (Optional): Remove very old news (> 30 days) to keep DB light
+            # await self.cache.queue.put(("DELETE FROM market_news WHERE publish_time < date('now', '-30 days')", (), False))
             
             # 2. Fetch Real News
             # Use get_latest_global_news which fetches from Cailianshe/Major Portals

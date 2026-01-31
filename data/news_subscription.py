@@ -1,7 +1,6 @@
 import asyncio
 import logging
-import akshare as ak
-import pandas as pd
+
 from datetime import datetime
 from utils.config_handler import ConfigHandler
 from data.cache_manager import CacheManager
@@ -91,29 +90,18 @@ class NewsSubscriptionService:
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""
         try:
-            loop = asyncio.get_running_loop()
+            # Use centralized NewsFetcher (which handles proxies and data normalization)
+            from data.news_fetcher import NewsFetcher
             
-            # Use run_in_executor for blocking AKShare call
-            # SWITCH TO CAILIANSHE (CLS) for Real-time Telegrpah (Fastest in China)
-            df = await loop.run_in_executor(None, lambda: ak.stock_info_global_cls())
+            # Fetch latest 1 news item
+            news_list = await NewsFetcher.get_latest_global_news(limit=1)
             
-            if df is None or df.empty:
+            if not news_list:
                 return
 
-            # Columns usually: [时间, 内容] or derived ones.
-            # Sina structure: index is time? Or specific cols.
-            # Based on test, we assume there is time/content.
-            # Let's peek columns from previous tests: likely '时间', '内容'.
-            
-            # Sort by time desc
-            # df usually comes sorted, but ensure it.
-            # We need to parse time to track "latest".
-            
-            # Simple dedup: compare top item content/time with last seen
-            # Assuming row 0 is latest
-            latest_row = df.iloc[0]
-            current_news_content = str(latest_row.get('content', '') or latest_row.get('内容', ''))
-            current_news_time = str(latest_row.get('time', '') or latest_row.get('时间', ''))
+            latest_item = news_list[0]
+            current_news_content = latest_item.get('content', '')
+            current_news_time = latest_item.get('time', '')
             
             # Setup initial state
             if self._last_news_time is None:

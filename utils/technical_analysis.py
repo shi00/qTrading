@@ -125,3 +125,46 @@ class TechnicalAnalysis:
             return "UP"
         else:
             return "DOWN"
+
+    @staticmethod
+    def get_rsi(df, period=6):
+        """
+        Calculate RSI (using QFQ).
+        :param df: DataFrame with 'close' (and 'adj_factor' for QFQ)
+        :param period: RSI period (default 6)
+        :return: Last RSI value (float) or 50 if insufficient data
+        """
+        if df is None or len(df) < period + 1:
+            return 50.0
+            
+        # Use Adjusted Prices
+        df_calc = TechnicalAnalysis._get_qfq_df(df)
+        
+        # Calculate price changes
+        delta = df_calc['close'].diff()
+        
+        # Get gains (up) and losses (down)
+        # up = delta.where(delta > 0, 0) # This keeps index
+        # down = -delta.where(delta < 0, 0)
+        
+        # Standard RSI Logic (Wilder's Smoothing is ideal, but SMA is common substitution)
+        # Let's use SMA for simplicity and speed as per plan, 
+        # or ewm (Exponential) which approximates Wilder's if alpha=1/period.
+        # Wilder's uses alpha = 1/n. Pandas ewm span=n uses alpha=2/(n+1), com=n-1 uses alpha=1/n.
+        # So ewm(com=period-1, adjust=False) is Wilder's Smoothed.
+        
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+        
+        # Use Wilder's Smoothing (alpha = 1/period)
+        ma_up = up.ewm(com=period - 1, adjust=False).mean()
+        ma_down = down.ewm(com=period - 1, adjust=False).mean()
+        
+        rs = ma_up / ma_down
+        rsi = 100 - (100 / (1 + rs))
+        
+        # Handle nan (e.g. initial window or divide by zero if no loss)
+        # If ma_down is 0, RSI is 100
+        rsi = rsi.fillna(100 if ma_down.iloc[-1] == 0 else 50)
+        
+        return rsi.iloc[-1]
