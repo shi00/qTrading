@@ -353,6 +353,10 @@ class I18n:
             "snack_full_sync_done": "完整日更新完成！共同步 {total} 条记录",
             "progress_sync_prepare": "准备同步...",
             "snack_sync_not_completed": "同步未完成，请重试",
+            "progress_sync_market": "正在同步行情: {date}",
+            "progress_sync_finance": "正在同步财务: {date}",
+            "progress_sync_moneyflow": "正在同步资金流: {date}",
+            "progress_sync_done": "同步完成",
         }
     }
 

@@ -463,6 +463,7 @@ class DataProcessor:
         Sync historical data for the last N days using concurrency.
         Includes Circuit Breaker and Post-Sync Retry mechanism.
         """
+        from ui.i18n import I18n
         logger.info(f"[DataProcessor] Starting historical sync for last {days} days...")
         
         end_date = datetime.datetime.now().strftime('%Y%m%d')
@@ -532,7 +533,7 @@ class DataProcessor:
                     await self.sync_daily_market_snapshot(date)
                     
                     if progress_callback:
-                        progress_callback(idx + 1, total_days, f"[1/2] Syncing Market Data: {date}")
+                        progress_callback(idx + 1, total_days, f"[1/2] {I18n.get('progress_sync_market').format(date=date)}")
                 except Exception as e:
                     logger.error(f"Failed to sync {date}: {e}")
                     failed_dates.append(date)
@@ -614,7 +615,7 @@ class DataProcessor:
 
         logger.info("[DataProcessor] Starting Financial Data Sync...")
         if progress_callback:
-             progress_callback(total_days, total_days, "[2/2] Preparing Financial Data...")
+             progress_callback(total_days, total_days, f"[2/2] {I18n.get('progress_sync_prepare')}...")
              
         await self.sync_financial_reports(progress_callback=progress_callback, cancel_event=cancel_event)
 
@@ -638,6 +639,8 @@ class DataProcessor:
         if self._shutdown_event.is_set():
              logger.info("[DataProcessor] Global shutdown detected. Skipping sync_financial_reports.")
              return 0
+             
+        from ui.i18n import I18n
 
         should_full_sync = False
         if periods is not None:
@@ -663,6 +666,7 @@ class DataProcessor:
         Incremental Sync: Query 'disclosure_date' to find *only* updated stocks.
         """
         if self._shutdown_event.is_set(): return 0
+        from ui.i18n import I18n
         logger.info("[DataProcessor] 🚀 Starting Incremental Financial Sync...")
         
         status = await self.cache.get_sync_status('financial_reports')
@@ -763,7 +767,7 @@ class DataProcessor:
             await asyncio.gather(*tasks)
             
             if progress_callback:
-                progress_callback(0, 0, f"Completed incremental sync for {day_str}")
+                progress_callback(0, 0, f"{I18n.get('progress_sync_done')} {day_str}")
 
         # Update status to NOW
         await self.cache.update_sync_status('financial_reports', datetime.datetime.now().strftime('%Y%m%d'), total_saved)
@@ -779,6 +783,7 @@ class DataProcessor:
         if self._shutdown_event.is_set(): return 0
         import datetime
         import asyncio
+        from ui.i18n import I18n
         
         if cancel_event and cancel_event.is_set():
              logger.warning("[DataProcessor] Financial sync cancelled before start.")
@@ -843,7 +848,7 @@ class DataProcessor:
                         total_saved += count
                         
                     if progress_callback and idx % 20 == 0:
-                        progress_callback(idx, total_stocks, f"[2/2] Syncing Financials: {ts_code}")
+                        progress_callback(idx, total_stocks, f"[2/2] {I18n.get('progress_sync_finance').format(date=ts_code)}")
                 
                 except Exception as e:
                     total_errors += 1
