@@ -9,80 +9,35 @@ logger = logging.getLogger(__name__)
 
 from utils.proxy_manager import ProxyManager
 
+import requests
+import json
+
 class NewsFetcher:
     """
-    Fetches news data using AKShare (free, open source).
-    Focuses on individual stock news.
+    Fetches news data using AKShare and direct robust Sina/THS clients.
+    Replaces blocked EastMoney interfaces.
     """
     _executor = ThreadPoolExecutor(max_workers=4)
+
+    @classmethod
+    def shutdown(cls):
+        """Shutdown the thread pool executor. Call on app exit."""
+        if cls._executor:
+            cls._executor.shutdown(wait=False)
+            logger.info("[NewsFetcher] Executor shutdown.")
 
     @staticmethod
     async def get_stock_news(ts_code, limit=10):
         """
-        Fetch specific stock news from EastMoney via AKShare.
-        
-        :param ts_code: Stock code (e.g. '000001.SZ' or '600000.SH' or just '600000')
-        :param limit: Max number of news items to return
-        :return: List of dicts [{'title':..., 'content':..., 'date':...}]
+        Fetch specific stock news. 
+        Note: Specific stock news is hard to get reliably without blocking.
+        Trying Sina or THS via akshare is hit or miss.
+        For now, we return empty list to avoid errors, or implement a broad search if critical.
         """
-        try:
-            # Clean code format for akshare (usually expects 6 digits)
-            symbol = ts_code.split('.')[0] if '.' in ts_code else ts_code
-            
-            loop = asyncio.get_event_loop()
-            
-            # Run blocking akshare call in thread pool with proxy bypass
-            def _fetch():
-                with ProxyManager.bypass_proxy_for_domestic():
-                    return ak.stock_news_em(symbol=symbol)
-
-            try:
-                df = await loop.run_in_executor(
-                    NewsFetcher._executor,
-                    _fetch
-                )
-            except RuntimeError:
-                # Executor shutdown
-                return []
-            
-            if df is None or df.empty:
-                logger.warning(f"[News] No news found for {ts_code}")
-                return []
-                
-            # AKShare stock_news_em columns: [关键词, 标题, 内容, 发布时间, 文章来源, 网址]
-            # Rename for consistency
-            # Note: Columns might vary by version, robust check needed
-            
-            # Filter recent news
-            # We want to format it nicely for the AI
-            news_list = []
-            count = 0
-            
-            for _, row in df.iterrows():
-                if count >= limit:
-                    break
-                    
-                # Robust column access
-                title = row.get('标题', '')
-                content = row.get('内容', '')
-                date_str = row.get('发布时间', '')
-                
-                # Simple cleanup
-                if not title: continue
-                
-                news_list.append({
-                    'title': title,
-                    'summary': content[:200] + "..." if len(content) > 200 else content, # Truncate for AI
-                    'publish_time': date_str,
-                    'source': row.get('文章来源', 'EastMoney')
-                })
-                count += 1
-                
-            return news_list
-    
-        except Exception as e:
-            logger.error(f"[News] Error fetching news for {ts_code}: {e}")
-            return []
+        # Placeholder: returning empty safely until a reliable unrestricted source is found 
+        # for individual A-share stock news content.
+        # Could try: ak.stock_news_ths_individual(symbol) if it existed.
+        return []
 
     @staticmethod
     async def get_latest_global_news(limit=20):
@@ -90,29 +45,20 @@ class NewsFetcher:
         Get major financial news (CCTV / Major Portals)
         """
         try:
-            loop = asyncio.get_event_loop()
-            # stock_info_global_sina or similar
-            # using 'news_cctv' from akshare if available, or 'stock_news_em' general
-            # For now let's use a broad market news source
+            loop = asyncio.get_running_loop()
             
-            # Using 'stock_telegraph_cls' (Cailianshe) for real-time flashes - very good for A-share
             def _fetch():
-                 with ProxyManager.bypass_proxy_for_domestic("cls.cn"): # Cailianshe domain? Or just default
-                     with ProxyManager.bypass_proxy_for_domestic(): # Default eastmoney too
-                        return ak.stock_info_global_cls()
+                 with ProxyManager.bypass_proxy_for_domestic("cls.cn"): 
+                    return ak.stock_info_global_cls()
 
             try:
-                df = await loop.run_in_executor(
-                    NewsFetcher._executor,
-                    _fetch
-                )
+                df = await loop.run_in_executor(NewsFetcher._executor, _fetch)
             except RuntimeError:
                 return []
             
             if df is None or df.empty:
                 return []
                 
-            # Columns: [标题, 内容, 发布时间, ...]
             news_list = []
             for _, row in df.head(limit).iterrows():
                 news_list.append({
@@ -130,65 +76,74 @@ class NewsFetcher:
     async def get_us_major_moves():
         """
         Fetch major US Tech giants performance (NVDA, TSLA, AAPL, MSFT, GOOGL, AMZN, META).
-        Used for 'Shadow Strategy' (Mapping).
+        Uses Sina Finance Custom Sort API (Verified Working).
         """
         try:
-            loop = asyncio.get_event_loop()
-            
-            # Using AKShare for US Stock Spot (Pink sheet or standard)
-            # ak.stock_us_spot_em() retrieves all US stocks. might be slow.
-            # Use 'stock_us_famous_spot_em' - "美股知名美股"
+            loop = asyncio.get_running_loop()
             
             def _fetch():
-                 with ProxyManager.bypass_proxy_for_domestic():
-                     return ak.stock_us_famous_spot_em()
-
-            df = await loop.run_in_executor(
-                NewsFetcher._executor,
-                _fetch
-            )
-            
-            if df is None or df.empty:
-                return "Global data unavailable."
+                # Direct call to Sina US API
+                url = "http://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO/US_CategoryService.getList"
+                params = {
+                    "page": "1",
+                    "num": "100",
+                    "sort": "mktcap", # Sort by market cap to get giants
+                    "asc": "0",
+                    "market": "",
+                    "id": ""
+                }
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
                 
-            # Filter for key tech giants
+                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                content = resp.text
+                
+                # Robust JSONP parsing: IO( {Data} );
+                start = content.find("(")
+                end = content.rfind(")")
+                if start != -1 and end != -1 and start < end:
+                    json_str = content[start+1 : end]
+                    try:
+                        data = json.loads(json_str)
+                        return data.get('data', [])
+                    except json.JSONDecodeError:
+                        logger.warning("[News] Failed to decode JSON from Sina US API")
+                        return []
+                return []
+
+            data_list = await loop.run_in_executor(NewsFetcher._executor, _fetch)
+            
+            if not data_list:
+                return "Global data unavailable."
+            
+            # Key mappings (Sina Names -> Ticker/English)
             key_tickers = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD']
-            # Provide mapping since names might be in Chinese or English
-            # AKShare returns: [名称, 最新价, 涨跌额, 涨跌幅, code, ...]
             
             summary = []
-            for _, row in df.iterrows():
-                name = row.get('名称', '')
-                code = row.get('代码', '').split('.')[0] # 105.NVDA -> NVDA? or just name match
-                
-                # Check for substring match in name or code
-                # Usually code is not in the column directly in famous_spot, checking '名称'
-                # Actually commonly: 英伟达, 特斯拉, 苹果...
-                
-                # Simple logic: Just grab Top 10 by volume or just grab known names
-                # Let's iterate and match
+            for item in data_list:
+                # Sina structure: {name: "NVDA", cname: "英伟达", price: "135.2", diff: "3.2", chg: "2.45", ...}
+                ticker = item.get('name', '')
+                cname = item.get('cname', '')
                 
                 matched = False
-                for k in key_tickers:
-                    if k in name or k in str(row): # loose match
-                        matched = True
-                        break
-                        
-                # Also include High Volatility ones (>3% or <-3%)
-                pct = row.get('涨跌幅', 0)
-                try:
-                    pct = float(pct)
-                except:
-                    pct = 0
+                if ticker in key_tickers:
+                    matched = True
                     
+                # Safe float conversion
+                try:
+                    pct = float(item.get('chg', 0))
+                except (ValueError, TypeError):
+                    pct = 0.0
+                
                 if matched or abs(pct) > 3.0:
-                    summary.append(f"{name}: {pct}%")
+                    display_name = ticker if ticker else cname
+                    summary.append(f"{display_name}: {pct}%")
             
-            if not summary:
-                # Fallback: just take top 5
-                top5 = df.head(5)
-                for _, row in top5.iterrows():
-                    summary.append(f"{row.get('名称')}: {row.get('涨跌幅')}%")
+            # If no giants found (unlikely with mktcap sort), take top 3 movers
+            if not summary and data_list:
+                for item in data_list[:5]:
+                    name = item.get('name', 'Unknown')
+                    chg = item.get('chg', '0')
+                    summary.append(f"{name}: {chg}%")
                     
             return ", ".join(summary)
             
@@ -199,88 +154,59 @@ class NewsFetcher:
     @staticmethod
     async def get_hot_concepts(limit=8):
         """
-        Get top performing concept boards (Hotspots).
-        Returns list of dicts: {'name': 'Lithium', 'change': '3.5%', 'code': '...'}
+        Get top performing concept boards.
+        Uses Sina Finance (verified working, not blocked).
         """
         try:
-            loop = asyncio.get_event_loop()
-            # ak.stock_board_concept_name_em() returns rank of all concepts
+            loop = asyncio.get_running_loop()
             
             def _fetch():
-                # Tier 1: EastMoney Concepts
+                # Sina Finance - Concept Boards
                 try:
-                    with ProxyManager.bypass_proxy_for_domestic():
-                         return ak.stock_board_concept_name_em(), "concept"
+                    with ProxyManager.bypass_proxy_for_domestic("sina.com.cn"):
+                         return ak.stock_sector_spot(indicator="概念")
                 except Exception as e:
-                    logger.warning(f"[News] Tier 1 (EM Concept) failed: {e}")
-                    
-                # Tier 2: THS Concepts
-                try:
-                    with ProxyManager.bypass_proxy_for_domestic("10jqka.com.cn"):
-                         # columns: 日期, 概念名称, 成分股数量, 涨跌幅, ...
-                         return ak.stock_board_concept_name_ths(), "ths_concept"
-                except Exception as e:
-                    logger.warning(f"[News] Tier 2 (THS Concept) failed: {e}")
+                    logger.warning(f"[News] Sina Concept Boards failed: {e}")
+                    return None
 
-                # Tier 3: EastMoney Industries (Last Resort)
-                try:
-                    with ProxyManager.bypass_proxy_for_domestic():
-                         return ak.stock_board_industry_name_em(), "industry"
-                except Exception as e:
-                    logger.error(f"[News] All data sources for hot concepts failed: {e}")
-                    raise e
-
-            result_data = await loop.run_in_executor(
-                NewsFetcher._executor,
-                _fetch
-            )
-            
-            df, source_type = result_data
+            df = await loop.run_in_executor(NewsFetcher._executor, _fetch)
             
             if df is None or df.empty:
                 return []
-                
-            # Normalization
-            # 1. Rename columns to standard '板块名称', '涨跌幅'
-            if source_type == "ths_concept":
-                # THS cols usually: 概念名称, 涨跌幅
-                rename_map = {}
-                for col in df.columns:
-                    if "名称" in col: rename_map[col] = "板块名称"
-                    if "涨跌幅" in col: rename_map[col] = "涨跌幅"
-                df.rename(columns=rename_map, inplace=True)
-
-            # 2. Sort
+            
+            # Sina returns: 板块, 涨跌幅
             if '涨跌幅' in df.columns:
-                 df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
-                 df.sort_values('涨跌幅', ascending=False, inplace=True)
+                df = df.sort_values('涨跌幅', ascending=False)
             
             results = []
             for _, row in df.head(limit).iterrows():
-                name = row.get('板块名称')
-                if not name:
-                    # Attempt to find name in other columns if not normalized correctly
-                    for col in df.columns:
-                        if '名称' in str(col) or 'name' in str(col).lower():
-                            val = row.get(col)
-                            if val:
-                                name = val
-                                break
-                    
-                if not name:
-                    continue # Skip invalid rows
+                name = row.get('板块', '')
+                if not name: continue 
 
-                change = row.get('涨跌幅', 0)
-                
-                # Check formatting
-                change_str = f"{change:.2f}%"
-                if isinstance(change, str) and '%' in change:
-                    change_str = change # Already formatted
-                
+                try:
+                    raw_val = row.get('涨跌幅', 0)
+                    # Handle NaN from pandas
+                    if pd.isna(raw_val):
+                        change_val = 0.0
+                    else:
+                        change_val = float(raw_val)
+                    change_str = f"{change_val:.2f}%"
+                except:
+                    change_str = "0.00%"
+                    change_val = 0.0
+
+                # Color: red=up, green=down, gray=flat
+                if change_val > 0:
+                    color = 'red'
+                elif change_val < 0:
+                    color = 'green'
+                else:
+                    color = 'grey'
+
                 results.append({
                     'name': name,
                     'change': change_str,
-                    'color': 'red' if (isinstance(change, (int, float)) and change > 0) else 'green'
+                    'color': color
                 })
                 
             return results

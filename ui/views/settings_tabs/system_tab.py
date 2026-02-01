@@ -48,6 +48,17 @@ class SystemTab(ft.Container):
             border_radius=8
         )
         
+        self.rate_limit_input = ft.TextField(
+            value=str(ConfigHandler.get_api_rate_limit()),
+            width=100,
+            text_size=14,
+            content_padding=10,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
+            suffix_text="次/分",
+            border_radius=8
+        )
+        
         # Layout Construction
         self.content = ft.ListView(
             controls=[
@@ -119,6 +130,29 @@ class SystemTab(ft.Container):
                             ], spacing=5)
                         ]),
                         
+                        ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
+                        
+                        # 4. API Rate Limit Item
+                        ft.Row([
+                            ft.Container(
+                                content=ft.Icon(ft.Icons.SPEED, color=ft.Colors.CYAN, size=24),
+                                padding=10, bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.CYAN), border_radius=10
+                            ),
+                            ft.Column([
+                                ft.Text("API 速率限制", size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                                ft.Text("Tushare 接口每分钟最大请求次数 (默认200)", size=12, color=AppColors.TEXT_SECONDARY),
+                            ], expand=True, spacing=2),
+                            ft.Row([
+                                self.rate_limit_input,
+                                ft.IconButton(
+                                    icon=ft.Icons.SAVE_ROUNDED, 
+                                    icon_color=AppColors.PRIMARY,
+                                    tooltip=I18n.get("settings_save_config"),
+                                    on_click=self.save_rate_limit
+                                )
+                            ], spacing=5)
+                        ]),
+                        
                     ], spacing=10)
                 )
             ],
@@ -160,3 +194,22 @@ class SystemTab(ft.Container):
         except Exception as ex:
             self.show_snack(f"{I18n.get('snack_save_fail')}: {str(ex)}")
             logger.error(f"Failed to save queue size: {ex}")
+
+    def save_rate_limit(self, e):
+        try:
+            limit_str = self.rate_limit_input.value.strip()
+            if not limit_str:
+                self.show_snack("请输入速率限制")
+                return
+            
+            limit = int(limit_str)
+            if limit < 10:
+                self.show_snack("速率限制至少为 10 次/分钟")
+                return
+            
+            ConfigHandler.set_api_rate_limit(limit)
+            self.show_snack(f"API 速率限制已更新为 {limit} 次/分钟")
+            logger.info(f"API rate limit updated to {limit}")
+        except Exception as ex:
+            self.show_snack(f"{I18n.get('snack_save_fail')}: {str(ex)}")
+            logger.error(f"Failed to save rate limit: {ex}")

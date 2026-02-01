@@ -160,11 +160,11 @@ class TechnicalAnalysis:
         ma_up = up.ewm(com=period - 1, adjust=False).mean()
         ma_down = down.ewm(com=period - 1, adjust=False).mean()
         
-        rs = ma_up / ma_down
+        # Avoid division by zero: when ma_down=0, RSI=100
+        rs = np.where(ma_down == 0, np.inf, ma_up / ma_down)
         rsi = 100 - (100 / (1 + rs))
         
-        # Handle nan (e.g. initial window or divide by zero if no loss)
-        # If ma_down is 0, RSI is 100
-        rsi = rsi.fillna(100 if ma_down.iloc[-1] == 0 else 50)
+        # Handle nan (e.g. initial window)
+        rsi = pd.Series(rsi).fillna(50)
         
-        return rsi.iloc[-1]
+        return float(rsi.iloc[-1])

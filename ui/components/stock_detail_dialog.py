@@ -290,9 +290,12 @@ class StockDetailDialog(ft.AlertDialog):
             html_content = generate_kline_html(df, title=f"{self.stock_data.get('name', '')} ({ts_code})")
             
             # Save to temporary file
-            # Use 'charts' subdir to keep organized? Or just temp dir.
+            # Use 'charts' subdir to keep organized
             tmp_dir = os.path.join(tempfile.gettempdir(), "astock_charts")
             os.makedirs(tmp_dir, exist_ok=True)
+            
+            # Lazy Cleanup: Remove files older than 10 minutes
+            self._cleanup_old_charts(tmp_dir)
             
             filename = f"chart_{ts_code}_{int(time.time())}.html"
             file_path = os.path.join(tmp_dir, filename)
@@ -302,12 +305,10 @@ class StockDetailDialog(ft.AlertDialog):
                 
             # Create WebView
             # Note: file:/// path needs 3 slashes on Windows? "file:///" + path
-            # But let's verify Flet WebView behavior. Usually abspath works if scheme provided.
             file_uri = f"file:///{file_path.replace(os.sep, '/')}"
             logger.info(f"Loading chart from: {file_uri}")
             
             # Hybrid view: Open in Browser Button (Fallback for when WebView is not supported)
-            # Since Flet WebView on specific Windows envs might be missing (Requires Edge WebView2 runtime or specific flet packing)
             
             def open_browser(e):
                 webbrowser.open(file_uri)
@@ -323,12 +324,29 @@ class StockDetailDialog(ft.AlertDialog):
             self.chart_container.content = content_col
             self.chart_container.update()
             
-            # Auto-open first time? Maybe annoying. Let user click.
-            # actually, let's try auto-open as convenience?
-            # webbrowser.open(file_uri)
-            
         except Exception as e:
             import traceback
             logger.error(f"Error loading chart: {e}\n{traceback.format_exc()}")
             self.chart_container.content = ft.Text(I18n.get("detail_err_load_chart").format(error=str(e)), color=ft.Colors.RED)
             self.chart_container.update()
+
+    def _cleanup_old_charts(self, tmp_dir):
+        """Cleanup chart files older than 10 minutes"""
+        try:
+            now = time.time()
+            for f in os.listdir(tmp_dir):
+                if not f.startswith("chart_") or not f.endswith(".html"):
+                    continue
+                
+                f_path = os.path.join(tmp_dir, f)
+                try:
+                    if os.path.isfile(f_path):
+                        mtime = os.path.getmtime(f_path)
+                        if now - mtime > 600: # 10 minutes
+                            os.remove(f_path)
+                            logger.debug(f"Removed old chart file: {f}")
+                except Exception:
+                    # Ignore file lock errors etc.
+                    pass
+        except Exception as e:
+            logger.warning(f"Failed to cleanup temp charts: {e}")

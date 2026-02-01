@@ -47,7 +47,12 @@ class DataSourceTab(ft.Container):
             content=ft.Column([
                 ft.Row([
                     SectionHeader(I18n.get("settings_sec_health") + " (3Y)"),
-                    ft.IconButton(ft.Icons.REFRESH, on_click=self.refresh_health_status, tooltip="刷新状态")
+                    ft.ElevatedButton(
+                        text=I18n.get("settings_check_health"),
+                        icon=ft.Icons.REFRESH,
+                        on_click=self.refresh_health_status,
+                        style=AppStyles.primary_button(),
+                    )
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 ft.ResponsiveRow([
@@ -213,18 +218,31 @@ class DataSourceTab(ft.Container):
             else:
                 self.metric_health.set_value("数据健康", ft.Icons.CHECK_CIRCLE, ft.Colors.GREEN)
                 
-            self.metric_sync.set_value(str(result.get('latest_local', '未知')), ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
+            latest = result.get('latest_local')
+            if not latest or str(latest) == 'None':
+                display_date = "从未同步"
+            else:
+                display_date = str(latest)
+            self.metric_sync.set_value(display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
             self.metric_coverage.set_value(f"{result.get('coverage', '0%')}", ft.Icons.DATA_USAGE, AppColors.INFO)
             self.metric_storage.set_value("正常", ft.Icons.STORAGE, ft.Colors.GREEN)
             
             fin_cov = result.get('financial_coverage', 'N/A')
-            self.health_detail_text.value = f"覆盖率: {result.get('coverage', 'N/A')} | 财报覆盖: {fin_cov} | 滞后: {result.get('lag_days', 0)}天"
+            recent_cov = result.get('financial_recent_coverage', fin_cov)
+            stale_count = result.get('financial_stale_count', 0)
+            self.health_detail_text.value = f"覆盖率: {result.get('coverage', 'N/A')} | 财报覆盖: {fin_cov} (近期: {recent_cov}) | 滞后: {result.get('lag_days', 0)}天"
             
-            # Show Repair Button if needed
+            # Show Repair Button if needed (now includes stale data)
             missing_fin = result.get('financial_missing_count', 0)
-            if missing_fin > 0:
+            total_need_repair = missing_fin + stale_count
+            if total_need_repair > 0:
                 self.missing_fin_codes = result.get('financial_missing_codes', [])
-                self.btn_repair.text = f"修复 {missing_fin} 只缺失基本面数据的股票"
+                if stale_count > 0 and missing_fin > 0:
+                    self.btn_repair.text = f"修复 {missing_fin} 只缺失 + {stale_count} 只过期数据的股票"
+                elif stale_count > 0:
+                    self.btn_repair.text = f"修复 {stale_count} 只过期数据的股票"
+                else:
+                    self.btn_repair.text = f"修复 {missing_fin} 只缺失基本面数据的股票"
                 self.btn_repair.visible = True
             else:
                 self.btn_repair.visible = False

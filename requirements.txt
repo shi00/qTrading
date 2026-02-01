@@ -9,3 +9,5 @@ cryptography>=42.0.0
 akshare>=1.15.0
 openai>=1.10.0
 
+
+readerwriterlock>=1.0.9

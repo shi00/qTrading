@@ -37,6 +37,12 @@ class GrowthStrategy(BaseStrategy):
         if df is None or df.empty:
             return pd.DataFrame()
         
+        # Drop NaN in required columns
+        required_cols = ['or_yoy', 'netprofit_yoy', 'roe']
+        df = df.dropna(subset=[c for c in required_cols if c in df.columns])
+        if df.empty:
+            return pd.DataFrame()
+        
         # Use or_yoy (revenue YoY) and netprofit_yoy from financial_reports
         # Filter: revenue growth > 20%, profit growth > 25%, ROE > 15%
         mask = (
@@ -57,6 +63,11 @@ class DividendStrategy(BaseStrategy):
         if df is None or df.empty:
             return pd.DataFrame()
         
+        # Drop NaN in required columns
+        df = df.dropna(subset=['dv_ttm'])
+        if df.empty:
+            return pd.DataFrame()
+        
         # High dividend yield > 4%
         mask = (df['dv_ttm'] > 4)
         result = df[mask].copy()
@@ -70,6 +81,12 @@ class TechnicalBreakoutStrategy(BaseStrategy):
     def filter(self, context):
         df = context.get('screening_data')
         if df is None or df.empty:
+            return pd.DataFrame()
+        
+        # Drop NaN in required columns
+        required_cols = ['pct_chg', 'turnover_rate']
+        df = df.dropna(subset=[c for c in required_cols if c in df.columns])
+        if df.empty:
             return pd.DataFrame()
         
         # Simplified: Today's gain 2-7%, high turnover

@@ -27,9 +27,24 @@ class AIClient:
         self.config = ConfigHandler()
         self.client = None
         self._setup_client()
-        concurrency = ConfigHandler.get_ai_concurrency() 
-        self.semaphore = asyncio.Semaphore(concurrency)
+        self._semaphore = None  # Lazy creation to avoid cross-event-loop issues
+        self._semaphore_loop = None  # Track which loop the semaphore belongs to
         self._initialized = True
+    
+    def _get_semaphore(self):
+        """Get or create semaphore for current event loop"""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        
+        # Create new semaphore if none exists or loop changed
+        if self._semaphore is None or self._semaphore_loop != current_loop:
+            concurrency = ConfigHandler.get_ai_concurrency()
+            self._semaphore = asyncio.Semaphore(concurrency)
+            self._semaphore_loop = current_loop
+        
+        return self._semaphore
         
     def _setup_client(self):
         """Initialize OpenAI client from settings"""
@@ -134,7 +149,7 @@ class AIClient:
         """
         
         try:
-            async with self.semaphore:
+            async with self._get_semaphore():
                 model = ConfigHandler.get_setting('ai_model_name', 'deepseek-chat')
                 
                 # Corner case: API timeout protection (30s max)
@@ -195,7 +210,7 @@ class AIClient:
         """
         
         try:
-            async with self.semaphore:
+            async with self._get_semaphore():
                 response = await self.client.chat.completions.create(
                     model=model,
                     messages=[

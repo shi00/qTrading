@@ -1,8 +1,11 @@
 import os
 import base64
 import secrets
+import logging
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from config import APP_ROOT
+
+logger = logging.getLogger(__name__)
 
 class SecurityManager:
     """
@@ -25,7 +28,7 @@ class SecurityManager:
                     cls._key = base64.b64decode(encoded_key)
                     return cls._key
             except Exception as e:
-                print(f"Error loading key: {e}")
+                logger.warning(f"Error loading key: {e}")
                 # If loading fails, we might want to regenerate or fail hard.
                 # Here we continue to regeneration if file is empty/corrupt? 
                 # Better to fail to avoid data loss confusion, but for now allow regen if file gone.
@@ -40,7 +43,7 @@ class SecurityManager:
             if os.name == 'nt':
                 os.system(f'attrib +h "{cls.KEY_FILE}"')
         except Exception as e:
-            print(f"Error saving key: {e}")
+            logger.warning(f"Error saving key: {e}")
             
         return cls._key
 
@@ -64,8 +67,7 @@ class SecurityManager:
             
             return base64.b64encode(nonce + ciphertext).decode('utf-8')
         except Exception as e:
-            print(f"Encryption error: {e}")
-            return plaintext # Fallback or Raise? Safe to return empty or original? 
+            logger.warning(f"Encryption error: {e}")
             # Returning original is bad for security. Returning empty is safer.
             return ""
 

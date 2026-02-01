@@ -65,8 +65,6 @@ class CacheManager:
             
             self._running = False
             self._closing = False # Reset if we want to restart later? Or keep closed.
-            self._running = False
-            self._closing = False # Reset if we want to restart later? Or keep closed.
             logger.info("[CacheManager] DB Writer stopped.")
 
     async def wait_for_maintenance(self):
@@ -780,15 +778,17 @@ class CacheManager:
     async def check_financial_coverage(self):
         """
         Audit data integrity: Check how many stocks have financial reports.
+        Enhanced: Also checks data timeliness (recent 2 quarters).
         Returns:
-            dict: stats {total_stocks, with_financials, coverage_ratio}
-            list: missing_ts_codes
+            dict: stats {total_stocks, with_financials, coverage_ratio, stale_count}
+            list: missing_ts_codes (priority: no data > stale data)
         """
         await self.wait_for_maintenance()
+        import datetime
+        
         async with aiosqlite.connect(self.db_path) as db:
             # 1. Total Stocks (Active)
-            # Assuming stock_basic has all stocks we care about
-            async with db.execute("SELECT ts_code, name FROM stock_basic") as cursor:
+            async with db.execute("SELECT ts_code, name FROM stock_basic WHERE list_status = 'L'") as cursor:
                 all_stocks = await cursor.fetchall()
                 
             if not all_stocks:
@@ -797,22 +797,80 @@ class CacheManager:
             all_codes = {row[0] for row in all_stocks}
             total_count = len(all_codes)
             
-            # 2. Stocks with ANY financial record
+            # 2. Calculate recent quarter thresholds (last 2 quarters)
+            now = datetime.datetime.now()
+            # Generate recent 2 quarter end dates
+            # Generate recent 2 quarter end dates (Precise logic considering disclosure deadlines)
+            recent_quarters = []
+            
+            # Helper to get latest AVAILABLE quarter (considering A-share disclosure deadlines)
+            # Q1 (0331): Due April 30
+            # H1 (0630): Due August 31
+            # Q3 (0930): Due October 31
+            # Annual (1231): Due April 30 next year
+            def get_latest_available_quarter(dt):
+                month = dt.month
+                year = dt.year
+                # After Oct 31: Q3 (0930) available
+                if month >= 11:
+                    return f"{year}0930"
+                # After Aug 31: H1 (0630) available
+                elif month >= 9:
+                    return f"{year}0630"
+                # After Apr 30: Q1 (0331) and Annual (1231) available
+                elif month >= 5:
+                    return f"{year}0331"
+                # Jan-Apr: Only last year's Q3 (0930) is guaranteed
+                else:
+                    return f"{year-1}0930"
+
+            # Get Q1 (latest available quarter)
+            q1 = get_latest_available_quarter(now)
+            recent_quarters.append(q1)
+            
+            # Get Q2 (previous available quarter)
+            # Parse Q1 back to date to find previous
+            q1_date = datetime.datetime.strptime(q1, "%Y%m%d")
+            # Go back 1 day from Q1 end date to be in Q2
+            q2_date = q1_date - datetime.timedelta(days=1) 
+            q2 = get_latest_available_quarter(q2_date)
+            recent_quarters.append(q2)
+            
+            # 3. Stocks with ANY financial record
             async with db.execute("SELECT DISTINCT ts_code FROM financial_reports") as cursor:
                 covered_stocks = await cursor.fetchall()
-                
             covered_codes = {row[0] for row in covered_stocks}
-            covered_count = len(covered_codes)
             
-            # 3. Calculate Diff
-            missing_codes = list(all_codes - covered_codes)
+            # 4. Stocks with RECENT data (within last 2 quarters)
+            if recent_quarters:
+                placeholders = ",".join("?" * len(recent_quarters))
+                query = f"SELECT DISTINCT ts_code FROM financial_reports WHERE end_date IN ({placeholders})"
+                async with db.execute(query, recent_quarters) as cursor:
+                    recent_stocks = await cursor.fetchall()
+                recent_codes = {row[0] for row in recent_stocks}
+            else:
+                recent_codes = covered_codes
+            
+            # 5. Calculate categories (filter to only stocks in all_codes)
+            no_data_codes = list(all_codes - covered_codes)  # Never had any data
+            stale_codes = list((covered_codes - recent_codes) & all_codes)  # Has data but outdated, AND still active
+            
+            # Combine missing = no_data + stale (prioritize no_data)
+            missing_codes = no_data_codes + stale_codes
+            
+            covered_count = len(covered_codes)
+            recent_count = len(recent_codes & all_codes)  # Recent AND in stock_basic
             ratio = (covered_count / total_count) if total_count > 0 else 0.0
+            recent_ratio = (recent_count / total_count) if total_count > 0 else 0.0
             
             stats = {
                 'total': total_count,
                 'covered': covered_count,
                 'ratio': ratio,
-                'missing_count': len(missing_codes)
+                'recent_count': recent_count,
+                'recent_ratio': recent_ratio,
+                'stale_count': len(stale_codes),
+                'missing_count': len(no_data_codes)
             }
             
             return stats, missing_codes
@@ -1128,15 +1186,11 @@ class CacheManager:
 
     # ========== Block Trade ==========
     async def save_block_trade(self, df):
-        """Save Block Trade data"""
+        """Save Block Trade data (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
             
         cols = ['trade_date', 'ts_code', 'price', 'vol', 'amount', 'buyer', 'seller']
-        df = df.copy()
-        for col in cols:
-            if col not in df.columns:
-                df[col] = None
         
         if not self._running and not self._closing:
             await self.start()
@@ -1146,10 +1200,17 @@ class CacheManager:
                 (trade_date, ts_code, price, volume, amount, buyer, seller)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             '''
-        params = df[cols].values.tolist()
-        await self.queue.put((sql, params, True))
         
-        return len(df)
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
+        
+        if params:
+            await self.queue.put((sql, params, True))
+            return len(params)
+        return 0
 
     async def get_block_trade(self, trade_date=None):
         """Get Block Trade data"""
@@ -1162,20 +1223,7 @@ class CacheManager:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(query, params) as cursor:
                 cols = [desc[0] for desc in cursor.description]
-                rows = await cursor.fetchall()
                 return pd.DataFrame(rows, columns=cols)
-
-    async def get_latest_northbound(self):
-        """Get latest northbound holding for all stocks"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT MAX(trade_date) FROM northbound_holding")
-            result = await cursor.fetchone()
-            trade_date = result[0] if result else None
-            
-            if not trade_date:
-                return pd.DataFrame()
-            
-            return await self.get_northbound(trade_date=trade_date)
 
     # ========== Market News ==========
     async def save_market_news(self, news_item):

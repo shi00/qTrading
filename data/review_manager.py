@@ -184,7 +184,7 @@ class ReviewManager:
                 LIMIT ?
             '''
             
-            async with self.cache._get_db_connection() as db:
+            async with aiosqlite.connect(self.cache.db_path) as db:
                 # Fetch wins
                 async with db.execute(sql_wins, (limit,)) as cursor:
                     rows = await cursor.fetchall()

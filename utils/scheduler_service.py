@@ -173,7 +173,7 @@ class SchedulerService:
             # If 16:30 update is stuck, we shouldn't wait forever
             await asyncio.wait_for(self._lock.acquire(), timeout=300)
         except asyncio.TimeoutError:
-            logger.error("[Scheduler] ⚠️ Lock acquisition timed out (5min). Previous task stuck? Skipping prediction.")
+            logger.error("[Scheduler] [WARN] Lock acquisition timed out (5min). Previous task stuck? Skipping prediction.")
             return
 
         try:

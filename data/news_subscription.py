@@ -47,7 +47,7 @@ class NewsSubscriptionService:
 
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
-        logger.info("[NewsService] Started news polling service 🚀")
+        logger.info("[NewsService] Started news polling service [STARTED]")
         
     def stop(self):
         """Stop the service"""
@@ -127,7 +127,7 @@ class NewsSubscriptionService:
                 ai_result = await self.ai_client.classify_news(clean_content)
                 if ai_result:
                     # AI Success
-                    emoji = ai_result.get('emoji', '📰')
+                    emoji = ai_result.get('emoji', '[NEWS]')
                     category = ai_result.get('category', 'News')
                     tag = f"【{emoji} {category}】"
                 else:
@@ -141,7 +141,7 @@ class NewsSubscriptionService:
                 
                 display_msg = f"{tag} {clean_content}" if tag else clean_content
                 
-                logger.info(f"[NewsService] 🔔 New Alert: {display_msg[:30]}...")
+                logger.info(f"[NewsService] [ALERT] New Alert: {display_msg[:30]}...")
                 
                 if self.on_news_callback:
                     # Notify UI

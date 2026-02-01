@@ -1,8 +1,11 @@
 import json
 import os
+import logging
 import config
 from utils.security_utils import SecurityManager
+from readerwriterlock import rwlock
 
+logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 
@@ -68,24 +71,64 @@ DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 ```"""
 
 class ConfigHandler:
+    _config_cache = None
+    _last_load_time = 0
+    _lock = rwlock.RWLockFair()
+
     @staticmethod
     def load_config():
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
+        """Load config with Read Lock"""
+        with ConfigHandler._lock.gen_rlock():
+            # Use simple caching: if cache exists, return it.
+            # We rely on save_config to update cache. 
+            if ConfigHandler._config_cache is not None:
+                 return ConfigHandler._config_cache.copy()
+
+            if os.path.exists(CONFIG_FILE):
+                try:
+                    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        ConfigHandler._config_cache = json.load(f)
+                        return ConfigHandler._config_cache.copy()
+                except Exception:
+                    return {}
+            return {}
 
     @staticmethod
     def save_config(config_data):
+        """Save config with Write Lock"""
         try:
-            current_config = ConfigHandler.load_config()
-            current_config.update(config_data)
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(current_config, f, indent=4)
-            return True
+            with ConfigHandler._lock.gen_wlock():
+                # Note: We must call load_config() inside here carefully? 
+                # Be careful: load_config uses read lock. 
+                # RWLockFair usually allows reentrancy if we hold write lock and want read lock?
+                # Check library docs. Usually yes. 
+                # BUT to be safe and efficient: we just access cache directly or reload raw if needed.
+                # Actually, standard pattern: 
+                
+                # We need to read current state to merge updates
+                # Since we hold Write Lock, no one else can write.
+                
+                # Check if cache is trusted
+                current_config = {}
+                if ConfigHandler._config_cache is not None:
+                    current_config = ConfigHandler._config_cache
+                elif os.path.exists(CONFIG_FILE):
+                    try:
+                        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                            current_config = json.load(f)
+                    except:
+                        pass
+                
+                # Update
+                current_config.update(config_data)
+                
+                # Write to disk
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(current_config, f, indent=4)
+                
+                # Update cache
+                ConfigHandler._config_cache = current_config
+                return True
         except Exception as e:
             print(f"Error saving config: {e}")
             return False
@@ -134,12 +177,12 @@ class ConfigHandler:
                     ConfigHandler.save_config({"ts_token": encrypted})
                     return token
                 except Exception as e:
-                    print(f"Error migrating token: {e}")
+                    logger.warning(f"Error migrating token: {e}")
                     return token
             else:
                 # Does NOT look like a valid token. Likely an encrypted blob we can't read.
                 # Return empty so UI prompts user to re-enter.
-                print("Warning: Stored token could not be decrypted and does not appear to be plaintext. Ignoring.")
+                logger.warning("Stored token could not be decrypted and does not appear to be plaintext. Ignoring.")
                 return ""
 
     @staticmethod
@@ -308,6 +351,17 @@ class ConfigHandler:
         config = ConfigHandler.load_config()
         return config.get("request_timeout", 30)
 
+    @staticmethod
+    def get_api_rate_limit():
+        """Get Tushare API rate limit (requests per minute). Default 200."""
+        config = ConfigHandler.load_config()
+        return config.get("api_rate_limit", 200)
+
+    @staticmethod
+    def set_api_rate_limit(limit):
+        """Set Tushare API rate limit (requests per minute)"""
+        return ConfigHandler.save_config({"api_rate_limit": int(limit)})
+
     # === Localization ===
     @staticmethod
     def get_locale():
@@ -317,3 +371,16 @@ class ConfigHandler:
     @staticmethod
     def set_locale(locale):
         return ConfigHandler.save_config({"locale": locale})
+
+    # === Scheduler ===
+    @staticmethod
+    def get_ai_prediction_time():
+        """Get AI prediction time (default 20:30)"""
+        config = ConfigHandler.load_config()
+        return config.get("ai_prediction_time", "20:30")
+
+    @staticmethod
+    def set_ai_prediction_time(time_str):
+        """Set AI prediction time (HH:MM format)"""
+        return ConfigHandler.save_config({"ai_prediction_time": time_str})
+

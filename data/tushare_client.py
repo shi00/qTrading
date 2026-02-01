@@ -65,20 +65,20 @@ class TushareClient:
                     # Rate limit: Exponential backoff with strong jitter
                     # e.g. 1s->(1-2s), 2s->(2-4s), 3s->(4-8s)
                     sleep_time = (2 ** i) + random.uniform(0, 1)
-                    logger.warning(f"[API] ⚠️ Rate limit hit, backing off {sleep_time:.2f}s... (attempt {i+1}/{self.max_retries})")
+                    logger.warning(f"[API] [WARN] Rate limit hit, backing off {sleep_time:.2f}s... (attempt {i+1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
                     
                 if is_network_error:
                     # Network error: Linear backoff with jitter
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
-                    logger.warning(f"[API] ⚠️ Connection error, retrying in {sleep_time:.2f}s... (attempt {i+1}/{self.max_retries})")
+                    logger.warning(f"[API] [WARN] Connection error, retrying in {sleep_time:.2f}s... (attempt {i+1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
                 
                 # Other errors
                 if i == self.max_retries - 1:
-                    logger.error(f"[API] ❌ Failed after {self.max_retries} attempts: {error_msg}")
+                    logger.error(f"[API] [FAIL] Failed after {self.max_retries} attempts: {error_msg}")
                     raise e
                 
                 # Unknown transient error, short sleep
@@ -237,34 +237,52 @@ class TushareClient:
 
     # ========== Financial Data ==========
     
-    def get_income(self, period, ts_code=None):
-        """Get income statement data for a specific reporting period"""
-        logger.debug(f"[API] fetching income statement for period={period}...")
+    def get_income(self, period=None, start_date=None, end_date=None, ts_code=None):
+        """Get income statement data"""
+        logger.debug(f"[API] fetching income statement for period={period} range={start_date}-{end_date}...")
         return self._handle_api_call(
             self.pro.income,
             period=period,
+            start_date=start_date,
+            end_date=end_date,
             ts_code=ts_code,
-            fields='ts_code,end_date,n_income,revenue,operate_profit' 
+            fields='ts_code,end_date,ann_date,report_type,n_income,revenue,operate_profit,total_revenue,n_income_attr_p' 
         )
 
-    def get_cashflow(self, period, ts_code=None):
+    def get_cashflow(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get cashflow statement data"""
-        logger.debug(f"[API] fetching cashflow for period={period}...")
+        logger.debug(f"[API] fetching cashflow for period={period} range={start_date}-{end_date}...")
         return self._handle_api_call(
             self.pro.cashflow,
             period=period,
+            start_date=start_date,
+            end_date=end_date,
             ts_code=ts_code,
             fields='ts_code,end_date,n_cashflow_act,c_cashflow_return_pay,n_cashflow_inv'
         )
         
-    def get_balancesheet(self, period, ts_code=None):
+    def get_balancesheet(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get balance sheet data"""
-        logger.debug(f"[API] fetching balancesheet for period={period}...")
+        logger.debug(f"[API] fetching balancesheet for period={period} range={start_date}-{end_date}...")
         return self._handle_api_call(
             self.pro.balancesheet,
             period=period,
+            start_date=start_date,
+            end_date=end_date,
             ts_code=ts_code,
             fields='ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int'
+        )
+
+    def get_fina_indicator(self, period=None, start_date=None, end_date=None, ts_code=None):
+        """Get financial indicators"""
+        logger.debug(f"[API] fetching fina_indicator for code={ts_code} period={period} range={start_date}-{end_date}...")
+        return self._handle_api_call(
+            self.pro.fina_indicator,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            ts_code=ts_code,
+             fields='ts_code,ann_date,end_date,roe,roe_dt,grossprofit_margin,netprofit_margin,debt_to_assets,or_yoy,netprofit_yoy'
         )
 
     # ========== Fund Flow & Institutional Data ==========

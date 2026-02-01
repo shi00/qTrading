@@ -46,6 +46,10 @@ async def main(page: ft.Page):
         scheduler.stop()
         NewsSubscriptionService().stop()
         
+        # Shutdown thread pools
+        from data.news_fetcher import NewsFetcher
+        NewsFetcher.shutdown()
+        
         async def async_cleanup():
             try:
                 from data.data_processor import DataProcessor
