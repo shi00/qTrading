@@ -12,3 +12,4 @@ aiohttp>=3.9.0
 
 
 readerwriterlock>=1.0.9
+pandas_market_calendars>=4.0.0

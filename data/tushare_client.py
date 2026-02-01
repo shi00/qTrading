@@ -149,14 +149,20 @@ class TushareClient:
                 return str(is_open) == '1'
             
         except Exception as e:
-            logger.warning(f"[API] Trade calendar check failed: {e}, falling back to weekday check")
+            logger.warning(f"[API] Trade calendar check failed: {e}, falling back to Offline Calendar")
         
-        # Fallback: Simple weekday check (Mon-Fri)
+        # Fallback: Use Offline Calendar (pandas_market_calendars)
         try:
-            dt = datetime.datetime.strptime(date_str, '%Y%m%d')
-            return dt.weekday() < 5
-        except:
-            return True  # Default to allowing if all else fails
+            from data.offline_calendar import OfflineCalendar
+            return OfflineCalendar.is_trading_day(date_str)
+        except Exception as ex:
+            logger.error(f"[API] Offline calendar check failed: {ex}")
+            # Ultimate Fallback: Simple weekday check (Mon-Fri)
+            try:
+                dt = datetime.datetime.strptime(date_str, '%Y%m%d')
+                return dt.weekday() < 5
+            except:
+                return True  # Default to allowing if all else fails
 
     # ========== Stock Basic ==========
     
