@@ -50,7 +50,11 @@ class SchedulerService:
             try:
                 self._loop.run_until_complete(self._scheduler_loop())
             except Exception as e:
-                logger.error(f"[Scheduler] Thread error: {e}")
+                msg = str(e)
+                if "Event loop stopped" in msg:
+                     logger.info("[Scheduler] Loop stopped cleanly (shutdown).")
+                else:
+                     logger.error(f"[Scheduler] Thread error: {e}")
             finally:
                 self._loop.close()
         
@@ -77,8 +81,11 @@ class SchedulerService:
             except Exception as e:
                 logger.error(f"[Scheduler] Error in loop: {e}")
             
-            # Wait 60 seconds before next check
-            await asyncio.sleep(60)
+            # Check frequently (every 1s) instead of sleeping 60s
+            for _ in range(60):
+                if not self._running:
+                    break
+                await asyncio.sleep(1)
     
     async def _check_and_run(self):
         """Check if update should run and execute if needed"""

@@ -40,45 +40,69 @@ async def main(page: ft.Page):
     
     # ... (Cleanup resources code) ...
     
-    def cleanup_resources(e):
-        # ...
-        logger.info("Cleaning up resources...")
-        scheduler.stop()
-        NewsSubscriptionService().stop()
+    async def cleanup_resources(e):
+        """
+        Graceful shutdown handler.
+        Orchestrate stopping all services and allow natural exit.
+        """
+        # Silence low-level asyncio network warnings during shutdown
+        logging.getLogger("asyncio").setLevel(logging.ERROR)
         
-        # Shutdown thread pools
-        from data.news_fetcher import NewsFetcher
-        NewsFetcher.shutdown()
-        
-        async def async_cleanup():
-            try:
-                from data.data_processor import DataProcessor
-                dp = DataProcessor()
-                await dp.close()
-                logger.info("DB Writer flushed and closed.")
-            except Exception as ex:
-                logger.error(f"Cleanup error: {ex}")
+        logger.info("[Main] Cleanup initiated. Stopping services...")
 
-        # Run async cleanup synchronously before exit
         try:
-             import asyncio
-             try:
-                 loop = asyncio.get_event_loop()
-                 if loop.is_running():
-                     future = asyncio.run_coroutine_threadsafe(async_cleanup(), loop)
-                     future.result(timeout=3)
-                 else:
-                     loop.run_until_complete(async_cleanup())
-             except Exception as e:
-                 logger.warning(f"Async cleanup failed: {e}")
-        except Exception as e:
-             logger.error(f"Cleanup runner failed: {e}")
+            logger.info("[Main] Step 1: Signaling Global Cancellation...")
+            from data.data_processor import DataProcessor
+            dp = DataProcessor()
+            dp.stop() 
+            
+            logger.info("[Main] Step 2: Stopping Scheduler...")
+            scheduler.stop()
+            
+            # Stop News
+            NewsSubscriptionService().stop()
+
+            # Stop Toasts (Cancel pending timers)
+            logger.info("[Main] Step 4: Stopping Toast Manager...")
+            if hasattr(page, "toast") and page.toast:
+                try:
+                    page.toast.stop_all()
+                except Exception as ex:
+                    logger.warning(f"Failed to stop toast manager: {ex}")
+            
+            logger.info("[Main] Step 5: Waiting for resources (5s timeout)...")
+            import asyncio
+            async def _wait_shutdown():
+                try:
+                    # Shutdown IO Thread Pools
+                    from data.news_fetcher import NewsFetcher
+                    NewsFetcher.shutdown()
+                    
+                    # Flush and Close Database
+                    await dp.close()
+                    logger.info("[Main] DB Writer flushed and closed.")
+                except Exception as inner_ex:
+                    logger.error(f"[Main] Cleanup step failed: {inner_ex}")
+
+            # Strict timeout for the wait phase
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    await asyncio.wait_for(_wait_shutdown(), timeout=5.0)
+            except RuntimeError:
+                asyncio.run(asyncio.wait_for(_wait_shutdown(), timeout=5.0))
+                
+        except asyncio.TimeoutError:
+             # 5s is long enough; if it times out, we just exit.
+             # Cancelling the main loop will clean up remaining tasks usually.
+            logger.warning("[Main] Cleanup timed out (5s). Force exiting.")
+        except Exception as ex:
+            logger.error(f"[Main] Error during cleanup: {ex}", exc_info=True)
         
-        import os
-        import time
-        time.sleep(0.5)
-        logger.info("Force exiting process...")
-        os._exit(0)
+        logger.info("[Main] Resources released. Bye.")
+        # No os._exit(0) here. Flet window dispatch will close process naturally 
+        # now that threads are joined and loops cancelled.
+        # If Flet doesn't close, user can click X again or we rely on daemon threads.
 
     page.on_disconnect = cleanup_resources
     

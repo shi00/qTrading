@@ -85,7 +85,8 @@ class ToastManager:
         
         # Start timer for this toast
         # Use page.run_task to be thread-safe from sync handlers
-        self.page.run_task(toast_card.start_timer)
+        task = self.page.run_task(toast_card.start_timer)
+        toast_card.timer_task = task
 
     def _remove_toast(self, toast):
         with self.lock:
@@ -97,6 +98,17 @@ class ToastManager:
                 except Exception:
                     pass
 
+    def stop_all(self):
+        """Cleanup all active toasts on shutdown"""
+        with self.lock:
+            for control in self.toasts_stack.controls:
+                if isinstance(control, ToastCard):
+                    control.cancel_timer()
+                    # Explicitly cancel the asyncio Task
+                    if hasattr(control, 'timer_task') and control.timer_task:
+                        control.timer_task.cancel()
+            self.toasts_stack.controls.clear()
+
 class ToastCard(ft.Container):
     def __init__(self, message, icon, color, bg_color, duration, on_dismiss):
         super().__init__()
@@ -105,6 +117,8 @@ class ToastCard(ft.Container):
         self.is_hovered = False
         self.remaining = duration
         self.start_time = time.time()
+        self._is_cancelled = False
+        self.timer_task = None # Store the asyncio Task handle
         
         # UI
         self.content = ft.Row([
@@ -144,19 +158,25 @@ class ToastCard(ft.Container):
         self.opacity = 1
         self.update()
         
+    def cancel_timer(self):
+        self._is_cancelled = True
+
     async def start_timer(self):
         try:
             # Wait for enter animation
             await asyncio.sleep(0.3)
             
             while self.remaining > 0:
+                if self._is_cancelled:
+                    return
                 if not self.page:
                     return # Page closed
                 if not self.is_hovered:
                     self.remaining -= 0.1
                 await asyncio.sleep(0.1)
                 
-            await self.dismiss()
+            if not self._is_cancelled:
+                await self.dismiss()
         except asyncio.CancelledError:
             pass
         except Exception as e:

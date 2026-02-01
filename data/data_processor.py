@@ -36,7 +36,14 @@ class DataProcessor:
         self.api = TushareClient(token=token)
         self.cache = CacheManager()
         self._first_news_sync = True
+        self._shutdown_event = asyncio.Event() # Global cancellation token
         self._initialized = True
+
+    def stop(self):
+        """Signal all running tasks to stop"""
+        if not self._shutdown_event.is_set():
+            self._shutdown_event.set()
+            logger.info("[DataProcessor] Global stop signal received.")
 
     def refresh_token(self, new_token=None):
         """Refresh API token without recreating instance"""
@@ -501,12 +508,17 @@ class DataProcessor:
         
         async def sync_one_day_safe(date, idx):
             nonlocal abort_sync
+            # Check global shutdown or local cancel
+            if self._shutdown_event.is_set():
+                return
             if cancel_event and cancel_event.is_set():
                 return
             if abort_sync:
                 return
 
             async with semaphore:
+                if self._shutdown_event.is_set():
+                     return
                 if cancel_event and cancel_event.is_set() or abort_sync:
                     return
                     
@@ -528,6 +540,9 @@ class DataProcessor:
         # Create tasks
         tasks = []
         for i, date in enumerate(trade_dates):
+            if self._shutdown_event.is_set():
+                 logger.info("[DataProcessor] Global shutdown detected. Aborting historical sync.")
+                 return total_days - len(trade_dates) + i # Approx
             if cancel_event and cancel_event.is_set() or abort_sync:
                 break
             tasks.append(sync_one_day_safe(date, i))
@@ -536,6 +551,9 @@ class DataProcessor:
         if tasks:
             await asyncio.gather(*tasks)
             
+            if self._shutdown_event.is_set():
+                return 0
+
             if cancel_event and cancel_event.is_set():
                 logger.warning("[DataProcessor] Sync cancelled by user.")
                 return 0
@@ -546,18 +564,24 @@ class DataProcessor:
                 # return len(trade_dates) - len(failed_dates)
 
         # === Smart Retry Mechanism ===
-        if failed_dates:
+        if failed_dates and not self._shutdown_event.is_set():
             MAX_RETRIES = 3
             logger.info(f"[DataProcessor] [WARN] Main sync finished with {len(failed_dates)} failures. Starting Smart Retry (Max {MAX_RETRIES} rounds)...")
             
             for retry_round in range(MAX_RETRIES):
-                if not failed_dates or (cancel_event and cancel_event.is_set()):
+                if not failed_dates or (cancel_event and cancel_event.is_set()) or self._shutdown_event.is_set():
                     break
                 
                 logger.info(f"[DataProcessor] [RETRY] Retry Round {retry_round+1}/{MAX_RETRIES} for {len(failed_dates)} dates...")
                 # Sleep briefly to let API/Network recover
-                await asyncio.sleep(2)
+                try:
+                    await asyncio.sleep(2)
+                except asyncio.CancelledError:
+                    break
                 
+                if self._shutdown_event.is_set():
+                    break
+
                 current_batch = failed_dates[:]
                 failed_dates = [] # Clear for this round
                 
@@ -566,6 +590,7 @@ class DataProcessor:
                 retry_sem = asyncio.Semaphore(2) 
                 
                 async def retry_one(date):
+                    if self._shutdown_event.is_set(): return
                     async with retry_sem:
                         try:
                             await self.sync_daily_market_snapshot(date)
@@ -583,6 +608,10 @@ class DataProcessor:
             logger.info("[DataProcessor] [OK] All failed dates recovered successfully!")
 
         # === 3. Sync Financial Reports ===
+        if self._shutdown_event.is_set():
+             logger.info("[DataProcessor] Global shutdown detected. Skipping Financial Sync.")
+             return total_days - len(failed_dates)
+
         logger.info("[DataProcessor] Starting Financial Data Sync...")
         if progress_callback:
              progress_callback(total_days, total_days, "[2/2] Preparing Financial Data...")
@@ -606,6 +635,10 @@ class DataProcessor:
         # 3. If First Run (no local data) -> Full Sync
         # 4. Otherwise -> Incremental Sync (Day by Day)
         
+        if self._shutdown_event.is_set():
+             logger.info("[DataProcessor] Global shutdown detected. Skipping sync_financial_reports.")
+             return 0
+
         should_full_sync = False
         if periods is not None:
             should_full_sync = True
@@ -629,6 +662,7 @@ class DataProcessor:
         """
         Incremental Sync: Query 'disclosure_date' to find *only* updated stocks.
         """
+        if self._shutdown_event.is_set(): return 0
         logger.info("[DataProcessor] 🚀 Starting Incremental Financial Sync...")
         
         status = await self.cache.get_sync_status('financial_reports')
@@ -742,6 +776,7 @@ class DataProcessor:
         Full/Batch Sync Financial Data.
         Strategy: Per-Stock Batch Sync (Query 3 Years of data).
         """
+        if self._shutdown_event.is_set(): return 0
         import datetime
         import asyncio
         
