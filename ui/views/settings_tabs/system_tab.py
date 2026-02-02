@@ -29,10 +29,10 @@ class SystemTab(ft.Container):
             border_radius=8,
             content_padding=10,
             options=[
-                ft.dropdown.Option("DEBUG", "调试 (DEBUG)"),
-                ft.dropdown.Option("INFO", "信息 (INFO)"),
-                ft.dropdown.Option("WARNING", "警告 (WARN)"),
-                ft.dropdown.Option("ERROR", "错误 (ERROR)"),
+                ft.dropdown.Option("DEBUG", I18n.get("sys_opt_debug")),
+                ft.dropdown.Option("INFO", I18n.get("sys_opt_info")),
+                ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
+                ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
             ],
             on_change=self.on_log_level_change
         )
@@ -44,18 +44,19 @@ class SystemTab(ft.Container):
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
-            suffix_text="条",
+            suffix_text=I18n.get("common_items"),
             border_radius=8
         )
         
+        val = ConfigHandler.get_tushare_api_limit()
         self.rate_limit_input = ft.TextField(
-            value=str(ConfigHandler.get_api_rate_limit()),
+            value=str(val) if val and val > 0 else "",
             width=100,
             text_size=14,
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
-            suffix_text="次/分",
+            suffix_text=I18n.get("common_times_min"),
             border_radius=8
         )
         
@@ -64,7 +65,7 @@ class SystemTab(ft.Container):
             controls=[
                 DashboardCard(
                     content=ft.Column([
-                        SectionHeader(I18n.get("settings_general") if I18n.get("settings_general") != "settings_general" else "核心配置"),
+                        SectionHeader(I18n.get("sys_core_config")),
                         ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                         
                         # 1. Log Level Item
@@ -75,7 +76,7 @@ class SystemTab(ft.Container):
                             ),
                             ft.Column([
                                 ft.Text(I18n.get("settings_log_level"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                                ft.Text("控制系统日志详细程度 (Info/Debug)", size=12, color=AppColors.TEXT_SECONDARY),
+                                ft.Text(I18n.get("sys_log_label"), size=12, color=AppColors.TEXT_SECONDARY),
                             ], expand=True, spacing=2),
                             self.log_level_dropdown
                         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -89,9 +90,9 @@ class SystemTab(ft.Container):
                                 padding=10, bgcolor=ft.Colors.with_opacity(0.1, AppColors.ACCENT), border_radius=10
                             ),
                             ft.Column([
-                                ft.Text(I18n.get("settings_sync_concurrency") if I18n.get("settings_sync_concurrency") != "settings_sync_concurrency" else "同步并发数", 
+                                ft.Text(I18n.get("sys_concurrency"), 
                                        size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                                ft.Text(I18n.get("settings_hint_cpu") if I18n.get("settings_hint_cpu") != "settings_hint_cpu" else "多线程请求数量，建议 3-5", 
+                                ft.Text(I18n.get("sys_concurrency_hint"), 
                                        size=12, color=AppColors.TEXT_SECONDARY),
                             ], expand=True, spacing=2),
                             ft.Container(
@@ -139,8 +140,8 @@ class SystemTab(ft.Container):
                                 padding=10, bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.CYAN), border_radius=10
                             ),
                             ft.Column([
-                                ft.Text("API 速率限制", size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                                ft.Text("Tushare 接口每分钟最大请求次数 (默认200)", size=12, color=AppColors.TEXT_SECONDARY),
+                                ft.Text(I18n.get("sys_tushare_limit"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                                ft.Text(I18n.get("sys_tushare_limit_desc"), size=12, color=AppColors.TEXT_SECONDARY),
                             ], expand=True, spacing=2),
                             ft.Row([
                                 self.rate_limit_input,
@@ -152,12 +153,138 @@ class SystemTab(ft.Container):
                                 )
                             ], spacing=5)
                         ]),
+
+                        ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
+
+                        # 5. Data Maintenance (System Init)
+                        ft.Row([
+                            ft.Container(
+                                content=ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, color=ft.Colors.RED_400, size=24),
+                                padding=10, bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.RED_400), border_radius=10
+                            ),
+                            ft.Column([
+                                ft.Text(I18n.get("sys_data_maint"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                                ft.Text(I18n.get("sys_data_maint_desc"), size=12, color=AppColors.TEXT_SECONDARY),
+                            ], expand=True, spacing=2),
+                            ft.ElevatedButton(
+                                text=I18n.get("sys_btn_init"),
+                                icon=ft.Icons.REFRESH,
+                                style=ft.ButtonStyle(
+                                    color=ft.Colors.WHITE,
+                                    bgcolor=ft.Colors.RED_400,
+                                ),
+                                on_click=self.show_init_dialog
+                            ),
+                            ft.OutlinedButton(
+                                text=I18n.get("sys_btn_health"),
+                                icon=ft.Icons.HEALTH_AND_SAFETY,
+                                on_click=self.on_health_check_click
+                            )
+                        ]),
                         
                     ], spacing=10)
                 )
             ],
             padding=ft.padding.only(bottom=50)
         )
+
+    def show_init_dialog(self, e):
+        # Confirmation Dialog
+        def close_dlg(e):
+            self.page.close(dlg_modal)
+
+        def start_init(e):
+            self.page.close(dlg_modal)
+            # We must schedule the async task
+            self.page.run_task(self.run_system_initialization)
+
+        dlg_modal = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(I18n.get("sys_init_confirm_title")),
+            content=ft.Text(I18n.get("sys_init_confirm_content")),
+            actions=[
+                ft.TextButton(I18n.get("common_cancel"), on_click=close_dlg),
+                ft.TextButton(I18n.get("common_start_exec"), on_click=start_init, style=ft.ButtonStyle(color=ft.Colors.RED)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg_modal)
+
+    async def run_system_initialization(self):
+        from data.data_processor import DataProcessor
+        import asyncio
+
+        # Progress Dialog UI
+        pb = ft.ProgressBar(width=400, color=AppColors.PRIMARY, bgcolor=AppColors.SURFACE_VARIANT)
+        status_text = ft.Text(I18n.get("common_preparing"), size=12, color=AppColors.TEXT_SECONDARY)
+        
+        cancel_event = asyncio.Event()
+
+        def cancel_click(e):
+            cancel_event.set()
+            status_text.value = I18n.get("sys_init_cancel_wait")
+            status_text.color = ft.Colors.RED
+            status_text.update()
+
+        dlg_progress = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(I18n.get("sys_init_progress_title")),
+            content=ft.Column([
+                ft.Text(I18n.get("sys_init_wait")),
+                ft.Container(height=10),
+                pb,
+                ft.Container(height=5),
+                status_text
+            ], height=100, width=400),
+            actions=[
+                ft.TextButton(I18n.get("common_cancel"), on_click=cancel_click, style=ft.ButtonStyle(color=ft.Colors.RED))
+            ],
+            actions_alignment=ft.MainAxisAlignment.CENTER
+        )
+        self.page.open(dlg_progress)
+        
+        try:
+            dp = DataProcessor()
+            
+            def progress_cb(current, total, msg):
+                # Update UI elements directly? 
+                # In Flet async handlers, we can just update? 
+                # But callback comes from DP which might be deep in loop. 
+                # We need to ensure we don't block.
+                # However, DP calls callback.
+                # We can't await inside non-async callback.
+                # Trick: Just validation.
+                status_text.value = f"{msg} ({int(current/max(1,total)*100)}%)" if total > 0 else msg
+                # status_text.update() # Sync update call might fail if loop busy?
+                # Better to just set value and trigger update periodically?
+                # Or use page.run_thread_safe if from thread?
+                # DataProcessor runs in asyncio loop.
+                # So we are in the same loop if DP is awaited properly.
+                # But callback is sync function.
+                # self.page.update() might be too heavy?
+                # Let's try direct update() on control.
+                try:
+                    status_text.update()
+                    pb.value = float(current) / max(1.0, float(total))
+                    pb.update()
+                except:
+                    pass
+
+            report = await dp.initialize_system(progress_callback=progress_cb, cancel_event=cancel_event)
+            
+            self.page.close(dlg_progress)
+            self.show_snack(I18n.get("sys_init_success"), color=ft.Colors.GREEN)
+            
+            # Auto-Show Health Report if available
+            if isinstance(report, dict):
+                self._show_health_report(report)
+            
+        except Exception as e:
+            self.page.close(dlg_progress)
+            logger.error(f"Initialization failed: {e}")
+            self.show_snack(I18n.get("sys_init_failed").format(error=e), color=ft.Colors.RED)
+
+
 
     def on_concurrency_change(self, e):
         val = int(self.concurrency_slider.value)
@@ -198,18 +325,169 @@ class SystemTab(ft.Container):
     def save_rate_limit(self, e):
         try:
             limit_str = self.rate_limit_input.value.strip()
+            
             if not limit_str:
-                self.show_snack("请输入速率限制")
+                # Empty means unlimited (0)
+                ConfigHandler.set_tushare_api_limit(0)
+                self.show_snack(I18n.get("sys_snack_limit_off"))
+                logger.info("Tushare API rate limit disabled (Unlimited)")
                 return
             
             limit = int(limit_str)
-            if limit < 10:
-                self.show_snack("速率限制至少为 10 次/分钟")
+            if limit <= 0:
+                ConfigHandler.set_tushare_api_limit(0)
+                self.show_snack("Tushare API 速率限制已解除 (不限速)")
                 return
+                
+            if limit < 10:
+                 self.show_snack(I18n.get("sys_snack_limit_min"))
+                 return
             
-            ConfigHandler.set_api_rate_limit(limit)
-            self.show_snack(f"API 速率限制已更新为 {limit} 次/分钟")
-            logger.info(f"API rate limit updated to {limit}")
-        except Exception as ex:
-            self.show_snack(f"{I18n.get('snack_save_fail')}: {str(ex)}")
-            logger.error(f"Failed to save rate limit: {ex}")
+            ConfigHandler.set_tushare_api_limit(limit)
+            self.show_snack(I18n.get("sys_snack_limit_set").format(limit=limit))
+            logger.info(f"Tushare API rate limit updated to {limit}")
+        except ValueError:
+            self.show_snack(I18n.get("ai_snack_param_err"), color=ft.Colors.RED)
+
+    def on_health_check_click(self, e):
+        """Run standalone health check reusing the core logic"""
+        self.page.run_task(self._run_health_check)
+
+    async def _run_health_check(self):
+        from data.data_processor import DataProcessor
+        import asyncio
+        
+        # Loading Dialog
+        dlg_loading = ft.AlertDialog(
+            modal=True,
+            content=ft.Row([
+                ft.ProgressRing(),
+                ft.Text(I18n.get("health_checking"), size=16)
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            actions=[],
+        )
+        self.page.open(dlg_loading)
+        
+        try:
+            dp = DataProcessor()
+            report = await dp.check_data_health()
+            
+            self.page.close(dlg_loading)
+            self._show_health_report(report)
+            
+        except Exception as e:
+            self.page.close(dlg_loading)
+            self.show_snack(I18n.get("common_check_fail").format(error=e), color=ft.Colors.RED)
+
+    def _show_health_report(self, report):
+        """Display the health check report dialog"""
+        # Parse Result
+        status = report.get('status', 'red')
+        market = report.get('market', {})
+        fundamentals = report.get('fundamentals', {})
+        tables = fundamentals.get('tables', {})
+        
+        color_map = {'green': ft.Colors.GREEN, 'yellow': ft.Colors.ORANGE, 'red': ft.Colors.RED}
+        icon_map = {'green': ft.Icons.CHECK_CIRCLE, 'yellow': ft.Icons.WARNING, 'red': ft.Icons.ERROR}
+        
+        status_color = color_map.get(status, ft.Colors.GREY)
+        status_icon = icon_map.get(status, ft.Icons.HELP)
+        
+        # Helper to create table row
+        def create_table_row(name, stats):
+            ratio = stats.get('ratio', 0)
+            fresh_ratio = stats.get('fresh_ratio', 0)
+            # Color code coverage
+            col = ft.Colors.GREEN if ratio > 0.98 else (ft.Colors.ORANGE if ratio > 0.9 else ft.Colors.RED)
+            
+            return ft.Row([
+                ft.Text(name, width=120, size=12, weight=ft.FontWeight.BOLD),
+                ft.ProgressBar(value=ratio, width=80, color=col, bgcolor=ft.Colors.GREY_200),
+                ft.Text(f"{ratio*100:.1f}%", width=50, size=12),
+                ft.Icon(ft.Icons.ACCESS_TIME, size=12, color=ft.Colors.BLUE if fresh_ratio > 0.8 else ft.Colors.GREY),
+                ft.Text(f"{fresh_ratio*100:.0f}%", size=12)
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+
+        # Build Table List (Priority Order)
+        table_rows = []
+        priority_order = ['financial_reports', 'fina_forecast', 'pledge_stat', 'margin_daily', 'suspend_d']
+        for t in priority_order:
+            if t in tables:
+                table_rows.append(create_table_row(t, tables[t]))
+        
+        # Reasons List
+        reasons = report.get('reasons', [])
+        reason_controls = []
+        if reasons:
+                reason_controls = [ft.Text("⚠️ " + r, size=12, color=ft.Colors.RED) for r in reasons]
+                reason_controls.insert(0, ft.Text(I18n.get("common_reason"), weight=ft.FontWeight.BOLD, size=12))
+                reason_controls.append(ft.Divider())
+
+        # Data Quality Metrics
+        gap_count = fundamentals.get('gap_count', 0)
+        sanity_errors = fundamentals.get('sanity_errors', 0)
+        
+        content = ft.Column([
+            ft.Row([
+                ft.Icon(status_icon, color=status_color, size=40),
+                ft.Column([
+                    ft.Text(I18n.get("health_status_label").format(status=status.upper()), size=20, weight=ft.FontWeight.BOLD, color=status_color),
+                    ft.Text(I18n.get("health_checked_count").format(count=len(tables)), size=12, color=ft.Colors.GREY)
+                ])
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Divider(),
+            
+            # Reasons
+            *reason_controls,
+            
+            # Market Section
+            ft.Text(I18n.get("health_market_ts"), weight=ft.FontWeight.BOLD),
+            ft.Row([
+                ft.Column([
+                    ft.Text(I18n.get("health_sync_latest"), size=12, color=ft.Colors.GREY),
+                    ft.Text(f"{market.get('latest_local', 'N/A')}", size=14)
+                ]),
+                ft.Column([
+                    ft.Text(I18n.get("health_sync_official"), size=12, color=ft.Colors.GREY),
+                    ft.Text(f"{market.get('latest_official', 'N/A')}", size=14)
+                ]),
+                ft.Column([
+                    ft.Text(I18n.get("health_lag_days"), size=12, color=ft.Colors.GREY),
+                    ft.Text(f"{market.get('lag_days', 0)} {I18n.get('common_suffix_day')}", size=14, color=ft.Colors.RED if market.get('lag_days', 0) > 0 else ft.Colors.GREEN)
+                ]),
+            ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
+            
+            ft.Divider(),
+            
+            # Quality Assurance Section (v2.0)
+            ft.Text(I18n.get("health_qa"), weight=ft.FontWeight.BOLD),
+            ft.Row([
+                ft.Column([
+                    ft.Text(I18n.get("health_gap_count"), size=12, color=ft.Colors.GREY),
+                    ft.Text(f"{gap_count} {I18n.get('common_suffix_place')}", size=14, color=ft.Colors.RED if gap_count > 0 else ft.Colors.GREEN, weight=ft.FontWeight.BOLD)
+                ]),
+                ft.Column([
+                    ft.Text(I18n.get("health_sanity_err"), size=12, color=ft.Colors.GREY),
+                    ft.Text(f"{sanity_errors} {I18n.get('common_items')}", size=14, color=ft.Colors.RED if sanity_errors > 0 else ft.Colors.GREEN, weight=ft.FontWeight.BOLD)
+                ]),
+            ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
+            ft.Divider(),
+            
+            # Fundamentals Section
+            ft.Row([
+                ft.Text("深度覆盖 (Coverage & Freshness)", weight=ft.FontWeight.BOLD),
+                ft.Text("阈值: 98%", size=10, color=ft.Colors.GREY)
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            ft.Container(height=10),
+            *table_rows,
+            
+            ft.Container(height=10),
+            ft.Text(f"{I18n.get('health_missing_sample')}: {len(fundamentals.get('missing_samples', []))} {I18n.get('common_items')}", size=10, color=ft.Colors.GREY),
+        ], width=450, height=550, scroll=ft.ScrollMode.AUTO)
+        
+        dlg_result = ft.AlertDialog(
+            title=ft.Text(I18n.get("health_report_title")),
+            content=content,
+            actions=[ft.TextButton(I18n.get("common_close"), on_click=lambda e: self.page.close(dlg_result))]
+        )
+        self.page.open(dlg_result)

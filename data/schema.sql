@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     updated_at TEXT
 );
 
--- 2. Daily Quotes - Complete OHLCV data for technical analysis
+-- 2. Daily Quotes
 CREATE TABLE IF NOT EXISTS daily_quotes (
     ts_code TEXT NOT NULL,
     trade_date TEXT NOT NULL,
@@ -31,11 +31,16 @@ CREATE TABLE IF NOT EXISTS daily_quotes (
     pct_chg REAL,
     vol REAL,
     amount REAL,
-    adj_factor REAL, 
+    adj_factor REAL,
+    -- Pre-Adjusted Prices (QFQ) for easier Backtesting
+    qfq_open REAL,
+    qfq_high REAL,
+    qfq_low REAL,
+    qfq_close REAL,
     PRIMARY KEY (ts_code, trade_date)
 );
 
--- 3. Daily Indicators - Valuation and market cap data
+-- 3. Daily Indicators
 CREATE TABLE IF NOT EXISTS daily_indicators (
     ts_code TEXT NOT NULL,
     trade_date TEXT NOT NULL,
@@ -92,7 +97,7 @@ CREATE TABLE IF NOT EXISTS northbound_holding (
     PRIMARY KEY (ts_code, trade_date)
 );
 
--- 6. Dragon Tiger Board (LHB - top_list)
+-- 6. Dragon Tiger Board
 CREATE TABLE IF NOT EXISTS top_list (
     trade_date TEXT NOT NULL,
     ts_code TEXT NOT NULL,
@@ -112,7 +117,7 @@ CREATE TABLE IF NOT EXISTS top_list (
     PRIMARY KEY (trade_date, ts_code)
 );
 
--- 7. Sync Status Tracking
+-- 7. Sync Status
 CREATE TABLE IF NOT EXISTS sync_status (
     table_name TEXT PRIMARY KEY,
     last_sync_date TEXT,
@@ -122,7 +127,7 @@ CREATE TABLE IF NOT EXISTS sync_status (
     updated_at TEXT
 );
 
--- 8. Screening History (Review System)
+-- 8. Screening History
 CREATE TABLE IF NOT EXISTS screening_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_date TEXT NOT NULL,
@@ -154,7 +159,7 @@ CREATE TABLE IF NOT EXISTS block_trade (
     PRIMARY KEY (ts_code, trade_date, buyer, seller)
 );
 
--- 10. Market News (Real-time storage for AI)
+-- 10. Market News
 CREATE TABLE IF NOT EXISTS market_news (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT,
@@ -165,7 +170,7 @@ CREATE TABLE IF NOT EXISTS market_news (
     UNIQUE(content, publish_time)
 );
 
--- 11. Trade Calendar (Persistent Cache)
+-- 11. Trade Calendar
 CREATE TABLE IF NOT EXISTS trade_cal (
     cal_date TEXT PRIMARY KEY,
     exchange TEXT,
@@ -193,7 +198,150 @@ CREATE TABLE IF NOT EXISTS financial_reports (
     debt_to_assets REAL,
     or_yoy REAL,
     netprofit_yoy REAL,
+    goodwill REAL, 
+    audit_result TEXT,
     PRIMARY KEY (ts_code, end_date)
+);
+
+-- 13. Index Daily
+CREATE TABLE IF NOT EXISTS index_daily (
+    ts_code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    close REAL,
+    open REAL,
+    high REAL,
+    low REAL,
+    pre_close REAL,
+    change REAL,
+    pct_chg REAL,
+    vol REAL,
+    amount REAL,
+    PRIMARY KEY (ts_code, trade_date)
+);
+
+-- 13b. Index Indicators
+CREATE TABLE IF NOT EXISTS index_dailybasic (
+    ts_code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    total_mv REAL,
+    float_mv REAL,
+    total_share REAL,
+    float_share REAL,
+    free_share REAL,
+    turnover_rate REAL,
+    turnover_rate_f REAL,
+    pe REAL,
+    pe_ttm REAL,
+    pb REAL,
+    PRIMARY KEY (ts_code, trade_date)
+);
+
+-- 14. Margin Data
+CREATE TABLE IF NOT EXISTS margin_daily (
+    ts_code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    rzye REAL, 
+    rqye REAL, 
+    rzmre REAL, 
+    rqyl REAL, 
+    rzrqye REAL,
+    PRIMARY KEY (ts_code, trade_date)
+);
+
+-- 15. Suspension Data
+CREATE TABLE IF NOT EXISTS suspend_d (
+    ts_code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    suspend_timing TEXT,
+    suspend_type_name TEXT,
+    PRIMARY KEY (ts_code, trade_date)
+);
+
+-- 16. Limit List
+CREATE TABLE IF NOT EXISTS limit_list (
+    trade_date TEXT NOT NULL,
+    ts_code TEXT NOT NULL,
+    name TEXT,
+    close REAL,
+    pct_chg REAL,
+    amp REAL,
+    fc_ratio REAL, 
+    fl_ratio REAL, 
+    fd_amount REAL, 
+    first_time TEXT, 
+    last_time TEXT, 
+    open_times INTEGER, 
+    strth REAL, 
+    limit_type TEXT, 
+    PRIMARY KEY (trade_date, ts_code)
+);
+
+-- 17. Performance Forecast
+CREATE TABLE IF NOT EXISTS fina_forecast (
+    ts_code TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    ann_date TEXT,
+    type TEXT,
+    p_change_min REAL, 
+    p_change_max REAL, 
+    net_profit_min REAL, 
+    net_profit_max REAL, 
+    PRIMARY KEY (ts_code, end_date, ann_date)
+);
+
+-- 18. Main Business Composition
+CREATE TABLE IF NOT EXISTS fina_mainbz (
+    ts_code TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    bz_item TEXT, 
+    bz_sales REAL, 
+    bz_profit REAL, 
+    bz_cost REAL, 
+    curr_type TEXT, 
+    update_flag TEXT,
+    PRIMARY KEY (ts_code, end_date, bz_item)
+);
+
+-- 19. Stock Pledge Statistics
+CREATE TABLE IF NOT EXISTS pledge_stat (
+    ts_code TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    pledge_count INTEGER,
+    unrest_pledge REAL,
+    rest_pledge REAL,
+    total_share REAL,
+    pledge_ratio REAL,
+    PRIMARY KEY (ts_code, end_date)
+);
+
+-- 20. Stock Repurchase
+CREATE TABLE IF NOT EXISTS repurchase (
+    ts_code TEXT NOT NULL,
+    ann_date TEXT NOT NULL,
+    end_date TEXT,
+    proc TEXT,
+    exp_date TEXT,
+    vol REAL,
+    amount REAL,
+    high_limit REAL,
+    low_limit REAL,
+    PRIMARY KEY (ts_code, ann_date) 
+);
+
+-- 21. Dividend History
+CREATE TABLE IF NOT EXISTS dividend (
+    ts_code TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    ann_date TEXT NOT NULL,
+    div_proc TEXT, 
+    stk_div REAL, 
+    stk_bo_rate REAL, 
+    stk_co_rate REAL, 
+    cash_div_tax REAL, 
+    cash_div_tax_rate REAL, 
+    record_date TEXT, 
+    ex_date TEXT, 
+    PRIMARY KEY (ts_code, ann_date)
 );
 
 -- Indexes
@@ -201,7 +349,18 @@ CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date);
 CREATE INDEX IF NOT EXISTS idx_quotes_code ON daily_quotes(ts_code);
 CREATE INDEX IF NOT EXISTS idx_indicators_date ON daily_indicators(trade_date);
 CREATE INDEX IF NOT EXISTS idx_fina_enddate ON financial_reports(end_date);
+CREATE INDEX IF NOT EXISTS idx_fina_code_date ON financial_reports(ts_code, end_date);
 CREATE INDEX IF NOT EXISTS idx_mf_date ON moneyflow_daily(trade_date);
 CREATE INDEX IF NOT EXISTS idx_north_date ON northbound_holding(trade_date);
 CREATE INDEX IF NOT EXISTS idx_history_date ON screening_history(trade_date);
 CREATE INDEX IF NOT EXISTS idx_cal_date ON trade_cal(cal_date);
+CREATE INDEX IF NOT EXISTS idx_stock_list_date ON stock_basic(list_date);
+CREATE INDEX IF NOT EXISTS idx_index_date ON index_daily(trade_date);
+CREATE INDEX IF NOT EXISTS idx_margin_date ON margin_daily(trade_date);
+CREATE INDEX IF NOT EXISTS idx_suspend_date ON suspend_d(trade_date);
+CREATE INDEX IF NOT EXISTS idx_limit_date ON limit_list(trade_date);
+CREATE INDEX IF NOT EXISTS idx_forecast_code ON fina_forecast(ts_code);
+CREATE INDEX IF NOT EXISTS idx_mainbz_code ON fina_mainbz(ts_code);
+CREATE INDEX IF NOT EXISTS idx_pledge_code ON pledge_stat(ts_code);
+CREATE INDEX IF NOT EXISTS idx_repurchase_code ON repurchase(ts_code);
+CREATE INDEX IF NOT EXISTS idx_dividend_code ON dividend(ts_code);

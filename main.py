@@ -2,12 +2,14 @@ import flet as ft
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SettingsView
+from ui.views.data_view import DataExplorerView
 from ui.views.onboarding_wizard import OnboardingWizard
 from ui.theme import AppColors, AppStyles, apply_page_theme
 from utils.config_handler import ConfigHandler
 from utils.logger import setup_logging
 from utils.scheduler_service import scheduler
 from data.news_subscription import NewsSubscriptionService
+from data.cache_manager import CacheManager
 
 from ui.i18n import I18n
 import logging
@@ -32,6 +34,9 @@ async def main(page: ft.Page):
         # I will preserve the surrounding code by targeting specific range.
 
     # ... (Skip ahead to page setup) ...
+
+    # Start Cache Manager explicitly on Main Loop
+    await CacheManager().start()
 
     # Start background scheduler
     scheduler.start()
@@ -136,8 +141,13 @@ async def main(page: ft.Page):
             nav_rail.destinations[1].label = I18n.get("nav_screener")
             nav_rail.destinations[1].label_content.value = I18n.get("nav_screener")
             
-            nav_rail.destinations[2].label = I18n.get("nav_settings")
-            nav_rail.destinations[2].label_content.value = I18n.get("nav_settings")
+            nav_rail.destinations[1].label_content.value = I18n.get("nav_screener")
+            
+            nav_rail.destinations[2].label = I18n.get("nav_data")
+            nav_rail.destinations[2].label_content.value = I18n.get("nav_data")
+            
+            nav_rail.destinations[3].label = I18n.get("nav_settings")
+            nav_rail.destinations[3].label_content.value = I18n.get("nav_settings")
             nav_rail.update()
         page.update()
 
@@ -164,11 +174,13 @@ async def main(page: ft.Page):
         # --- Views ---
         home_view = HomeView(on_run_strategy=run_strategy_from_home)
         screener_view = ScreenerView()
+        data_view = DataExplorerView()
         settings_view = SettingsView()
         
         views = [
             home_view,
             screener_view,
+            data_view,
             settings_view
         ]
 
@@ -203,6 +215,12 @@ async def main(page: ft.Page):
                     selected_icon=ft.Icons.FILTER_ALT, 
                     label=I18n.get("nav_screener"),
                     label_content=ft.Text(I18n.get("nav_screener"), color=AppColors.TEXT_ON_PRIMARY),
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.STORAGE_OUTLINED, 
+                    selected_icon=ft.Icons.STORAGE_ROUNDED, 
+                    label=I18n.get("nav_data"),
+                    label_content=ft.Text(I18n.get("nav_data"), color=AppColors.TEXT_ON_PRIMARY),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED, 

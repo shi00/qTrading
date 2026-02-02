@@ -46,13 +46,10 @@ class OversoldStrategy(BaseStrategy):
         logger.info(f"[OversoldStrategy] Fetching history from {start_date} to {end_date} for RSI calculation...")
 
         # 3. Fetch Historical Data (Batch) using DataProcessor/Cache
-        # Optimization: We only need 'close' and 'adj_factor'
-        # We fetch ALL quotes for the period. 
-        # Note: If database is large, fetching *all* quotes for 30 days might be heavy (e.g. 5k stocks * 30 rows = 150k rows).
-        # SQLite should handle 150k rows in milliseconds.
-        
+        # Optimization: Filter by relevant stocks only
         try:
-            history_df = await dp.cache.get_daily_quotes(start_date=start_date, end_date=end_date)
+            valid_codes = snapshot_df['ts_code'].tolist()
+            history_df = await dp.cache.get_daily_quotes(start_date=start_date, end_date=end_date, ts_code_list=valid_codes)
             
             if history_df is None or history_df.empty:
                 logger.warning("[OversoldStrategy] No historical data found.")

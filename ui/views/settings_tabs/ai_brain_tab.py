@@ -49,10 +49,10 @@ class AIBrainTab(ft.Container):
         )
         
         self.ai_status_icon = ft.Icon(ft.Icons.CIRCLE, color=ft.Colors.GREY)
-        self.ai_status_text = ft.Text("未连接", color=ft.Colors.GREY)
+        self.ai_status_text = ft.Text(I18n.get("ai_status_disconnected"), color=ft.Colors.GREY)
         
         self.btn_test_connection = ft.ElevatedButton(
-            text="测试连接",
+            text=I18n.get("ai_btn_test"),
             icon=ft.Icons.VIBRATION,
             on_click=self._test_ai_connection,
             style=AppStyles.primary_button()
@@ -87,7 +87,7 @@ class AIBrainTab(ft.Container):
             value=str(current_max_candidates),
             width=190,
             keyboard_type=ft.KeyboardType.NUMBER,
-            hint_text="默认: 30",
+            hint_text=I18n.get("ai_hint_default").format(val=30),
             tooltip=I18n.get("settings_hint_ai_cost")
         )
         self.strategy_min_turnover_input = ft.TextField(
@@ -95,7 +95,7 @@ class AIBrainTab(ft.Container):
             value=str(current_min_turnover),
             width=190,
             keyboard_type=ft.KeyboardType.NUMBER,
-            hint_text="默认: 2.0",
+            hint_text=I18n.get("ai_hint_default").format(val=2.0),
             tooltip=I18n.get("settings_hint_turnover")
         )
         self.ai_concurrency_label = ft.Text(f"{I18n.get('settings_ai_concurrency')}: {current_ai_concurrency}", size=14)
@@ -112,18 +112,18 @@ class AIBrainTab(ft.Container):
                     SectionHeader(I18n.get("settings_sec_tuning")),
                     ft.Icon(ft.Icons.TUNE, size=20, color=AppColors.PRIMARY)
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                ft.Text("调整AI分析的深度与广度，平衡成本与性能", size=12, color=AppColors.TEXT_SECONDARY),
+                ft.Text(I18n.get("ai_tuning_desc"), size=12, color=AppColors.TEXT_SECONDARY),
                 ft.Container(height=10),
                 ft.ResponsiveRow([
                     ft.Column([
                         ft.Row([
                             self.ai_max_candidates_input,
-                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip="上限")
+                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("ai_hint_cap"))
                         ]),
                         ft.Container(height=5),
                         ft.Row([
                             self.strategy_min_turnover_input,
-                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip="换手率下限")
+                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("ai_hint_turnover_min"))
                         ]),
                     ], col={"sm": 12, "md": 6}),
                     ft.Column([
@@ -156,7 +156,7 @@ class AIBrainTab(ft.Container):
         # Card 3: System Persona
         self.card_prompt = DashboardCard(
             content=ft.Column([
-                ft.Row([SectionHeader("系统人设 (System Prompt)"), self.btn_reset_prompt], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Row([SectionHeader(I18n.get("ai_sec_persona")), self.btn_reset_prompt], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Container(
                     content=self.ai_prompt_input,
                     border=ft.border.all(1, AppColors.BORDER),
@@ -210,7 +210,7 @@ class AIBrainTab(ft.Container):
                 ConfigHandler.set_ai_max_candidates(max_cand)
                 ConfigHandler.set_strategy_min_turnover(min_turn)
             except ValueError:
-                self.show_snack("参数错误：数量必须为整数，换手率必须为数字", color=ft.Colors.RED)
+                self.show_snack(I18n.get("ai_snack_param_err"), color=ft.Colors.RED)
                 return
 
             ConfigHandler.save_ai_config(ai_key, ai_base, ai_model)
@@ -261,26 +261,26 @@ class AIBrainTab(ft.Container):
         base_url = self.ai_base_url_input.value
         model = self.ai_model_dropdown.value
         if not api_key:
-            self.show_snack("请输入API Key", color=ft.Colors.ERROR)
+            self.show_snack(I18n.get("ai_snack_key_err"), color=ft.Colors.ERROR)
             return
 
-        self.btn_test_connection.text = "测试中..."
+        self.btn_test_connection.text = I18n.get("ai_btn_testing")
         self.btn_test_connection.disabled = True
         self.update()
         
         try:
             success = await AIClient.test_connection(api_key, base_url, model)
             if success:
-                self.show_snack("连接测试成功！", color=ft.Colors.GREEN)
-                self.ai_status_text.value = "已连接"
+                self.show_snack(I18n.get("ai_snack_conn_ok"), color=ft.Colors.GREEN)
+                self.ai_status_text.value = I18n.get("ai_status_connected")
                 self.ai_status_icon.icon = ft.Icons.CHECK_CIRCLE
                 self.ai_status_icon.color = ft.Colors.GREEN
             else:
-                self.show_snack("连接测试失败", color=ft.Colors.ERROR)
+                self.show_snack(I18n.get("ai_snack_conn_fail"), color=ft.Colors.ERROR)
         except Exception as ex:
-            self.show_snack(f"连接失败: {str(ex)}", color=ft.Colors.ERROR)
+            self.show_snack(f"{I18n.get('ai_status_disconnected')}: {str(ex)}", color=ft.Colors.ERROR)
         finally:
-            self.btn_test_connection.text = "测试连接"
+            self.btn_test_connection.text = I18n.get("ai_btn_test")
             self.btn_test_connection.disabled = False
             self._safe_update()
 

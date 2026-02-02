@@ -4,52 +4,85 @@ import time
 import datetime
 import config
 from utils.config_handler import ConfigHandler
+from utils.rate_limiter import TokenBucket
 import logging
 import random
+
+import threading
 
 logger = logging.getLogger(__name__)
 
 class TushareClient:
     """
-    Enhanced Tushare API client with timeout, retry, and trade calendar support.
+    Enhanced Tushare API client with timeout, retry, trade calendar support, and TokenBucket Rate Limiting.
     """
     
     # Singleton instance
     _instance = None
+    _lock = threading.Lock() # Thread safety lock
     _trade_cal_cache = None  # Cache trade calendar
     
     def __new__(cls, token=None):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
     
     def __init__(self, token=None):
+        # Double-check locking for initialization to prevent race conditions
         if self._initialized:
             if token and token != self.token:
                 self.set_token(token)
             return
-        
-        self.token = token or ConfigHandler.get_token()
-        self.timeout = ConfigHandler.get_request_timeout()  # Request timeout in seconds
-        self.max_retries = ConfigHandler.get_request_max_retries()
-        
-        if self.token:
-            ts.set_token(self.token)
-            self.pro = ts.pro_api()
-        else:
-            self.pro = None
-        
-        self._initialized = True
+            
+        with self._lock:
+            if self._initialized:
+                return
+            
+            self.token = token or ConfigHandler.get_token()
+            self.timeout = ConfigHandler.get_tushare_timeout() # Custom timeout for Tushare
+            self.max_retries = ConfigHandler.get_request_max_retries()
+            
+            # Initialize Rate Limiter
+            # Get limit per minute (default None)
+            limit_per_min = ConfigHandler.get_tushare_api_limit()
+            
+            if limit_per_min and limit_per_min > 0:
+                rate_per_sec = limit_per_min / 60.0
+                # Capacity allows for small bursts (e.g. 5 seconds worth or fixed 10)
+                capacity = max(10, rate_per_sec * 5)
+                self._rate_limiter = TokenBucket(start_tokens=capacity, capacity=capacity, rate=rate_per_sec)
+                logger.info(f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)")
+            else:
+                self._rate_limiter = None
+                logger.info("[API] Rate Limiter disabled (No limit set)")
+            
+            if self.token:
+                ts.set_token(self.token)
+                # Pass timeout to requests via tushare SDK
+                self.pro = ts.pro_api(timeout=self.timeout) 
+                logger.info(f"[API] Tushare Client initialized with timeout={self.timeout}s")
+            else:
+                self.pro = None
+            
+            self._initialized = True
 
     def set_token(self, token):
         self.token = token
         ts.set_token(token)
-        self.pro = ts.pro_api()
+        # Re-initialize with timeout
+        self.pro = ts.pro_api(timeout=self.timeout)
+        logger.info(f"[API] Token updated. Client re-initialized with timeout={self.timeout}s")
 
     def _handle_api_call(self, func, **kwargs):
         """Helper to handle rate limits, retries, and errors with jittered backoff"""
         for i in range(self.max_retries):
+            # Consume token BEFORE request (Proactive Rate Limiting)
+            if self._rate_limiter:
+                self._rate_limiter.consume(1)
+                
             try:
                 if not self.pro:
                     raise Exception("Tushare Token not set. Please set your token in settings.")
@@ -276,7 +309,7 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             ts_code=ts_code,
-            fields='ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int'
+            fields='ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill'
         )
 
     def get_fina_indicator(self, period=None, start_date=None, end_date=None, ts_code=None):
@@ -383,14 +416,16 @@ class TushareClient:
         )
 
     # ========== Market Overview APIs ==========
-    def get_index_daily(self, ts_code=None, trade_date=None):
+    def get_index_daily(self, ts_code=None, trade_date=None, start_date=None, end_date=None):
         """Get index daily data"""
         logger.debug(f"[API] fetching index_daily date={trade_date} code={ts_code}...")
         # Index Daily
         return self._handle_api_call(
             self.pro.index_daily,
             ts_code=ts_code,
-            trade_date=trade_date
+            trade_date=trade_date,
+            start_date=start_date,
+            end_date=end_date
         )
 
     def get_moneyflow_hsgt(self, trade_date=None):
@@ -400,3 +435,110 @@ class TushareClient:
             self.pro.moneyflow_hsgt,
             trade_date=trade_date
         )
+
+    def get_index_dailybasic(self, trade_date=None, ts_code=None):
+        """Get index daily indicators (PE, PB, etc.)"""
+        logger.debug(f"[API] fetching index_dailybasic date={trade_date}...")
+        return self._handle_api_call(
+            self.pro.index_dailybasic,
+            trade_date=trade_date,
+            ts_code=ts_code,
+            fields='ts_code,trade_date,total_mv,float_mv,total_share,float_share,free_share,turnover_rate,turnover_rate_f,pe,pe_ttm,pb'
+        )
+
+    def get_limit_list(self, trade_date=None):
+        """Get daily limit up/down list"""
+        logger.debug(f"[API] fetching limit_list date={trade_date}...")
+        return self._handle_api_call(
+            self.pro.limit_list,
+            trade_date=trade_date,
+            # fields='trade_date,ts_code,name,close,pct_chg,amp,fc_ratio,fl_ratio,fd_amount,first_time,last_time,open_times,strth,limit_type'
+        )
+
+    def get_suspend_d(self, trade_date=None, ts_code=None):
+        """Get daily suspension list"""
+        logger.debug(f"[API] fetching suspend_d date={trade_date}...")
+        return self._handle_api_call(
+            self.pro.suspend_d,
+            trade_date=trade_date,
+            ts_code=ts_code,
+            suspend_type='S' # Only stop
+        )
+
+    def get_margin_detail(self, trade_date=None, ts_code=None):
+        """Get individual stock margin detail"""
+        logger.debug(f"[API] fetching margin_detail date={trade_date} code={ts_code}...")
+        # Note: API might be 'margin_detail' or 'margin' depending on permissions
+        # Usually 'margin_detail' is for individual stocks
+        return self._handle_api_call(
+            self.pro.margin_detail,
+            trade_date=trade_date,
+            ts_code=ts_code
+        )
+
+    # ========== Extended Fundamentals (Step 4) ==========
+
+    def get_fina_audit(self, ts_code, start_date=None, end_date=None):
+        """Get financial audit opinion"""
+        logger.debug(f"[API] fetching audit for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.fina_audit,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields='ts_code,end_date,ann_date,audit_result,audit_agency,audit_sign'
+        )
+
+    def get_forecast(self, ts_code=None, period=None, start_date=None, end_date=None):
+        """Get performance forecast"""
+        logger.debug(f"[API] fetching forecast for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.forecast,
+            ts_code=ts_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            fields='ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,net_profit_max'
+        )
+
+    def get_fina_mainbz(self, ts_code=None, period=None, start_date=None, end_date=None):
+        """Get main business composition"""
+        logger.debug(f"[API] fetching mainbz for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.fina_mainbz,
+            ts_code=ts_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            type='P' # By Product
+        )
+
+    def get_pledge_stat(self, ts_code=None, end_date=None):
+        """Get share pledge statistics"""
+        logger.debug(f"[API] fetching pledge_stat for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.pledge_stat,
+            ts_code=ts_code,
+            end_date=end_date
+        )
+
+    def get_repurchase(self, ts_code=None, start_date=None, end_date=None):
+        """Get share repurchase"""
+        logger.debug(f"[API] fetching repurchase for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.repurchase,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date
+        ) 
+
+    def get_dividend(self, ts_code=None, start_date=None, end_date=None):
+        """Get dividend history"""
+        logger.debug(f"[API] fetching dividend for {ts_code}...")
+        return self._handle_api_call(
+            self.pro.dividend,
+            ts_code=ts_code,
+            ann_date=start_date # Using date range if possible, or ts_code
+            # Tushare dividend API standard fields
+        )
+

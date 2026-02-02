@@ -6,8 +6,27 @@ import os
 import config
 from utils.config_handler import ConfigHandler
 import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from dataclasses import dataclass, field
+from typing import Any
+import itertools
 
 logger = logging.getLogger(__name__)
+
+# Priority Levels (Lower value = Higher Priority)
+PRIORITY_CRITICAL = 0   # STOP, INIT, Schema Changes
+PRIORITY_HIGH = 10      # User Real-time Queries, Single item fixes
+PRIORITY_NORMAL = 50    # Standard Daily Sync (Batch)
+PRIORITY_LOW = 100      # Historical Backfill (Background)
+
+@dataclass(order=True)
+class PrioritizedTask:
+    priority: int
+    seq: int
+    item: Any = field(compare=False)
+
 
 class CacheManager:
     _instance = None
@@ -23,7 +42,8 @@ class CacheManager:
             return
             
         self.db_path = db_path or config.DB_PATH
-        self.queue = asyncio.Queue(maxsize=ConfigHandler.get_db_queue_size()) # Ring buffer / Queue
+        self.queue = asyncio.PriorityQueue(maxsize=ConfigHandler.get_db_queue_size()) # Priority Queue
+        self._seq_counter = itertools.count() # For stable FIFO ordering
         self.writer_task = None
         self._running = False
         self._closing = False # New flag to prevent restart during close
@@ -32,17 +52,53 @@ class CacheManager:
         self._maintenance_event = asyncio.Event()
         self._maintenance_event.set() # Default: Ready (Green light)
         
+        self._schema_initialized = False
         self._initialized = True
 
+    async def _enqueue(self, item, priority=PRIORITY_NORMAL):
+        """
+        Thread-safe helper to enqueue tasks.
+        Auto-bridges cross-loop calls to the bound main loop.
+        """
+        if not self._running or getattr(self, '_loop', None) is None:
+            # Fallback for critical tasks if loop not bound (shouldn't happen with explicit start)
+            if priority == PRIORITY_CRITICAL:
+                 pass 
+            else:
+                 return
+
+        # Wrap payload
+        task = PrioritizedTask(priority, next(self._seq_counter), item)
+
+        try:
+            curr_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            curr_loop = None
+
+        if self._loop and curr_loop == self._loop:
+            # Same loop (Main Thread) -> Direct Put
+            await self.queue.put(task)
+        else:
+            # Different loop (Background Thread) -> Bridge
+            if self._loop and self._loop.is_running():
+                # Use run_coroutine_threadsafe to schedule put() on the bound loop
+                # put() is a coroutine, so we run it threadsafe
+                asyncio.run_coroutine_threadsafe(self.queue.put(task), self._loop)
+            else:
+                logger.warning("[CacheManager] Main loop closed, cannot bridge task.")
+
     async def start(self):
-        """Start the background DB writer task"""
+        """Start the background DB writer task on the CURRENT loop (Main Loop)"""
         if self._closing:
-            return # Don't start if we are closing
+            return 
             
         if not self._running:
             self._running = True
+            # STRICT BINDING: Capture the loop that calls start() (Main Loop)
+            self._loop = asyncio.get_running_loop()
+            
             self.writer_task = asyncio.create_task(self._db_writer_loop())
-            logger.info("[CacheManager] DB Writer started.")
+            logger.info(f"[CacheManager] DB Writer started on loop {id(self._loop)}.")
 
     async def close(self):
         """Stop the writer task and wait for queue to empty"""
@@ -53,18 +109,43 @@ class CacheManager:
         
         if self._running:
             logger.info("[CacheManager] Stopping DB Writer... waiting for queue to empty.")
-            # We assume the producer has stopped producing before calling close()
-            # or we accept that some late items might be rejected if we enforced it strictly.
-            await self.queue.put(None) # Sentinel
             
             if self.writer_task:
                 try:
-                    await self.writer_task
+                    task_loop = self.writer_task.get_loop()
+                    curr_loop = asyncio.get_running_loop()
+                    
+                    if task_loop == curr_loop:
+                        # Same loop: standard await
+                        await self._enqueue(None, PRIORITY_CRITICAL)
+                        await self.writer_task
+                    else:
+                        if task_loop.is_running():
+                            logger.info(f"[CacheManager] Closing cross-loop ({id(task_loop)} vs {id(curr_loop)})...")
+                            
+                            # 1. Send Sentinel safely on the writer's loop
+                            future_sentinel = asyncio.run_coroutine_threadsafe(
+                                self._enqueue(None, PRIORITY_CRITICAL), 
+                                task_loop
+                            )
+                            await asyncio.wrap_future(future_sentinel)
+                            
+                            # 2. Wait for writer task
+                            future_wait = asyncio.run_coroutine_threadsafe(
+                                asyncio.wait_for(self.writer_task, timeout=10.0), 
+                                task_loop
+                            )
+                            await asyncio.wrap_future(future_wait)
+                        else:
+                            logger.warning("[CacheManager] Writer task loop is already closed. Cannot await.")
                 except Exception as e:
                     logger.error(f"[CacheManager] Writer task error during close: {e}")
+            else:
+                # No writer task running? Just reset.
+                self._running = False
             
             self._running = False
-            self._closing = False # Reset if we want to restart later? Or keep closed.
+            self._closing = False 
             logger.info("[CacheManager] DB Writer stopped.")
 
     async def wait_for_maintenance(self):
@@ -85,7 +166,9 @@ class CacheManager:
             while True:
                 try:
                     # Get first task
-                    task = await self.queue.get()
+                    task_wrapper = await self.queue.get()
+                    task = task_wrapper.item
+                    priority = task_wrapper.priority
                     
                     if task is None: # Sentinel
                         self.queue.task_done()
@@ -125,7 +208,10 @@ class CacheManager:
                         continue
 
                     # === Normal Batch Processing (INSERT/UPDATE/DELETE) ===
-                    MAX_BATCH_ROWS = 20000
+                    # BATCHING STRATEGY FOR PRIORITY QUEUE:
+                    # Only batch items with SAME priority.
+                    
+                    MAX_BATCH_ROWS = ConfigHandler.get_max_batch_rows()
                     current_batch_rows = 0
                     
                     # Calculate rows for the first task
@@ -133,33 +219,69 @@ class CacheManager:
                     
                     tasks = [task]
                     
-                    # Batch retrieval (drain queue up to limit)
+                    # Batch retrieval (drain queue up to limit, BUT respect Priority)
                     try:
                         for _ in range(50): 
                             if current_batch_rows >= MAX_BATCH_ROWS:
                                 break
                             
-                            t = self.queue.get_nowait()
-                            if t is None:
+                            # Peek/Get next item
+                            # If PriorityQueue, get_nowait returns the highest priority item.
+                            # If that item has higher (lower val) or equal priority, we take it.
+                            # But if we are processing P2, and a P0 comes, we should ideally put P2 back?
+                            # Actually, get_nowait() will return P0 if it exists.
+                            # If we are processing P2, and get P0, we should run P0 First!
+                            # Current logic: 'tasks' is the batch we are building.
+                            # If we encounter a different priority, we should probably stop batching?
+                            # Or if it's more critical, we must execute it.
+                            
+                            # Simplified Logic:
+                            # Just drain queue. If we picked up a P0 while building P2 batch,
+                            # We can't easily "put back" to front.
+                            # So, we just execute what we got. 
+                            # Since PriorityQueue guarantees order, if we get P0, it means P0 was at head.
+                            # Wait, we already got the first task `task_wrapper`. 
+                            # If valid P0 existed, `task_wrapper` would be P0.
+                            # So any subsequent `get_nowait` will be >= `priority`.
+                            # We only batch if new task has SAME priority.
+                            
+                            try:
+                                next_wrapper = self.queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                                
+                            if next_wrapper.priority != priority:
+                                # Different priority (must be lower/worse, since we pulled best first)
+                                # Actually, it could be same numeric value but different arrival?
+                                # No, if priority is different int value, stop batching to allow re-evaluation?
+                                # Yes, let's strict batch by priority group.
+                                # Put it back!
+                                # WARNING: put() might re-order if we are not careful, but heapq is stable-ish for inputs?
+                                # No, PriorityQueue is heap.
+                                # To be safe, we just process it as a separate batch loop cycle.
+                                # But we already took it out. We must put it back.
+                                self.queue.put_nowait(next_wrapper)
+                                break
+                                
+                            # Same Priority, add to batch
+                            t = next_wrapper.item
+                            if t is None: # Sentinel found in batching?
                                 tasks.append(t)
                                 break
                             
-                            # Check if next task is compatible with batching
-                            # If it's a special task, we shouldn't batch it with SQLs generally, or we just execute batch first then special.
-                            # For simplicity, if we encounter a special task (FUNC/SCRIPT), we put it back or handle it separately?
-                            # Better: execute current batch, then loop back.
+                            # Check compatibility (SQL vs FUNC)
                             t_payload, t_args, t_type = t
                             if t_type == 'FUNC' or t_type == 'SCRIPT':
-                                # Push back to front of queue? No, asyncio.Queue doesn't support push_front.
-                                # So we MUST process it now or just add to 'tasks' list but execute differently?
-                                # Let's handle mixed batch by iterating.
-                                pass 
+                                # Don't batch special types with SQL
+                                # Put back and stop batching
+                                self.queue.put_nowait(next_wrapper)
+                                break
                             
-                            # Just add to tasks list and iterate logic handles types
-                            # But row count logic only applies to SQL
+                            
                             row_count = len(t_args) if t_type is True else 1
                             current_batch_rows += row_count
                             tasks.append(t)
+                            # self.queue.task_done() should NOT be called here, wait for processing!
                             
                     except asyncio.QueueEmpty:
                         pass
@@ -253,16 +375,21 @@ class CacheManager:
             logger.info("[CacheManager] Schema executed successfully.")
             
             if future:
-                future.set_result(True)
+                if not future.done():
+                    future.set_result(True)
+                else:
+                    logger.debug("[CacheManager] Schema future already done/cancelled.")
                 
         except Exception as e:
             logger.error(f"[CacheManager] Schema Error: {e}")
-            if future:
+            if future and not future.done():
                 future.set_exception(e)
 
     async def init_db(self):
         """Initialize database tables via Queue"""
-        await self.start()
+        if self._schema_initialized:
+             return
+
         
         # Create a future to wait for initialization
         loop = asyncio.get_running_loop()
@@ -271,14 +398,34 @@ class CacheManager:
         # Queue the internal function
         # Task: (Function, [args...], 'FUNC')
         # Arg 1 is always 'db' passed by worker, so we pass extra args here
-        await self.queue.put((self._execute_schema_internal, [future], 'FUNC'))
+        await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
         
         # Wait for it to finish
         await future
+        self._schema_initialized = True
 
     async def clear_all_cache(self):
         """Rebuild Database: Drop all tables and Re-initialize"""
         print("[Cache] Queuing Database Rebuild...")
+        
+        # 1. Purge Pending Writes to speed up
+        # Since we are destroying the DB, pending writes are useless.
+        # We drain the queue effectively skipping them.
+        purged_count = 0
+        try:
+            while not self.queue.empty():
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                    purged_count += 1
+                except asyncio.QueueEmpty:
+                    break
+            if purged_count > 0:
+                logger.info(f"[CacheManager] Purged {purged_count} pending tasks before rebuild.")
+        except Exception as e:
+            logger.warning(f"[CacheManager] Error purging queue: {e}")
+
+        self._schema_initialized = False
         
         # Enter Maintenance Mode (Block readers)
         self._maintenance_event.clear()
@@ -291,7 +438,7 @@ class CacheManager:
             drop_script = "\n".join([f"DROP TABLE IF EXISTS {t};" for t in tables])
             
             # Queue Drop Script
-            await self.queue.put((drop_script, [], 'SCRIPT'))
+            await self._enqueue((drop_script, [], 'SCRIPT'), PRIORITY_CRITICAL)
             
             # 2. Re-Initialize Schema
             # We don't necessarily need to wait for this one to finish synchronously if we don't return anything,
@@ -300,7 +447,7 @@ class CacheManager:
             loop = asyncio.get_running_loop()
             future = loop.create_future()
             
-            await self.queue.put((self._execute_schema_internal, [future], 'FUNC'))
+            await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
             
             await future
             print("[Cache] Database Rebuild Complete.")
@@ -379,7 +526,7 @@ class CacheManager:
         return df[cols].values.tolist()
 
     # ========== Stock Basic ==========
-    async def save_stock_basic(self, df):
+    async def save_stock_basic(self, df, priority=PRIORITY_NORMAL):
         """Save stock basic info (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
@@ -402,9 +549,7 @@ class CacheManager:
         # 1. Modify DF here (it's fast)
         df = df.copy() # Shallow copy of index/columns
         df['updated_at'] = now
-        
-        if not self._running and not self._closing:
-            await self.start()
+
 
         sql = '''
                 INSERT OR REPLACE INTO stock_basic 
@@ -421,7 +566,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True), priority)
             return len(params)
         return 0
 
@@ -435,17 +580,15 @@ class CacheManager:
                 return pd.DataFrame(rows, columns=cols)
 
     # ========== Daily Quotes ==========
-    async def save_daily_quotes(self, df):
+    async def save_daily_quotes(self, df, priority=PRIORITY_NORMAL):
         """Save daily OHLCV quotes (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
         
-        cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 
+        
+        cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close',  
                 'pre_close', 'change', 'pct_chg', 'vol', 'amount', 'adj_factor']
         
-        if not self._running and not self._closing:
-            await self.start()
-
         sql = '''
                 INSERT OR REPLACE INTO daily_quotes 
                 (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
@@ -459,32 +602,46 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True), priority)
             return len(params)
         return 0
 
-    async def get_daily_quotes(self, start_date=None, end_date=None, ts_code=None):
-        """Get daily quotes with optional filters"""
+    async def get_daily_quotes(self, ts_code=None, start_date=None, end_date=None, ts_code_list=None):
+        """
+        Get daily quotes from DB.
+        Support single code, list of codes, or date range.
+        Optimized to use IN (...) query if list provided.
+        """
         await self.wait_for_maintenance()
-        query = "SELECT * FROM daily_quotes WHERE 1=1"
-        params = []
-        
-        if start_date:
-            query += " AND trade_date >= ?"
-            params.append(start_date)
-        if end_date:
-            query += " AND trade_date <= ?"
-            params.append(end_date)
-        if ts_code:
-            query += " AND ts_code = ?"
-            params.append(ts_code)
-        
-        query += " ORDER BY trade_date DESC"
-        
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(query, params) as cursor:
+            base_sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
+            params = []
+            
+            if ts_code:
+                base_sql += " AND ts_code = ?"
+                params.append(ts_code)
+            
+            if start_date:
+                base_sql += " AND trade_date >= ?"
+                params.append(start_date)
+            
+            if end_date:
+                base_sql += " AND trade_date <= ?"
+                params.append(end_date)
+
+            if ts_code_list:
+                # Optimized IN query
+                placeholders = ','.join(['?'] * len(ts_code_list))
+                base_sql += f" AND ts_code IN ({placeholders})"
+                params.extend(ts_code_list)
+            
+            async with db.execute(base_sql, params) as cursor:
+                # Use row factory or manual column mapping
                 cols = [desc[0] for desc in cursor.description]
                 rows = await cursor.fetchall()
+                if not rows:
+                    return pd.DataFrame()
+                
                 return pd.DataFrame(rows, columns=cols)
 
     async def get_latest_trade_date(self):
@@ -539,7 +696,7 @@ class CacheManager:
             return stats
 
     # ========== Daily Indicators ==========
-    async def save_daily_indicators(self, df):
+    async def save_daily_indicators(self, df, priority=PRIORITY_NORMAL):
         """Save daily valuation indicators (Offloaded to Thread)"""
         if df is None or df.empty:
             return 0
@@ -566,7 +723,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True), priority)
             return len(params)
         return 0
 
@@ -587,6 +744,123 @@ class CacheManager:
                 rows = await cursor.fetchall()
                 return pd.DataFrame(rows, columns=cols)
 
+    # ========== New Data Types (Step 4 & Extended) ==========
+
+    async def save_fina_audit(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'end_date', 'ann_date', 'audit_result', 'audit_agency', 'audit_sign']
+        sql = "INSERT OR REPLACE INTO financial_reports (ts_code, end_date, ann_date, audit_result) VALUES (?, ?, ?, ?)" # Note: We update existing reports
+        # Wait, audit comes from separate API. It should probably UPDATE the financial_reports table if exists, or INSERT.
+        # But financial_reports primary key is (ts_code, end_date). 
+        # Tushare audit interface returns end_date.
+        # Ideally we UPSERT. But here we might just want to update the audit_result column specifically.
+        # SQLite doesn't support easy column update via INSERT OR REPLACE without creating new row.
+        # Strategy: DB schema has audit_result in financial_reports.
+        # We can use INSERT OR IGNORE then UPDATE, or just INSERT OR REPLACE if we have all data.
+        # But we only have audit info here. We don't want to wipe other fields.
+        # Better strategy: Use specific UPDATE statement.
+        
+        # But for simplicity and bulk, let's use UPDATE.
+        # "UPDATE financial_reports SET audit_result=?, audit_agency=? ... WHERE ts_code=? AND end_date=?"
+        # But we handle batch.
+        sql = '''
+            UPDATE financial_reports 
+            SET audit_result = ?
+            WHERE ts_code = ? AND end_date = ?
+        '''
+        # Params need to be (audit_result, ts_code, end_date)
+        # Prepare params manually
+        t_data = []
+        for _, row in df.iterrows():
+            t_data.append((row['audit_result'], row['ts_code'], row['end_date']))
+            
+        if not self._running and not self._closing: await self.start()
+        await self._enqueue((sql, t_data, True))
+        return len(t_data)
+
+    async def save_fina_forecast(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'end_date', 'ann_date', 'type', 'p_change_min', 'p_change_max', 'net_profit_min', 'net_profit_max']
+        sql = "INSERT OR REPLACE INTO fina_forecast (ts_code, end_date, ann_date, type, p_change_min, p_change_max, net_profit_min, net_profit_max) VALUES (?,?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_fina_mainbz(self, df):
+        if df is None or df.empty: return 0
+        # fina_mainbz columns in schema: ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type, update_flag
+        # Tushare returns: ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+        # We assume bz_item is unique per date per stock? Yes PK.
+        cols = ['ts_code', 'end_date', 'bz_item', 'bz_sales', 'bz_profit', 'bz_cost', 'curr_type']
+        sql = "INSERT OR REPLACE INTO fina_mainbz (ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type) VALUES (?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_pledge_stat(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'end_date', 'pledge_count', 'unrest_pledge', 'rest_pledge', 'total_share', 'pledge_ratio']
+        sql = "INSERT OR REPLACE INTO pledge_stat (ts_code, end_date, pledge_count, unrest_pledge, rest_pledge, total_share, pledge_ratio) VALUES (?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_repurchase(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'ann_date', 'end_date', 'proc', 'exp_date', 'vol', 'amount', 'high_limit', 'low_limit']
+        sql = "INSERT OR REPLACE INTO repurchase (ts_code, ann_date, end_date, proc, exp_date, vol, amount, high_limit, low_limit) VALUES (?,?,?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_dividend(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'end_date', 'ann_date', 'div_proc', 'stk_div', 'stk_bo_rate', 'stk_co_rate', 'cash_div_tax', 'cash_div_tax_rate', 'record_date', 'ex_date']
+        sql = "INSERT OR REPLACE INTO dividend (ts_code, end_date, ann_date, div_proc, stk_div, stk_bo_rate, stk_co_rate, cash_div_tax, cash_div_tax_rate, record_date, ex_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_index_daily(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'trade_date', 'close', 'open', 'high', 'low', 'pre_close', 'change', 'pct_chg', 'vol', 'amount']
+        sql = "INSERT OR REPLACE INTO index_daily (ts_code, trade_date, close, open, high, low, pre_close, change, pct_chg, vol, amount) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_index_dailybasic(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'trade_date', 'total_mv', 'float_mv', 'total_share', 'float_share', 'free_share', 'turnover_rate', 'turnover_rate_f', 'pe', 'pe_ttm', 'pb']
+        sql = "INSERT OR REPLACE INTO index_dailybasic (ts_code, trade_date, total_mv, float_mv, total_share, float_share, free_share, turnover_rate, turnover_rate_f, pe, pe_ttm, pb) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_limit_list(self, df):
+        if df is None or df.empty: return 0
+        cols = ['trade_date', 'ts_code', 'name', 'close', 'pct_chg', 'amp', 'fc_ratio', 'fl_ratio', 'fd_amount', 'first_time', 'last_time', 'open_times', 'strth', 'limit_type']
+        sql = "INSERT OR REPLACE INTO limit_list (trade_date, ts_code, name, close, pct_chg, amp, fc_ratio, fl_ratio, fd_amount, first_time, last_time, open_times, strth, limit_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_margin_daily(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'trade_date', 'rzye', 'rqye', 'rzmre', 'rqyl', 'rzrqye']
+        sql = "INSERT OR REPLACE INTO margin_daily (ts_code, trade_date, rzye, rqye, rzmre, rqyl, rzrqye) VALUES (?,?,?,?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
+    async def save_suspend_d(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'trade_date', 'suspend_timing', 'suspend_type_name']
+        sql = "INSERT OR REPLACE INTO suspend_d (ts_code, trade_date, suspend_timing, suspend_type_name) VALUES (?,?,?,?)"
+        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
+
     async def save_market_news(self, news_item):
         """
         Save a single news item to DB
@@ -606,7 +880,7 @@ class CacheManager:
             news_item.get('source', 'Sina'),
             now
         )
-        await self.queue.put((sql, params, False))
+        await self._enqueue((sql, params, False))
 
     # ========== Trade Calendar ==========
     async def save_trade_cal(self, df):
@@ -642,7 +916,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True))
             return len(params)
         return 0
 
@@ -663,6 +937,84 @@ class CacheManager:
               params.append(int(is_open))
               
         query += " ORDER BY cal_date ASC"
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, params) as cursor:
+                cols = [desc[0] for desc in cursor.description]
+                rows = await cursor.fetchall()
+                return pd.DataFrame(rows, columns=cols)
+
+    # ========== Index Daily ==========
+    async def save_index_daily(self, df):
+        """Save index daily data (Offloaded to Thread)"""
+        if df is None or df.empty:
+            return 0
+        
+        cols = ['ts_code', 'trade_date', 'close', 'open', 'high', 'low', 
+                'pre_close', 'change', 'pct_chg', 'vol', 'amount']
+        
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
+                INSERT OR REPLACE INTO index_daily 
+                (ts_code, trade_date, close, open, high, low, pre_close, change, pct_chg, vol, amount)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
+        
+        if params:
+            await self._enqueue((sql, params, True))
+            return len(params)
+        return 0
+
+    async def save_index_dailybasic(self, df):
+        """Save index daily basic indicators (Offloaded to Thread)"""
+        if df is None or df.empty:
+            return 0
+        
+        cols = ['ts_code', 'trade_date', 'total_mv', 'float_mv', 'total_share',
+                'float_share', 'free_share', 'turnover_rate', 'turnover_rate_f', 'pe', 'pe_ttm', 'pb']
+        
+        if not self._running and not self._closing:
+            await self.start()
+
+        sql = '''
+                INSERT OR REPLACE INTO index_dailybasic 
+                (ts_code, trade_date, total_mv, float_mv, total_share, float_share, 
+                 free_share, turnover_rate, turnover_rate_f, pe, pe_ttm, pb)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+            
+        try:
+            loop = asyncio.get_running_loop()
+            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+            return 0
+        
+        if params:
+            await self._enqueue((sql, params, True))
+            return len(params)
+        return 0
+
+    async def get_index_daily(self, ts_code=None, trade_date=None):
+        """Get index daily data from cache"""
+        query = "SELECT * FROM index_daily WHERE 1=1"
+        params = []
+        
+        if ts_code:
+            query += " AND ts_code = ?"
+            params.append(ts_code)
+        if trade_date:
+            query += " AND trade_date = ?"
+            params.append(trade_date)
+            
+        query += " ORDER BY trade_date DESC"
         
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(query, params) as cursor:
@@ -700,7 +1052,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True))
             return len(params)
         return 0
 
@@ -756,7 +1108,7 @@ class CacheManager:
                 VALUES (?, ?, ?, ?, ?, ?)
             '''
         params = (table_name, now, last_data_date, record_count, status, now)
-        await self.queue.put((sql, params, False)) # Single execution
+        await self._enqueue((sql, params, False)) # Single execution
 
     async def get_sync_status(self, table_name=None):
         """Get sync status for tables"""
@@ -788,7 +1140,13 @@ class CacheManager:
         
         async with aiosqlite.connect(self.db_path) as db:
             # 1. Total Stocks (Active)
-            async with db.execute("SELECT ts_code, name FROM stock_basic WHERE list_status = 'L'") as cursor:
+            # Filter out new stocks (< 6 months / 180 days) as they might not have reports yet
+            cutoff_date = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime('%Y%m%d')
+            
+            async with db.execute(
+                "SELECT ts_code, name FROM stock_basic WHERE list_status = 'L' AND list_date <= ?", 
+                (cutoff_date,)
+            ) as cursor:
                 all_stocks = await cursor.fetchall()
                 
             if not all_stocks:
@@ -945,7 +1303,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True))
             return len(params)
         return 0
 
@@ -993,7 +1351,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True))
             return len(params)
         return 0
 
@@ -1049,9 +1407,6 @@ class CacheManager:
         except RuntimeError:
             return 0
 
-        if not self._running and not self._closing:
-            await self.start()
-
         sql = '''
                 INSERT OR IGNORE INTO screening_history 
                 (trade_date, strategy_name, ts_code, name, close, pct_chg)
@@ -1059,7 +1414,7 @@ class CacheManager:
             '''
         # Note: records is a list of tuples, so we use True for is_many
         if records:
-            await self.queue.put((sql, records, True))
+            await self._enqueue((sql, records, True))
             return len(records)
         return 0
         
@@ -1098,15 +1453,12 @@ class CacheManager:
         if not updates:
             return
             
-        if not self._running and not self._closing:
-            await self.start()
-
         sql = '''
                 UPDATE screening_history 
                 SET t1_price = ?, t1_pct = ?, t5_price = ?, t5_pct = ?
                 WHERE id = ?
             '''
-        await self.queue.put((sql, updates, True))
+        await self._enqueue((sql, updates, True))
 
     async def get_screening_history(self, strategy_name=None, limit=100):
         """Get screening history for UI"""
@@ -1149,8 +1501,10 @@ class CacheManager:
                 'amount', 'l_sell', 'l_buy', 'l_amount', 'net_amount', 
                 'net_rate', 'amount_rate', 'float_values', 'reason']
         
+        
         if not self._running and not self._closing:
-            await self.start()
+            pass # Explicit start required
+
 
         sql = '''
                 INSERT OR REPLACE INTO top_list 
@@ -1166,7 +1520,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True))
             return len(params)
         return 0
 
@@ -1192,8 +1546,10 @@ class CacheManager:
             
         cols = ['trade_date', 'ts_code', 'price', 'vol', 'amount', 'buyer', 'seller']
         
+        
         if not self._running and not self._closing:
-            await self.start()
+            pass # Explicit start required
+
 
         sql = '''
                 INSERT OR REPLACE INTO block_trade 
@@ -1208,7 +1564,7 @@ class CacheManager:
             return 0
         
         if params:
-            await self.queue.put((sql, params, True))
+            await self._enqueue((sql, params, True))
             return len(params)
         return 0
 
@@ -1233,8 +1589,10 @@ class CacheManager:
             
         cols = ['content', 'tags', 'publish_time', 'source']
         
+        
         if not self._running and not self._closing:
-            await self.start()
+            pass # Explicit start required
+
 
         sql = '''
                 INSERT OR IGNORE INTO market_news 
@@ -1250,7 +1608,7 @@ class CacheManager:
                 val = str(val)
             params.append(val)
             
-        await self.queue.put((sql, params, False))
+        await self._enqueue((sql, params, False))
         return 1
 
     async def get_market_news(self, limit=50, offset=0, min_publish_time=None):
@@ -1289,3 +1647,156 @@ class CacheManager:
     async def save_financials(self, df):
         """Backward compatibility wrapper"""
         return await self.save_financial_reports(df)
+
+    async def check_comprehensive_health(self):
+        """
+        Deep Health Check v2.0:
+        1. Coverage (Existence)
+        2. Strict Freshness (Dynamic Deadline)
+        3. Integrity (Sanity Check)
+        4. Continuity (Gap Detection - Full Scan)
+        """
+        await self.wait_for_maintenance()
+        
+        today = datetime.datetime.now()
+        
+        # --- 1. Dynamic Freshness Logic ---
+        # Calculate required financial period based on today
+        # Rules:
+        # May 1 - Aug 30: Need Y-1/Q4 (Annual)
+        # Sep 1 - Oct 30: Need Y/Q2 (Semi)
+        # Nov 1 - Apr 30: Need Y/Q3
+        
+        y = today.year
+        md = today.month * 100 + today.day
+        
+        required_period = ""
+        deadline_desc = ""
+        
+        if 501 <= md <= 830:
+            required_period = f"{y-1}1231"
+            deadline_desc = f"去年年报 ({y-1})"
+        elif 901 <= md <= 1030:
+            required_period = f"{y}0630"
+            deadline_desc = f"中报 ({y})"
+        elif md >= 1101 or md <= 430:
+            # If Nov-Dec, need this year Q3. If Jan-Apr, need Last Year Q3
+            target_y = y if md >= 1101 else y-1
+            required_period = f"{target_y}0930"
+            deadline_desc = f"三季报 ({target_y})"
+        
+        # Tables Config
+        check_list = [
+            ('fina_forecast', 'end_date', 180),
+            ('pledge_stat', 'end_date', 30),
+            ('margin_daily', 'trade_date', 5),
+            ('suspend_d', 'trade_date', 5),
+        ]
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. Total Active Stocks
+            cursor = await db.execute("SELECT count(*) FROM stock_basic WHERE list_status='L'")
+            total_stocks = (await cursor.fetchone())[0] or 1
+            
+            results = {}
+            
+            # --- 2. Financial Reports (Special Handling) ---
+            try:
+                # Coverage
+                cursor = await db.execute("SELECT count(DISTINCT ts_code) FROM financial_reports")
+                fin_covered = (await cursor.fetchone())[0] or 0
+                
+                # Strict Freshness
+                sql_strict = f"SELECT count(DISTINCT ts_code) FROM financial_reports WHERE end_date >= '{required_period}'"
+                cursor = await db.execute(sql_strict)
+                fin_fresh = (await cursor.fetchone())[0] or 0
+                
+                results['financial_reports'] = {
+                    'covered': fin_covered,
+                    'ratio': fin_covered / total_stocks,
+                    'fresh': fin_fresh,
+                    'fresh_ratio': fin_fresh / total_stocks,
+                    'deadline_desc': deadline_desc
+                }
+            except Exception as e:
+                results['financial_reports'] = {'error': str(e)}
+
+            # --- 3. Other Tables (Standard Logic) ---
+            for table, date_col, days in check_list:
+                try:
+                    # Coverage
+                    cursor = await db.execute(f"SELECT count(DISTINCT ts_code) FROM {table}")
+                    covered = (await cursor.fetchone())[0] or 0
+                    
+                    # Loose Freshness
+                    cutoff = (today - datetime.timedelta(days=days)).strftime('%Y%m%d')
+                    cursor = await db.execute(f"SELECT count(DISTINCT ts_code) FROM {table} WHERE {date_col} >= '{cutoff}'")
+                    fresh = (await cursor.fetchone())[0] or 0
+                    
+                    results[table] = {
+                        'covered': covered,
+                        'ratio': covered / total_stocks,
+                        'fresh': fresh,
+                        'fresh_ratio': fresh / total_stocks
+                    }
+                except:
+                    results[table] = {'covered': 0, 'ratio': 0}
+
+            # --- 4. Sanity Check (Zero Tolerance) ---
+            sanity_errors = 0
+            try:
+                # Price <= 0
+                cursor = await db.execute("SELECT count(*) FROM daily_quotes WHERE qfq_close <= 0")
+                sanity_errors += (await cursor.fetchone())[0]
+                
+                # High < Low
+                cursor = await db.execute("SELECT count(*) FROM daily_quotes WHERE high < low")
+                sanity_errors += (await cursor.fetchone())[0]
+            except: pass
+            
+            # --- 5. Gap Detection (Full Scan) ---
+            gap_count = 0
+            try:
+                # Use Gap > 10 days to exclude long holidays safely without complex calendar logic
+                sql_gap = """
+                SELECT count(*) FROM (
+                    SELECT ts_code, trade_date,
+                           LAG(trade_date) OVER (PARTITION BY ts_code ORDER BY trade_date) as prev_date
+                    FROM daily_quotes
+                    WHERE trade_date > date('now', '-3 years')
+                ) WHERE julianday(trade_date) - julianday(prev_date) > 10
+                """
+                cursor = await db.execute(sql_gap)
+                gap_count = (await cursor.fetchone())[0]
+            except Exception as e:
+                logger.error(f"Gap check failed: {e}")
+
+            # Get Missing Samples
+            cursor = await db.execute("""
+                SELECT ts_code, name FROM stock_basic 
+                WHERE list_status='L' 
+                AND ts_code NOT IN (SELECT DISTINCT ts_code FROM financial_reports)
+                LIMIT 10
+            """)
+            missing_samples = [{'code': row[0], 'name': row[1]} for row in await cursor.fetchall()]
+            
+            return {
+                'total_stocks': total_stocks,
+                'tables': results,
+                'missing_samples': missing_samples,
+                'sanity_errors': sanity_errors,
+                'gap_count': gap_count,
+                'deadline_desc': deadline_desc
+            }
+            
+    # Legacy alias if needed, or remove
+    async def check_financial_coverage(self):
+        # Redirect to new method but adapt return format to break less code strictly if needed,
+        # but better to update caller.
+        res = await self.check_comprehensive_health()
+        fin = res['tables'].get('financial_reports', {})
+        return {
+            'total': res['total_stocks'],
+            'covered': fin.get('covered', 0),
+            'ratio': fin.get('ratio', 0)
+        }, [m['code'] for m in res['missing_samples']]

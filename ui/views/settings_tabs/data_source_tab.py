@@ -25,17 +25,17 @@ class DataSourceTab(ft.Container):
         # --- UI Components ---
         
         # 1. Health Status Dashboard
-        self.metric_sync = MetricCard("最后更新", "今日 15:30", ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
-        self.metric_coverage = MetricCard("数据覆盖", "5000+ 股票", ft.Icons.DATA_USAGE, AppColors.INFO)
-        self.metric_health = MetricCard("系统健康", "检测中...", ft.Icons.HEALTH_AND_SAFETY, ft.Colors.ORANGE)
-        self.metric_storage = MetricCard("存储占用", "计算中...", ft.Icons.STORAGE, ft.Colors.GREY)
+        self.metric_sync = MetricCard(I18n.get("ds_last_update"), f"{I18n.get('time_today')} 15:30", ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
+        self.metric_coverage = MetricCard(I18n.get("ds_data_coverage"), I18n.get("ds_val_placeholder_count"), ft.Icons.DATA_USAGE, AppColors.INFO)
+        self.metric_health = MetricCard(I18n.get("ds_sys_health"), I18n.get("ds_status_checking"), ft.Icons.HEALTH_AND_SAFETY, ft.Colors.ORANGE)
+        self.metric_storage = MetricCard(I18n.get("ds_storage_usage"), I18n.get("ds_status_calc"), ft.Icons.STORAGE, ft.Colors.GREY)
         
         self.health_detail_text = ft.Text(I18n.get("settings_check_health"), size=12, color=ft.Colors.GREY_600)
 
         # Repair UI
         self.missing_fin_codes = []
         self.btn_repair = ft.ElevatedButton(
-            "一键修复缺失数据", 
+            I18n.get("ds_btn_repair"), 
             icon=ft.Icons.BUILD_CIRCLE, 
             style=ft.ButtonStyle(color=ft.Colors.WHITE, icon_color=ft.Colors.WHITE, bgcolor=ft.Colors.ERROR),
             visible=False,
@@ -74,7 +74,7 @@ class DataSourceTab(ft.Container):
         self.action_update_today = ActionChip(
             ft.Icons.UPDATE, 
             I18n.get("settings_update_today"), 
-            "快速同步今日行情数据", 
+            I18n.get("ds_action_today"), 
             self.update_daily_quotes,
             is_primary=False
         )
@@ -82,20 +82,20 @@ class DataSourceTab(ft.Container):
         self.action_full_sync = ActionChip(
             ft.Icons.SYNC_PROBLEM, 
             I18n.get("settings_full_sync"), 
-            "完整遍历修复缺失数据", 
+            I18n.get("ds_action_full"), 
             self.full_daily_sync
         )
 
         self.action_clear_cache = ActionChip(
             ft.Icons.CLEANING_SERVICES, 
             I18n.get("settings_clear_cache"), 
-            "清除缓存并重新校验", 
+            I18n.get("ds_action_clear"), 
             self.confirm_clear_cache
         )
 
         self.action_console = DashboardCard(
             content=ft.Column([
-                SectionHeader("快捷指令台"),
+                SectionHeader(I18n.get("ds_shortcut_console")),
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 ft.ResponsiveRow([
                     ft.Column([self.action_update_today], col={"sm": 12, "md": 4}),
@@ -199,9 +199,11 @@ class DataSourceTab(ft.Container):
     # --- Logic Methods (Migrated from SettingsView) ---
 
     def refresh_health_status(self, e):
-        self.metric_health.set_value("正在检测...", ft.Icons.HOURGLASS_TOP, ft.Colors.BLUE)
-        self.metric_storage.set_value("计算中...", ft.Icons.HOURGLASS_TOP, ft.Colors.GREY)
-        self.health_detail_text.value = "正在扫描本地数据库与Tushare日历比对..."
+        if not self.page:
+            return
+        self.metric_health.set_value(I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, ft.Colors.BLUE)
+        self.metric_storage.set_value(I18n.get("ds_status_calc"), ft.Icons.HOURGLASS_TOP, ft.Colors.GREY)
+        self.health_detail_text.value = I18n.get("health_checking")
         self.update()
         self.page.run_task(self.check_health_async)
 
@@ -212,25 +214,25 @@ class DataSourceTab(ft.Container):
             status = result.get('status', 'red')
             
             if status == 'yellow':
-                self.metric_health.set_value("数据滞后", ft.Icons.WARNING, ft.Colors.AMBER)
+                self.metric_health.set_value(I18n.get("ds_health_lag"), ft.Icons.WARNING, ft.Colors.AMBER)
             elif status == 'red':
-                self.metric_health.set_value("数据异常/缺失", ft.Icons.ERROR, ft.Colors.RED)
+                self.metric_health.set_value(I18n.get("ds_health_error"), ft.Icons.ERROR, ft.Colors.RED)
             else:
-                self.metric_health.set_value("数据健康", ft.Icons.CHECK_CIRCLE, ft.Colors.GREEN)
+                self.metric_health.set_value(I18n.get("ds_health_ok"), ft.Icons.CHECK_CIRCLE, ft.Colors.GREEN)
                 
             latest = result.get('latest_local')
             if not latest or str(latest) == 'None':
-                display_date = "从未同步"
+                display_date = I18n.get("ds_never_sync")
             else:
                 display_date = str(latest)
             self.metric_sync.set_value(display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
             self.metric_coverage.set_value(f"{result.get('coverage', '0%')}", ft.Icons.DATA_USAGE, AppColors.INFO)
-            self.metric_storage.set_value("正常", ft.Icons.STORAGE, ft.Colors.GREEN)
+            self.metric_storage.set_value(I18n.get("common_normal"), ft.Icons.STORAGE, ft.Colors.GREEN)
             
             fin_cov = result.get('financial_coverage', 'N/A')
             recent_cov = result.get('financial_recent_coverage', fin_cov)
             stale_count = result.get('financial_stale_count', 0)
-            self.health_detail_text.value = f"覆盖率: {result.get('coverage', 'N/A')} | 财报覆盖: {fin_cov} (近期: {recent_cov}) | 滞后: {result.get('lag_days', 0)}天"
+            self.health_detail_text.value = I18n.get("ds_text_cov_detail").format(cov=result.get('coverage', 'N/A'), fin_cov=fin_cov, recent=recent_cov, lag=result.get('lag_days', 0))
             
             # Show Repair Button if needed (now includes stale data)
             missing_fin = result.get('financial_missing_count', 0)
@@ -238,11 +240,11 @@ class DataSourceTab(ft.Container):
             if total_need_repair > 0:
                 self.missing_fin_codes = result.get('financial_missing_codes', [])
                 if stale_count > 0 and missing_fin > 0:
-                    self.btn_repair.text = f"修复 {missing_fin} 只缺失 + {stale_count} 只过期数据的股票"
+                    self.btn_repair.text = I18n.get("ds_btn_repair_fmt").format(missing=missing_fin, stale=stale_count)
                 elif stale_count > 0:
-                    self.btn_repair.text = f"修复 {stale_count} 只过期数据的股票"
+                    self.btn_repair.text = I18n.get("ds_btn_repair_fmt").format(missing=0, stale=stale_count)
                 else:
-                    self.btn_repair.text = f"修复 {missing_fin} 只缺失基本面数据的股票"
+                    self.btn_repair.text = I18n.get("ds_btn_repair_fmt").format(missing=missing_fin, stale=0)
                 self.btn_repair.visible = True
             else:
                 self.btn_repair.visible = False
@@ -250,13 +252,13 @@ class DataSourceTab(ft.Container):
             
             self._safe_update()
         except Exception as e:
-            self.metric_health.set_value("检查失败", ft.Icons.ERROR, ft.Colors.RED)
+            self.metric_health.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR, ft.Colors.RED)
             self.health_detail_text.value = str(e)
             self._safe_update()
 
     def repair_data(self, e):
         if self.is_syncing: return
-        self.show_snack("开始针对性修复...")
+        self.show_snack(I18n.get("ds_repair_start_snack"))
         self._set_sync_busy(True, self.btn_repair)
         self.page.run_task(self.repair_data_async)
 
@@ -265,18 +267,18 @@ class DataSourceTab(ft.Container):
              processor = DataProcessor()
              await processor.init_data() # ensure init
              
-             self.show_snack("正在修复... 请勿关闭", color=ft.Colors.BLUE)
+             self.show_snack(I18n.get("ds_repair_progress"), color=ft.Colors.BLUE)
              
              count = await processor.repair_financial_data(
                 self.missing_fin_codes,
                 progress_callback=lambda c, t, m: self.update_progress(c, t, m)
              )
              
-             self.show_snack(f"✅ 修复完成！已补充 {count} 条记录", color=ft.Colors.GREEN)
+             self.show_snack(I18n.get("ds_repair_done").format(count=count), color=ft.Colors.GREEN)
              # Auto refresh health
              self.refresh_health_status(None)
         except Exception as e:
-             self.show_snack(f"修复失败: {e}", color=ft.Colors.RED)
+             self.show_snack(I18n.get("ds_repair_fail").format(error=e), color=ft.Colors.RED)
         finally:
              self._set_sync_busy(False)
 
@@ -310,8 +312,11 @@ class DataSourceTab(ft.Container):
         try:
             processor = DataProcessor()
             await processor.init_data()
-            results = await processor.sync_all_daily()
-            self.show_snack(I18n.get("snack_full_sync_done").format(total=sum(results.values())))
+            # Use the robust sync_daily_market_snapshot instead of deprecated sync_all_daily
+            df = await processor.sync_daily_market_snapshot()
+            
+            count = len(df) if df is not None else 0
+            self.show_snack(I18n.get("snack_full_sync_done").format(total=f"{count} (Quotes)"))
         except Exception as ex:
              self.show_snack(f"Error: {str(ex)[:30]}", color=ft.Colors.RED)
         finally:
@@ -322,28 +327,38 @@ class DataSourceTab(ft.Container):
             if not self.page:
                 logger.error("Page is not attached")
                 return
+            
+            # Prevent multiple dialogs
+            if getattr(self, '_dialog_open', False):
+                return
+            self._dialog_open = True
 
             def close_dialog(e):
+                self._dialog_open = False
                 self.page.close(dialog)
+                
             def confirm_clear(e):
+                self._dialog_open = False
                 self.page.close(dialog)
                 self.page.run_task(self.clear_cache_async)
                 
             dialog = ft.AlertDialog(
                 modal=True,
-                title=ft.Text("确认清理缓存"),
-                content=ft.Text("这将删除所有已缓存的历史数据。\n清理后需要重新同步数据。\n\n确定要继续吗？"),
+                title=ft.Text(I18n.get("dialog_confirm_clear_title")),
+                content=ft.Text(I18n.get("dialog_confirm_clear_content")),
                 actions=[
-                    ft.TextButton("取消", on_click=close_dialog),
-                    ft.TextButton("确认清理", on_click=confirm_clear, style=ft.ButtonStyle(color=ft.Colors.RED)),
+                    ft.TextButton(I18n.get("common_cancel"), on_click=close_dialog),
+                    ft.TextButton(I18n.get("btn_confirm_clear"), on_click=confirm_clear, style=ft.ButtonStyle(color=ft.Colors.RED)),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
+                on_dismiss=lambda e: setattr(self, '_dialog_open', False) # Handle click outside if not modal (though it is modal)
             )
             self.page.open(dialog)
             logger.info("Confirmation dialog opened")
         except Exception as ex:
+            self._dialog_open = False
             logger.error(f"Error opening dialog: {ex}")
-            self.show_snack(f"操作失败: {ex}", color=ft.Colors.RED)
+            self.show_snack(I18n.get("common_op_fail").format(error=ex), color=ft.Colors.RED)
 
     async def clear_cache_async(self):
         if self.is_syncing: return
@@ -352,10 +367,10 @@ class DataSourceTab(ft.Container):
             cache_mgr = CacheManager()
             await cache_mgr.init_db()
             await cache_mgr.clear_all_cache()
-            self.show_snack("缓存已清理完成！")
+            self.show_snack(I18n.get("ds_cache_cleared"))
             self.page.pubsub.send_all("cache_cleared")
         except Exception as ex:
-            self.show_snack(f"清理失败: {str(ex)[:30]}")
+            self.show_snack(I18n.get("ds_clean_fail").format(error=str(ex)[:30]))
         finally:
             logger.info("[clear_cache_async] Releasing sync lock...")
             self._set_sync_busy(False)
@@ -380,7 +395,7 @@ class DataSourceTab(ft.Container):
             self.status_icon.color = ft.Colors.GREEN
             self.status_icon.icon = ft.Icons.CHECK_CIRCLE
         except Exception as ex:
-            self.status_text.value = f"验证失败: {str(ex)[:20]}"
+            self.status_text.value = I18n.get("ds_verify_fail_fmt").format(error=str(ex)[:20])
             self.status_text.color = ft.Colors.RED
             self.status_icon.color = ft.Colors.RED
             self.status_icon.icon = ft.Icons.ERROR
@@ -390,7 +405,7 @@ class DataSourceTab(ft.Container):
         if self.is_syncing and self.sync_button.text.startswith(I18n.get("common_cancel")):
              if self.cancel_event:
                  self.cancel_event.set()
-                 self.sync_button.text = "取消中..."
+                 self.sync_button.text = I18n.get("sys_init_cancel_wait")
                  self.sync_button.disabled = True
                  self.update()
              return
@@ -429,46 +444,34 @@ class DataSourceTab(ft.Container):
         self.cancel_event = asyncio.Event()
         try:
             processor = DataProcessor()
-            await processor.init_data()
             
-            # Step 1
-            self.progress_text.value = "步骤 1/3: 同步股票列表..."
-            self._safe_update()
-            if self.cancel_event.is_set(): raise asyncio.CancelledError()
-            await processor.sync_stock_basic()
-
-            # Step 2
-            self.progress_text.value = "步骤 2/3: 同步历史行情..."
+            # Unified Initialization Logic (v2.0)
+            # This handles all 5 steps: List, Calendar, Quotes, Financials, Health Check
+            # and provides weighted progress reporting.
+            
+            self.progress_text.value = I18n.get("wizard_status_init")
             self.progress_bar.value = 0
             self._safe_update()
-            if self.cancel_event.is_set(): raise asyncio.CancelledError()
             
-            days = 1095
-            success = await processor.sync_historical_data(
-                days=days, 
+            report = await processor.initialize_system(
                 progress_callback=lambda c, t, m: self.update_progress(c, t, m),
                 cancel_event=self.cancel_event
             )
             
             if self.cancel_event.is_set(): raise asyncio.CancelledError()
-            
-            # Step 3
-            should_sync, _ = await processor.should_sync_financials()
-            if should_sync and not self.cancel_event.is_set():
-                self.progress_text.value = "步骤 3/3: 同步财务报表..."
-                self.progress_bar.value = None
-                self._safe_update()
-                await processor.sync_financial_reports(progress_callback=None)
 
-            if not self.cancel_event.is_set():
-                self.progress_text.value = "✅ 完成！"
-                self.progress_bar.value = 1
-                self.show_snack("✅ 初始化完成", color=ft.Colors.GREEN)
+            self.progress_text.value = f"✅ {I18n.get('sys_init_success')}"
+            self.progress_bar.value = 1
+            self.show_snack(I18n.get("settings_init_done"), color=ft.Colors.GREEN)
+            
+            # Auto refresh health dashboard if report available
+            if isinstance(report, dict):
+                 self.refresh_health_status(None)
 
         except asyncio.CancelledError:
-            self.show_snack("同步已取消", color=ft.Colors.ORANGE)
+            self.show_snack(I18n.get("settings_msg_sync_cancelled"), color=ft.Colors.ORANGE)
         except Exception as e:
-            self.show_snack(f"初始化失败: {str(e)[:30]}", color=ft.Colors.RED)
+            self.show_snack(I18n.get("ds_init_fail_fmt").format(error=str(e)[:30]), color=ft.Colors.RED)
             logger.error(f"Sync error: {e}")
         finally:
             self.is_syncing = False

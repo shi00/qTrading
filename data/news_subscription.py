@@ -60,32 +60,29 @@ class NewsSubscriptionService:
     async def _poll_loop(self):
         """Main polling loop"""
         base_interval = ConfigHandler.get_config('news_poll_interval', 60) # Default 60s
-        retry_count = 0
-        max_retries = 5
         
         while self._running:
+            # Fire and forget (or track if needed). 
+            # We use create_task so the sleep interval is independent of fetch duration (strict interval).
+            task = asyncio.create_task(self._safe_fetch_task())
+            
+            # Simple error handling for the loop itself (unlikely to fail here)
             try:
-                await self._fetch_and_notify()
-                # Success: Reset retries
-                if retry_count > 0:
-                    logger.info("[NewsService] Connection restored.")
-                    retry_count = 0
+                await asyncio.sleep(base_interval)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                retry_count += 1
-                backoff = min(base_interval * (2 ** (retry_count - 1)), 600) # Max 10 mins
-                logger.error(f"[NewsService] Error in poll loop: {e}. Retrying in {backoff}s (Attempt {retry_count})")
-                
-                # Sleep the backoff period (check running often)
-                # Simple sleep for now
-                try:
-                    await asyncio.sleep(backoff)
-                except asyncio.CancelledError:
-                    break
-                continue # Skip normal interval sleep
-            
-            await asyncio.sleep(base_interval)
+
+    async def _safe_fetch_task(self):
+        """Wrapper to handle errors within the independent task"""
+        if not self._running: 
+            return
+
+        try:
+            await self._fetch_and_notify()
+        except Exception as e:
+            logger.error(f"[NewsService] Error in background fetch task: {e}")
+            # Optional: Implement retry logic here if needed, but for periodic polling, 
+            # just failing and waiting for next interval is often cleaner.
 
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""

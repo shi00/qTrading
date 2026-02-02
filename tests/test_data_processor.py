@@ -269,31 +269,7 @@ class TestDataProcessor(unittest.TestCase):
     def test_sync_northbound(self):
         asyncio.run(self.async_test_sync_northbound())
 
-    async def async_test_sync_all_daily(self):
-        """Test sync_all_daily (parallel execution)"""
-        # Mock all API returns
-        self.mock_api.get_daily_quotes = MagicMock(return_value=pd.DataFrame({'a': [1]}))
-        self.mock_api.get_daily_basic = MagicMock(return_value=pd.DataFrame({'b': [1]}))
-        self.mock_api.get_moneyflow = MagicMock(return_value=pd.DataFrame({'c': [1]}))
-        self.mock_api.get_hk_hold = MagicMock(return_value=pd.DataFrame({'d': [1]}))
-        self.mock_api.get_top_list = MagicMock(return_value=pd.DataFrame({'e': [1]}))
-        self.mock_api.get_block_trade = MagicMock(return_value=pd.DataFrame({'f': [1]}))
-        
-        # Mock Cache saves
-        self.mock_cache.save_daily_quotes = AsyncMock(return_value=1)
-        self.mock_cache.save_daily_indicators = AsyncMock(return_value=1)
-        self.mock_cache.save_moneyflow = AsyncMock(return_value=1)
-        self.mock_cache.save_northbound = AsyncMock(return_value=1)
-        self.mock_cache.save_top_list = AsyncMock(return_value=1)
-        self.mock_cache.save_block_trade = AsyncMock(return_value=1)
-        
-        results = await self.processor.sync_all_daily("20230101")
-        
-        self.assertEqual(results['quotes'], 1)
-        self.assertEqual(results['northbound'], 1)
-
-    def test_sync_all_daily(self):
-        asyncio.run(self.async_test_sync_all_daily())
+    # Removed test_sync_all_daily as the method is deprecated and removed.
 
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""

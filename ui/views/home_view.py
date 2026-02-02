@@ -19,6 +19,11 @@ class HomeView(ft.Container):
         self.PAGE_SIZE = 20
         self.has_more_news = True
         
+        # Auto-refresh Configuration
+        self.REFRESH_INTERVAL_SECONDS = 30
+        self._refresh_task = None
+        self._is_mounted = False
+        
         # UI State Controls
         self.date_label = ft.Text(I18n.get("home_data_date").format(date="--"), size=12, color=ft.Colors.GREY)
         
@@ -112,9 +117,54 @@ class HomeView(ft.Container):
         # Subscribe to broadcast messages
         if self.page:
             self.page.pubsub.subscribe(self._on_broadcast_message)
+        
+        self._is_mounted = True
+        
+        # Initialize Data & Auto load
+        # Use task to avoid blocking did_mount UI thread
+        if self.page:
+            self.page.run_task(self._init_and_load)
+
+    async def _init_and_load(self):
+        """Initial load with DB init"""
+        try:
+            await self.processor.init_data()
+            await self._load_data()
+            # Start timer only INITED
+            self._start_auto_refresh()
+        except Exception as e:
+            logger.error(f"[HomeView] Init failed: {e}")
             
-        # Auto load data when view is attached
-        self._refresh_data(None)
+    def will_unmount(self):
+        """Cleanup when view is detached"""
+        self._is_mounted = False
+        self._stop_auto_refresh()
+
+    def _start_auto_refresh(self):
+        """Start the periodic auto-refresh task"""
+        if self._refresh_task is None and self.page and self._is_mounted:
+            self._refresh_task = self.page.run_task(self._auto_refresh_loop)
+            logger.info(f"[HomeView] Auto-refresh started (interval: {self.REFRESH_INTERVAL_SECONDS}s)")
+
+    def _stop_auto_refresh(self):
+        """Stop the auto-refresh task"""
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            self._refresh_task = None
+            logger.info("[HomeView] Auto-refresh stopped")
+
+    async def _auto_refresh_loop(self):
+        """Background loop for periodic data refresh"""
+        while self._is_mounted:
+            try:
+                await asyncio.sleep(self.REFRESH_INTERVAL_SECONDS)
+                if self._is_mounted:
+                    logger.debug("[HomeView] Auto-refreshing data...")
+                    await self._load_data()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[HomeView] Auto-refresh error: {e}")
 
     def _on_broadcast_message(self, message):
         """Handle broadcast messages"""
@@ -137,9 +187,6 @@ class HomeView(ft.Container):
 
     async def _load_data(self):
         try:
-             # Ensure DB is initialized before querying
-             await self.processor.init_data()
-             
              # Reset pagination on full refresh
              self.news_page = 0
              self.has_more_news = True
@@ -225,19 +272,11 @@ class HomeView(ft.Container):
         try:
             offset = self.news_page * self.PAGE_SIZE
             
-            # Strict "Today Only" Policy
-            # Calculate Today 00:00:00
-            import datetime
-            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-            # Note: News time format might be 'YYYY-MM-DD HH:MM:SS' or just 'HH:MM' (if created today by some sources)
-            # But usually we store full date. If stored as HH:MM, comparison with YYYY-MM-DD might fail?
-            # Tushare/AKShare usually returns full date or we should assume.
-            # Safe bet: Filter by YYYY-MM-DD string match if we can't do comparison, but SQL string compare works for ISO format.
-            
+            # Load all recent news without strict date filter
+            # The sync process already limits to recent items
             news_df = await self.processor.cache.get_market_news(
                 limit=self.PAGE_SIZE, 
-                offset=offset,
-                min_publish_time=today_str 
+                offset=offset
             )
             
             if not load_more:

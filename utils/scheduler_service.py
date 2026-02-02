@@ -35,7 +35,7 @@ class SchedulerService:
         self._initialized = True
         self._thread = None
         self._loop = None
-        self._lock = asyncio.Lock()  # Ensure mutual exclusion between update and prediction
+        # self._lock = asyncio.Lock() -> Moved to run_scheduler to be loop-safe
     
     def start(self):
         """Start the scheduler in a background thread with its own event loop"""
@@ -47,6 +47,9 @@ class SchedulerService:
         def run_scheduler():
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            # Initialize lock in the correct loop
+            self._lock = asyncio.Lock()
+            
             try:
                 self._loop.run_until_complete(self._scheduler_loop())
             except Exception as e:

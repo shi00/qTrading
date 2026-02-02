@@ -59,7 +59,8 @@ class MetricCard(ft.Container):
             # We replace the 3rd element (Status Container/Row)
             self.content.controls[2] = ft.Row(new_status_row, spacing=4, alignment=ft.MainAxisAlignment.START)
         
-        self.update()
+        if self.page:
+            self.update()
 
 class ActionChip(ft.Container):
     """

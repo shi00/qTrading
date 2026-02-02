@@ -242,11 +242,29 @@ class ConfigHandler:
     @staticmethod
     def get_sync_concurrency():
         config = ConfigHandler.load_config()
-        return config.get("sync_concurrency", 5)
+        return config.get("sync_concurrency", 2)
 
     @staticmethod
     def set_sync_concurrency(concurrency):
         return ConfigHandler.save_config({"sync_concurrency": int(concurrency)})
+
+    @staticmethod
+    def get_max_batch_rows():
+        config = ConfigHandler.load_config()
+        return config.get("max_batch_rows", 20000)
+
+    @staticmethod
+    def set_max_batch_rows(rows):
+        return ConfigHandler.save_config({"max_batch_rows": int(rows)})
+    
+    @staticmethod
+    def get_sync_retry_count():
+        config = ConfigHandler.load_config()
+        return config.get("sync_retry_count", 3)
+
+    @staticmethod
+    def set_sync_retry_count(count):
+        return ConfigHandler.save_config({"sync_retry_count": int(count)})
 
     @staticmethod
     def get_config(key, default=None):
@@ -352,15 +370,26 @@ class ConfigHandler:
         return config.get("request_timeout", 30)
 
     @staticmethod
-    def get_api_rate_limit():
-        """Get Tushare API rate limit (requests per minute). Default 200."""
+    def get_tushare_timeout():
+        """Get Tushare API timeout. If not set, returns None (no timeout)."""
         config = ConfigHandler.load_config()
-        return config.get("api_rate_limit", 200)
+        return config.get("tushare_timeout", None)
 
     @staticmethod
-    def set_api_rate_limit(limit):
+    def set_tushare_timeout(seconds):
+        """Set Tushare API timeout in seconds"""
+        return ConfigHandler.save_config({"tushare_timeout": int(seconds) if seconds is not None else None})
+
+    @staticmethod
+    def get_tushare_api_limit():
+        """Get Tushare API rate limit (requests per minute). Default None (No Limit)."""
+        config = ConfigHandler.load_config()
+        return config.get("tushare_api_rate_limit", None)
+
+    @staticmethod
+    def set_tushare_api_limit(limit):
         """Set Tushare API rate limit (requests per minute)"""
-        return ConfigHandler.save_config({"api_rate_limit": int(limit)})
+        return ConfigHandler.save_config({"tushare_api_rate_limit": int(limit)})
 
     # === Localization ===
     @staticmethod

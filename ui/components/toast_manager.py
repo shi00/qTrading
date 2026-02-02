@@ -23,6 +23,7 @@ class ToastManager:
             right=20,
             bottom=20,
             width=320,
+            bgcolor=ft.Colors.TRANSPARENT, # Ensure transparent
             # No height, grows upwards
         )
         

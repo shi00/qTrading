@@ -54,3 +54,25 @@ class OfflineCalendar:
             logger.warning(f"[OfflineCalendar] Check failed: {e}")
             # Fallback
             return True
+
+    @staticmethod
+    def get_trade_dates(start_date, end_date):
+        """
+        Get list of trading dates between start and end (inclusive).
+        Returns list of strings in YYYYMMDD format.
+        """
+        try:
+            cal = OfflineCalendar.get_instance()
+            if cal is None:
+                return []
+                
+            # Convert to Timestamps
+            # valid_days returns a DatetimeIndex
+            valid = cal.valid_days(start_date=start_date, end_date=end_date)
+            
+            # Format to list of strings
+            return [d.strftime('%Y%m%d') for d in valid]
+            
+        except Exception as e:
+            logger.error(f"[OfflineCalendar] Range check failed: {e}")
+            return []

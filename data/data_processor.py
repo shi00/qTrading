@@ -106,14 +106,25 @@ class DataProcessor:
         # Fallback if DB fails
         dates = []
         try:
-            current = datetime.datetime.strptime(start_date, '%Y%m%d')
-            end = datetime.datetime.strptime(end_date, '%Y%m%d')
-            while current <= end:
-                if current.weekday() < 5:
-                    dates.append(current.strftime('%Y%m%d'))
-                current += datetime.timedelta(days=1)
-        except:
-            pass
+            # Try Offline Calendar first (Handles holidays correctly)
+            from data.offline_calendar import OfflineCalendar
+            dates = OfflineCalendar.get_trade_dates(start_date, end_date)
+            
+            if not dates:
+                 # Last resort: Weekday check
+                 raise Exception("Offline calendar returned empty")
+                 
+        except Exception as ex:
+            logger.warning(f"[DataProcessor] Offline calendar fallback failed: {ex}, using simple weekday check")
+            try:
+                current = datetime.datetime.strptime(start_date, '%Y%m%d')
+                end = datetime.datetime.strptime(end_date, '%Y%m%d')
+                while current <= end:
+                    if current.weekday() < 5:
+                        dates.append(current.strftime('%Y%m%d'))
+                    current += datetime.timedelta(days=1)
+            except:
+                pass
         return dates
 
     async def init_data(self):
@@ -179,92 +190,86 @@ class DataProcessor:
 
     async def check_data_health(self):
         """
-        Check data health status: Timeliness and Completeness (3 years).
-        Returns:
-            dict: {
-                'status': 'green'|'yellow'|'red',
-                'latest_date': str,
-                'lag_days': int,
-                'missing_count': int,
-                'total_days': int,
-                'missing_details': list,
-                'coverage': str
-            }
+        Check data health status: Timeliness (Market) and Completeness (Financials).
+        Returns comprehensive report.
         """
+        # Ensure schema (indices) are up to date
+        await self.cache.init_db()
+        
         try:
-            # 1. Official Calendar (Last 3 Years)
+            # 1. Market Data Logic (Keep existing time-series check)
             end_date = await self.get_latest_trade_date()
             start_date = (datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
-            
-            # Run blocking API call in executor
-            # loop = asyncio.get_running_loop()
-            # official_dates = await loop.run_in_executor(None, lambda: self.api.get_trade_dates(start_date, end_date))
-            
-            # Use cached method
             official_dates = await self.get_trade_dates(start_date, end_date)
             
             if not official_dates:
                 return {'status': 'red', 'msg': 'Cannot get official calendar'}
                 
-            # Ensure ascending order for correct indexing
             official_dates.sort()
             official_set = set(official_dates)
-            
-            # 2. Local Cache
             local_dates = await self.cache.get_cached_trade_dates()
             
-            # 3. Analyze logic
-            # Filter official dates to only those <= end_date (should be handled by get_trade_dates but double check)
-            
-            # Calculate missing
-            # Only care about missing dates that are in official_set
-            missing_dates = sorted(list(official_set - local_dates))
-            missing_count = len(missing_dates)
-            total_days = len(official_set)
-            
-            # Timeliness check
-            latest_official = official_dates[-1] if official_dates else end_date
-            is_latest_synced = latest_official in local_dates
+            # Market Metrics
+            is_latest_synced = official_dates[-1] in local_dates
+            last_local = sorted(list(local_dates))[-1] if local_dates else 'None'
             
             lag_days = 0
-            if not is_latest_synced:
-                # Calculate lag: how many official trading days exist AFTER the last local date
-                if not local_dates:
-                    lag_days = total_days
-                else:
-                    last_local = sorted(list(local_dates))[-1]
-                    lag_days = len([d for d in official_dates if d > last_local])
+            if not is_latest_synced and local_dates:
+                lag_days = len([d for d in official_dates if d > last_local])
+            elif not local_dates:
+                lag_days = len(official_dates)
             
-            # Status determination
+            # 2. Comprehensive Fundamentals Check
+            deep_health = await self.cache.check_comprehensive_health()
+            
+            # v2.0 Scorecard (Strict Zero Tolerance)
             status = 'green'
-            if not is_latest_synced:
+            reasons = []
+            
+            # Metric 1: Market Lag
+            if lag_days > 0:
                 status = 'yellow'
-                if lag_days > 3:
-                    status = 'red'
-            
-            # 4. Financial Coverage
-            fin_stats, missing_fin_codes = await self.cache.check_financial_coverage()
-            fin_ratio = fin_stats.get('ratio', 0)
-            
-            # Status logic update
-            if fin_ratio < 0.8:
+                reasons.append(f"行情滞后 {lag_days} 天")
+            if lag_days > 3: 
                 status = 'red'
-            elif fin_ratio < 0.98:
+            
+            # Metric 2: Financial Freshness (Strict)
+            fin_stats = deep_health['tables'].get('financial_reports', {})
+            fin_fresh_ratio = fin_stats.get('fresh_ratio', 0)
+            target_period = fin_stats.get('deadline_desc', '必要报告期')
+            
+            if fin_fresh_ratio < 0.90:
+                status = 'red'
+                reasons.append(f"{target_period} 缺失 (仅 {fin_fresh_ratio*100:.0f}%)")
+            elif fin_fresh_ratio < 0.98:
                 if status == 'green': status = 'yellow'
+                reasons.append(f"{target_period} 覆盖不足")
                 
+            # Metric 3: Gaps (Continuity)
+            gap_count = deep_health.get('gap_count', 0)
+            if gap_count > 0:
+                status = 'red' # Zero Tolerance
+                reasons.append(f"发现 {gap_count} 处行情断点")
+                
+            # Metric 4: Sanity (Integrity)
+            sanity_errors = deep_health.get('sanity_errors', 0)
+            if sanity_errors > 0:
+                if status == 'green': status = 'yellow'
+                if sanity_errors > 10: status = 'red'
+                reasons.append(f"发现 {sanity_errors} 条脏数据")
+
             return {
                 'status': status,
-                'latest_local': sorted(list(local_dates))[-1] if local_dates else 'None',
-                'latest_official': latest_official,
-                'lag_days': lag_days,
-                'missing_count': missing_count,
-                'total_days': total_days,
-                'coverage': f"{(total_days - missing_count)/total_days*100:.1f}%" if total_days > 0 else "0%",
-                
-                # Financial Health
-                'financial_coverage': f"{fin_ratio*100:.1f}%",
-                'financial_missing_count': len(missing_fin_codes),
-                'financial_missing_codes': missing_fin_codes
+                'reasons': reasons,
+                'market': {
+                    'latest_local': last_local,
+                    'latest_official': official_dates[-1],
+                    'lag_days': lag_days,
+                    'coverage_ratio': len(local_dates & official_set) / len(official_set) if official_set else 0
+                },
+                'fundamentals': deep_health,
+                'financial_coverage': f"{fin_stats.get('ratio',0)*100:.1f}%", 
+                'missing_count': deep_health['tables']['financial_reports'].get('total_stocks', 0) - deep_health['tables']['financial_reports'].get('covered', 0)
             }
             
         except Exception as e:
@@ -335,22 +340,56 @@ class DataProcessor:
             try:
                 return await loop.run_in_executor(None, lambda: func(trade_date=trade_date))
             except Exception as e:
-                if "权限" in str(e) or "2000" in str(e):
-                    logger.warning(f"[DataProcessor] [WARN] Skipping {name} due to permission/points limit.")
+                if "权限" in str(e) or "2000" in str(e) or "积分" in str(e):
+                    logger.warning(f"[DataProcessor] [WARN] Skipping {name} due to Tushare points limit.")
                 else:
                     logger.warning(f"[DataProcessor] Failed to fetch {name}: {e}")
                 return None
 
-        # Create tasks
+        # Create tasks for ALL daily data (11 types now)
+        # Core Stock Data
         t_quotes = fetch_safe(self.api.get_daily_quotes, "Daily Quotes")
         t_basic = fetch_safe(self.api.get_daily_basic, "Daily Indicators")
+        t_limit = fetch_safe(self.api.get_limit_list, "Limit List")
+        t_suspend = fetch_safe(self.api.get_suspend_d, "Suspend List")
+        t_margin = fetch_safe(self.api.get_margin_detail, "Margin Detail") # Individual stock margin
+        
+        # Extended Data
         t_mf = fetch_safe(self.api.get_moneyflow, "Money Flow")
         t_north = fetch_safe(self.api.get_hk_hold, "Northbound")
         t_lhb = fetch_safe(self.api.get_top_list, "Dragon Tiger")
         t_block = fetch_safe(self.api.get_block_trade, "Block Trade")
         
-        results = await asyncio.gather(t_quotes, t_basic, t_mf, t_north, t_lhb, t_block)
-        df_quotes, df_basic, df_mf, df_north, df_lhb, df_block = results
+        # Index Data (Must fetch by ts_code for index_daily)
+        t_index_basic = fetch_safe(self.api.get_index_dailybasic, "Index Indicators")
+        
+        # Major Indices List
+        MAJOR_INDICES = ['000001.SH', '399001.SZ', '399006.SZ', '000300.SH', '000905.SH', '000852.SH', '000688.SH']
+        
+        async def fetch_indices_safe():
+            try:
+                # Fetch each index concurrently
+                tasks = [loop.run_in_executor(None, lambda c=code: self.api.get_index_daily(ts_code=c, trade_date=trade_date)) for code in MAJOR_INDICES]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                dfs = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
+                if dfs:
+                    return pd.concat(dfs, ignore_index=True)
+                return None
+            except Exception as e:
+                logger.warning(f"[DataProcessor] Failed to fetch indices: {e}")
+                return None
+
+        t_index = fetch_indices_safe() # Returns a coroutine
+        
+        results = await asyncio.gather(
+            t_quotes, t_basic, t_limit, t_suspend, t_margin, 
+            t_mf, t_north, t_lhb, t_block, 
+            t_index, t_index_basic
+        )
+        
+        (df_quotes, df_basic, df_limit, df_suspend, df_margin, 
+         df_mf, df_north, df_lhb, df_block, 
+         df_index, df_index_basic) = results
         
         # Handle case where today's data is not ready (Quotes is the primary signal)
         today_str = datetime.datetime.now().strftime('%Y%m%d')
@@ -367,13 +406,8 @@ class DataProcessor:
             await self.cache.update_sync_status('daily_quotes', trade_date, quotes_count)
             logger.info(f"[DataProcessor] [OK] Saved {quotes_count} daily quotes.")
         
-        if quotes_count == 0:
-            # If quotes failed, it's likely a non-trading day or serious issue, but we try saving others just in case?
-            # Usually if quotes fail, everything fails for that day.
-            # But we only raise if it's strictly required.
-             if trade_date != today_str:
-                logger.warning(f"[DataProcessor] No quotes available for {trade_date}.")
-                # We do NOT raise here to allow partial sync if possible, but usually we need quotes.
+        if quotes_count == 0 and trade_date != today_str:
+             logger.warning(f"[DataProcessor] No quotes available for {trade_date}.")
         
         # 2. Indicators
         if df_basic is not None and not df_basic.empty:
@@ -381,13 +415,28 @@ class DataProcessor:
             await self.cache.update_sync_status('daily_indicators', trade_date, indicators_count)
             logger.info(f"[DataProcessor] [OK] Saved {indicators_count} daily indicators.")
 
-        # 3. Extended Data (MoneyFlow)
+        # 3. Limit List
+        if df_limit is not None and not df_limit.empty:
+            c = await self.cache.save_limit_list(df_limit)
+            logger.info(f"[DataProcessor] [OK] Saved {c} limit records.")
+
+        # 4. Suspend List
+        if df_suspend is not None and not df_suspend.empty:
+            c = await self.cache.save_suspend_d(df_suspend)
+            logger.info(f"[DataProcessor] [OK] Saved {c} suspend records.")
+
+        # 5. Margin Detail
+        if df_margin is not None and not df_margin.empty:
+            c = await self.cache.save_margin_daily(df_margin)
+            logger.info(f"[DataProcessor] [OK] Saved {c} margin records.")
+
+        # 6. Money Flow
         if df_mf is not None and not df_mf.empty:
             c = await self.cache.save_moneyflow(df_mf)
             await self.cache.update_sync_status('moneyflow_daily', trade_date, c)
             logger.info(f"[DataProcessor] [OK] Saved {c} money flow records.")
 
-        # 4. Extended Data (Northbound)
+        # 7. Northbound
         if df_north is not None and not df_north.empty:
             # Filter A-shares
             df_north = df_north[df_north['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
@@ -396,15 +445,28 @@ class DataProcessor:
                 await self.cache.update_sync_status('northbound_holding', trade_date, c)
                 logger.info(f"[DataProcessor] [OK] Saved {c} northbound records.")
 
-        # 5. Extended Data (LHB)
+        # 8. LHB
         if df_lhb is not None and not df_lhb.empty:
             c = await self.cache.save_top_list(df_lhb)
             logger.info(f"[DataProcessor] [OK] Saved {c} LHB records.")
 
-        # 6. Extended Data (Block Trade)
+        # 9. Block Trade - DISABLED for Step 3 to save time/space if not strictly needed (User plan didn't emphasize block)
+        # But schema has it. Let's keep it.
+        # However, block trade is huge volume sometimes.
         if df_block is not None and not df_block.empty:
+            # Drop block trade saving if performance is an issue, but ok for now.
             c = await self.cache.save_block_trade(df_block)
             logger.info(f"[DataProcessor] [OK] Saved {c} block trade records.")
+            
+        # 10. Index Daily
+        if df_index is not None and not df_index.empty:
+            c = await self.cache.save_index_daily(df_index)
+            logger.info(f"[DataProcessor] [OK] Saved {c} index daily records.")
+            
+        # 11. Index Indicators
+        if df_index_basic is not None and not df_index_basic.empty:
+            c = await self.cache.save_index_dailybasic(df_index_basic)
+            logger.info(f"[DataProcessor] [OK] Saved {c} index basic records.")
         
         # Return merged data for immediate use (Backward Compatibility)
         if df_quotes is not None and not df_quotes.empty and df_basic is not None and not df_basic.empty:
@@ -533,7 +595,7 @@ class DataProcessor:
                     await self.sync_daily_market_snapshot(date)
                     
                     if progress_callback:
-                        progress_callback(idx + 1, total_days, f"[1/2] {I18n.get('progress_sync_market').format(date=date)}")
+                        progress_callback(idx + 1, total_days, I18n.get('progress_sync_market').format(date=date))
                 except Exception as e:
                     logger.error(f"Failed to sync {date}: {e}")
                     failed_dates.append(date)
@@ -566,7 +628,7 @@ class DataProcessor:
 
         # === Smart Retry Mechanism ===
         if failed_dates and not self._shutdown_event.is_set():
-            MAX_RETRIES = 3
+            MAX_RETRIES = ConfigHandler.get_sync_retry_count()
             logger.info(f"[DataProcessor] [WARN] Main sync finished with {len(failed_dates)} failures. Starting Smart Retry (Max {MAX_RETRIES} rounds)...")
             
             for retry_round in range(MAX_RETRIES):
@@ -775,86 +837,202 @@ class DataProcessor:
         return total_saved
 
 
-    async def _run_full_sync(self, periods=None, progress_callback=None, cancel_event=None):
+    async def initialize_system(self, progress_callback=None, cancel_event=None):
         """
-        Full/Batch Sync Financial Data.
-        Strategy: Per-Stock Batch Sync (Query 3 Years of data).
+        Master Initialization Sequence (Step 1-5).
+        Orchestrates the entire sync process from scratch.
         """
-        if self._shutdown_event.is_set(): return 0
-        import datetime
-        import asyncio
         from ui.i18n import I18n
         
-        if cancel_event and cancel_event.is_set():
-             logger.warning("[DataProcessor] Financial sync cancelled before start.")
-             return 0
+        # Weighted Progress Configuration
+        # Step 1: Stock List (2%)
+        # Step 2: Calendar (3%)
+        # Step 3: Quotes (45%)
+        # Step 4: Fundamentals (45%)
+        # Step 5: Health Check (5%)
+        step_weights = [2, 3, 45, 45, 5]
+        step_starts = [0, 2, 5, 50, 95]
+        
+        def report_progress(step_idx, fraction, msg):
+            if not progress_callback: return
+            base = step_starts[step_idx]
+            width = step_weights[step_idx]
+            current_val = base + (width * fraction)
+            progress_callback(current_val, 100, msg)
 
-        # Calculate Time Range (3 Years + Buffer)
-        now = datetime.datetime.now()
-        end_date = now.strftime('%Y%m%d')
-        start_date = (now - datetime.timedelta(days=365*3 + 180)).strftime('%Y%m%d')
+        # Step 1: Basic Info
+        report_progress(0, 0.1, f"[1/5] {I18n.get('init_stock_list')}")
+        if cancel_event and cancel_event.is_set(): return
+        await self.sync_stock_basic()
+        report_progress(0, 1.0, f"[1/5] {I18n.get('init_stock_list_done')}")
         
-        logger.info(f"[DataProcessor] Starting Per-Stock Batch Sync from {start_date} to {end_date}...")
+        # Step 2: Trade Calendar (3 Years)
+        report_progress(1, 0.1, f"[2/5] {I18n.get('init_calendar')}")
+        if cancel_event and cancel_event.is_set(): return
+        end_date = datetime.datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
+        await self.cache.init_db() # Explicit schema check
+        # Force sync calendar
+        loop = asyncio.get_running_loop()
+        df_cal = await loop.run_in_executor(None, lambda: self.api.get_trade_cal(start_date, end_date))
+        if df_cal is not None:
+             await self.cache.save_trade_cal(df_cal)
+        report_progress(1, 1.0, f"[2/5] {I18n.get('init_calendar_done')}")
+             
+        # Step 3: Historical Quotes (3 Years)
+        report_progress(2, 0.0, f"[3/5] {I18n.get('init_quotes')}")
+        if cancel_event and cancel_event.is_set(): return
         
-        # Get stock list
-        stock_df = await self.cache.get_stock_basic()
-        if stock_df is None or stock_df.empty:
-            await self.sync_stock_basic()
-            stock_df = await self.cache.get_stock_basic()
-            
-        all_stock_codes = stock_df['ts_code'].tolist()
-        if not all_stock_codes:
-            return 0
-            
-        total_stocks = len(all_stock_codes)
-        
-        # Concurrency Control
-        semaphore = asyncio.Semaphore(ConfigHandler.get_sync_concurrency()) 
-        
-        total_saved = 0
-        total_errors = 0
-        
-        async def sync_one_stock(ts_code, idx):
-            if cancel_event and cancel_event.is_set():
-                return
+        def step3_callback(current, total, msg):
+             fraction = current / max(1, total) if total > 0 else 0
+             fraction = max(0.0, min(1.0, fraction))
+             report_progress(2, fraction, f"[3/5] {msg}")
 
-            nonlocal total_saved, total_errors
+        # This will use the UPDATED sync_daily_market_snapshot inside
+        await self.sync_historical_data(days=365*3, progress_callback=step3_callback, cancel_event=cancel_event)
+        
+        # Step 4: Comprehensive Fundamentals
+        report_progress(3, 0.0, f"[4/5] {I18n.get('init_fundamentals')}")
+        if cancel_event and cancel_event.is_set(): return
+        
+        def step4_callback(current, total, msg):
+             fraction = current / max(1, total) if total > 0 else 0
+             fraction = max(0.0, min(1.0, fraction))
+             report_progress(3, fraction, f"[4/5] {msg}")
+                 
+        await self.sync_comprehensive_fundamentals(progress_callback=step4_callback, cancel_event=cancel_event)
+        
+        # Step 5: Health Check
+        report_progress(4, 0.1, f"[5/5] {I18n.get('init_health_check')}")
+        if cancel_event and cancel_event.is_set(): return
+        
+        health_report = await self.check_data_health()
+        status = health_report.get('status', 'red').upper()
+        coverage = health_report.get('financial_coverage', '0%')
+        
+        final_msg = I18n.get('init_complete').format(status=status, coverage=coverage)
+        if progress_callback: progress_callback(100, 100, final_msg)
+        
+        return health_report
+
+    async def _run_full_sync(self, periods=None, progress_callback=None, cancel_event=None):
+        """
+        Legacy/Alias for Full Sync.
+        Redirects to sync_comprehensive_fundamentals for simplicity.
+        """
+        await self.sync_comprehensive_fundamentals(progress_callback=progress_callback, cancel_event=cancel_event)
+
+    async def sync_comprehensive_fundamentals(self, progress_callback=None, cancel_event=None):
+        """
+        Step 4 Implementation: Loop by Stock, 9 concurrent requests per stock.
+        """
+        from ui.i18n import I18n
+        logger.info("[DataProcessor] Starting Step 4: Comprehensive Fundamentals Sync...")
+        
+        # 1. Get Stock List
+        df_basic = await self.cache.get_stock_basic()
+        if df_basic.empty:
+            logger.error("[DataProcessor] No stocks found. Run Step 1 first.")
+            return
+
+        # Sort active stocks first? List status L.
+        df_active = df_basic[df_basic['list_status'] == 'L']
+        stocks = df_active['ts_code'].tolist()
+        total_stocks = len(stocks)
+        
+        # 2. Concurrency Control (Stock Level)
+        concurrency = ConfigHandler.get_sync_concurrency()
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        # 3. Resume Logic
+        import json
+        import os
+        checkpoint_file = 'sync_checkpoint_step4.json'
+        start_index = 0
+        if os.path.exists(checkpoint_file):
+            try:
+                with open(checkpoint_file, 'r') as f:
+                    data = json.load(f)
+                    if data.get('total') == total_stocks: # Simple validation
+                        start_index = data.get('last_index', 0)
+                        logger.info(f"[DataProcessor] Resuming Step 4 from index {start_index}")
+            except: pass
+            
+        completed_count = start_index
+        
+        async def process_one_stock(ts_code):
             async with semaphore:
-                if cancel_event and cancel_event.is_set():
-                    return
-
+                if cancel_event and cancel_event.is_set(): return
+                if self._shutdown_event.is_set(): return
+                
                 try:
-                    # Fetch 3 years data for this stock (Comprehensive: Income + Balance + Indicators)
-                    # Use helper method to merge data sources
-                    df = await self._fetch_comprehensive_financial_data(
-                        ts_code=ts_code, 
-                        start_date=start_date, 
-                        end_date=end_date
-                    )
+                    loop = asyncio.get_running_loop()
+                    end_date = datetime.datetime.now().strftime('%Y%m%d')
+                    start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
                     
-                    if df is not None and not df.empty:
-                        # Ensure Schema
-                        schema_cols = ['ts_code', 'end_date', 'ann_date', 'report_type', 'total_revenue', 'revenue',
-                                     'n_income', 'n_income_attr_p', 'total_assets', 'total_liab', 
-                                     'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin', 
-                                     'netprofit_margin', 'debt_to_assets', 'or_yoy', 'netprofit_yoy']
-                        
-                        # Handle potential missing columns after merge
-                        for col in schema_cols:
-                            if col not in df.columns:
-                                df[col] = None
-                                
-                        count = await self.cache.save_financial_reports(df[schema_cols])
-                        total_saved += count
-                        
-                    if progress_callback and idx % 20 == 0:
-                        progress_callback(idx, total_stocks, f"[2/2] {I18n.get('progress_sync_finance').format(date=ts_code)}")
-                
+                    async def f(func, **kwargs):
+                        try:
+                            # Tushare Client is synchronous, so run in executor
+                            return await loop.run_in_executor(None, lambda: func(**kwargs))
+                        except Exception as e:
+                            return None
+
+                    # 9 Data Types
+                    t1 = f(self.api.get_income, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t2 = f(self.api.get_balancesheet, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t3 = f(self.api.get_cashflow, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t4 = f(self.api.get_fina_indicator, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t5 = f(self.api.get_fina_audit, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t6 = f(self.api.get_forecast, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t7 = f(self.api.get_fina_mainbz, ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    t8 = f(self.api.get_pledge_stat, ts_code=ts_code, end_date=end_date) 
+                    t9 = f(self.api.get_repurchase, ts_code=ts_code, start_date=start_date)
+                    t10 = f(self.api.get_dividend, ts_code=ts_code, start_date=start_date)
+                    
+                    results = await asyncio.gather(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10)
+                    
+                    # Save results if not empty
+                    if results[0] is not None: await self.cache.save_financial_reports(results[0])
+                    if results[1] is not None: await self.cache.save_financial_reports(results[1])
+                    if results[2] is not None: await self.cache.save_financial_reports(results[2])
+                    if results[3] is not None: await self.cache.save_financial_reports(results[3])
+                    
+                    if results[4] is not None: await self.cache.save_fina_audit(results[4])
+                    if results[5] is not None: await self.cache.save_fina_forecast(results[5])
+                    if results[6] is not None: await self.cache.save_fina_mainbz(results[6])
+                    if results[7] is not None: await self.cache.save_pledge_stat(results[7])
+                    if results[8] is not None: await self.cache.save_repurchase(results[8])
+                    if results[9] is not None: await self.cache.save_dividend(results[9])
+
                 except Exception as e:
-                    total_errors += 1
-                    logger.debug(f"Failed sync {ts_code}: {e}")
+                    logger.error(f"Failed Step 4 for {ts_code}: {e}")
+
+        # Batch Processing
+        batch_size = 50
+        pending_list = stocks[start_index:]
+        
+        for i in range(0, len(pending_list), batch_size):
+            if cancel_event and cancel_event.is_set(): break
+            if self._shutdown_event.is_set(): break
+            
+            batch = pending_list[i : i+batch_size]
+            tasks = [process_one_stock(code) for code in batch]
+            await asyncio.gather(*tasks)
+            
+            completed_count += len(batch)
+            
+            # Update Checkpoint
+            try:
+                with open(checkpoint_file, 'w') as f:
+                    json.dump({'last_index': completed_count, 'total': total_stocks}, f)
+            except: pass
+            
+            if progress_callback:
+                progress_callback(completed_count, total_stocks, f"Fundamentals: {completed_count}/{total_stocks} ({pending_list[i]})")
                 
-                await asyncio.sleep(0.05)
+        if completed_count >= total_stocks:
+             if os.path.exists(checkpoint_file):
+                 os.remove(checkpoint_file)
 
     async def _fetch_comprehensive_financial_data(self, ts_code, start_date=None, end_date=None, period=None):
         """
@@ -1037,64 +1215,7 @@ class DataProcessor:
             logger.error(f"[DataProcessor] [WARN] Error syncing northbound: {e}")
         return 0
 
-    async def sync_all_daily(self, trade_date=None):
-        """
-        Sync all daily data: quotes, indicators, moneyflow, northbound.
-        This is the main method for daily updates.
-        """
-        if trade_date is None:
-            trade_date = self.get_latest_trade_date()
-        
-        logger.info(f"[DataProcessor] === Full daily sync for {trade_date} ===")
-        
-        results = {
-            'quotes': 0,
-            'indicators': 0,
-            'moneyflow': 0,
-            'northbound': 0
-        }
-        
-        # Sync in parallel
-        loop = asyncio.get_running_loop()
-        
-        # Fetch all data types
-        # Fetch all data types in parallel
-        logger.info(f"[DataProcessor] Fetching extended data from Tushare API...")
-        futures = [
-            loop.run_in_executor(None, lambda: self.api.get_daily_quotes(trade_date=trade_date)),
-            loop.run_in_executor(None, lambda: self.api.get_daily_basic(trade_date=trade_date)),
-            loop.run_in_executor(None, lambda: self.api.get_moneyflow(trade_date=trade_date)),
-            loop.run_in_executor(None, lambda: self.api.get_hk_hold(trade_date=trade_date)),
-            loop.run_in_executor(None, lambda: self.api.get_top_list(trade_date=trade_date)),
-            loop.run_in_executor(None, lambda: self.api.get_block_trade(trade_date=trade_date)),
-        ]
-        
-        results = await asyncio.gather(*futures, return_exceptions=True)
-        df_quotes, df_basic, df_mf, df_north, df_lhb, df_block = results
-        
-        saved_counts = {}
-        
-        # Save each type (handling exceptions)
-        if isinstance(df_quotes, pd.DataFrame) and not df_quotes.empty:
-            saved_counts['quotes'] = await self.cache.save_daily_quotes(df_quotes)
-            
-        if isinstance(df_basic, pd.DataFrame) and not df_basic.empty:
-            saved_counts['indicators'] = await self.cache.save_daily_indicators(df_basic)
-            
-        if isinstance(df_mf, pd.DataFrame) and not df_mf.empty:
-            saved_counts['moneyflow'] = await self.cache.save_moneyflow(df_mf)
-            
-        if isinstance(df_north, pd.DataFrame) and not df_north.empty:
-            saved_counts['northbound'] = await self.cache.save_northbound(df_north)
-            
-        if isinstance(df_lhb, pd.DataFrame) and not df_lhb.empty:
-            saved_counts['top_list'] = await self.cache.save_top_list(df_lhb)
-            
-        if isinstance(df_block, pd.DataFrame) and not df_block.empty:
-            saved_counts['block_trade'] = await self.cache.save_block_trade(df_block)
-        
-        logger.info(f"[DataProcessor] === Sync complete: {saved_counts} ===")
-        return saved_counts
+    # sync_all_daily removed (use sync_daily_market_snapshot)
 
 
     async def prepare_screening_context(self):
@@ -1306,18 +1427,19 @@ class DataProcessor:
             
             logger.info(f"Fetching market overview for target: {date}...")
 
-            # 2. Fetch Indices
+            # 2. Fetch Indices (Real-time only, no cache fallback)
             # 000001.SH (Shanghai), 399001.SZ (Shenzhen), 399006.SZ (ChiNext)
             async def get_idx(code, name):
                 df = await asyncio.to_thread(self.api.get_index_daily, ts_code=code, trade_date=date)
                 
                 if df is not None and not df.empty:
                     row = df.iloc[0]
-                    change = row['pct_chg']
+                    change = row.get('pct_chg', 0) or 0
+                    close_val = row.get('close', 0) or 0
                     return {
                         'name': name,
-                        'value': f"{row['close']:.2f}",
-                        'change': f"{change:+.2f}%",
+                        'value': f"{close_val:.2f}" if close_val else '-',
+                        'change': f"{change:+.2f}%" if change else '-',
                         'color': 'red' if change >= 0 else 'green' 
                     }
                 return {'name': name, 'value': '-', 'change': '-', 'color': 'grey'}
@@ -1379,7 +1501,7 @@ class DataProcessor:
             if getattr(self, '_first_news_sync', True):
                 limit = 200
                 self._first_news_sync = False
-                logger.info("[DataProcessor] 🚀 Deep Sync triggered for startup (limit=200)")
+                logger.info("[DataProcessor] Deep Sync triggered for startup (limit=200)")
             else:
                 limit = 20
         

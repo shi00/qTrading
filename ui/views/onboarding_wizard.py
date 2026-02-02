@@ -284,64 +284,7 @@ class OnboardingWizard(ft.Container):
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    async def _verify_ai_config(self, e):
-        from ui.theme import AppColors
-        api_key = self.ai_api_key_input.value.strip()
-        base_url = self.ai_base_url_input.value.strip()
-        model = self.ai_model_dropdown.value
-        
-        if not api_key:
-             self.ai_status.value = "❌ 请输入 API Key"
-             self.ai_status.color = AppColors.ERROR
-             self.update()
-             return
 
-        # Save temporarily
-        ConfigHandler.save_ai_config(api_key, base_url, model)
-        ConfigHandler.save_ai_system_prompt(self.ai_prompt_input.value)
-        
-        self.ai_status.value = "验证连接中..."
-        self.ai_status.color = AppColors.WARNING
-        self.update()
-        
-        try:
-            from data.ai_client import AIClient
-            client = AIClient()
-            await client.reload_config()
-            success = await client.verify_connection()
-            
-            if success:
-                self.ai_status.value = "✅ 验证成功"
-                self.ai_status.color = AppColors.SUCCESS
-                self.update()
-                await asyncio.sleep(0.5)
-                await self._next_step()
-            else:
-                 self.ai_status.value = "❌ 验证失败: 连接被拒绝"
-                 self.ai_status.color = AppColors.ERROR
-                 self.update()
-                 
-        except Exception as ex:
-            self.ai_status.value = f"❌ 验证出错: {str(ex)[:30]}"
-            self.ai_status.color = AppColors.ERROR
-            self.update()
-
-    async def _skip_ai_config(self, e):
-        """Skip AI config"""
-        await self._next_step()
-
-    async def _handle_full_sync(self, e):
-        await self._start_sync(quick=False)
-
-    async def _handle_cancel_sync(self, e):
-        """Cancel the running sync task"""
-        from ui.theme import AppColors
-        if hasattr(self, 'cancel_event'):
-            self.cancel_event.set()
-            self.sync_status.value = "正在取消..."
-            self.sync_status.color = AppColors.ERROR
-            self.btn_cancel_sync.disabled = True
-            self.update()
 
     def _build_step2(self):
         """Step 3: Data Sync"""
@@ -671,7 +614,7 @@ class OnboardingWizard(ft.Container):
         from ui.theme import AppColors
         if hasattr(self, 'cancel_event'):
             self.cancel_event.set()
-            self.sync_status.value = "正在取消..." # Keep simplified status directly or use key? "正在取消..." -> wizard_msg_sync_cancelled (close enough or need new key?)
+            self.sync_status.value = I18n.get("wizard_status_cancelling") # Keep simplified status directly or use key? "正在取消..." -> wizard_msg_sync_cancelled (close enough or need new key?)
             # Actually I should use I18n for "Cancelling..."
             # Let's use hardcoded "Cancelling..." for now as I missed this key or stick to English "Cancelling..."
             # I'll use "Cancelling..." -> "正在取消..."

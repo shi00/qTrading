@@ -236,7 +236,8 @@ class ReviewManager:
         """Update DB with result"""
         # We could store index_pct if schema supported it, for now just use it for logging above
         sql = "UPDATE screening_history SET t1_pct=?, prediction_result=? WHERE id=?"
-        await self.cache.queue.put((sql, (pct, label, record_id), False))
+        # Use _enqueue to wrap in PrioritizedTask
+        await self.cache._enqueue((sql, (pct, label, record_id), False))
 
     async def save_results(self, strategy_name, df):
         """
@@ -288,5 +289,5 @@ class ReviewManager:
         
         # We need to access CacheManager queue
         # CacheManager queue items: (sql, params, is_many)
-        await self.cache.queue.put((sql, records, True))
+        await self.cache._enqueue((sql, records, True))
         logger.info(f"[Review] Saved {len(records)} predictions for {strategy_name}")
