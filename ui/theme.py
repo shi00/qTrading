@@ -4,6 +4,7 @@ A股量化选股系统 - 统一主题配置
 提供专业金融应用的配色方案和组件样式。
 """
 import flet as ft
+from ui.i18n import I18n
 
 
 class AppColors:
@@ -40,6 +41,19 @@ class AppColors:
     WARNING = "#FF9800"
     ERROR = "#F44336"
     INFO = "#2196F3"
+
+    # 组件特定
+    TABLE_HEADER_BG = "#1E3A5F"   # 表头背景 - 深海蓝（与 PRIMARY 一致）
+    TABLE_HEADER_TEXT = "#FFFFFF" # 表头文字 - 白色
+    TABLE_ROW_ODD = "#FFFFFF"     # 奇数行背景
+    TABLE_ROW_EVEN = "#F7FAFC"    # 偶数行背景 - 极淡蓝灰
+    TABLE_CELL_TEXT = "#2D3748"   # 单元格文字 - 深灰
+    TABLE_CELL_NUMERIC = "#1A365D" # 数字单元格 - 深蓝（更专业）
+    TABLE_BORDER = "#E0E4E8"      # 表格边框
+    TABLE_GRID_V = "#E8ECF0"      # 垂直网格线 - 淡色
+    TABLE_GRID_H = "#F0F3F5"      # 水平网格线 - 更淡
+    GRID_LINE = "#F5F5F5"         # 通用网格线 (Grey 100)
+    INPUT_BORDER = "#E0E0E0"      # 输入框边框 (Grey 300 approx)
 
 
 class AppStyles:
@@ -161,5 +175,20 @@ def apply_page_theme(page: ft.Page):
             on_background=AppColors.TEXT_PRIMARY,
             on_error=AppColors.TEXT_ON_PRIMARY,
         ),
-        font_family="Microsoft YaHei",
+        font_family=I18n.get("font_family"),
+        scrollbar_theme=ft.ScrollbarTheme(
+            track_visibility=True,
+            thumb_visibility=True,
+            track_color={
+                ft.ControlState.HOVERED: ft.Colors.with_opacity(0.1, AppColors.PRIMARY),
+                ft.ControlState.DEFAULT: ft.Colors.TRANSPARENT,
+            },
+            thumb_color={
+                ft.ControlState.HOVERED: ft.Colors.with_opacity(0.5, AppColors.PRIMARY),
+                ft.ControlState.DEFAULT: ft.Colors.with_opacity(0.2, AppColors.PRIMARY),
+            },
+            thickness=10,
+            radius=5,
+            interactive=True,
+        )
     )

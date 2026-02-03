@@ -3,6 +3,7 @@ import logging
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
 
@@ -12,8 +13,8 @@ class ProxyManager:
     Domestic (Direct) and International (Proxy) traffic.
     """
     
-    # Critical domains that should usually bypass proxy in China
-    DOMESTIC_DOMAINS = [
+    # Default critical domains (Fallback if user config is empty)
+    DEFAULT_DOMAINS = [
         "eastmoney.com",
         "sina.com.cn",
         "10jqka.com.cn",
@@ -33,9 +34,10 @@ class ProxyManager:
         Auto-optimizes network settings at startup.
         Strategy:
         1. Identify system proxy settings.
-        2. For each critical domestic domain, TEST direct connectivity.
-        3. If Direct works -> Add to NO_PROXY (Performance + Stability).
-        4. If Direct fails -> Do nothing (Allow System Proxy to handle it).
+        2. Load whitelist from Config (user_settings.json) OR use Defaults.
+        3. For each critical domestic domain, TEST direct connectivity.
+        4. If Direct works -> Add to NO_PROXY (Performance + Stability).
+        5. If Direct fails -> Do nothing (Allow System Proxy to handle it).
         """
         logger.info("[ProxyManager] Starting network optimization...")
         
@@ -50,6 +52,18 @@ class ProxyManager:
             current_no_proxy = os.environ.get("no_proxy", "")
             
         final_domains = set(current_no_proxy.split(",")) if current_no_proxy else set()
+        
+        # Load User Configured Domains
+        user_domains = ConfigHandler.get_proxy_domains()
+        
+        # Merge Strategy: Defaults + User Config
+        # We rely on the connectivity test to filter out bad domains, so merging is safe.
+        # This allows users to just add extra domains without copying the whole default list.
+        merged_list = ProxyManager.DEFAULT_DOMAINS + user_domains
+        # Safety Filter: Ensure all items are strings (e.g. if user put int in json)
+        target_domains = list(set([d for d in merged_list if isinstance(d, str) and d.strip()]))
+        
+        logger.info(f"[ProxyManager] Testing connectivity for {len(target_domains)} domains (Defaults + {len(user_domains)} User Custom)...")
         
         # Test Function
         def check_direct_access(domain):
@@ -70,10 +84,10 @@ class ProxyManager:
                     return False
 
         # Use ThreadPool to check fast
-        logger.info(f"[ProxyManager] Testing direct connectivity for {len(ProxyManager.DOMESTIC_DOMAINS)} domestic domains...")
+        logger.info(f"[ProxyManager] Testing direct connectivity for {len(target_domains)} domestic domains...")
         
         with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_domain = {executor.submit(check_direct_access, d): d for d in ProxyManager.DOMESTIC_DOMAINS}
+            future_to_domain = {executor.submit(check_direct_access, d): d for d in target_domains}
             
             for future in future_to_domain:
                 domain = future_to_domain[future]

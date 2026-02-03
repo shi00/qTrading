@@ -3,6 +3,7 @@ import json
 import asyncio
 from openai import AsyncOpenAI
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import log_async_operation
 from data.tushare_client import TushareClient
 from data.review_manager import ReviewManager
 
@@ -71,10 +72,11 @@ class AIClient:
     async def reload_config(self):
         """Reload config when settings change"""
         self._setup_client()
-        # Reload concurrency
-        concurrency = ConfigHandler.get_ai_concurrency()
-        self.semaphore = asyncio.Semaphore(concurrency)
+        # Force semaphore rebuild with new concurrency
+        self._semaphore = None
+        self._semaphore_loop = None
 
+    @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=30000)
     async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="") -> dict:
         """
         Analyze a single stock using the LLM.
@@ -179,6 +181,7 @@ class AIClient:
             logger.error(f"[AI] Analysis failed: {e}")
             return {"error": str(e), "score": 0}
 
+    @log_async_operation(operation_name="classify_news", performance_threshold_ms=5000)
     async def classify_news(self, text: str) -> dict:
         """
         Classify news text using LLM.

@@ -47,7 +47,7 @@ class HomeView(ft.Container):
         # News Control
         self.news_list = ft.ListView(spacing=10, padding=10, auto_scroll=False, expand=True)
         self.load_more_btn = ft.ElevatedButton(
-            text=I18n.get("news_load_more") if I18n.get("news_load_more") != "news_load_more" else "加载更多",
+            text=I18n.get("news_load_more"),
             on_click=self._on_load_more_click,
             visible=False,
             style=ft.ButtonStyle(
@@ -244,7 +244,7 @@ class HomeView(ft.Container):
              else:
                  # Show empty/error state
                  controls_content = [
-                     ft.Text(I18n.get("home_hot_concepts_empty") if I18n.get("home_hot_concepts_empty") != "home_hot_concepts_empty" else "暂无热点数据 (请检查网络)", 
+                     ft.Text(I18n.get("home_hot_concepts_empty"), 
                              size=12, color=ft.Colors.GREY)
                  ]
 
@@ -285,7 +285,7 @@ class HomeView(ft.Container):
             if news_df.empty:
                self.has_more_news = False
                if not load_more:
-                   self.news_list.controls.append(ft.Text("暂无新闻", color=ft.Colors.GREY))
+                   self.news_list.controls.append(ft.Text(I18n.get("home_news_empty"), color=ft.Colors.GREY))
             else:
                for _, row in news_df.iterrows():
                    self.news_list.controls.append(self._build_news_item(row))

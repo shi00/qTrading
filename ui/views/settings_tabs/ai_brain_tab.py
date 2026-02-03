@@ -247,7 +247,7 @@ class AIBrainTab(ft.Container):
                     self.ai_status_icon.color = ft.Colors.RED
             except Exception as ex:
                 self.title_text = str(ex) # Debug
-                self.ai_status_text.value = "Error"
+                self.ai_status_text.value = I18n.get("common_error")
                 
             self._safe_update()
             self.show_snack(I18n.get("settings_snack_ai_saved"))

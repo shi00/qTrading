@@ -530,7 +530,7 @@ class ScreenerView(ft.Container):
             
             # AI Reason for Tooltip
             ai_reason = row.get('ai_reason', '')
-            score_tooltip = f"AI Score: {score_str}\n{ai_reason}" if ai_reason else f"AI Score: {score_str}"
+            score_tooltip = f"{I18n.get('col_ai_score')}: {score_str}\n{ai_reason}" if ai_reason else f"{I18n.get('col_ai_score')}: {score_str}"
 
             # Create detail button with stock code reference
             # Define async handler closure to verify loop execution

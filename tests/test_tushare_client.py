@@ -4,7 +4,7 @@ import time
 import tushare as ts
 # Make sure to import the class to be tested
 # Assuming path is setup or we run as module
-from data.tushare_client import TushareClient, RateLimiter
+from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 
 class TestTushareClient(unittest.TestCase):
@@ -16,48 +16,8 @@ class TestTushareClient(unittest.TestCase):
     def tearDown(self):
         TushareClient._instance = None
 
-    def test_rate_limiter_logic(self):
-        """Test the RateLimiter calculation"""
-        # 600 requests per minute = 0.1s interval
-        limiter = RateLimiter(requests_per_minute=600)
-        self.assertAlmostEqual(limiter.interval, 0.1)
-        
-        # Test updating rate
-        limiter = RateLimiter(requests_per_minute=300)
-        limiter.update_rate(300) # 0.2s interval
-        self.assertAlmostEqual(limiter.interval, 0.2)
+    # Legacy RateLimiter tests removed as RateLimiter class was replaced by TokenBucket
 
-    def test_rate_limiter_zero_prevention(self):
-        """Test that rate limiter handles 0 or negative values safely"""
-        limiter = RateLimiter(requests_per_minute=0)
-        # Should default to 1 -> 60s interval
-        self.assertEqual(limiter.interval, 60.0)
-        
-        limiter.update_rate(-10)
-        self.assertEqual(limiter.interval, 60.0)
-
-    @patch('time.sleep')
-    @patch('time.time')
-    def test_rate_limiter_acquire(self, mock_time, mock_sleep):
-        """Test that acquire calls sleep when needed"""
-        limiter = RateLimiter(requests_per_minute=60) # 1s interval
-        
-        # First call: now = 100. Last request was 0. Elapsed 100 > 1. No sleep.
-        mock_time.return_value = 100.0
-        limiter.acquire()
-        mock_sleep.assert_not_called()
-        self.assertEqual(limiter.last_request_time, 100.0)
-        
-        # Second call: now = 100.5. Elapsed 0.5 < 1. Should sleep 0.5s.
-        mock_time.return_value = 100.5
-        limiter.acquire()
-        mock_sleep.assert_called_with(0.5)
-        # last_request_time should be updated to time.time() (which we mocked as not changing during function, 
-        # but logically it represents the time AFTER sleep)
-        # In our implementation: self.last_request_time = time.time()
-        # Since mock_time returns 100.5, it sets it to 100.5 again? 
-        # Wait, the implementation calls time.time() AGAIN after sleep.
-        # So we need mock_time to check side_effects if we want to be precise.
         
     @patch('time.sleep')
     @patch('tushare.pro_api')
@@ -73,7 +33,7 @@ class TestTushareClient(unittest.TestCase):
         mock_api_instance.daily.return_value = mock_df
         
         # Mock Config to return a known limit
-        with patch.object(ConfigHandler, 'get_api_rate_limit', return_value=60): # 1s interval
+        with patch.object(ConfigHandler, 'get_tushare_api_limit', return_value=60): # 1s interval
              client = TushareClient(token="dummy")
              
              # Mock internal limiter to verify acquire is called
@@ -84,7 +44,7 @@ class TestTushareClient(unittest.TestCase):
              client.get_daily_quotes(ts_code="000001.SZ")
              
              # get_daily_quotes calls daily and adj_factor, so acquire might be called twice
-             self.assertGreaterEqual(client._rate_limiter.acquire.call_count, 1)
+             self.assertGreaterEqual(client._rate_limiter.consume.call_count, 1)
 
 
     @patch('time.sleep')
@@ -160,6 +120,46 @@ class TestTushareClient(unittest.TestCase):
             client.get_daily_quotes(ts_code="000001.SZ")
             
         self.assertEqual(mock_api_instance.daily.call_count, 3) # Max retries default is 3
+
+
+    
+    @patch('tushare.pro_api')
+    @patch('tushare.set_token')
+    def test_is_trading_day_caching(self, mock_set_token, mock_pro_api):
+        """Test that is_trading_day uses year-based caching"""
+        mock_api_instance = MagicMock()
+        mock_pro_api.return_value = mock_api_instance
+        
+        # Mock API Response for 2025: Only 20250101 is trading day
+        mock_df = MagicMock()
+        mock_df.empty = False
+        mock_df.__getitem__.return_value.tolist.return_value = ['20250101'] # cal_date column
+        
+        mock_api_instance.trade_cal.return_value = mock_df
+        
+        client = TushareClient(token="dummy")
+        # clear cache for test
+        TushareClient._trade_cal_cache = set()
+        TushareClient._loaded_years = set()
+        
+        # 1. First Call: Should hit API (load 2025)
+        is_open = client.is_trading_day('20250101')
+        self.assertTrue(is_open)
+        self.assertEqual(mock_api_instance.trade_cal.call_count, 1)
+        
+        # Verify API called with full year range
+        args, kwargs = mock_api_instance.trade_cal.call_args
+        self.assertEqual(kwargs['start_date'], '20250101')
+        self.assertEqual(kwargs['end_date'], '20251231')
+        
+        # 2. Second Call (Same Year, Different Date): Should HIT CACHE (No API call)
+        is_open_2 = client.is_trading_day('20250102') # Not in the mocked list
+        self.assertFalse(is_open_2)
+        self.assertEqual(mock_api_instance.trade_cal.call_count, 1) # Count stays 1
+        
+        # 3. Third Call (Different Year): Should hit API again
+        is_open_3 = client.is_trading_day('20260101')
+        self.assertEqual(mock_api_instance.trade_cal.call_count, 2) # Count increases
 
 if __name__ == '__main__':
     unittest.main()

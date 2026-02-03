@@ -190,7 +190,7 @@ async def main(page: ft.Page):
         brand_header = ft.Container(
             content=ft.Column([
                 ft.Image(src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN),
-                ft.Text("A股智选", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_ON_PRIMARY),
+                ft.Text(I18n.get("app_brand"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_ON_PRIMARY),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5),
             padding=ft.padding.only(top=20, bottom=10),
         )

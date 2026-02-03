@@ -55,7 +55,7 @@ class StockDetailDialog(ft.AlertDialog):
         )
 
         # Price section
-        close = self._format_val('close', '元')
+        close = self._format_val('close', I18n.get("unit_yuan"))
         pct = self.stock_data.get('pct_chg', 0)
         pct_color = ft.Colors.RED if pct and pct > 0 else ft.Colors.GREEN
         pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
@@ -220,7 +220,7 @@ class StockDetailDialog(ft.AlertDialog):
             return '-'
         try:
             # Tushare returns in 万元, convert to 亿
-            return f"{float(val) / 10000:.1f}亿"
+            return f"{float(val) / 10000:.1f}{I18n.get('unit_yi')}"
         except:
             return '-'
     
@@ -232,8 +232,8 @@ class StockDetailDialog(ft.AlertDialog):
         try:
             v = float(val)
             if v >= 10000:
-                return f"{v / 10000:.1f}万手"
-            return f"{v:.0f}手"
+                return f"{v / 10000:.1f}{I18n.get('unit_wanshou')}"
+            return f"{v:.0f}{I18n.get('unit_shou')}"
         except:
             return '-'
     
@@ -244,7 +244,7 @@ class StockDetailDialog(ft.AlertDialog):
             return '-'
         try:
             # Amount is in 千元
-            return f"{float(val) / 100000:.2f}亿"
+            return f"{float(val) / 100000:.2f}{I18n.get('unit_yi')}"
         except:
             return '-'
     

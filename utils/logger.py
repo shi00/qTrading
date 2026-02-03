@@ -28,16 +28,24 @@ def setup_logging(name="astock_screener"):
     logging_level = level_map.get(current_level, logging.INFO)
 
     logger = logging.getLogger()
-    logger.setLevel(logging_level) # Catch all, handlers will filter
+    logger.setLevel(logging_level) 
     
-    # Avoid duplicate handlers if setup is called multiple times
-    if logger.handlers:
-        # Update existing handlers level
-        for h in logger.handlers:
-            if isinstance(h, RotatingFileHandler) and not h.baseFilename.endswith("error.log"):
-                 h.setLevel(logging_level)
-        logger.setLevel(logging_level)
-        return logger
+    # Check what we already have
+    # Note: StreamHandler is a parent of FileHandler, so strict type check or order matters.
+    # We want standard Stdout handler.
+    has_console = any(type(h) is logging.StreamHandler for h in logger.handlers)
+    
+    # Check for our specific file handlers by filename
+    has_app_log = False
+    has_error_log = False
+    
+    for h in logger.handlers:
+        if isinstance(h, RotatingFileHandler):
+            if "app.log" in h.baseFilename:
+                has_app_log = True
+                h.setLevel(logging_level) # Update level if config changed
+            elif "error.log" in h.baseFilename:
+                has_error_log = True
 
     # Formatter
     formatter = logging.Formatter(
@@ -45,46 +53,47 @@ def setup_logging(name="astock_screener"):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # Load config
+    # Load config limits
     try:
         max_mb = ConfigHandler.get_log_max_mb()
         backup_count = ConfigHandler.get_log_backup_count()
     except:
         max_mb = 5
         backup_count = 5
-        
     max_bytes = int(max_mb * 1024 * 1024)
 
     # 1. Console Handler (INFO+)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    if not has_console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     # 2. File Handler (DEBUG+, Rotating)
-    # Use a fixed filename 'app.log' that rotates to app.log.1, app.log.2 etc.
-    log_file_path = os.path.join(LOG_DIR, "app.log")
-    file_handler = RotatingFileHandler(
-        log_file_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging_level)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    if not has_app_log:
+        log_file_path = os.path.join(LOG_DIR, "app.log")
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging_level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
     
     # 3. Separate Error Log (ERROR+)
-    error_log_path = os.path.join(LOG_DIR, "error.log")
-    error_handler = RotatingFileHandler(
-        error_log_path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding='utf-8'
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(formatter)
-    logger.addHandler(error_handler)
+    if not has_error_log:
+        error_log_path = os.path.join(LOG_DIR, "error.log")
+        error_handler = RotatingFileHandler(
+            error_log_path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding='utf-8'
+        )
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(formatter)
+        logger.addHandler(error_handler)
     
     logger.info(f"--- Log Session Started: {datetime.datetime.now()} ---")
     return logger

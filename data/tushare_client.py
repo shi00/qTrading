@@ -1,10 +1,12 @@
-import tushare as ts
+﻿import tushare as ts
 import pandas as pd
 import time
 import datetime
-import config
+
 from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
+from utils.log_decorators import log_async_operation
+from utils.sanitizers import DataSanitizer
 import logging
 import random
 
@@ -20,8 +22,10 @@ class TushareClient:
     # Singleton instance
     _instance = None
     _lock = threading.Lock() # Thread safety lock
-    _trade_cal_cache = None  # Cache trade calendar
-    
+    _trade_cal_cache = set()  # Cache valid trading days (Set lookup O(1))
+    _loaded_years = set()     # Track which years have been loaded
+    _calendar_lock = threading.Lock() # Lock for cache updates
+
     def __new__(cls, token=None):
         if cls._instance is None:
             with cls._lock:
@@ -79,7 +83,6 @@ class TushareClient:
     def _handle_api_call(self, func, **kwargs):
         """Helper to handle rate limits, retries, and errors with jittered backoff"""
         for i in range(self.max_retries):
-            # Consume token BEFORE request (Proactive Rate Limiting)
             if self._rate_limiter:
                 self._rate_limiter.consume(1)
                 
@@ -90,62 +93,51 @@ class TushareClient:
                 return result
             except Exception as e:
                 error_msg = str(e)
-                # Parse Tushare error codes/messages
-                is_rate_limit = "每分钟最多访问" in error_msg or "抱歉" in error_msg or "检测到您" in error_msg
+                is_rate_limit = "每分钟最多访问" in error_msg or "抱歉" in error_msg or "检测到" in error_msg
                 is_network_error = "timeout" in error_msg.lower() or "connection" in error_msg.lower() or "timed out" in error_msg.lower()
                 
                 if is_rate_limit:
-                    # Rate limit: Exponential backoff with strong jitter
-                    # e.g. 1s->(1-2s), 2s->(2-4s), 3s->(4-8s)
                     sleep_time = (2 ** i) + random.uniform(0, 1)
-                    logger.warning(f"[API] [WARN] Rate limit hit, backing off {sleep_time:.2f}s... (attempt {i+1}/{self.max_retries})")
+                    # Log rate limit backoff
+                    logger.warning(f"[tushare_api] RATE_LIMITED: backoff={sleep_time:.2f}s (attempt {i+1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
                     
                 if is_network_error:
-                    # Network error: Linear backoff with jitter
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
-                    logger.warning(f"[API] [WARN] Connection error, retrying in {sleep_time:.2f}s... (attempt {i+1}/{self.max_retries})")
+                    logger.warning(f"[tushare_api] CONNECTION_ERROR: retry in {sleep_time:.2f}s (attempt {i+1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
                 
                 # Other errors
                 if i == self.max_retries - 1:
-                    logger.error(f"[API] [FAIL] Failed after {self.max_retries} attempts: {error_msg}")
+                    logger.error(f"[tushare_api] RETRY_EXHAUSTED: {error_msg[:100]}")
                     raise e
                 
-                # Unknown transient error, short sleep
                 time.sleep(1)
         return None
 
     # ========== Trade Calendar ==========
     
     def get_trade_cal(self, start_date, end_date, exchange='SSE'):
-        """Get trade calendar (cached)"""
-        cache_key = f"{exchange}_{start_date}_{end_date}"
-        if TushareClient._trade_cal_cache is not None:
-            cached = TushareClient._trade_cal_cache.get(cache_key)
-            if cached is not None:
-                return cached
-        
-        logger.debug(f"[API] fetching trade_cal {start_date} to {end_date}...")
-        df = self._handle_api_call(
+        """
+        Get trade calendar. 
+        Note: This is the raw API wrapper. For is_trading_day checks, use is_trading_day() 
+        which implements optimized year-based caching.
+        """
+        return self._handle_api_call(
             self.pro.trade_cal,
             exchange=exchange,
             start_date=start_date,
             end_date=end_date,
             is_open='1'
         )
-        
-        if df is not None:
-            if TushareClient._trade_cal_cache is None:
-                TushareClient._trade_cal_cache = {}
-            TushareClient._trade_cal_cache[cache_key] = df
-        
-        return df
 
     def get_trade_dates(self, start_date, end_date):
         """Get list of actual trading dates (includes holidays handling)"""
+        # For date ranges, we can still use the API directly or potentially optimize to use cache too.
+        # Given this is likely used for batch data fetching, direct API is acceptable, 
+        # or we could iterate if range is small, but API is safer for ranges.
         df = self.get_trade_cal(start_date, end_date)
         if df is not None and not df.empty:
             return df['cal_date'].tolist()
@@ -153,38 +145,55 @@ class TushareClient:
 
     def is_trading_day(self, date_str=None):
         """
-        Check if a given date is a trading day (handles Chinese holidays).
+        Check if a given date is a trading day with optimized caching.
+        Strategy: Year-based lazy loading with Double-Checked Locking.
         
         Args:
             date_str: Date in YYYYMMDD format. If None, uses today.
             
         Returns:
             bool: True if trading day, False if holiday/weekend
-            
-        Corner cases:
-        - API failure: Falls back to weekday check only
-        - Cache miss: Fetches from API
         """
         if date_str is None:
             date_str = datetime.datetime.now().strftime('%Y%m%d')
         
-        try:
-            # Fetch calendar for just this date
-            df = self._handle_api_call(
-                self.pro.trade_cal,
-                exchange='SSE',
-                start_date=date_str,
-                end_date=date_str
-            )
-            
-            if df is not None and not df.empty:
-                is_open = df.iloc[0].get('is_open', 0)
-                return str(is_open) == '1'
-            
-        except Exception as e:
-            logger.warning(f"[API] Trade calendar check failed: {e}, falling back to Offline Calendar")
+        year = date_str[:4]
         
-        # Fallback: Use Offline Calendar (pandas_market_calendars)
+        # 1. Fast Path: Check if year is already loaded (No Lock)
+        if year in TushareClient._loaded_years:
+            return date_str in TushareClient._trade_cal_cache
+
+        # 2. Slow Path: Load the year with Lock
+        try:
+            with TushareClient._calendar_lock:
+                # Double-check inside lock
+                if year in TushareClient._loaded_years:
+                    return date_str in TushareClient._trade_cal_cache
+                
+                logger.info(f"[Cache] Loading trading calendar for year {year}...")
+                
+                # Fetch full year data
+                start_date = f"{year}0101"
+                end_date = f"{year}1231"
+                
+                df = self.get_trade_cal(start_date, end_date)
+                
+                if df is not None and not df.empty:
+                    # Helper to bulk update set
+                    dates = set(df['cal_date'].tolist())
+                    TushareClient._trade_cal_cache.update(dates)
+                    TushareClient._loaded_years.add(year)
+                    logger.info(f"[Cache] Successfully loaded {len(dates)} trading days for {year}")
+                    
+                    return date_str in dates
+                else:
+                    logger.warning(f"[Cache] Failed to load calendar for {year} (Empty response)")
+                    # Do not mark as loaded so we retry next time, or logic below deals with it
+        
+        except Exception as e:
+             logger.warning(f"[API] Trade calendar cache load failed: {e}, falling back to Offline Calendar")
+
+        # 3. Fallback: Offline Calendar (pandas_market_calendars)
         try:
             from data.offline_calendar import OfflineCalendar
             return OfflineCalendar.is_trading_day(date_str)
@@ -201,12 +210,11 @@ class TushareClient:
     
     def get_stock_basic(self):
         """Get basic list of all stocks"""
-        logger.debug(f"[API] fetching stock_basic...")
         return self._handle_api_call(
             self.pro.stock_basic, 
             exchange='', 
             list_status='L', 
-            fields='ts_code,symbol,name,area,industry,list_date,market'
+            fields='ts_code,symbol,name,area,industry,list_date,market,list_status'
         )
 
     def get_stock_list(self):
@@ -217,7 +225,6 @@ class TushareClient:
     
     def get_daily_quotes(self, trade_date=None, start_date=None, end_date=None, ts_code=None):
         """Get daily quotes with adj_factor joined"""
-        logger.debug(f"[API] fetching daily quotes + adj_factor for date={trade_date} code={ts_code}...")
         
         # 1. Fetch Daily Quotes
         df_daily = self._handle_api_call(
@@ -266,7 +273,6 @@ class TushareClient:
 
     def get_daily_basic(self, trade_date=None, ts_code=None):
         """Get daily basic indicators (PE, PB, Turnover, etc.)"""
-        logger.debug(f"[API] fetching daily_basic for date={trade_date}...")
         return self._handle_api_call(
             self.pro.daily_basic,
             ts_code=ts_code,
@@ -278,7 +284,7 @@ class TushareClient:
     
     def get_income(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get income statement data"""
-        logger.debug(f"[API] fetching income statement for period={period} range={start_date}-{end_date}...")
+
         return self._handle_api_call(
             self.pro.income,
             period=period,
@@ -290,7 +296,7 @@ class TushareClient:
 
     def get_cashflow(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get cashflow statement data"""
-        logger.debug(f"[API] fetching cashflow for period={period} range={start_date}-{end_date}...")
+
         return self._handle_api_call(
             self.pro.cashflow,
             period=period,
@@ -302,7 +308,7 @@ class TushareClient:
         
     def get_balancesheet(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get balance sheet data"""
-        logger.debug(f"[API] fetching balancesheet for period={period} range={start_date}-{end_date}...")
+
         return self._handle_api_call(
             self.pro.balancesheet,
             period=period,
@@ -312,23 +318,13 @@ class TushareClient:
             fields='ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill'
         )
 
-    def get_fina_indicator(self, period=None, start_date=None, end_date=None, ts_code=None):
-        """Get financial indicators"""
-        logger.debug(f"[API] fetching fina_indicator for code={ts_code} period={period} range={start_date}-{end_date}...")
-        return self._handle_api_call(
-            self.pro.fina_indicator,
-            period=period,
-            start_date=start_date,
-            end_date=end_date,
-            ts_code=ts_code,
-             fields='ts_code,ann_date,end_date,roe,roe_dt,grossprofit_margin,netprofit_margin,debt_to_assets,or_yoy,netprofit_yoy'
-        )
+    # get_fina_indicator removed (duplicate)
 
     # ========== Fund Flow & Institutional Data ==========
 
     def get_top_list(self, trade_date):
         """Dragon Tiger Board (LHB) data"""
-        logger.debug(f"[API] fetching top_list for {trade_date}...")
+
         return self._handle_api_call(
             self.pro.top_list,
             trade_date=trade_date
@@ -336,7 +332,7 @@ class TushareClient:
         
     def get_top_inst(self, trade_date):
         """LHB Institutional Seat Transaction Detail"""
-        logger.debug(f"[API] fetching top_inst for {trade_date}...")
+
         return self._handle_api_call(
             self.pro.top_inst,
             trade_date=trade_date
@@ -344,7 +340,7 @@ class TushareClient:
 
     def get_hk_hold(self, trade_date):
         """Northbound (HK->Connect) holdings"""
-        logger.debug(f"[API] fetching hk_hold for {trade_date}...")
+
         return self._handle_api_call(
             self.pro.hk_hold,
             trade_date=trade_date
@@ -352,7 +348,7 @@ class TushareClient:
 
     def get_moneyflow(self, trade_date):
         """Individual stock money flow (Main force)"""
-        logger.debug(f"[API] fetching moneyflow for {trade_date}...")
+
         return self._handle_api_call(
             self.pro.moneyflow,
             trade_date=trade_date
@@ -360,7 +356,7 @@ class TushareClient:
 
     def get_block_trade(self, trade_date):
         """Block trade data"""
-        logger.debug(f"[API] fetching block_trade for {trade_date}...")
+
         return self._handle_api_call(
             self.pro.block_trade,
             trade_date=trade_date
@@ -368,7 +364,7 @@ class TushareClient:
 
     def get_stk_holdernumber(self, ts_code=None, end_date=None):
         """Shareholder number"""
-        logger.debug(f"[API] fetching stk_holdernumber...")
+
         return self._handle_api_call(
             self.pro.stk_holdernumber,
             ts_code=ts_code,
@@ -382,14 +378,14 @@ class TushareClient:
         1. ts_code + start_date/end_date (Get history for one stock)
         2. period (Get all stocks for one quarter - Requires permissions)
         """
-        logger.debug(f"[API] fetching fina_indicator for code={ts_code} period={period}...")
+
         return self._handle_api_call(
             self.pro.fina_indicator,
             ts_code=ts_code,
             period=period,
             start_date=start_date,
             end_date=end_date,
-            fields='ts_code,end_date,roe,roe_waa,roe_dt,netprofit_margin,grossprofit_margin,debt_to_assets,q_sales_yoy,q_profit_yoy,or_yoy,netprofit_yoy'
+            fields='ts_code,ann_date,end_date,roe,roe_waa,roe_dt,netprofit_margin,grossprofit_margin,debt_to_assets,q_sales_yoy,q_profit_yoy,or_yoy,netprofit_yoy'
         )
 
     def get_disclosure_date(self, date):
@@ -397,7 +393,7 @@ class TushareClient:
         Get disclosure list for a specific date (Incremental Sync).
         Uses 'actual_date' to find reports released on this day.
         """
-        logger.debug(f"[API] fetching disclosure_date for actual_date={date}...")
+
         return self._handle_api_call(
             self.pro.disclosure_date,
             actual_date=date, 
@@ -408,7 +404,7 @@ class TushareClient:
         """
         Get concepts for a specific stock (e.g. Lithium, Sora, etc.)
         """
-        logger.debug(f"[API] fetching concept_detail for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.concept_detail,
             ts_code=ts_code,
@@ -418,7 +414,7 @@ class TushareClient:
     # ========== Market Overview APIs ==========
     def get_index_daily(self, ts_code=None, trade_date=None, start_date=None, end_date=None):
         """Get index daily data"""
-        logger.debug(f"[API] fetching index_daily date={trade_date} code={ts_code}...")
+
         # Index Daily
         return self._handle_api_call(
             self.pro.index_daily,
@@ -430,7 +426,7 @@ class TushareClient:
 
     def get_moneyflow_hsgt(self, trade_date=None):
         """Get Northbound (HSGT) money flow"""
-        logger.debug(f"[API] fetching moneyflow_hsgt date={trade_date}...")
+
         return self._handle_api_call(
             self.pro.moneyflow_hsgt,
             trade_date=trade_date
@@ -438,7 +434,7 @@ class TushareClient:
 
     def get_index_dailybasic(self, trade_date=None, ts_code=None):
         """Get index daily indicators (PE, PB, etc.)"""
-        logger.debug(f"[API] fetching index_dailybasic date={trade_date}...")
+
         return self._handle_api_call(
             self.pro.index_dailybasic,
             trade_date=trade_date,
@@ -448,7 +444,7 @@ class TushareClient:
 
     def get_limit_list(self, trade_date=None):
         """Get daily limit up/down list"""
-        logger.debug(f"[API] fetching limit_list date={trade_date}...")
+
         return self._handle_api_call(
             self.pro.limit_list,
             trade_date=trade_date,
@@ -457,7 +453,7 @@ class TushareClient:
 
     def get_suspend_d(self, trade_date=None, ts_code=None):
         """Get daily suspension list"""
-        logger.debug(f"[API] fetching suspend_d date={trade_date}...")
+
         return self._handle_api_call(
             self.pro.suspend_d,
             trade_date=trade_date,
@@ -467,7 +463,7 @@ class TushareClient:
 
     def get_margin_detail(self, trade_date=None, ts_code=None):
         """Get individual stock margin detail"""
-        logger.debug(f"[API] fetching margin_detail date={trade_date} code={ts_code}...")
+
         # Note: API might be 'margin_detail' or 'margin' depending on permissions
         # Usually 'margin_detail' is for individual stocks
         return self._handle_api_call(
@@ -480,7 +476,7 @@ class TushareClient:
 
     def get_fina_audit(self, ts_code, start_date=None, end_date=None):
         """Get financial audit opinion"""
-        logger.debug(f"[API] fetching audit for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.fina_audit,
             ts_code=ts_code,
@@ -491,7 +487,7 @@ class TushareClient:
 
     def get_forecast(self, ts_code=None, period=None, start_date=None, end_date=None):
         """Get performance forecast"""
-        logger.debug(f"[API] fetching forecast for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.forecast,
             ts_code=ts_code,
@@ -503,7 +499,7 @@ class TushareClient:
 
     def get_fina_mainbz(self, ts_code=None, period=None, start_date=None, end_date=None):
         """Get main business composition"""
-        logger.debug(f"[API] fetching mainbz for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.fina_mainbz,
             ts_code=ts_code,
@@ -515,7 +511,7 @@ class TushareClient:
 
     def get_pledge_stat(self, ts_code=None, end_date=None):
         """Get share pledge statistics"""
-        logger.debug(f"[API] fetching pledge_stat for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.pledge_stat,
             ts_code=ts_code,
@@ -524,7 +520,7 @@ class TushareClient:
 
     def get_repurchase(self, ts_code=None, start_date=None, end_date=None):
         """Get share repurchase"""
-        logger.debug(f"[API] fetching repurchase for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.repurchase,
             ts_code=ts_code,
@@ -534,7 +530,7 @@ class TushareClient:
 
     def get_dividend(self, ts_code=None, start_date=None, end_date=None):
         """Get dividend history"""
-        logger.debug(f"[API] fetching dividend for {ts_code}...")
+
         return self._handle_api_call(
             self.pro.dividend,
             ts_code=ts_code,

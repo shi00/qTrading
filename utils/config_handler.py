@@ -267,6 +267,22 @@ class ConfigHandler:
         return ConfigHandler.save_config({"sync_retry_count": int(count)})
 
     @staticmethod
+    def get_proxy_domains():
+        """Get list of domains to bypass proxy (whitelist). Robustly returns list."""
+        config = ConfigHandler.load_config()
+        val = config.get("proxy_domains", [])
+        if isinstance(val, list):
+            return val
+        return []
+
+    @staticmethod
+    def set_proxy_domains(domains):
+        """Set list of domains to bypass proxy"""
+        if not isinstance(domains, list):
+            return False
+        return ConfigHandler.save_config({"proxy_domains": domains})
+
+    @staticmethod
     def get_config(key, default=None):
         """Generic get method for any setting"""
         config = ConfigHandler.load_config()

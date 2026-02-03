@@ -5,6 +5,7 @@ import datetime
 import os
 import config
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import log_async_operation, track_performance
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -348,6 +349,26 @@ class CacheManager:
 
     async def _execute_schema_internal(self, db, future=None):
         """Internal method to execute schema on existing connection"""
+        # 1. Thread-Safe/Loop-Safe Idempotency Check
+        # This runs inside the Writer Loop, so it involves no race conditions.
+        if self._schema_initialized:
+             if future:
+                 # Must complete the future in the CALLER's loop, not here.
+                 # _execute_schema_internal handles future resolution below safely?
+                 # ideally we just let it fall through or return early.
+                 # But we need to set the future result!
+                 # The Future object was passed from Caller Loop.
+                 # We must use call_soon_threadsafe to set it.
+                 def _set_res():
+                     if not future.done(): future.set_result(True)
+                 
+                 # future.get_loop() might be needed if we want to be pedantic, 
+                 # but since we don't know the future's loop easily (it's not stored on future in all python versions publically).
+                 # Wait, future.get_loop() exists.
+                 f_loop = future.get_loop()
+                 f_loop.call_soon_threadsafe(_set_res)
+             return
+
         logger.info(f"[CacheManager] Initializing database from schema (Internal)...")
         schema_path = os.path.join(os.path.dirname(__file__), 'schema.sql')
         try:
@@ -372,37 +393,40 @@ class CacheManager:
             except Exception: pass
             
             await db.commit()
+            self._schema_initialized = True 
             logger.info("[CacheManager] Schema executed successfully.")
             
             if future:
-                if not future.done():
-                    future.set_result(True)
-                else:
-                    logger.debug("[CacheManager] Schema future already done/cancelled.")
+                def _safe_set_result():
+                    if not future.done(): future.set_result(True)
+                future.get_loop().call_soon_threadsafe(_safe_set_result)
                 
         except Exception as e:
             logger.error(f"[CacheManager] Schema Error: {e}")
-            if future and not future.done():
-                future.set_exception(e)
+            if future:
+                def _safe_set_exception():
+                    if not future.done(): future.set_exception(e)
+                future.get_loop().call_soon_threadsafe(_safe_set_exception)
 
     async def init_db(self):
         """Initialize database tables via Queue"""
-        if self._schema_initialized:
-             return
-
+        # We simply queue the request. 
+        # The worker (single-threaded) will handle idempotency checks.
         
-        # Create a future to wait for initialization
-        loop = asyncio.get_running_loop()
+        # Create a future to wait for initialization (Caller Loop Bound)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[CacheManager] init_db called without running loop?")
+            return
+
         future = loop.create_future()
         
         # Queue the internal function
-        # Task: (Function, [args...], 'FUNC')
-        # Arg 1 is always 'db' passed by worker, so we pass extra args here
         await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
         
         # Wait for it to finish
         await future
-        self._schema_initialized = True
 
     async def clear_all_cache(self):
         """Rebuild Database: Drop all tables and Re-initialize"""
@@ -523,7 +547,10 @@ class CacheManager:
                     df[col] = df[col].astype(str)
 
         # Convert to list of lists (heavy operation)
-        return df[cols].values.tolist()
+        # CRITICAL FIX: Replace NaN with None so SQLite receives NULL, not 'nan' string/float.
+        # This is essential for COALESCE to work in UPSERTs.
+        import numpy as np
+        return df[cols].replace({np.nan: None}).values.tolist()
 
     # ========== Stock Basic ==========
     async def save_stock_basic(self, df, priority=PRIORITY_NORMAL):
@@ -777,6 +804,55 @@ class CacheManager:
         if not self._running and not self._closing: await self.start()
         await self._enqueue((sql, t_data, True))
         return len(t_data)
+
+    async def save_financial_reports(self, df):
+        if df is None or df.empty: return 0
+        
+        # Added 'goodwill' and ensuring all schema columns are covered
+        cols = ['ts_code', 'end_date', 'ann_date', 'report_type', 'total_revenue', 'revenue',
+                'n_income', 'n_income_attr_p', 'total_assets', 'total_liab', 
+                'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin', 
+                'netprofit_margin', 'debt_to_assets', 'or_yoy', 'netprofit_yoy', 'goodwill']
+        
+        # SAFE UPSERT: Use COALESCE to avoid overwriting existing data with NULLs from partial updates
+        # (e.g. valid revenue from Income Statement shouldn't be wiped by Balance Sheet save)
+        sql = '''
+            INSERT INTO financial_reports 
+            (ts_code, end_date, ann_date, report_type, total_revenue, revenue,
+             n_income, n_income_attr_p, total_assets, total_liab, 
+             total_hldr_eqy_exc_min_int, roe, roe_dt, grossprofit_margin, 
+             netprofit_margin, debt_to_assets, or_yoy, netprofit_yoy, goodwill)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ts_code, end_date) DO UPDATE SET
+                ann_date = COALESCE(excluded.ann_date, financial_reports.ann_date),
+                report_type = COALESCE(excluded.report_type, financial_reports.report_type),
+                total_revenue = COALESCE(excluded.total_revenue, financial_reports.total_revenue),
+                revenue = COALESCE(excluded.revenue, financial_reports.revenue),
+                n_income = COALESCE(excluded.n_income, financial_reports.n_income),
+                n_income_attr_p = COALESCE(excluded.n_income_attr_p, financial_reports.n_income_attr_p),
+                total_assets = COALESCE(excluded.total_assets, financial_reports.total_assets),
+                total_liab = COALESCE(excluded.total_liab, financial_reports.total_liab),
+                total_hldr_eqy_exc_min_int = COALESCE(excluded.total_hldr_eqy_exc_min_int, financial_reports.total_hldr_eqy_exc_min_int),
+                roe = COALESCE(excluded.roe, financial_reports.roe),
+                roe_dt = COALESCE(excluded.roe_dt, financial_reports.roe_dt),
+                grossprofit_margin = COALESCE(excluded.grossprofit_margin, financial_reports.grossprofit_margin),
+                netprofit_margin = COALESCE(excluded.netprofit_margin, financial_reports.netprofit_margin),
+                debt_to_assets = COALESCE(excluded.debt_to_assets, financial_reports.debt_to_assets),
+                or_yoy = COALESCE(excluded.or_yoy, financial_reports.or_yoy),
+                netprofit_yoy = COALESCE(excluded.netprofit_yoy, financial_reports.netprofit_yoy),
+                goodwill = COALESCE(excluded.goodwill, financial_reports.goodwill)
+        '''
+        
+        try:
+             loop = asyncio.get_running_loop()
+             params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+        except RuntimeError:
+             return 0
+             
+        if params: 
+             await self._enqueue((sql, params, True))
+             return len(params)
+        return 0
 
     async def save_fina_forecast(self, df):
         if df is None or df.empty: return 0

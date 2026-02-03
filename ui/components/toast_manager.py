@@ -89,6 +89,16 @@ class ToastManager:
         task = self.page.run_task(toast_card.start_timer)
         toast_card.timer_task = task
 
+    def stop_all(self):
+        """Cleanup all timers on shutdown"""
+        with self.lock:
+             for control in list(self.toasts_stack.controls):
+                 if isinstance(control, ToastCard):
+                     control.cancel_timer()
+                     # Also cancel the asyncio task if stored
+                     if hasattr(control, 'timer_task') and control.timer_task:
+                         control.timer_task.cancel()
+
     def _remove_toast(self, toast):
         with self.lock:
             if toast in self.toasts_stack.controls:

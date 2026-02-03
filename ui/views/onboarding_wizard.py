@@ -626,7 +626,7 @@ class OnboardingWizard(ft.Container):
             # I'll leave "正在取消..." as hardcoded since it's transient state.
             # Or better: I'll Replace with: I18n.get("common_cancel") + "..." ? -> "Cancel..." / "取消..."
             
-            self.sync_status.value = I18n.get("common_cancel") + "..."
+            self.sync_status.value = I18n.get("common_cancelling")
             self.sync_status.color = AppColors.ERROR
             self.btn_cancel_sync.disabled = True
             self.update()

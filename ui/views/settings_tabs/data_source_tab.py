@@ -5,7 +5,7 @@ from ui.components.settings_widgets import DashboardCard, MetricCard, ActionChip
 from utils.config_handler import ConfigHandler
 from data.data_processor import DataProcessor
 from data.cache_manager import CacheManager
-import tushare as ts
+from data.tushare_client import TushareClient
 import logging
 import asyncio
 
@@ -47,12 +47,19 @@ class DataSourceTab(ft.Container):
             content=ft.Column([
                 ft.Row([
                     SectionHeader(I18n.get("settings_sec_health") + " (3Y)"),
-                    ft.ElevatedButton(
-                        text=I18n.get("settings_check_health"),
-                        icon=ft.Icons.REFRESH,
-                        on_click=self.refresh_health_status,
-                        style=AppStyles.primary_button(),
-                    )
+                    ft.Row([
+                         ft.IconButton(
+                            icon=ft.Icons.INFO_OUTLINE, 
+                            tooltip=I18n.get("health_report_title"),
+                            on_click=self.show_health_report_dialog
+                        ),
+                        ft.ElevatedButton(
+                            text=I18n.get("settings_check_health"),
+                            icon=ft.Icons.REFRESH,
+                            on_click=self.refresh_health_status,
+                            style=AppStyles.primary_button(),
+                        )
+                    ])
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 ft.ResponsiveRow([
@@ -316,9 +323,9 @@ class DataSourceTab(ft.Container):
             df = await processor.sync_daily_market_snapshot()
             
             count = len(df) if df is not None else 0
-            self.show_snack(I18n.get("snack_full_sync_done").format(total=f"{count} (Quotes)"))
+            self.show_snack(I18n.get("snack_full_sync_done").format(total=f"{count} ({I18n.get('common_quotes')})"))
         except Exception as ex:
-             self.show_snack(f"Error: {str(ex)[:30]}", color=ft.Colors.RED)
+             self.show_snack(f"{I18n.get('common_error')}: {str(ex)[:30]}", color=ft.Colors.RED)
         finally:
              self._set_sync_busy(False)
 
@@ -380,21 +387,31 @@ class DataSourceTab(ft.Container):
         if not token:
              self.show_snack(I18n.get("settings_snack_token_empty"))
              return
-        ConfigHandler.save_token(token)
         
         self.status_text.value = I18n.get("settings_status_verifying")
         self.status_text.color = ft.Colors.ORANGE
         self.update()
         
         try:
+            # Step 1: Verify FIRST using a temporary tushare instance (don't touch singleton yet)
+            import tushare as ts
             ts.set_token(token)
-            pro = ts.pro_api()
-            pro.trade_cal(exchange='', start_date='20250101', end_date='20250101')
+            temp_pro = ts.pro_api()
+            temp_pro.trade_cal(exchange='', start_date='20250101', end_date='20250101')
+            
+            # Step 2: Verification passed - Now save token and update singleton
+            ConfigHandler.save_token(token)
+            
+            # Step 3: Update singleton with verified token
+            client = TushareClient()
+            client.set_token(token)
+            
             self.status_text.value = I18n.get("settings_snack_token_verified")
             self.status_text.color = ft.Colors.GREEN
             self.status_icon.color = ft.Colors.GREEN
             self.status_icon.icon = ft.Icons.CHECK_CIRCLE
         except Exception as ex:
+            # Verification failed - Don't save token, don't update singleton
             self.status_text.value = I18n.get("ds_verify_fail_fmt").format(error=str(ex)[:20])
             self.status_text.color = ft.Colors.RED
             self.status_icon.color = ft.Colors.RED
@@ -436,7 +453,7 @@ class DataSourceTab(ft.Container):
         if should_update:
             progress = current / total if total > 0 else 0
             self.progress_bar.value = progress
-            self.progress_text.value = f"{current}/{total} ({progress*100:.1f}%) - {message}"
+            self.progress_text.value = f"{int(current)}/{int(total)} ({int(progress*100)}%) - {message}"
             self._safe_update()
             self._last_ui_update = now
 
@@ -502,3 +519,22 @@ class DataSourceTab(ft.Container):
         
         # Batch update via parent container to ensure consistency
         self.update()
+
+    def show_health_report_dialog(self, e):
+        """Show full health report dialog"""
+        if not self.page: return
+        self.page.run_task(self._show_health_report_task)
+
+    async def _show_health_report_task(self):
+        try:
+            self.show_snack(I18n.get("health_checking"), color=ft.Colors.BLUE)
+            
+            processor = DataProcessor()
+            report = await processor.check_data_health()
+            
+            from ui.components.health_report_dialog import HealthReportDialog
+            dlg = HealthReportDialog(self.page, report)
+            self.page.open(dlg)
+            
+        except Exception as ex:
+             self.show_snack(I18n.get("common_op_fail").format(error=ex), color=ft.Colors.RED)

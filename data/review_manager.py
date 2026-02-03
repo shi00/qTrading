@@ -5,6 +5,7 @@ import aiosqlite
 from data.cache_manager import CacheManager
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import log_async_operation
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class ReviewManager:
         self.api = TushareClient()
         self.config = ConfigHandler()
 
+    @log_async_operation(operation_name="t1_review", performance_threshold_ms=10000)
     async def run_review(self):
         """
         Main entry point: Review all pending predictions.
