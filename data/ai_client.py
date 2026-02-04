@@ -272,8 +272,13 @@ class AIClient:
             raise ValueError("API Key is empty")
             
         try:
-            # Create a temporary client
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            # Create a temporary client with same timeout config
+            client = AsyncOpenAI(
+                api_key=api_key, 
+                base_url=base_url,
+                timeout=httpx.Timeout(10.0, connect=5.0),  # Shorter for testing
+                max_retries=1  # Less retries for testing
+            )
             
             # Simple test request
             await client.chat.completions.create(
