@@ -1,6 +1,7 @@
 import logging
 import json
 import asyncio
+import httpx
 from openai import AsyncOpenAI
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
@@ -55,7 +56,14 @@ class AIClient:
         base_url = ai_cfg.get('ai_base_url', 'https://api.deepseek.com')
         
         if api_key:
-            self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            # Configure timeout and retry at SDK level
+            # Total 30s timeout (matching analyze_stock), 5s connect timeout, max 2 retries
+            self.client = AsyncOpenAI(
+                api_key=api_key, 
+                base_url=base_url,
+                timeout=httpx.Timeout(30.0, connect=5.0),
+                max_retries=2
+            )
             logger.info(f"[AI] Client initialized with Base URL: {base_url}")
         else:
             logger.warning("[AI] API Key not found. AI features will be disabled.")
@@ -214,16 +222,23 @@ class AIClient:
         
         try:
             async with self._get_semaphore():
-                response = await self.client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text[:500]} # Truncate to save tokens
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.1
+                # 10s timeout for classification (should be fast)
+                response = await asyncio.wait_for(
+                    self.client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": text[:500]} # Truncate to save tokens
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1
+                    ),
+                    timeout=10.0
                 )
                 return json.loads(response.choices[0].message.content)
+        except asyncio.TimeoutError:
+            logger.warning("[AI] Classification timeout (>10s), using fallback")
+            return None
         except Exception as e:
             logger.error(f"[AI] Classification failed: {e}")
             return None

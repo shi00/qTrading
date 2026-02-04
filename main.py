@@ -64,7 +64,7 @@ async def main(page: ft.Page):
             logger.info("[Main] Step 2: Stopping Scheduler...")
             scheduler.stop()
             
-            # Stop News
+            logger.info("[Main] Step 3: Stopping News Service...")
             NewsSubscriptionService().stop()
 
             # Stop Toasts (Cancel pending timers)
