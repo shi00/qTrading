@@ -372,7 +372,7 @@ class DataSourceTab(ft.Container):
         self._set_sync_busy(True, self.action_clear_cache)
         try:
             cache_mgr = CacheManager()
-            await cache_mgr.init_db()
+            # init_db is handled inside clear_all_cache / schema reset, valid check not needed here as we are nuking it.
             await cache_mgr.clear_all_cache()
             self.show_snack(I18n.get("ds_cache_cleared"))
             self.page.pubsub.send_all("cache_cleared")

@@ -162,6 +162,8 @@ class CacheManager:
             # Enable WAL mode for better concurrency
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA synchronous=NORMAL;")
+            # Set busy timeout to 30s to avoid 'database is locked' errors during high concurrency
+            await db.execute("PRAGMA busy_timeout = 30000;")
             await db.commit()
             
             while True:

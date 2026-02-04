@@ -69,9 +69,12 @@ class SchedulerService:
     def stop(self):
         """Stop the scheduler"""
         self._running = False
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        # Do NO call self._loop.stop() here! It kills the loop immediately.
+        # Let the loop exit naturally because _running is False.
+        # self._loop.call_soon_threadsafe(self._loop.stop) <- REMOVED
+        
         if self._thread and self._thread.is_alive():
+            # Wait for thread to finish its current loop iteration
             self._thread.join(timeout=2)
             self._thread = None
         logger.info("[Scheduler] Stopped")

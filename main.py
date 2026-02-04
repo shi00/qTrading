@@ -71,43 +71,26 @@ async def main(page: ft.Page):
             logger.info("[Main] Step 4: Stopping Toast Manager...")
             if hasattr(page, "toast") and page.toast:
                 try:
-                    page.toast.stop_all()
+                    await page.toast.stop_all()
                 except Exception as ex:
                     logger.warning(f"Failed to stop toast manager: {ex}")
             
-            logger.info("[Main] Step 5: Waiting for resources (5s timeout)...")
-            import asyncio
-            async def _wait_shutdown():
-                try:
-                    # Shutdown IO Thread Pools
-                    from data.news_fetcher import NewsFetcher
-                    NewsFetcher.shutdown()
-                    
-                    # Flush and Close Database
-                    await dp.close()
-                    logger.info("[Main] DB Writer flushed and closed.")
-                except Exception as inner_ex:
-                    logger.error(f"[Main] Cleanup step failed: {inner_ex}")
-
-            # Strict timeout for the wait phase
-            try:
-                loop = asyncio.get_running_loop()
-                if loop.is_running():
-                    await asyncio.wait_for(_wait_shutdown(), timeout=5.0)
-            except RuntimeError:
-                asyncio.run(asyncio.wait_for(_wait_shutdown(), timeout=5.0))
+            logger.info("[Main] Step 5: Waiting for resources to release...")
+            
+            # Shutdown IO Thread Pools
+            from data.news_fetcher import NewsFetcher
+            NewsFetcher.shutdown()
+            
+            # Flush and Close Database
+            await dp.close()
+            logger.info("[Main] DB Writer flushed and closed.")
                 
-        except asyncio.TimeoutError:
-             # 5s is long enough; if it times out, we just exit.
-             # Cancelling the main loop will clean up remaining tasks usually.
-            logger.warning("[Main] Cleanup timed out (5s). Force exiting.")
         except Exception as ex:
             logger.error(f"[Main] Error during cleanup: {ex}", exc_info=True)
         
         logger.info("[Main] Resources released. Bye.")
         # No os._exit(0) here. Flet window dispatch will close process naturally 
         # now that threads are joined and loops cancelled.
-        # If Flet doesn't close, user can click X again or we rely on daemon threads.
 
     page.on_disconnect = cleanup_resources
     

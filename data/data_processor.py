@@ -75,26 +75,22 @@ class DataProcessor:
         # First signal shutdown
         self.stop()
         
-        # Wait for all active tasks to complete (with timeout)
+        # Wait for all active tasks to complete (cancel and gather)
         if hasattr(self, '_active_tasks') and hasattr(self, '_tasks_lock'):
+            tasks_to_wait = []
             with self._tasks_lock:
-                pending = [t for t in self._active_tasks if not t.done()]
+                # Identify tasks still running
+                for t in self._active_tasks:
+                    if not t.done():
+                        t.cancel()
+                        tasks_to_wait.append(t)
             
-            if pending:
-                logger.info(f"[DataProcessor] Waiting for {len(pending)} tasks to complete...")
+            if tasks_to_wait:
+                logger.info(f"[DataProcessor] Waiting for {len(tasks_to_wait)} tasks to clean up...")
                 try:
-                    # Wait with timeout - returns (done, pending) sets
-                    # Note: asyncio.wait() requires non-empty iterable
-                    done, still_pending = await asyncio.wait(pending, timeout=5.0)
-                    
-                    # Cancel any still running
-                    for task in still_pending:
-                        task.cancel()
-                    
-                    # Await cancellation to complete
-                    if still_pending:
-                        await asyncio.gather(*still_pending, return_exceptions=True)
-                        
+                    # Gather ensures we wait for them to finish (or handle CancelledError)
+                    # return_exceptions=True prevents one error from stopping the wait for others
+                    await asyncio.gather(*tasks_to_wait, return_exceptions=True)
                 except Exception as e:
                     logger.warning(f"[DataProcessor] Error during task cleanup: {e}")
                 finally:
@@ -392,6 +388,10 @@ class DataProcessor:
         Sync FULL daily market data for a single date.
         Includes: Quotes, Indicators, MoneyFlow, Northbound, LHB, BlockTrade.
         """
+        # Single-point shutdown defense - protects all callers automatically
+        if self._shutdown_event.is_set():
+            return None
+        
         if trade_date is None:
             trade_date = await self.get_latest_trade_date()
         
@@ -444,6 +444,9 @@ class DataProcessor:
             try:
                 res = await loop.run_in_executor(None, lambda: func(trade_date=trade_date))
                 return (key, res)
+            except asyncio.CancelledError:
+                # Silence cancellation noise
+                return (key, None)
             except Exception as e:
                 if "权限" in str(e) or "2000" in str(e) or "积分" in str(e):
                     logger.warning(f"[sync_market_snapshot] PERMISSION_DENIED: {name}")
@@ -460,6 +463,8 @@ class DataProcessor:
                 dfs = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if dfs:
                     return ("index", pd.concat(dfs, ignore_index=True))
+                return ("index", None)
+            except asyncio.CancelledError:
                 return ("index", None)
             except Exception as e:
                 logger.warning(f"[DataProcessor] Failed to fetch indices: {e}")
@@ -647,8 +652,12 @@ class DataProcessor:
         CB_THRESHOLD = max(20, int(total_days * 0.1) if total_days > 0 else 20)
         abort_sync = False
         
+        # Batch processing config
+        BATCH_SIZE = 20
+        processed_count = 0
+        
         async def sync_one_day_safe(date, idx):
-            nonlocal abort_sync
+            nonlocal abort_sync, processed_count
             # Check global shutdown or local cancel
             if self._shutdown_event.is_set():
                 return
@@ -667,36 +676,43 @@ class DataProcessor:
                     # Check circuit breaker
                     if len(failed_dates) > CB_THRESHOLD:
                         abort_sync = True
-                        # 保留熟断器关键日志
                         logger.error(f"[sync_historical] CIRCUIT_BREAKER: {len(failed_dates)} failures, threshold={CB_THRESHOLD}")
                         return
 
                     await self.sync_daily_market_snapshot(date, cancel_event=cancel_event)
+                    processed_count += 1  # Track actual success
                     
                     if progress_callback:
-                        progress_callback(idx + 1, total_days, I18n.get('progress_sync_market').format(date=date))
+                        progress_callback(processed_count, total_days, I18n.get('progress_sync_market').format(date=date))
                 except Exception as e:
                     logger.debug(f"[sync_historical] sync_failed: {date} - {type(e).__name__}")
                     failed_dates.append(date)
 
-        # Create tasks
-        tasks = []
-        for i, date in enumerate(trade_dates):
+        # === Batch Processing ===
+        # Process in batches instead of creating all tasks at once
+        # This reduces memory pressure and allows faster shutdown response
+        for batch_start in range(0, len(trade_dates), BATCH_SIZE):
             if self._shutdown_event.is_set():
-                 logger.info("[sync_historical] GLOBAL_SHUTDOWN")
-                 return total_days - len(trade_dates) + i
-            if cancel_event and cancel_event.is_set() or abort_sync:
+                logger.info("[sync_historical] GLOBAL_SHUTDOWN during batch processing")
+                return processed_count
+            if cancel_event and cancel_event.is_set():
+                logger.warning("[sync_historical] USER_CANCELLED during batch processing")
+                return processed_count
+            if abort_sync:
+                logger.error("[sync_historical] ABORTED_BY_CIRCUIT_BREAKER")
                 break
-            tasks.append(asyncio.create_task(sync_one_day_safe(date, i)))
             
-        # Run main batch
-        if tasks:
+            batch_dates = trade_dates[batch_start:batch_start + BATCH_SIZE]
+            tasks = [asyncio.create_task(sync_one_day_safe(d, batch_start + i)) 
+                     for i, d in enumerate(batch_dates)]
+            
             # Register tasks for tracking (thread-safe)
             with self._tasks_lock:
                 self._active_tasks.update(tasks)
             
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # Note: processed_count is updated inside sync_one_day_safe on success
             except asyncio.CancelledError:
                 for task in tasks:
                     if not task.done():
@@ -707,16 +723,6 @@ class DataProcessor:
                 # Unregister completed tasks (thread-safe)
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
-            
-            if self._shutdown_event.is_set():
-                return 0
-
-            if cancel_event and cancel_event.is_set():
-                logger.warning("[sync_historical] USER_CANCELLED")
-                return 0
-            
-            if abort_sync:
-                logger.error("[sync_historical] ABORTED_BY_CIRCUIT_BREAKER")
 
         # === Smart Retry Mechanism ===
         if failed_dates and not self._shutdown_event.is_set():
@@ -752,17 +758,21 @@ class DataProcessor:
                             logger.debug(f"[sync_historical] retry_fail: {date}")
                             failed_dates.append(date)
                 
-                retry_tasks = [asyncio.create_task(retry_one(d)) for d in current_batch]
-                
-                # Register retry tasks for tracking (thread-safe)
-                with self._tasks_lock:
-                    self._active_tasks.update(retry_tasks)
-                
-                try:
-                    await asyncio.gather(*retry_tasks, return_exceptions=True)
-                finally:
+                # Batch retry tasks too (use same BATCH_SIZE)
+                for retry_batch_start in range(0, len(current_batch), BATCH_SIZE):
+                    if self._shutdown_event.is_set():
+                        break
+                    retry_batch = current_batch[retry_batch_start:retry_batch_start + BATCH_SIZE]
+                    retry_tasks = [asyncio.create_task(retry_one(d)) for d in retry_batch]
+                    
                     with self._tasks_lock:
-                        self._active_tasks.difference_update(retry_tasks)
+                        self._active_tasks.update(retry_tasks)
+                    
+                    try:
+                        await asyncio.gather(*retry_tasks, return_exceptions=True)
+                    finally:
+                        with self._tasks_lock:
+                            self._active_tasks.difference_update(retry_tasks)
                 
         # 最终统计 - 保留关键结果日志
         if failed_dates:
@@ -1004,6 +1014,11 @@ class DataProcessor:
         """
         Step 4 Implementation: Loop by Stock, 9 concurrent requests per stock.
         """
+        # Shutdown guard - prevent starting if app is closing
+        if self._shutdown_event.is_set():
+            logger.info("[DataProcessor] Step 4 skipped - shutdown in progress")
+            return
+        
         from ui.i18n import I18n
         logger.info("[DataProcessor] Starting Step 4: Comprehensive Fundamentals Sync...")
         

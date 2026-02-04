@@ -1,64 +1,76 @@
 import flet as ft
 import asyncio
-import time
 import threading
-from ui.theme import AppColors
+
 
 class ToastManager:
     """
-    Manages floating toast notifications properly stacked.
-    Proposal A Implementation.
+    Manages floating toast notifications with centralized task lifecycle management.
+    
+    Uses a TaskGroup pattern for reliable shutdown:
+    - All timer tasks tracked in a central set
+    - Automatic cleanup via done_callback
+    - Clean cancellation without race conditions
+    
+    Thread Safety:
+    - All _active_tasks operations protected by _lock
+    - Safe to call show() from any thread
     """
     def __init__(self, page: ft.Page):
         self.page = page
-        self.lock = threading.Lock()
+        self._lock = threading.Lock()
+        self._active_tasks: set[asyncio.Task] = set()
+        self._is_stopping = False
+        
         self.toasts_stack = ft.Column(
             spacing=10,
             alignment=ft.MainAxisAlignment.END,
             horizontal_alignment=ft.CrossAxisAlignment.END,
         )
-        # Container for the stack, positioned absolute
         self.container = ft.Container(
             content=self.toasts_stack,
             right=20,
             bottom=20,
             width=320,
-            bgcolor=ft.Colors.TRANSPARENT, # Ensure transparent
-            # No height, grows upwards
+            bgcolor=ft.Colors.TRANSPARENT,
         )
         
-        # Add to page overlay
         if self.page:
             self.page.overlay.append(self.container)
             self.page.update()
 
-    def show(self, message, type="info", duration=10):
+    def _register_task(self, task: asyncio.Task) -> None:
+        """Register a task for lifecycle tracking with auto-cleanup (thread-safe)."""
+        with self._lock:
+            self._active_tasks.add(task)
+        
+        def on_done(t: asyncio.Task) -> None:
+            with self._lock:
+                self._active_tasks.discard(t)
+        
+        task.add_done_callback(on_done)
+
+    def show(self, message: str, type: str = "info", duration: int = 10) -> None:
         """
-        Show a toast.
-        type: 'info', 'success', 'error', 'warning'
+        Show a toast notification.
+        
+        Args:
+            message: Text to display
+            type: 'info', 'success', 'error', 'warning'
+            duration: Seconds before auto-dismiss
         """
-        if not self.page:
+        if not self.page or self._is_stopping:
             return
 
         # Determine colors and icon
-        if type == "success":
-            color = ft.Colors.GREEN
-            icon = ft.Icons.CHECK_CIRCLE
-            bg_color = ft.Colors.GREEN_50
-        elif type == "error":
-            color = ft.Colors.RED
-            icon = ft.Icons.ERROR
-            bg_color = ft.Colors.RED_50
-        elif type == "warning":
-            color = ft.Colors.ORANGE
-            icon = ft.Icons.WARNING
-            bg_color = ft.Colors.ORANGE_50
-        else: # info
-            color = ft.Colors.BLUE
-            icon = ft.Icons.INFO
-            bg_color = ft.Colors.BLUE_50
+        color_map = {
+            "success": (ft.Colors.GREEN, ft.Icons.CHECK_CIRCLE, ft.Colors.GREEN_50),
+            "error": (ft.Colors.RED, ft.Icons.ERROR, ft.Colors.RED_50),
+            "warning": (ft.Colors.ORANGE, ft.Icons.WARNING, ft.Colors.ORANGE_50),
+            "info": (ft.Colors.BLUE, ft.Icons.INFO, ft.Colors.BLUE_50),
+        }
+        color, icon, bg_color = color_map.get(type, color_map["info"])
 
-        # Create Toast Control
         toast_card = ToastCard(
             message=message,
             icon=icon,
@@ -68,68 +80,86 @@ class ToastManager:
             on_dismiss=self._remove_toast
         )
         
-        with self.lock:
-            # Add to stack
-            # self.toasts_stack.controls.insert(0, toast_card) 
+        with self._lock:
             self.toasts_stack.controls.append(toast_card)
             
-            # Limit max toasts (e.g. 5)
-            if len(self.toasts_stack.controls) > 5:
-                 removed = self.toasts_stack.controls.pop(0) # Remove oldest (top)
+            # Limit max toasts (remove oldest)
+            while len(self.toasts_stack.controls) > 5:
+                removed = self.toasts_stack.controls.pop(0)
+                if isinstance(removed, ToastCard):
+                    removed.cancel_timer()
                  
-            # Update the stack control directly to register the new child
             try:
                 self.toasts_stack.update()
                 self.container.update() 
             except Exception as e:
                 print(f"Toast update failed: {e}")
         
-        # Start timer for this toast
-        # Use page.run_task to be thread-safe from sync handlers
-        task = self.page.run_task(toast_card.start_timer)
-        toast_card.timer_task = task
+        # Start timer with centralized task tracking
+        task = self.page.run_task(self._run_toast_lifecycle, toast_card)
+        self._register_task(task)
 
-    def stop_all(self):
-        """Cleanup all timers on shutdown"""
-        with self.lock:
-             for control in list(self.toasts_stack.controls):
-                 if isinstance(control, ToastCard):
-                     control.cancel_timer()
-                     # Also cancel the asyncio task if stored
-                     if hasattr(control, 'timer_task') and control.timer_task:
-                         control.timer_task.cancel()
+    async def _run_toast_lifecycle(self, toast_card: "ToastCard") -> None:
+        """
+        Wrapper for toast lifecycle with proper exception handling.
+        Ensures CancelledError is handled cleanly during shutdown.
+        """
+        try:
+            await toast_card.start_timer()
+        except asyncio.CancelledError:
+            pass  # Normal cancellation during shutdown
 
-    def _remove_toast(self, toast):
-        with self.lock:
+    def _remove_toast(self, toast: "ToastCard") -> None:
+        """Remove a toast from the stack."""
+        with self._lock:
             if toast in self.toasts_stack.controls:
                 self.toasts_stack.controls.remove(toast)
+                toast.cancel_timer()
                 try:
                     self.toasts_stack.update()
                     self.container.update()
                 except Exception:
                     pass
 
-    def stop_all(self):
-        """Cleanup all active toasts on shutdown"""
-        with self.lock:
+    async def stop_all(self) -> None:
+        """
+        Graceful shutdown: cancel all active toasts and wait for cleanup.
+        
+        This method is idempotent and safe to call multiple times.
+        Will not leave any pending tasks that could cause "Task destroyed but pending" errors.
+        """
+        self._is_stopping = True
+        
+        # Take snapshot under lock
+        with self._lock:
+            tasks_snapshot = list(self._active_tasks)
+        
+        # Cancel all active tasks
+        for task in tasks_snapshot:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for all cancellations to complete
+        if tasks_snapshot:
+            await asyncio.gather(*tasks_snapshot, return_exceptions=True)
+        
+        # Clear UI
+        with self._lock:
             for control in self.toasts_stack.controls:
                 if isinstance(control, ToastCard):
                     control.cancel_timer()
-                    # Explicitly cancel the asyncio Task
-                    if hasattr(control, 'timer_task') and control.timer_task:
-                        control.timer_task.cancel()
             self.toasts_stack.controls.clear()
 
 class ToastCard(ft.Container):
+    """Individual toast notification card with animation and timer."""
+    
     def __init__(self, message, icon, color, bg_color, duration, on_dismiss):
         super().__init__()
         self.duration = duration
         self.on_dismiss = on_dismiss
         self.is_hovered = False
         self.remaining = duration
-        self.start_time = time.time()
         self._is_cancelled = False
-        self.timer_task = None # Store the asyncio Task handle
         
         # UI
         self.content = ft.Row([
@@ -201,19 +231,14 @@ class ToastCard(ft.Container):
         await self.dismiss()
 
     async def dismiss(self):
+        """Animate out and notify manager to remove this toast."""
         if not self.page:
-             # Already removed from page (e.g. by limit)
-             if self.on_dismiss:
-                 # Still notify manager to cleanup if needed, 
-                 # though typically manager did the removal if it was due to limit.
-                 # If it was manual close, we are here.
-                 # Just ensure we don't error.
-                 pass
-             return
+            return  # Already detached from page
 
         self.opacity = 0
-        self.offset = ft.transform.Offset(1.1, 0) # Slide out right
+        self.offset = ft.transform.Offset(1.1, 0)  # Slide out right
         self.update()
         await asyncio.sleep(0.3)
         if self.on_dismiss:
             self.on_dismiss(self)
+

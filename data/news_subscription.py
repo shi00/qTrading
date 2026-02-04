@@ -30,6 +30,7 @@ class NewsSubscriptionService:
         self._task = None
         self._last_news_time = None
         self.on_news_callback = None # Function to call when news arrives (e.g. show snackbar)
+        self._current_fetch_task = None
         self._initialized = True
         
     def start(self, callback=None):
@@ -55,6 +56,12 @@ class NewsSubscriptionService:
         if self._task:
             self._task.cancel()
             self._task = None
+            
+        # Also cancel the detached fetch task if running
+        if self._current_fetch_task and not self._current_fetch_task.done():
+            self._current_fetch_task.cancel()
+            self._current_fetch_task = None
+            
         logger.info("[NewsService] Stopped news polling service")
 
     async def _poll_loop(self):
@@ -62,9 +69,9 @@ class NewsSubscriptionService:
         base_interval = ConfigHandler.get_config('news_poll_interval', 60) # Default 60s
         
         while self._running:
-            # Fire and forget (or track if needed). 
+            # Fire and forget (but track it for cleanup). 
             # We use create_task so the sleep interval is independent of fetch duration (strict interval).
-            task = asyncio.create_task(self._safe_fetch_task())
+            self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())
             
             # Simple error handling for the loop itself (unlikely to fail here)
             try:
