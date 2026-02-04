@@ -1,6 +1,10 @@
-import flet as ft
 import asyncio
+import logging
 import threading
+
+import flet as ft
+
+logger = logging.getLogger(__name__)
 
 
 class ToastManager:
@@ -16,12 +20,13 @@ class ToastManager:
     - All _active_tasks operations protected by _lock
     - Safe to call show() from any thread
     """
+
     def __init__(self, page: ft.Page):
         self.page = page
         self._lock = threading.Lock()
         self._active_tasks: set[asyncio.Task] = set()
         self._is_stopping = False
-        
+
         self.toasts_stack = ft.Column(
             spacing=10,
             alignment=ft.MainAxisAlignment.END,
@@ -34,7 +39,7 @@ class ToastManager:
             width=320,
             bgcolor=ft.Colors.TRANSPARENT,
         )
-        
+
         if self.page:
             self.page.overlay.append(self.container)
             self.page.update()
@@ -43,11 +48,11 @@ class ToastManager:
         """Register a task for lifecycle tracking with auto-cleanup (thread-safe)."""
         with self._lock:
             self._active_tasks.add(task)
-        
+
         def on_done(t: asyncio.Task) -> None:
             with self._lock:
                 self._active_tasks.discard(t)
-        
+
         task.add_done_callback(on_done)
 
     def show(self, message: str, type: str = "info", duration: int = 10) -> None:
@@ -79,22 +84,22 @@ class ToastManager:
             duration=duration,
             on_dismiss=self._remove_toast
         )
-        
+
         with self._lock:
             self.toasts_stack.controls.append(toast_card)
-            
+
             # Limit max toasts (remove oldest)
             while len(self.toasts_stack.controls) > 5:
                 removed = self.toasts_stack.controls.pop(0)
                 if isinstance(removed, ToastCard):
                     removed.cancel_timer()
-                 
+
             try:
                 self.toasts_stack.update()
-                self.container.update() 
+                self.container.update()
             except Exception as e:
-                print(f"Toast update failed: {e}")
-        
+                logger.warning(f"Toast update failed: {e}")
+
         # Start timer with centralized task tracking
         task = self.page.run_task(self._run_toast_lifecycle, toast_card)
         self._register_task(task)
@@ -124,25 +129,25 @@ class ToastManager:
     async def stop_all(self) -> None:
         """
         Graceful shutdown: cancel all active toasts and wait for cleanup.
-        
+
         This method is idempotent and safe to call multiple times.
         Will not leave any pending tasks that could cause "Task destroyed but pending" errors.
         """
         self._is_stopping = True
-        
+
         # Take snapshot under lock
         with self._lock:
             tasks_snapshot = list(self._active_tasks)
-        
+
         # Cancel all active tasks
         for task in tasks_snapshot:
             if not task.done():
                 task.cancel()
-        
+
         # Wait for all cancellations to complete
         if tasks_snapshot:
             await asyncio.gather(*tasks_snapshot, return_exceptions=True)
-        
+
         # Clear UI
         with self._lock:
             for control in self.toasts_stack.controls:
@@ -150,9 +155,10 @@ class ToastManager:
                     control.cancel_timer()
             self.toasts_stack.controls.clear()
 
+
 class ToastCard(ft.Container):
     """Individual toast notification card with animation and timer."""
-    
+
     def __init__(self, message, icon, color, bg_color, duration, on_dismiss):
         super().__init__()
         self.duration = duration
@@ -160,7 +166,7 @@ class ToastCard(ft.Container):
         self.is_hovered = False
         self.remaining = duration
         self._is_cancelled = False
-        
+
         # UI
         self.content = ft.Row([
             ft.Icon(icon, color=color, size=24),
@@ -168,13 +174,13 @@ class ToastCard(ft.Container):
                 ft.Text(message, size=14, color=ft.Colors.BLACK87, width=230, no_wrap=False),
             ], spacing=2, alignment=ft.MainAxisAlignment.CENTER),
             ft.IconButton(
-                ft.Icons.CLOSE, 
-                icon_size=16, 
+                ft.Icons.CLOSE,
+                icon_size=16,
                 icon_color=ft.Colors.GREY,
                 on_click=self._handle_dismiss_click
             )
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.START)
-        
+
         self.padding = 12
         self.bgcolor = ft.Colors.WHITE
         self.border_left = ft.BorderSide(4, color)
@@ -186,19 +192,19 @@ class ToastCard(ft.Container):
             offset=ft.Offset(0, 4)
         )
         # Animation
-        self.offset = ft.transform.Offset(1.1, 0) # Start off-screen right
+        self.offset = ft.transform.Offset(1.1, 0)  # Start off-screen right
         self.animate_offset = ft.animation.Animation(300, ft.AnimationCurve.EASE_OUT_CUBIC)
         self.animate_opacity = ft.animation.Animation(300, ft.AnimationCurve.EASE_IN)
         self.opacity = 0
-        
+
         self.on_hover = self._on_hover
-        
+
     def did_mount(self):
         # Trigger enter animation
         self.offset = ft.transform.Offset(0, 0)
         self.opacity = 1
         self.update()
-        
+
     def cancel_timer(self):
         self._is_cancelled = True
 
@@ -206,16 +212,16 @@ class ToastCard(ft.Container):
         try:
             # Wait for enter animation
             await asyncio.sleep(0.3)
-            
+
             while self.remaining > 0:
                 if self._is_cancelled:
                     return
                 if not self.page:
-                    return # Page closed
+                    return  # Page closed
                 if not self.is_hovered:
                     self.remaining -= 0.1
                 await asyncio.sleep(0.1)
-                
+
             if not self._is_cancelled:
                 await self.dismiss()
         except asyncio.CancelledError:
@@ -241,4 +247,3 @@ class ToastCard(ft.Container):
         await asyncio.sleep(0.3)
         if self.on_dismiss:
             self.on_dismiss(self)
-

@@ -293,12 +293,31 @@ class DataProcessor:
             elif fin_fresh_ratio < 0.98:
                 if status == 'green': status = 'yellow'
                 reasons.append(f"{target_period} 覆盖不足")
-                
-            # Metric 3: Gaps (Continuity)
+
+            # Metric 2b: Auxiliary Data Check (Strategy Critical)
+            # Check Main Business Data (fina_mainbz) which is critical for strategy filters
+            bz_stats = deep_health['tables'].get('fina_mainbz', {})
+            bz_fresh_ratio = bz_stats.get('fresh_ratio', 0)
+            
+            # Allow slightly lower threshold for auxiliary data
+            if bz_fresh_ratio < 0.85:
+                 if status == 'green': status = 'yellow'
+                 reasons.append(f"主营数据缺失 (仅 {bz_fresh_ratio*100:.0f}%)")
+                 
+            # Metric 2c: Joint Strategy Readiness (Intersection Check)
+            joint_stats = deep_health['tables'].get('joint_coverage', {})
+            joint_ratio = joint_stats.get('ratio', 0)
+            
+            if joint_ratio < 0.80:
+                 if status == 'green': status = 'yellow'
+                 if joint_ratio < 0.50: status = 'red'
+                 reasons.append(f"策略可用性不足 (有效全集 {joint_ratio*100:.0f}%)")
+
+            # Metric 3: Gaps (Continuity - Index Based)
             gap_count = deep_health.get('gap_count', 0)
             if gap_count > 0:
                 status = 'red' # Zero Tolerance
-                reasons.append(f"发现 {gap_count} 处行情断点")
+                reasons.append(f"发现 {gap_count} 处大盘行情断点")
                 
             # Metric 4: Sanity (Integrity)
             sanity_errors = deep_health.get('sanity_errors', 0)
@@ -386,7 +405,7 @@ class DataProcessor:
                 self._is_syncing_basic = False
 
 
-    @log_async_operation(operation_name="sync_market_snapshot", log_args=True, log_result=False, performance_threshold_ms=5000)
+    @log_async_operation(operation_name="sync_market_snapshot", log_args=True, log_result=False, performance_threshold_ms=20000)
     async def sync_daily_market_snapshot(self, trade_date=None, cancel_event=None):
         """
         Sync FULL daily market data for a single date.
@@ -647,7 +666,13 @@ class DataProcessor:
         total_days = len(trade_dates)
         
         # Concurrency control
+        # Respect user config but warn if high.
         concurrency = ConfigHandler.get_sync_concurrency()
+        
+        # Smart Warning for high concurrency
+        if concurrency > 3:
+             logger.warning(f"[sync_historical] High concurrency ({concurrency}) detected. If you experience timeouts or 45s+ delays, please reduce 'Sync Concurrency' to 3 in Settings.")
+             
         semaphore = asyncio.Semaphore(max(1, concurrency))
         logger.debug(f"[sync_historical] concurrency={concurrency}")
         
@@ -815,16 +840,8 @@ class DataProcessor:
                 should_full_sync = True
                 logger.info("[sync_financial] STRATEGY: Full Sync (first run)")
         
-        reset_checkpoint = False
         if should_full_sync:
-            if force:
-                 reset_checkpoint = True
-                 
-            status = await self.cache.get_sync_status('financial_reports')
-            if not status or not status.get('last_sync_date'):
-                reset_checkpoint = True
-                
-            return await self._run_full_sync(periods, progress_callback, cancel_event, reset_checkpoint=reset_checkpoint)
+            return await self._run_full_sync(periods, progress_callback, force=force, cancel_event=cancel_event)
         else:
             return await self._run_incremental_sync(progress_callback)
 
@@ -1010,16 +1027,17 @@ class DataProcessor:
         
         return health_report
 
-    async def _run_full_sync(self, periods=None, progress_callback=None, cancel_event=None, reset_checkpoint=False):
+    async def _run_full_sync(self, periods=None, progress_callback=None, force=False, cancel_event=None):
         """
         Legacy/Alias for Full Sync.
         Redirects to sync_comprehensive_fundamentals for simplicity.
         """
-        await self.sync_comprehensive_fundamentals(progress_callback=progress_callback, cancel_event=cancel_event, reset_checkpoint=reset_checkpoint)
+        await self.sync_comprehensive_fundamentals(progress_callback=progress_callback, force=force, cancel_event=cancel_event)
 
-    async def sync_comprehensive_fundamentals(self, progress_callback=None, cancel_event=None, reset_checkpoint=False):
+    async def sync_comprehensive_fundamentals(self, progress_callback=None, force=False, cancel_event=None):
         """
-        Step 4 Implementation: Loop by Stock, 9 concurrent requests per stock.
+        Step 4 Implementation: Loop by Stock, 10 concurrent requests per stock.
+        Uses "data-as-state" pattern for checkpoint-less resume.
         """
         # Shutdown guard - prevent starting if app is closing
         if self._shutdown_event.is_set():
@@ -1027,7 +1045,12 @@ class DataProcessor:
             return
         
         from ui.i18n import I18n
-        logger.info("[DataProcessor] Starting Step 4: Comprehensive Fundamentals Sync...")
+        logger.info(f"[DataProcessor] Starting Step 4: Comprehensive Fundamentals Sync (force={force})...")
+        
+        # Force Logic: Reset sync status for resume
+        if force:
+            logger.warning("[sync_fundamentals] Force mode: Clearing previous sync status...")
+            await self.cache.clear_step4_sync_status()
         
         # 1. Get Stock List
         df_basic = await self.cache.get_stock_basic()
@@ -1037,51 +1060,36 @@ class DataProcessor:
 
         # Sort active stocks first? List status L.
         df_active = df_basic[df_basic['list_status'] == 'L']
-        stocks = df_active['ts_code'].tolist()
-        total_stocks = len(stocks)
+        all_stocks = set(df_active['ts_code'].tolist())
+        total_stocks = len(all_stocks)
         
         # 2. Concurrency Control (Stock Level)
         concurrency = ConfigHandler.get_sync_concurrency()
         semaphore = asyncio.Semaphore(concurrency)
         
-        # 3. Resume Logic
-        import json
-        import os
-        checkpoint_file = 'sync_checkpoint_step4.json'
+        # 3. Data-as-State Resume Logic (Precise tracking via sync_status table)
+        # Query stocks that have COMPLETED Step 4 (all 10 data types successfully saved)
+        synced_stocks = await self.cache.get_completed_step4_stocks(sync_version=1)
         
-        if reset_checkpoint and os.path.exists(checkpoint_file):
-            logger.info(f"[DataProcessor] Reset requested. Deleting stale checkpoint: {checkpoint_file}")
-            try:
-                os.remove(checkpoint_file)
-            except Exception as e:
-                logger.warning(f"[DataProcessor] Failed to delete checkpoint: {e}")
+        # Calculate pending stocks (set difference) with consistent ordering
+        pending_stocks = sorted([s for s in all_stocks if s not in synced_stocks])
+        skipped_count = total_stocks - len(pending_stocks)
+        
+        if skipped_count > 0:
+            logger.info(f"[sync_fundamentals] RESUME: {skipped_count} stocks completed, {len(pending_stocks)} pending")
+        
+        if not pending_stocks:
+            logger.info("[sync_fundamentals] All stocks already synced. Nothing to do.")
+            if progress_callback:
+                progress_callback(total_stocks, total_stocks, I18n.get('progress_sync_fundamentals').format(current=total_stocks, total=total_stocks, stock="Done"))
+            return
+        
+        # Track progress: completed = skipped + newly processed
+        completed_count = skipped_count
 
-        start_index = 0
-        if os.path.exists(checkpoint_file):
-            try:
-                with open(checkpoint_file, 'r') as f:
-                    data = json.load(f)
-                    # Check if total matches (if stock count changed significantly, maybe discard?)
-                    # But more importantly: Check if it was already "Done"
-                    saved_index = data.get('last_index', 0)
-                    saved_total = data.get('total', 0)
-                    
-                    if saved_index >= saved_total and saved_total > 0:
-                         logger.info(f"[DataProcessor] Found COMPLETED checkpoint ({saved_index}/{saved_total}). Assuming user wants RESTART.")
-                         start_index = 0
-                         try: os.remove(checkpoint_file)
-                         except: pass
-                    elif data.get('total') == total_stocks:
-                        start_index = saved_index
-                        logger.info(f"[DataProcessor] Resuming Step 4 from index {start_index}")
-                    else:
-                        logger.warning(f"[DataProcessor] Stock count mismatch (Saved: {data.get('total')}, Curr: {total_stocks}). Discarding checkpoint.")
-                        start_index = 0
-            except Exception as e:
-                logger.warning(f"[DataProcessor] Failed to read checkpoint: {e}")
-                start_index = 0
-            
-        completed_count = start_index
+        # Pre-calculate dates once (Invariant)
+        end_date = datetime.datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
         
         async def process_one_stock(ts_code):
             # Check cancellation BEFORE acquiring semaphore to avoid being stuck
@@ -1096,47 +1104,66 @@ class DataProcessor:
                     
                     try:
                         loop = asyncio.get_running_loop()
-                        # Note: No need to check loop.is_closed() here.
-                        # get_running_loop() raises RuntimeError if no loop is running.
-                            
-                        end_date = datetime.datetime.now().strftime('%Y%m%d')
-                        start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
                         
-                        async def f(func, **kwargs):
+                        # Internal helper to track failure
+                        has_error = False
+                        
+                        async def fetch_safe(func, kwargs):
+                            nonlocal has_error
                             try:
                                 # Tushare Client is synchronous, so run in executor
                                 return await loop.run_in_executor(None, lambda: func(**kwargs))
                             except asyncio.CancelledError:
                                 raise  # Propagate cancellation
+                            except (AttributeError, NameError, TypeError, ImportError) as e:
+                                # CRITICAL: Do not swallow coding errors. Let them bubble up.
+                                raise e 
                             except Exception as e:
+                                has_error = True # Mark as failed (Runtime error)
+                                logger.warning(f"Fetch failed for {ts_code} [{func.__name__}]: {e}")
                                 return None
 
-                        # 9 Data Types
-                        t1 = f(self.api.get_income, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t2 = f(self.api.get_balancesheet, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t3 = f(self.api.get_cashflow, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t4 = f(self.api.get_fina_indicator, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t5 = f(self.api.get_fina_audit, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t6 = f(self.api.get_forecast, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t7 = f(self.api.get_fina_mainbz, ts_code=ts_code, start_date=start_date, end_date=end_date)
-                        t8 = f(self.api.get_pledge_stat, ts_code=ts_code, end_date=end_date) 
-                        t9 = f(self.api.get_repurchase, ts_code=ts_code, start_date=start_date)
-                        t10 = f(self.api.get_dividend, ts_code=ts_code, start_date=start_date)
+                        # Define Tasks Configuration: (Fetch API, Save Cache, Args Type)
+                        # Args Type: 0=start+end, 1=end only, 2=start only
+                        task_specs = [
+                            (self.api.get_income, self.cache.save_financial_reports, 0),
+                            (self.api.get_balancesheet, self.cache.save_financial_reports, 0),
+                            (self.api.get_cashflow, self.cache.save_financial_reports, 0),
+                            (self.api.get_fina_indicator, self.cache.save_financial_reports, 0),
+                            (self.api.get_fina_audit, self.cache.save_fina_audit, 0),
+                            (self.api.get_forecast, self.cache.save_fina_forecast, 0),
+                            (self.api.get_fina_mainbz, self.cache.save_fina_mainbz, 0),
+                            (self.api.get_pledge_stat, self.cache.save_pledge_stat, 1),
+                            (self.api.get_repurchase, self.cache.save_repurchase, 2),
+                            (self.api.get_dividend, self.cache.save_dividend, 2)
+                        ]
                         
-                        results = await asyncio.gather(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10)
+                        futures = []
+                        for fetch_func, _, arg_type in task_specs:
+                            kw = {'ts_code': ts_code}
+                            if arg_type == 0:
+                                kw.update(start_date=start_date, end_date=end_date)
+                            elif arg_type == 1:
+                                kw.update(end_date=end_date)
+                            elif arg_type == 2:
+                                kw.update(start_date=start_date)
+                            
+                            futures.append(fetch_safe(fetch_func, kw))
                         
-                        # Save results if not empty
-                        if results[0] is not None: await self.cache.save_financial_reports(results[0])
-                        if results[1] is not None: await self.cache.save_financial_reports(results[1])
-                        if results[2] is not None: await self.cache.save_financial_reports(results[2])
-                        if results[3] is not None: await self.cache.save_financial_reports(results[3])
+                        # Run all fetches concurrently
+                        results = await asyncio.gather(*futures)
                         
-                        if results[4] is not None: await self.cache.save_fina_audit(results[4])
-                        if results[5] is not None: await self.cache.save_fina_forecast(results[5])
-                        if results[6] is not None: await self.cache.save_fina_mainbz(results[6])
-                        if results[7] is not None: await self.cache.save_pledge_stat(results[7])
-                        if results[8] is not None: await self.cache.save_repurchase(results[8])
-                        if results[9] is not None: await self.cache.save_dividend(results[9])
+                        # Save results sequentially (DB writes are fast enough compared to network)
+                        for i, result in enumerate(results):
+                            if result is not None:
+                                save_func = task_specs[i][1]
+                                await save_func(result)
+                        
+                        # MARK AS COMPLETED only if no errors occurred
+                        if not has_error:
+                            await self.cache.mark_stock_step4_completed(ts_code, sync_version=1)
+                        else:
+                            logger.warning(f"Stock {ts_code} incomplete (errors occurred), will retry next time.")
 
                     except (AttributeError, NameError, TypeError, ImportError) as e:
                         # Critical Programming Errors: FAIL FAST
@@ -1159,13 +1186,12 @@ class DataProcessor:
 
         # Batch Processing with proper task tracking
         batch_size = 50
-        pending_list = stocks[start_index:]
         
-        for i in range(0, len(pending_list), batch_size):
+        for i in range(0, len(pending_stocks), batch_size):
             if cancel_event and cancel_event.is_set(): break
             if self._shutdown_event.is_set(): break
             
-            batch = pending_list[i : i+batch_size]
+            batch = pending_stocks[i : i+batch_size]
             tasks = [asyncio.create_task(process_one_stock(code)) for code in batch]
             
             # Register tasks for tracking (thread-safe)
@@ -1189,18 +1215,8 @@ class DataProcessor:
             
             completed_count += len(batch)
             
-            # Update Checkpoint
-            try:
-                with open(checkpoint_file, 'w') as f:
-                    json.dump({'last_index': completed_count, 'total': total_stocks}, f)
-            except: pass
-            
             if progress_callback:
-                progress_callback(completed_count, total_stocks, f"Fundamentals: {completed_count}/{total_stocks} ({pending_list[i]})")
-                
-        if completed_count >= total_stocks:
-             if os.path.exists(checkpoint_file):
-                 os.remove(checkpoint_file)
+                progress_callback(completed_count, total_stocks, I18n.get('progress_sync_fundamentals').format(current=completed_count, total=total_stocks, stock=batch[0]))
 
     async def _fetch_comprehensive_financial_data(self, ts_code, start_date=None, end_date=None, period=None):
         """
@@ -1438,7 +1454,7 @@ class DataProcessor:
         :param progress_callback: Optional callback function(current, total, message)
         """
         days = int(years * 250)  # ~250 trading days per year
-        print(f"[DataProcessor] === Starting {years}-year historical sync ({days} days) ===")
+        logger.info(f"[DataProcessor] === Starting {years}-year historical sync ({days} days) ===")
         
         # 1. Sync stock basic first
         await self.sync_stock_basic()
@@ -1466,7 +1482,7 @@ class DataProcessor:
         
         await self.sync_financial_reports(periods=periods)
         
-        print(f"[DataProcessor] === {years}-year historical sync complete! ===")
+        logger.info(f"[DataProcessor] === {years}-year historical sync complete! ===")
 
     # ===== Screening Methods =====
 

@@ -14,3 +14,6 @@ aiohttp>=3.9.0
 readerwriterlock>=1.0.9
 pandas_market_calendars>=4.0.0
 sqlparse>=0.4.4
+tzdata>=2023.3 # Required for APScheduler timezone support on Windows
+
+apscheduler>=3.10.0

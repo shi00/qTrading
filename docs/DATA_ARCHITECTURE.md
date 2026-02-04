@@ -96,7 +96,7 @@
 ### 4.2 错误处理与弹性
 -   **抖动退避 (Jittered Backoff)**: 遇到 `TcpTimeout` 或 `500` 错误时，休眠 `2^n + random()` 秒。防止 API 恢复瞬间发生“惊群效应”。
 -   **熔断机制 (Circuit Breaker)**: 如果遇到权限不足 (Error 2000)，自动跳过特定数据类型（如 `margin_detail`），并记录警告，确保主流程不中断。
--   **原子检查点 (Atomic Checkpoints)**: Step 4 每完成一个批次（50 只股票）即持久化进度到 `sync_checkpoint_step4.json`。支持进程被杀后的无损断点续传。
+-   **同步状态追踪 (Sync Status Tracking)**: Step 4 引入 `stock_sync_status` 表进行原子化状态管理。只有当一只股票的所有数据类型（如利润表、资产负债表等10项）全部成功抓取并保存后，才会标记为“完成”。这解决了部分数据抓取失败导致的数据不完整问题，同时支持无文件断点续传。
 
 ### 4.3 数据一致性
 -   **前复权计算**: `daily_quotes` 数据包含 `adj_factor` (复权因子)。

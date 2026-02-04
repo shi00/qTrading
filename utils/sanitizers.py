@@ -9,13 +9,14 @@
 """
 
 import re
+from typing import Optional
+
 import pandas as pd
-from typing import Any, Optional
 
 
 class DataSanitizer:
     """统一的数据脱敏工具类"""
-    
+
     @staticmethod
     def sanitize_token(token: str) -> str:
         """
@@ -32,14 +33,14 @@ class DataSanitizer:
         """
         if not token or not isinstance(token, str):
             return "***"
-        
+
         # 短token直接全部隐藏
         if len(token) < 8:
             return "***"
-        
+
         # 标准格式: 前3位 + *** + 后4位
         return f"{token[:3]}***{token[-4:]}"
-    
+
     @staticmethod
     def sanitize_dataframe(df: Optional[pd.DataFrame], max_cols: int = 5) -> str:
         """
@@ -56,23 +57,30 @@ class DataSanitizer:
         """
         if df is None:
             return "None"
-        
+
         if not isinstance(df, pd.DataFrame):
             return f"{type(df).__name__}"
-        
+
         if df.empty:
             return "DataFrame(empty)"
-        
+
         # 仅显示前N列
         cols_display = list(df.columns[:max_cols])
         if len(df.columns) > max_cols:
             cols_display.append("...")
-        
+
         return (
             f"DataFrame(shape={df.shape}, "
             f"cols={cols_display})"
         )
-    
+
+    # Pre-compile regex patterns for better performance
+    # Matches Windows paths: D:\path\to\file.py or C:\Users\...
+    _PATTERN_WIN_PATH = re.compile(r'[A-Z]:\\[^\'"\s]+')
+
+    # Matches Unix paths: /path/to/file.py
+    _PATTERN_UNIX_PATH = re.compile(r'/[\w/\-\.]+\.py')
+
     @staticmethod
     def sanitize_error(exception: Exception, show_traceback: bool = False) -> str:
         """
@@ -88,23 +96,23 @@ class DataSanitizer:
             脱敏后的错误信息
         """
         msg = str(exception)
-        
-        # 移除 Windows路径: D:\path\to\file.py
-        msg = re.sub(r'[A-Z]:\\[^\'"\s]+', '<PATH>', msg)
-        
-        # 移除 Unix路径: /path/to/file.py
-        msg = re.sub(r'/[\w/\-\.]+\.py', '<PATH>', msg)
-        
+
+        # 移除 Windows路径
+        msg = DataSanitizer._PATTERN_WIN_PATH.sub('<PATH>', msg)
+
+        # 移除 Unix路径
+        msg = DataSanitizer._PATTERN_UNIX_PATH.sub('<PATH>', msg)
+
         # 如果需要堆栈,也要脱敏
         if show_traceback and hasattr(exception, '__traceback__'):
             import traceback
             tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
             # 过滤敏感路径
-            tb_clean = [re.sub(r'[A-Z]:\\[^\'"\s]+', '<PATH>', line) for line in tb_lines]
+            tb_clean = [DataSanitizer._PATTERN_WIN_PATH.sub('<PATH>', line) for line in tb_lines]
             return '\n'.join(tb_clean)
-        
+
         return msg
-    
+
     @staticmethod
     def sanitize_dict(data: dict, sensitive_keys: list = None) -> dict:
         """
@@ -119,7 +127,7 @@ class DataSanitizer:
         """
         if sensitive_keys is None:
             sensitive_keys = ['token', 'password', 'api_key', 'secret', 'key']
-        
+
         result = {}
         for k, v in data.items():
             # 检查key是否敏感
@@ -134,9 +142,9 @@ class DataSanitizer:
                     result[k] = DataSanitizer.sanitize_dataframe(v)
                 else:
                     result[k] = v
-        
+
         return result
-    
+
     @staticmethod
     def sanitize_args(*args, sensitive_patterns: list = None, **kwargs) -> tuple:
         """
@@ -154,10 +162,10 @@ class DataSanitizer:
         """
         if sensitive_patterns is None:
             sensitive_patterns = ['token', 'password', 'key', 'secret']
-        
+
         # 关键字参数脱敏
         clean_kwargs = DataSanitizer.sanitize_dict(kwargs, sensitive_patterns)
-        
+
         # 位置参数转为安全表示(避免大对象)
         clean_args = []
         for arg in args:
@@ -167,5 +175,5 @@ class DataSanitizer:
                 clean_args.append(f"{arg[:50]}...(truncated)")
             else:
                 clean_args.append(repr(arg)[:100])
-        
+
         return tuple(clean_args), clean_kwargs

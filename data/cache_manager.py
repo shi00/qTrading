@@ -49,10 +49,10 @@ class CacheManager:
         self._running = False
         self._closing = False # New flag to prevent restart during close
         
-        # Maintenance Mode Control
         self._maintenance_event = asyncio.Event()
         self._maintenance_event.set() # Default: Ready (Green light)
         
+        self._loop = None # Ensure attribute exists
         self._schema_initialized = False
         self._initialized = True
 
@@ -424,6 +424,10 @@ class CacheManager:
 
         future = loop.create_future()
         
+        # Ensure running before queueing
+        if not self._running and not self._closing:
+            await self.start()
+        
         # Queue the internal function
         await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
         
@@ -432,7 +436,7 @@ class CacheManager:
 
     async def clear_all_cache(self):
         """Rebuild Database: Drop all tables and Re-initialize"""
-        print("[Cache] Queuing Database Rebuild...")
+        logger.info("[Cache] Queuing Database Rebuild...")
         
         # 1. Purge Pending Writes to speed up
         # Since we are destroying the DB, pending writes are useless.
@@ -476,7 +480,7 @@ class CacheManager:
             await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
             
             await future
-            print("[Cache] Database Rebuild Complete.")
+            logger.info("[Cache] Database Rebuild Complete.")
         
         finally:
             # Exit Maintenance Mode (Unblock readers)
@@ -723,6 +727,73 @@ class CacheManager:
             stats['stock_count'] = row[0] or 0
             
             return stats
+
+    async def get_completed_step4_stocks(self, sync_version=1):
+        """
+        Get set of stock codes that have completed Step 4 sync.
+        Uses stock_sync_status table for precise tracking.
+        
+        :param sync_version: Only return stocks synced with this version
+        :return: Set of ts_code strings that completed Step 4
+        """
+        await self.wait_for_maintenance()
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                cursor = await db.execute(
+                    "SELECT ts_code FROM stock_sync_status WHERE sync_version >= ?",
+                    (sync_version,)
+                )
+                rows = await cursor.fetchall()
+                return set(row[0] for row in rows)
+            except Exception as e:
+                # Table might not exist yet on first run
+                logger.debug(f"[CacheManager] stock_sync_status query failed (first run?): {e}")
+                return set()
+
+    async def mark_stock_step4_completed(self, ts_code, sync_version=1):
+        """
+        Mark a stock as having completed Step 4 sync.
+        Called only after ALL data types for a stock are successfully saved.
+        
+        :param ts_code: Stock code
+        :param sync_version: Sync version number
+        """
+        import datetime
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        sql = '''
+            INSERT OR REPLACE INTO stock_sync_status 
+            (ts_code, step4_completed_at, sync_version)
+            VALUES (?, ?, ?)
+        '''
+        await self._enqueue((sql, [(ts_code, now, sync_version)], True))
+
+    async def clear_step4_sync_status(self):
+        """
+        Clear all Step 4 sync status (for forced full resync).
+        Waits for completion to ensure consistency.
+        """
+        logger.info("[CacheManager] Clearing Step 4 sync status for forced resync")
+        
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError: return
+            
+        future = loop.create_future()
+        
+        async def _do_delete(db_conn):
+            try:
+                await db_conn.execute("DELETE FROM stock_sync_status")
+                await db_conn.commit()
+                # Resolve future in main loop
+                loop.call_soon_threadsafe(future.set_result, True)
+            except Exception as e:
+                loop.call_soon_threadsafe(future.set_exception, e)
+                
+        # Queue as FUNC (Priority Critical ensures it runs ASAP)
+        await self._enqueue((_do_delete, [], 'FUNC'), priority=PRIORITY_CRITICAL)
+        
+        # Wait for actual execution
+        await future
 
     # ========== Daily Indicators ==========
     async def save_daily_indicators(self, df, priority=PRIORITY_NORMAL):
@@ -1764,11 +1835,18 @@ class CacheManager:
             deadline_desc = f"三季报 ({target_y})"
         
         # Tables Config
+        # Schema: (Table, Date Column, Days Lag or 'dynamic')
         check_list = [
+            ('fina_mainbz', 'end_date', 'dynamic'),
             ('fina_forecast', 'end_date', 180),
-            ('pledge_stat', 'end_date', 30),
+            ('pledge_stat', 'end_date', 90), 
+            ('repurchase', 'ann_date', 365), 
+            ('dividend', 'ann_date', 365),
+            ('northbound_holding', 'trade_date', 5),
             ('margin_daily', 'trade_date', 5),
             ('suspend_d', 'trade_date', 5),
+            ('top_list', 'trade_date', 5),
+            ('block_trade', 'trade_date', 5),
         ]
         
         async with aiosqlite.connect(self.db_path) as db:
@@ -1800,14 +1878,18 @@ class CacheManager:
                 results['financial_reports'] = {'error': str(e)}
 
             # --- 3. Other Tables (Standard Logic) ---
-            for table, date_col, days in check_list:
+            for table, date_col, criterion in check_list:
                 try:
                     # Coverage
                     cursor = await db.execute(f"SELECT count(DISTINCT ts_code) FROM {table}")
                     covered = (await cursor.fetchone())[0] or 0
                     
-                    # Loose Freshness
-                    cutoff = (today - datetime.timedelta(days=days)).strftime('%Y%m%d')
+                    # Freshness
+                    if criterion == 'dynamic':
+                        cutoff = required_period
+                    else:
+                        cutoff = (today - datetime.timedelta(days=criterion)).strftime('%Y%m%d')
+                        
                     cursor = await db.execute(f"SELECT count(DISTINCT ts_code) FROM {table} WHERE {date_col} >= '{cutoff}'")
                     fresh = (await cursor.fetchone())[0] or 0
                     
@@ -1818,7 +1900,7 @@ class CacheManager:
                         'fresh_ratio': fresh / total_stocks
                     }
                 except:
-                    results[table] = {'covered': 0, 'ratio': 0}
+                    results[table] = {'covered': 0, 'ratio': 0, 'fresh': 0, 'fresh_ratio': 0}
 
             # --- 4. Sanity Check (Zero Tolerance) ---
             sanity_errors = 0
@@ -1832,16 +1914,48 @@ class CacheManager:
                 sanity_errors += (await cursor.fetchone())[0]
             except: pass
             
-            # --- 5. Gap Detection (Full Scan) ---
+            # --- 4b. Joint Coverage (Strategy Readiness) ---
+            # How many stocks have BOTH Financial Reports AND Main Business data?
+            try:
+                sql_joint = f"""
+                    SELECT count(*) FROM stock_basic sb
+                    WHERE sb.list_status='L'
+                    AND sb.ts_code IN (SELECT DISTINCT ts_code FROM financial_reports WHERE end_date >= '{required_period}')
+                    AND sb.ts_code IN (SELECT DISTINCT ts_code FROM fina_mainbz WHERE end_date >= '{required_period}')
+                """
+                cursor = await db.execute(sql_joint)
+                joint_count = (await cursor.fetchone())[0] or 0
+                results['joint_coverage'] = {
+                    'count': joint_count,
+                    'ratio': joint_count / total_stocks
+                }
+            except:
+                 results['joint_coverage'] = {'count': 0, 'ratio': 0}
+
+            # --- 5. Gap Detection (Smart Fallback) ---
+            # Priority 1: Check Index (000001.SH) - Fast & Accurate (No suspensions)
+            # Priority 2: Check Bellwether Stock (600519.SH) - If Index data missing
             gap_count = 0
             try:
-                # Use Gap > 10 days to exclude long holidays safely without complex calendar logic
-                sql_gap = """
+                # Check Index Data Availability
+                cursor = await db.execute("SELECT count(*) FROM index_daily WHERE ts_code='000001.SH' AND trade_date > date('now', '-1 years')")
+                idx_cnt = (await cursor.fetchone())[0]
+                
+                target_table = 'index_daily'
+                target_code = '000001.SH'
+                
+                if idx_cnt < 200:
+                    # Fallback to Stock
+                    target_table = 'daily_quotes'
+                    target_code = '600519.SH' # Moutai (Rarely suspended)
+                
+                sql_gap = f"""
                 SELECT count(*) FROM (
-                    SELECT ts_code, trade_date,
-                           LAG(trade_date) OVER (PARTITION BY ts_code ORDER BY trade_date) as prev_date
-                    FROM daily_quotes
-                    WHERE trade_date > date('now', '-3 years')
+                    SELECT trade_date,
+                           LAG(trade_date) OVER (ORDER BY trade_date) as prev_date
+                    FROM {target_table}
+                    WHERE ts_code = '{target_code}' 
+                    AND trade_date > date('now', '-1 years')
                 ) WHERE julianday(trade_date) - julianday(prev_date) > 10
                 """
                 cursor = await db.execute(sql_gap)

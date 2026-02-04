@@ -8,7 +8,7 @@ class I18n:
     Internationalization support.
     Manages locale state and provides translated strings.
     """
-    _locale = "zh"  # Enforce Chinese only
+    _locale = "zh"  # Default locale
     _listeners = []
     
 
@@ -16,7 +16,7 @@ class I18n:
     STRINGS = {
         "zh": {
 
-            "app_title": "A股智能选股助手 (Pro)",
+            "app_title": "A股智能选股助手",
             "app_brand": "A股智选",
             "nav_market": "市场概览",
             "nav_screener": "智能选股",
@@ -407,6 +407,7 @@ class I18n:
             "init_fundamentals": "正在同步深度基本面数据...",
             "init_health_check": "正在执行系统健康检查...",
             "init_complete": "初始化完成! 健康度: {status} (财报覆盖: {coverage})",
+            "progress_sync_fundamentals": "基本面: {current}/{total} ({stock})",
             
             # --- Settings: System Tab ---
             "sys_core_config": "核心配置",
@@ -513,7 +514,7 @@ class I18n:
             "ai_snack_param_err": "参数错误：数量必须为整数，换手率必须为数字",
         },
         "en": {
-            "app_title": "A-Share Intelligent Screener (Pro)",
+            "app_title": "A-Share Intelligent Screener",
             "app_brand": "A-Stock Pro",
             "nav_market": "Market",
             "nav_screener": "Screener",
@@ -906,6 +907,7 @@ class I18n:
             "init_fundamentals": "Syncing Fundamentals...",
             "init_health_check": "Running Health Check...",
             "init_complete": "Init Complete! Health: {status} (Coverage: {coverage})",
+            "progress_sync_fundamentals": "Fundamentals: {current}/{total} ({stock})",
             
             # --- Settings: System Tab ---
             "sys_core_config": "Core Config",

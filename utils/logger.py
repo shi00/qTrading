@@ -1,15 +1,15 @@
+import datetime
 import logging
 import os
 import sys
-from utils.config_handler import ConfigHandler
 from logging.handlers import RotatingFileHandler
-import datetime
-import config
 
-# Create logs dir if not exists
+import config
+from utils.config_handler import ConfigHandler
+
+# Define logs dir path (creation happens in setup_logging)
 LOG_DIR = os.path.join(config.APP_ROOT, "logs")
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
+
 
 def setup_logging(name="astock_screener"):
     """
@@ -17,8 +17,21 @@ def setup_logging(name="astock_screener"):
     - Console: INFO level
     - File: DEBUG level, max 5MB per file, keep last 5 files
     """
-    # Load config
-    current_level = ConfigHandler.get_log_level()
+    # 1. Ensure logs directory exists (Safe side-effect)
+    if not os.path.exists(LOG_DIR):
+        try:
+            os.makedirs(LOG_DIR)
+        except Exception as e:
+            # Fallback for permission errors - print to stderr
+            sys.stderr.write(f"Failed to create log directory {LOG_DIR}: {e}\n")
+
+    # 2. Load config with robustness
+    try:
+        current_level = ConfigHandler.get_log_level()
+    except Exception:
+        # Fallback if config is broken
+        current_level = "INFO"
+
     level_map = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
@@ -28,22 +41,22 @@ def setup_logging(name="astock_screener"):
     logging_level = level_map.get(current_level, logging.INFO)
 
     logger = logging.getLogger()
-    logger.setLevel(logging_level) 
-    
+    logger.setLevel(logging_level)
+
     # Check what we already have
     # Note: StreamHandler is a parent of FileHandler, so strict type check or order matters.
     # We want standard Stdout handler.
     has_console = any(type(h) is logging.StreamHandler for h in logger.handlers)
-    
+
     # Check for our specific file handlers by filename
     has_app_log = False
     has_error_log = False
-    
+
     for h in logger.handlers:
         if isinstance(h, RotatingFileHandler):
             if "app.log" in h.baseFilename:
                 has_app_log = True
-                h.setLevel(logging_level) # Update level if config changed
+                h.setLevel(logging_level)  # Update level if config changed
             elif "error.log" in h.baseFilename:
                 has_error_log = True
 
@@ -62,41 +75,53 @@ def setup_logging(name="astock_screener"):
         backup_count = 5
     max_bytes = int(max_mb * 1024 * 1024)
 
-    # 1. Console Handler (INFO+)
+    # 3. Console Handler (INFO+)
     if not has_console:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-    # 2. File Handler (DEBUG+, Rotating)
+    # 4. File Handler (DEBUG+, Rotating)
     if not has_app_log:
         log_file_path = os.path.join(LOG_DIR, "app.log")
-        file_handler = RotatingFileHandler(
-            log_file_path,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding='utf-8'
-        )
-        file_handler.setLevel(logging_level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    
-    # 3. Separate Error Log (ERROR+)
+        try:
+            file_handler = RotatingFileHandler(
+                log_file_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
+            file_handler.setLevel(logging_level)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            sys.stderr.write(f"Failed to setup file logging: {e}\n")
+
+    # 5. Separate Error Log (ERROR+)
     if not has_error_log:
         error_log_path = os.path.join(LOG_DIR, "error.log")
-        error_handler = RotatingFileHandler(
-            error_log_path,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding='utf-8'
-        )
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(formatter)
-        logger.addHandler(error_handler)
-    
+        try:
+            error_handler = RotatingFileHandler(
+                error_log_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
+            error_handler.setLevel(logging.ERROR)
+            error_handler.setFormatter(formatter)
+            logger.addHandler(error_handler)
+        except Exception:
+            pass
+
+    # 6. Suppress noisy third-party logs
+    noisy_libs = ["urllib3", "requests", "asyncio", "flet", "apscheduler", "matplotlib", "PIL", "websockets"]
+    for lib in noisy_libs:
+        logging.getLogger(lib).setLevel(logging.WARNING)
+
     logger.info(f"--- Log Session Started: {datetime.datetime.now()} ---")
     return logger
+
 
 def update_log_level(level_str):
     """
@@ -111,16 +136,17 @@ def update_log_level(level_str):
     new_level = level_map.get(level_str.upper(), logging.INFO)
     logger = logging.getLogger()
     logger.setLevel(new_level)
-    
+
     for h in logger.handlers:
         # Update file handler (excluding error.log which is always ERROR)
         if isinstance(h, RotatingFileHandler) and "error.log" not in h.baseFilename:
             h.setLevel(new_level)
         # Update console handler
         elif isinstance(h, logging.StreamHandler):
-             h.setLevel(new_level)
-            
+            h.setLevel(new_level)
+
     logger.info(f"Log level updated to {level_str}")
+
 
 def get_logger(name=None):
     """

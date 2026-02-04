@@ -3,7 +3,12 @@ import os
 import logging
 import shutil
 import tempfile
+import sys
 from unittest.mock import patch, MagicMock
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.logger import setup_logging, get_logger
 import utils.logger
 

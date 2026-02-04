@@ -344,6 +344,14 @@ CREATE TABLE IF NOT EXISTS dividend (
     PRIMARY KEY (ts_code, ann_date)
 );
 
+-- 22. Stock Sync Status (for checkpoint-less resume)
+-- Only stocks that have successfully completed Step 4 sync get marked here
+CREATE TABLE IF NOT EXISTS stock_sync_status (
+    ts_code TEXT PRIMARY KEY,
+    step4_completed_at TEXT,  -- ISO timestamp when sync completed
+    sync_version INTEGER DEFAULT 1  -- Version for forced resync (increment to invalidate)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date);
 CREATE INDEX IF NOT EXISTS idx_quotes_code ON daily_quotes(ts_code);
