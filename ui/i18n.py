@@ -223,6 +223,10 @@ class I18n:
 
             # Settings - Options & Hints
             "settings_opt_1530": "15:30 (收盘后)",
+            "settings_opt_1600": "16:00",
+            "settings_opt_1630": "16:30",
+            "settings_opt_1700": "17:00",
+            "settings_opt_1800": "18:00",
             "settings_opt_2000": "20:00 (晚间)",
             "settings_lang_zh": "简体中文",
             "settings_lang_en": "English",
@@ -535,6 +539,9 @@ class I18n:
             "ai_snack_conn_ok": "连接测试成功！",
             "ai_snack_conn_fail": "连接测试失败",
             "ai_snack_param_err": "参数错误：数量必须为整数，换手率必须为数字",
+            "ai_snack_invalid_range": "{field}超出有效范围 (允许: {min}-{max})",
+            "ai_snack_fields_empty": "请填写候选数量和换手率阈值",
+            "ai_snack_invalid_url": "API地址必须以 http:// 或 https:// 开头",
         },
         "en": {
             "app_title": "A-Share Intelligent Screener",
@@ -756,6 +763,10 @@ class I18n:
 
             # Settings - Options & Hints
             "settings_opt_1530": "15:30 (Post-Market)",
+            "settings_opt_1600": "16:00",
+            "settings_opt_1630": "16:30",
+            "settings_opt_1700": "17:00",
+            "settings_opt_1800": "18:00",
             "settings_opt_2000": "20:00 (Evening)",
             "settings_lang_zh": "简体中文",
             "settings_lang_en": "English",
@@ -1055,6 +1066,9 @@ class I18n:
             "ai_snack_conn_ok": "Connection Test Passed!",
             "ai_snack_conn_fail": "Connection Test Failed",
             "ai_snack_param_err": "Invalid Params: Count must be int, Turnover must be number",
+            "ai_snack_invalid_range": "{field} out of valid range (Allowed: {min}-{max})",
+            "ai_snack_fields_empty": "Please fill in candidate count and turnover threshold",
+            "ai_snack_invalid_url": "API URL must start with http:// or https://",
         }
     }
 
