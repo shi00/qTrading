@@ -1,20 +1,41 @@
+import logging
+import weakref
+
 import flet as ft
+
+from data.news_subscription import NewsSubscriptionService
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
-from data.news_subscription import NewsSubscriptionService
-import logging
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# UI Constants
+# ============================================================================
+_FONT_SIZE_TITLE = 16
+_FONT_SIZE_BODY = 14
+_FONT_SIZE_SMALL = 12
+_FONT_SIZE_HINT = 11
+_ICON_SIZE_SMALL = 16
+_DROPDOWN_WIDTH = 150
+_CARD_PADDING = 15
+_CARD_BORDER_RADIUS = 8
+_SPACING_DEFAULT = 20
+_SPACING_SMALL = 10
+
+
 class AutomationTab(ft.Container):
+    """自动化任务设置标签页"""
+
     def __init__(self, show_snack_callback):
         super().__init__()
         self.show_snack = show_snack_callback
-        
+        self._locale_subscription_id = None
+
         auto_update_enabled = ConfigHandler.is_auto_update_enabled()
         auto_update_time = ConfigHandler.get_auto_update_time()
-        
+
         self.schedule_enabled = ft.Switch(
             label=I18n.get("settings_auto_update"),
             value=auto_update_enabled,
@@ -22,105 +43,220 @@ class AutomationTab(ft.Container):
         )
         self.schedule_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
-            width=150,
+            width=_DROPDOWN_WIDTH,
             value=auto_update_time,
-            options=[
-                ft.dropdown.Option("15:30", I18n.get("settings_opt_1530")),
-                ft.dropdown.Option("16:00", "16:00"),
-                ft.dropdown.Option("16:30", "16:30"),
-                ft.dropdown.Option("17:00", "17:00"),
-                ft.dropdown.Option("18:00", "18:00"),
-                ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
-            ],
+            options=self._build_time_options(),
             on_change=self.on_schedule_time_change
         )
-        
+
         self.schedule_status = ft.Text(
             self._get_schedule_status_text(auto_update_enabled),
-            size=12,
-            color=ft.Colors.GREEN if auto_update_enabled else ft.Colors.GREY
+            size=_FONT_SIZE_SMALL,
+            color=AppColors.SUCCESS if auto_update_enabled else AppColors.TEXT_HINT
         )
-        
+
+        self._build_content()
+
+    def _build_time_options(self):
+        """构建时间选项列表"""
+        return [
+            ft.dropdown.Option("15:30", I18n.get("settings_opt_1530")),
+            ft.dropdown.Option("16:00", I18n.get("settings_opt_1600")),
+            ft.dropdown.Option("16:30", I18n.get("settings_opt_1630")),
+            ft.dropdown.Option("17:00", I18n.get("settings_opt_1700")),
+            ft.dropdown.Option("18:00", I18n.get("settings_opt_1800")),
+            ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
+        ]
+
+    def _build_content(self):
+        """构建 UI 内容"""
         self.content = ft.Container(
             content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
-                ft.Text(I18n.get("settings_auto_update"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                ft.Text(I18n.get("settings_auto_desc"), size=14, color=AppColors.TEXT_SECONDARY),
-                ft.Container(height=10),
+                ft.Text(I18n.get("settings_auto_update"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
+                        color=AppColors.TEXT_PRIMARY),
+                ft.Text(I18n.get("settings_auto_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY),
+                ft.Container(height=_SPACING_SMALL),
                 ft.Container(
                     content=ft.Column([
                         ft.Row([self.schedule_enabled]),
                         ft.Row([
-                            ft.Text(f"{I18n.get('settings_update_time')}:", size=14),
+                            ft.Text(f"{I18n.get('settings_update_time')}:", size=_FONT_SIZE_BODY),
                             self.schedule_time,
-                            ft.Text(I18n.get("settings_trading_days"), size=12, color=AppColors.TEXT_SECONDARY),
+                            ft.Text(I18n.get("settings_trading_days"), size=_FONT_SIZE_SMALL,
+                                    color=AppColors.TEXT_SECONDARY),
                         ]),
                         ft.Row([
-                            ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=AppColors.TEXT_SECONDARY),
+                            ft.Icon(ft.Icons.INFO_OUTLINE, size=_ICON_SIZE_SMALL, color=AppColors.TEXT_SECONDARY),
                             self.schedule_status,
                         ]),
                     ]),
-                    padding=15, border=ft.border.all(1, AppColors.BORDER), border_radius=8,
+                    padding=_CARD_PADDING, border=ft.border.all(1, AppColors.BORDER), border_radius=_CARD_BORDER_RADIUS,
                 ),
-                ft.Text(I18n.get("settings_hint_bg_run"), size=11, color=AppColors.TEXT_HINT),
-            ], spacing=20),
+                ft.Text(I18n.get("settings_hint_bg_run"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT),
+            ], spacing=_SPACING_DEFAULT),
             **AppStyles.card()
         )
 
+    def did_mount(self):
+        """组件挂载后订阅语言变更"""
+        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
+        logger.debug("[AutomationTab] Subscribed to locale changes")
+
+    def will_unmount(self):
+        """组件卸载前取消订阅"""
+        if self._locale_subscription_id:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+            logger.debug("[AutomationTab] Unsubscribed from locale changes")
+
+    def _on_locale_change(self, new_locale: str):
+        """语言变更回调
+        
+        Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
+        """
+        try:
+            # 更新静态文本
+            self.schedule_enabled.label = I18n.get("settings_auto_update")
+            self.schedule_time.label = I18n.get("settings_update_time")
+            self.schedule_time.options = self._build_time_options()
+            self.schedule_status.value = self._get_schedule_status_text(self.schedule_enabled.value)
+
+            # 重建整个内容以确保所有文本更新
+            self._build_content()
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[AutomationTab] Failed to update locale: {e}")
+
+    def _safe_update(self):
+        """线程安全的 UI 更新，处理页面未附加的情况"""
+        try:
+            if self.page:
+                self.update()
+        except Exception:
+            pass
+
     def _get_schedule_status_text(self, enabled):
+        """获取调度状态文本"""
         return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
 
     def on_schedule_toggle(self, e):
+        """处理自动更新开关切换"""
         enabled = self.schedule_enabled.value
         ConfigHandler.save_config({"auto_update_enabled": enabled})
         self.schedule_status.value = self._get_schedule_status_text(enabled)
-        self.schedule_status.color = ft.Colors.GREEN if enabled else ft.Colors.GREY
+        self.schedule_status.color = AppColors.SUCCESS if enabled else AppColors.TEXT_HINT
         self.update()
-        self.show_snack(I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"))
+        if self.show_snack:
+            self.show_snack(I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"))
 
     def on_schedule_time_change(self, e):
-        time = self.schedule_time.value
-        ConfigHandler.save_config({"auto_update_time": time})
-        self.show_snack(I18n.get("settings_snack_time_set").format(time=time))
+        """处理更新时间变更"""
+        selected_time = self.schedule_time.value
+        ConfigHandler.save_config({"auto_update_time": selected_time})
+        self.update()
+        if self.show_snack:
+            self.show_snack(I18n.get("settings_snack_time_set").format(time=selected_time))
 
 
 class NotificationsTab(ft.Container):
+    """通知设置标签页"""
+
     def __init__(self, show_snack_callback, page_ref):
         super().__init__()
         self.show_snack = show_snack_callback
-        self.page_ref = page_ref # Need access to page for snackbar callback in service
-        
+        # 使用弱引用避免闭包持有强引用导致的问题
+        self._page_ref = weakref.ref(page_ref) if page_ref else None
+        self._locale_subscription_id = None
+
         enable_news = ConfigHandler.get_config("enable_news_alerts", True)
-        
+
         self.news_alerts_enabled = ft.Switch(
             label=I18n.get("settings_news_alerts"),
             value=enable_news,
             on_change=self.on_news_toggle
         )
-        
+
+        self._build_content()
+
+    def _build_content(self):
+        """构建 UI 内容"""
         self.content = ft.Container(
             content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
-                ft.Text(I18n.get("settings_notify_title"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                ft.Container(height=10),
+                ft.Text(I18n.get("settings_notify_title"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
+                        color=AppColors.TEXT_PRIMARY),
+                ft.Container(height=_SPACING_SMALL),
                 ft.Container(
                     content=ft.Row([self.news_alerts_enabled]),
-                    padding=15, border=ft.border.all(1, AppColors.BORDER), border_radius=8,
+                    padding=_CARD_PADDING, border=ft.border.all(1, AppColors.BORDER), border_radius=_CARD_BORDER_RADIUS,
                 ),
-                ft.Text(I18n.get("settings_notify_desc"), size=14, color=AppColors.TEXT_SECONDARY)
-            ], spacing=20),
+                ft.Text(I18n.get("settings_notify_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+            ], spacing=_SPACING_DEFAULT),
             **AppStyles.card()
         )
 
+    def did_mount(self):
+        """组件挂载后订阅语言变更"""
+        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
+        logger.debug("[NotificationsTab] Subscribed to locale changes")
+
+    def will_unmount(self):
+        """组件卸载前取消订阅"""
+        if self._locale_subscription_id:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+            logger.debug("[NotificationsTab] Unsubscribed from locale changes")
+
+    def _on_locale_change(self, new_locale: str):
+        """语言变更回调
+        
+        Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
+        """
+        try:
+            self.news_alerts_enabled.label = I18n.get("settings_news_alerts")
+            self._build_content()
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[NotificationsTab] Failed to update locale: {e}")
+
+    def _safe_update(self):
+        """线程安全的 UI 更新，处理页面未附加的情况"""
+        try:
+            if self.page:
+                self.update()
+        except Exception:
+            pass
+
+    def _create_news_callback(self):
+        """创建新闻回调函数
+        
+        使用 weakref 包装 self 和 page_ref，避免闭包持有强引用导致 Tab 无法被 GC
+        """
+        weak_self = weakref.ref(self)
+
+        def callback(msg):
+            tab = weak_self()
+            if tab is None:
+                return
+            page = tab._page_ref() if tab._page_ref else None
+            if page:
+                try:
+                    page.open(ft.SnackBar(ft.Text(f"📰 {msg}"), open=True))
+                except Exception as e:
+                    logger.warning(f"[NotificationsTab] Failed to show news snackbar: {e}")
+
+        return callback
+
     def on_news_toggle(self, e):
+        """处理新闻推送开关切换"""
         enabled = self.news_alerts_enabled.value
         ConfigHandler.save_config({"enable_news_alerts": enabled})
-        
+
         service = NewsSubscriptionService()
         if enabled:
-            # We need a proper callback that uses 'self.page_ref' which might be None initially?
-            # Ideally the page is attached.
-            if self.page_ref:
-                service.start(callback=lambda msg: self.page_ref.open(ft.SnackBar(ft.Text(f"📰 {msg}"), open=True)))
-            self.show_snack(I18n.get("settings_snack_news_on"))
+            service.start(callback=self._create_news_callback())
+            if self.show_snack:
+                self.show_snack(I18n.get("settings_snack_news_on"))
         else:
             service.stop()
-            self.show_snack(I18n.get("settings_snack_news_off"))
+            if self.show_snack:
+                self.show_snack(I18n.get("settings_snack_news_off"))
