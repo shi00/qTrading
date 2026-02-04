@@ -1,9 +1,11 @@
 import json
-import os
 import logging
+import os
+
+from readerwriterlock import rwlock
+
 import config
 from utils.security_utils import SecurityManager, DecryptionError
-from readerwriterlock import rwlock
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +236,8 @@ class ConfigHandler:
 
     @staticmethod
     def set_proxy_domains(domains):
-        if not isinstance(domains, list):
+        if not isinstance(domains, list) or not all(isinstance(x, str) for x in domains):
+            logger.error("Invalid proxy domains format: must be list of strings")
             return False
         return ConfigHandler.save_config({"proxy_domains": domains})
 
@@ -368,3 +371,32 @@ class ConfigHandler:
     @staticmethod
     def set_ai_prediction_time(time_str):
         return ConfigHandler.save_config({"ai_prediction_time": time_str})
+
+    # === Thread Pool Configuration ===
+    @staticmethod
+    def get_max_io_workers():
+        """Get max IO threads from config. Returns None if not set (to let ThreadPoolManager decide default)."""
+        config = ConfigHandler.load_config()
+        val = config.get("max_io_workers", None)
+        try:
+            return int(val) if val is not None and int(val) > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def set_max_io_workers(count):
+        return ConfigHandler.save_config({"max_io_workers": int(count)})
+
+    @staticmethod
+    def get_max_cpu_workers():
+        """Get max CPU threads from config. Returns None if not set."""
+        config = ConfigHandler.load_config()
+        val = config.get("max_cpu_workers", None)
+        try:
+            return int(val) if val is not None and int(val) > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def set_max_cpu_workers(count):
+        return ConfigHandler.save_config({"max_cpu_workers": int(count)})
