@@ -1,10 +1,11 @@
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 
 import requests
 
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -78,21 +79,25 @@ class ProxyManager:
         # Use ThreadPool to check fast
         logger.info(f"[ProxyManager] Testing direct connectivity for {len(target_domains)} domestic domains...")
 
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_domain = {executor.submit(check_direct_access, d): d for d in target_domains}
+        manager = ThreadPoolManager()
+        futures_map = {}
+        
+        # Submit tasks to IO pool
+        for d in target_domains:
+            future = manager.submit(TaskType.IO, check_direct_access, d)
+            futures_map[future] = d
 
-            for future in as_completed(future_to_domain):
-                domain = future_to_domain[future]
-                try:
-                    is_direct_ok = future.result()
-                    if is_direct_ok:
-                        final_domains.add(domain)
-                        logger.info(f"[ProxyManager] Domain {domain} - Direct Access OK -> Whitelisted.")
-                    else:
-                        logger.warning(f"[ProxyManager] Domain {domain} - Direct Access FAILED -> Will use Proxy.")
-                except Exception as e:
-                    logger.error(f"[ProxyManager] Error checking {domain}: {e}")
+        for future in as_completed(futures_map):
+            domain = futures_map[future]
+            try:
+                is_direct_ok = future.result()
+                if is_direct_ok:
+                    final_domains.add(domain)
+                    logger.info(f"[ProxyManager] Domain {domain} - Direct Access OK -> Whitelisted.")
+                else:
+                    logger.warning(f"[ProxyManager] Domain {domain} - Direct Access FAILED -> Will use Proxy.")
+            except Exception as e:
+                logger.error(f"[ProxyManager] Error checking {domain}: {e}")
 
         # Apply updates
         if final_domains:
