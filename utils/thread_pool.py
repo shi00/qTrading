@@ -57,19 +57,11 @@ class ThreadPoolManager:
     def _init_pools(self):
         # 1. IO Pool Configuration
         io_workers = ConfigHandler.get_max_io_workers()
-        if io_workers is None:
-            io_workers = 32
-            logger.info(f"ThreadPool: IO Pool using default size: {io_workers}")
-        else:
-            logger.info(f"ThreadPool: IO Pool using config size: {io_workers}")
+        logger.info(f"ThreadPool: IO Pool size: {io_workers}")
 
         # 2. CPU Pool Configuration
         cpu_workers = ConfigHandler.get_max_cpu_workers()
-        if cpu_workers is None:
-            cpu_workers = os.cpu_count() or 1
-            logger.info(f"ThreadPool: CPU Pool using default size (Core Count): {cpu_workers}")
-        else:
-            logger.info(f"ThreadPool: CPU Pool using config size: {cpu_workers}")
+        logger.info(f"ThreadPool: CPU Pool size: {cpu_workers}")
 
         self._io_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=io_workers,

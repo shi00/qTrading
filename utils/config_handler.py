@@ -375,13 +375,13 @@ class ConfigHandler:
     # === Thread Pool Configuration ===
     @staticmethod
     def get_max_io_workers():
-        """Get max IO threads from config. Returns None if not set (to let ThreadPoolManager decide default)."""
+        """Get max IO threads from config. Defaults to 32."""
         config = ConfigHandler.load_config()
-        val = config.get("max_io_workers", None)
+        val = config.get("max_io_workers", 32)
         try:
-            return int(val) if val is not None and int(val) > 0 else None
+            return int(val) if val is not None and int(val) > 0 else 32
         except (ValueError, TypeError):
-            return None
+            return 32
 
     @staticmethod
     def set_max_io_workers(count):
@@ -389,13 +389,14 @@ class ConfigHandler:
 
     @staticmethod
     def get_max_cpu_workers():
-        """Get max CPU threads from config. Returns None if not set."""
+        """Get max CPU threads from config. Defaults to CPU count."""
         config = ConfigHandler.load_config()
         val = config.get("max_cpu_workers", None)
+        default_cpu = os.cpu_count() or 1
         try:
-            return int(val) if val is not None and int(val) > 0 else None
+            return int(val) if val is not None and int(val) > 0 else default_cpu
         except (ValueError, TypeError):
-            return None
+            return default_cpu
 
     @staticmethod
     def set_max_cpu_workers(count):
