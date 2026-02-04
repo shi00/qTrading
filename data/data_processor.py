@@ -238,6 +238,10 @@ class DataProcessor:
         Check data health status: Timeliness (Market) and Completeness (Financials).
         Returns comprehensive report.
         """
+        # Shutdown guard - DB might be closing
+        if self._shutdown_event.is_set():
+            return {'status': 'unknown', 'msg': 'Shutdown in progress'}
+        
         # Ensure schema (indices) are up to date
         await self.cache.init_db()
         
@@ -993,6 +997,9 @@ class DataProcessor:
         # Step 5: Health Check
         report_progress(4, 0.1, f"[5/5] {I18n.get('init_health_check')}")
         if cancel_event and cancel_event.is_set(): return
+        if self._shutdown_event.is_set(): 
+            logger.info("[DataProcessor] Step 5 (Health Check) skipped - shutdown in progress")
+            return
         
         health_report = await self.check_data_health()
         status = health_report.get('status', 'red').upper()
