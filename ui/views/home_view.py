@@ -1,11 +1,14 @@
-import flet as ft
-from data.data_processor import DataProcessor
-from ui.theme import AppColors, AppStyles
-from ui.i18n import I18n
-import logging
 import asyncio
+import logging
+
+import flet as ft
+
+from data.data_processor import DataProcessor
+from ui.i18n import I18n
+from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
+
 
 class HomeView(ft.Container):
     def __init__(self, on_run_strategy=None):
@@ -13,115 +16,45 @@ class HomeView(ft.Container):
         self.expand = True
         self.processor = DataProcessor()
         self.on_run_strategy = on_run_strategy
-        
+
         # Pagination State
         self.news_page = 0
         self.PAGE_SIZE = 20
         self.has_more_news = True
-        
+
         # Auto-refresh Configuration
         self.REFRESH_INTERVAL_SECONDS = 30
         self._refresh_task = None
         self._is_mounted = False
-        
-        # UI State Controls
-        self.date_label = ft.Text(I18n.get("home_data_date").format(date="--"), size=12, color=ft.Colors.GREY)
-        
-        # Indices Controls
-        self.sh_value = ft.Text("--", size=20, weight=ft.FontWeight.BOLD)
-        self.sh_change = ft.Text("--", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY)
-        
-        self.sz_value = ft.Text("--", size=20, weight=ft.FontWeight.BOLD)
-        self.sz_change = ft.Text("--", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY)
-        
-        self.cyb_value = ft.Text("--", size=20, weight=ft.FontWeight.BOLD)
-        self.cyb_change = ft.Text("--", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY)
-        
-        # HSGT Controls
-        self.hsgt_value = ft.Text("--", size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY)
-        self.hsgt_sub = ft.Text("--", size=12, color=ft.Colors.GREY_500)
-        
-        # Hot Concepts
-        self.hot_concepts_container = ft.Container()
-        
-        # News Control
-        self.news_list = ft.ListView(spacing=10, padding=10, auto_scroll=False, expand=True)
-        self.load_more_btn = ft.ElevatedButton(
-            text=I18n.get("news_load_more"),
-            on_click=self._on_load_more_click,
-            visible=False,
-            style=ft.ButtonStyle(
-                color=AppColors.TEXT_SECONDARY,
-                bgcolor=ft.Colors.TRANSPARENT,
-                shape=ft.RoundedRectangleBorder(radius=8),
-                side=ft.BorderSide(1, AppColors.BORDER)
-            )
-        )
-        
-        self.content = ft.Column(
-            scroll=ft.ScrollMode.AUTO,
-            expand=True,
-            controls=[
-                ft.Row([
-                    ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD),
-                    ft.Container(expand=True),
-                    self.date_label,
-                    ft.IconButton(ft.Icons.REFRESH, on_click=self._refresh_data, tooltip=I18n.get("home_refresh"))
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Divider(),
-                # Market Indices
-                ft.ResponsiveRow(
-                    [
-                        self._build_dashboard_card(I18n.get("home_index_sh"), self.sh_value, self.sh_change),
-                        self._build_dashboard_card(I18n.get("home_index_sz"), self.sz_value, self.sz_change),
-                        self._build_dashboard_card(I18n.get("home_index_cyb"), self.cyb_value, self.cyb_change),
-                        self._build_dashboard_card(I18n.get("home_northbound"), self.hsgt_value, self.hsgt_sub),
-                    ],
-                ),
-                ft.Container(height=10),
-                
-                # Hot Concepts Section
-                self.hot_concepts_container,
-                
-                ft.Divider(height=20, color=ft.Colors.TRANSPARENT),
-                
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
 
-                
-                ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
-                ft.Container(
-                    content=self._build_news_feed(),
-                    height=400, # Fixed height scrollable area
-                    bgcolor=AppColors.SURFACE,
-                    border_radius=12,
-                    border=ft.border.all(1, AppColors.BORDER),
-                    padding=10
-                )
-            ]
-        )
-        
+        # Data Cache (for UI Rebuild)
+        self.last_data = {}
+        self.news_data = None  # DataFrame
+
+        # Build initial UI
+        self.content = self._build_ui()
+
         # Subscribe to locale changes
         I18n.subscribe(self.refresh_locale)
 
     def refresh_locale(self):
-        """Rebuild UI text on locale change - requires page reload for full effect"""
-        # Note: Since content structure is built in __init__, a full rebuild would require
-        # re-creating controls. For simplicity, we just log. A page reload is recommended.
+        """Rebuild UI on locale change"""
         try:
+            # Rebuild UI using cached data
+            self.content = self._build_ui(self.last_data)
             if self.page:
-                self.page.update()
-        except Exception:
-            pass
+                self.update()
+        except Exception as e:
+            logger.error(f"Error refreshing locale: {e}")
 
     def did_mount(self):
         # Subscribe to broadcast messages
         if self.page:
             self.page.pubsub.subscribe(self._on_broadcast_message)
-        
+
         self._is_mounted = True
-        
+
         # Initialize Data & Auto load
-        # Use task to avoid blocking did_mount UI thread
         if self.page:
             self.page.run_task(self._init_and_load)
 
@@ -130,15 +63,15 @@ class HomeView(ft.Container):
         try:
             await self.processor.init_data()
             await self._load_data()
-            # Start timer only INITED
             self._start_auto_refresh()
         except Exception as e:
             logger.error(f"[HomeView] Init failed: {e}")
-            
+
     def will_unmount(self):
         """Cleanup when view is detached"""
         self._is_mounted = False
         self._stop_auto_refresh()
+        I18n.unsubscribe(self.refresh_locale)
 
     def _start_auto_refresh(self):
         """Start the periodic auto-refresh task"""
@@ -170,94 +103,44 @@ class HomeView(ft.Container):
         """Handle broadcast messages"""
         if message == "cache_cleared":
             # Clear in-memory news list immediately
-            self.news_list.controls.clear()
-            self.news_list.controls.append(ft.Text("暂无新闻", color=ft.Colors.GREY))
+            self.last_data = {}
+            self.news_data = None
             self.has_more_news = False
             self.news_page = 0
-            
-            # If validated page, update UI
+
+            # Rebuild UI to show empty state
+            self.content = self._build_ui({})
             if self.page:
-                self.news_list.update()
-                # self.update() # Optional: if we want to ensure full refresh, but news list is enough
+                self.update()
 
     def _refresh_data(self, e):
         # Run async task
         if self.page:
-             self.page.run_task(self._load_data)
+            self.page.run_task(self._load_data)
 
     async def _load_data(self):
         try:
-             # Reset pagination on full refresh
-             self.news_page = 0
-             self.has_more_news = True
-             
-             data = await self.processor.get_market_overview()
-             if not data:
-                 return
-             
-             
-             
-             # Sync News immediately
-             # Deep Sync Strategy: handled by DataProcessor internally (first run = 200 items)
-             await self.processor.sync_market_news()
-             
-             # Update Date
-             self.date_label.value = I18n.get("home_data_date").format(date=data.get('date', '--'))
-             
-             # Update Indices
-             indices = data.get('indices', [])
-             if len(indices) >= 3:
-                 sh, sz, cyb = indices[0], indices[1], indices[2]
-                 
-                 self.sh_value.value = sh['value']
-                 self.sh_change.value = sh['change']
-                 self.sh_change.color = getattr(ft.Colors, sh['color'].upper())
-                 
-                 self.sz_value.value = sz['value']
-                 self.sz_change.value = sz['change']
-                 self.sz_change.color = getattr(ft.Colors, sz['color'].upper())
-                 
-                 self.cyb_value.value = cyb['value']
-                 self.cyb_change.value = cyb['change']
-                 self.cyb_change.color = getattr(ft.Colors, cyb['color'].upper())
+            # Reset pagination on full refresh
+            self.news_page = 0
+            self.has_more_news = True
 
-             # Update HSGT
-             hsgt = data.get('hsgt', {})
-             self.hsgt_value.value = hsgt.get('value', '--')
-             self.hsgt_value.color = ft.Colors.RED if I18n.get("home_inflow") in hsgt.get('sub', '') else ft.Colors.GREEN
-             self.hsgt_sub.value = hsgt.get('sub', '--')
-             
-             # Update Hot Concepts
-             hot_concepts = data.get('hot_concepts', [])
-             
-             # Always show the section title so user knows it exists
-             controls_content = []
-             if hot_concepts:
-                 controls_content = [
-                    ft.ResponsiveRow(
-                        controls=[
-                            self._build_concept_card(c) for c in hot_concepts if c.get('name')
-                        ],
-                        run_spacing=10,
-                    )
-                 ]
-             else:
-                 # Show empty/error state
-                 controls_content = [
-                     ft.Text(I18n.get("home_hot_concepts_empty"), 
-                             size=12, color=ft.Colors.GREY)
-                 ]
+            data = await self.processor.get_market_overview()
+            if not data:
+                return
 
-             self.hot_concepts_container.content = ft.Column([
-                ft.Text(I18n.get("home_hot_concepts"), size=16, weight=ft.FontWeight.BOLD),
-                *controls_content
-             ], spacing=10)
-             
-             if self.page:
-                 self.update()
-                 
-             # Load News
-             await self._load_news()
+            # Update Cache
+            self.last_data = data
+
+            # Sync News immediately (Deep Sync Strategy)
+            await self.processor.sync_market_news()
+
+            # Load News Data
+            await self._load_news_data()
+
+            # Rebuild UI with fresh data
+            self.content = self._build_ui(self.last_data)
+            if self.page:
+                self.update()
 
         except Exception as e:
             logger.error(f"Error loading home data: {e}")
@@ -266,68 +149,206 @@ class HomeView(ft.Container):
         """Handle Load More button click"""
         if self.has_more_news:
             self.news_page += 1
-            await self._load_news(load_more=True)
+            await self._load_news_data(load_more=True)
 
-    async def _load_news(self, load_more=False):
+            # Rebuild UI to append news (or in full rebuild case, show all)
+            # Optimization: could just update news list, but full rebuild is safer for I18n consistency
+            self.content = self._build_ui(self.last_data)
+            if self.page:
+                self.update()
+
+    async def _load_news_data(self, load_more=False):
         try:
             offset = self.news_page * self.PAGE_SIZE
-            
-            # Load all recent news without strict date filter
-            # The sync process already limits to recent items
-            news_df = await self.processor.cache.get_market_news(
-                limit=self.PAGE_SIZE, 
+
+            # Fetch batch
+            new_batch = await self.processor.cache.get_market_news(
+                limit=self.PAGE_SIZE,
                 offset=offset
             )
-            
-            if not load_more:
-                self.news_list.controls.clear()
-            
-            if news_df.empty:
-               self.has_more_news = False
-               if not load_more:
-                   self.news_list.controls.append(ft.Text(I18n.get("home_news_empty"), color=ft.Colors.GREY))
+
+            if new_batch.empty:
+                self.has_more_news = False
+                if not load_more:
+                    self.news_data = None
             else:
-               for _, row in news_df.iterrows():
-                   self.news_list.controls.append(self._build_news_item(row))
-               
-               # Check if we likely have more
-               if len(news_df) < self.PAGE_SIZE:
-                   self.has_more_news = False
-            
-            # Update button visibility
-            self.load_more_btn.visible = self.has_more_news and len(self.news_list.controls) > 0
-            if self.load_more_btn.page:
-                self.load_more_btn.update()
-            
-            if self.page:
-                self.news_list.update()
-                
+                if not load_more or self.news_data is None:
+                    self.news_data = new_batch
+                else:
+                    # Append new data
+                    import pandas as pd
+                    self.news_data = pd.concat([self.news_data, new_batch], ignore_index=True)
+
+                # Check if we likely have more
+                if len(new_batch) < self.PAGE_SIZE:
+                    self.has_more_news = False
+
         except Exception as e:
             logger.error(f"Error loading news: {e}")
 
-    def _build_news_feed(self):
-        return ft.Column([
-            self.news_list,
-            ft.Container(
-                content=self.load_more_btn,
-                alignment=ft.alignment.center,
-                padding=10
+    def _build_ui(self, data=None):
+        """
+        Rebuilds the entire UI structure. 
+        Args:
+            data: dict of market data (indices, hsgt, etc.)
+        """
+        if data is None:
+            data = {}
+
+        # --- UI Components Construction ---
+
+        # 1. Header Section
+        date_str = data.get('date', '--')
+        header = ft.Row([
+            ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD),
+            ft.Container(expand=True),
+            ft.Text(I18n.get("home_data_date").format(date=date_str), size=12, color=ft.Colors.GREY),
+            ft.IconButton(ft.Icons.REFRESH, on_click=self._refresh_data, tooltip=I18n.get("home_refresh"))
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        # 2. Market Indices Section
+        indices = data.get('indices', [])
+        # Default placeholders
+        sh = {'value': '--', 'change': '--', 'color': 'grey'}
+        sz = {'value': '--', 'change': '--', 'color': 'grey'}
+        cyb = {'value': '--', 'change': '--', 'color': 'grey'}
+
+        if len(indices) >= 3:
+            sh, sz, cyb = indices[0], indices[1], indices[2]
+
+        def _mk_idx_card(title, info):
+            val_color = getattr(ft.Colors, info.get('color', 'GREY').upper())
+            return self._build_dashboard_card(
+                title,
+                ft.Text(info.get('value', '--'), size=20, weight=ft.FontWeight.BOLD),
+                ft.Text(info.get('change', '--'), size=14, weight=ft.FontWeight.BOLD, color=val_color)
             )
-        ], scroll=ft.ScrollMode.AUTO, expand=True)
+
+        # HSGT
+        hsgt = data.get('hsgt', {})
+        hsgt_val = hsgt.get('value', '--')
+        hsgt_sub = hsgt.get('sub', '--')
+        is_inflow = I18n.get("home_inflow") in hsgt_sub
+        hsgt_color = ft.Colors.RED if is_inflow else ft.Colors.GREEN if 'out' in hsgt_sub or '流出' in hsgt_sub else ft.Colors.GREY
+
+        indices_row = ft.ResponsiveRow([
+            _mk_idx_card(I18n.get("home_index_sh"), sh),
+            _mk_idx_card(I18n.get("home_index_sz"), sz),
+            _mk_idx_card(I18n.get("home_index_cyb"), cyb),
+            self._build_dashboard_card(
+                I18n.get("home_northbound"),
+                ft.Text(hsgt_val, size=20, weight=ft.FontWeight.BOLD, color=hsgt_color),
+                ft.Text(hsgt_sub, size=12, color=ft.Colors.GREY_500)
+            ),
+        ])
+
+        # 3. Hot Concepts Section
+        hot_concepts = data.get('hot_concepts', [])
+        concept_cards = []
+        if hot_concepts:
+            concept_cards = [
+                ft.ResponsiveRow(
+                    controls=[self._build_concept_card(c) for c in hot_concepts if c.get('name')],
+                    run_spacing=10,
+                )
+            ]
+        else:
+            concept_cards = [ft.Text(I18n.get("home_hot_concepts_empty"), size=12, color=ft.Colors.GREY)]
+
+        concepts_section = ft.Column([
+            ft.Text(I18n.get("home_hot_concepts"), size=16, weight=ft.FontWeight.BOLD),
+            *concept_cards
+        ], spacing=10)
+
+        # 4. News Feed Section
+        news_items = []
+        if self.news_data is not None and not self.news_data.empty:
+            for _, row in self.news_data.iterrows():
+                news_items.append(self._build_news_item(row))
+        else:
+            news_items.append(ft.Text(I18n.get("home_news_empty"), color=ft.Colors.GREY))
+
+        # Load More Button
+        load_more_btn = ft.Container(
+            content=ft.ElevatedButton(
+                text=I18n.get("news_load_more"),
+                on_click=self._on_load_more_click,
+                style=ft.ButtonStyle(
+                    color=AppColors.TEXT_SECONDARY,
+                    bgcolor=ft.Colors.TRANSPARENT,
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                    side=ft.BorderSide(1, AppColors.BORDER)
+                )
+            ),
+            alignment=ft.alignment.center,
+            padding=10,
+            visible=self.has_more_news and len(news_items) > 0
+        )
+
+        news_list = ft.ListView(
+            controls=news_items + [load_more_btn],
+            spacing=10,
+            padding=10,
+            auto_scroll=False,
+            expand=True  # Important: Expand within the column
+        )
+
+        news_section = ft.Container(
+            content=news_list,
+            # Removed fixed height=400 to allow expansion
+            expand=True,
+            bgcolor=AppColors.SURFACE,
+            border_radius=12,
+            border=ft.border.all(1, AppColors.BORDER),
+            padding=10
+        )
+
+        # Assemble Full Layout
+        return ft.Column(
+            scroll=ft.ScrollMode.OFF,  # Disable outer scroll so inner listview handles scrolling
+            expand=True,
+            controls=[
+                header,
+                ft.Divider(),
+                indices_row,
+                ft.Container(height=10),
+                concepts_section,
+                ft.Divider(height=20, color=ft.Colors.TRANSPARENT),
+                ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
+                news_section
+            ]
+        )
 
     def _build_news_item(self, row):
-        tag = row.get('tags', '')
-        # Localize tags
-        tag = tag.replace('Stock', '个股').replace('Policy', '政策').replace('Market', '市场').replace('Global', '全球').replace('International', '国际').replace('Macro', '宏观')
-        
+        raw_tag = row.get('tags', '')
+        # Localize tags using new keys
+        # Mapping: 'Stock' -> 'tag_stock', etc.
+        tag_key = f"tag_{raw_tag.lower()}"
+        # Fallback to raw tag if no translation found, but try I18n first
+        translated_tag = I18n.get(tag_key)
+        if translated_tag == tag_key:  # Key missing/returned itself
+            # Fallback logic for unknown tags or composite tags "Stock,Global"
+            # Try splitting by comma
+            tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+            translated_parts = []
+            for t in tags:
+                tk = f"tag_{t.lower()}"
+                tv = I18n.get(tk)
+                translated_parts.append(tv if tv != tk else t)
+
+            if translated_parts:
+                translated_tag = ",".join(translated_parts)
+            else:
+                translated_tag = raw_tag
+
         content = row.get('content', '')
         time_str = row.get('publish_time', '')
-        
+
         return ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Text(tag, color=ft.Colors.BLUE, weight=ft.FontWeight.BOLD, size=12),
-                    ft.Text(time_str[-8:], color=ft.Colors.GREY, size=12) # HH:MM:SS
+                    ft.Text(translated_tag, color=ft.Colors.BLUE, weight=ft.FontWeight.BOLD, size=12),
+                    ft.Text(time_str[-8:], color=ft.Colors.GREY, size=12)  # HH:MM:SS
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Text(content, size=14, color=AppColors.TEXT_PRIMARY)
             ]),
@@ -363,13 +384,13 @@ class HomeView(ft.Container):
         color_str = str(item.get('color', ''))
         is_up = 'red' in color_str
         color = ft.Colors.RED if is_up else ft.Colors.GREEN
-        
+
         return ft.Container(
             content=ft.Column([
                 ft.Text(name, size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY, no_wrap=True),
                 ft.Row([
-                    ft.Icon(ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN, 
-                           color=color, size=16),
+                    ft.Icon(ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN,
+                            color=color, size=16),
                     ft.Text(change, size=16, weight=ft.FontWeight.BOLD, color=color)
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
             ], spacing=5),
@@ -378,12 +399,10 @@ class HomeView(ft.Container):
             border_radius=12,
             border=ft.border.all(1, AppColors.BORDER),
             shadow=ft.BoxShadow(
-                spread_radius=0, 
-                blur_radius=5, 
-                color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK), 
+                spread_radius=0,
+                blur_radius=5,
+                color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK),
                 offset=ft.Offset(0, 2)
             ),
             col={"xs": 6, "sm": 4, "md": 3, "lg": 2}
         )
-
-
