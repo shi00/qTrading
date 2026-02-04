@@ -10,6 +10,7 @@ from data.cache_manager import CacheManager
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation, track_performance, AsyncOperationLogger
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -352,8 +353,7 @@ class DataProcessor:
     
     async def sync_daily_quotes_for_date(self, trade_date):
         """Sync daily quotes for a specific date"""
-        loop = asyncio.get_running_loop()
-        df = await loop.run_in_executor(None, lambda: self.api.get_daily_quotes(trade_date=trade_date))
+        df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_daily_quotes, trade_date=trade_date)
         if df is not None and not df.empty:
             count = await self.cache.save_daily_quotes(df)
             return count
@@ -361,8 +361,7 @@ class DataProcessor:
 
     async def sync_daily_indicators_for_date(self, trade_date):
         """Sync daily indicators for a specific date"""
-        loop = asyncio.get_running_loop()
-        df = await loop.run_in_executor(None, lambda: self.api.get_daily_basic(trade_date=trade_date))
+        df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_daily_basic, trade_date=trade_date)
         if df is not None and not df.empty:
             count = await self.cache.save_daily_indicators(df)
             return count
@@ -393,8 +392,7 @@ class DataProcessor:
             return 0
         
         try:
-            loop = asyncio.get_running_loop()
-            df = await loop.run_in_executor(None, lambda: self.api.get_stock_list())
+            df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_stock_list)
             if df is not None and not df.empty:
                 count = await self.cache.save_stock_basic(df)
                 await self.cache.update_sync_status('stock_basic', datetime.datetime.now().strftime('%Y%m%d'), count)
@@ -430,14 +428,15 @@ class DataProcessor:
             # Let's assume if it sends a request for a specific date, it wants a sync.
             pass
 
-        loop = asyncio.get_running_loop()
+            pass
         
         # Fetch ALL data types in parallel
         
         # We wrap each safe fetcher to handle permissions/empty data gracefully
         async def fetch_safe(func, name):
             try:
-                return await loop.run_in_executor(None, lambda: func(trade_date=trade_date))
+                # Use Global IO Pool
+                return await ThreadPoolManager().run_async(TaskType.IO, func, trade_date=trade_date)
             except Exception as e:
                 # 保留关键决策日志 - 权限错误
                 if "权限" in str(e) or "2000" in str(e) or "积分" in str(e):
@@ -465,7 +464,8 @@ class DataProcessor:
         # Wrap fetcher logic
         async def fetch_wrapper(key, func, name):
             try:
-                res = await loop.run_in_executor(None, lambda: func(trade_date=trade_date))
+                # Use Global IO Pool via helper
+                res = await ThreadPoolManager().run_async(TaskType.IO, func, trade_date=trade_date)
                 return (key, res)
             except asyncio.CancelledError:
                 # Silence cancellation noise
@@ -481,7 +481,9 @@ class DataProcessor:
         MAJOR_INDICES = ['000001.SH', '399001.SZ', '399006.SZ', '000300.SH', '000905.SH', '000852.SH', '000688.SH']
         async def fetch_indices_safe():
             try:
-                tasks = [loop.run_in_executor(None, lambda c=code: self.api.get_index_daily(ts_code=c, trade_date=trade_date)) for code in MAJOR_INDICES]
+                # Use Global IO Pool for parallel tasks manually if needed, or loop over run_async
+                # Since asyncio.gather is used below, let's create coroutines using run_async
+                tasks = [ThreadPoolManager().run_async(TaskType.IO, self.api.get_index_daily, ts_code=code, trade_date=trade_date) for code in MAJOR_INDICES]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 dfs = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if dfs:
@@ -1614,7 +1616,7 @@ class DataProcessor:
             # 2. Fetch Indices (Real-time only, no cache fallback)
             # 000001.SH (Shanghai), 399001.SZ (Shenzhen), 399006.SZ (ChiNext)
             async def get_idx(code, name):
-                df = await asyncio.to_thread(self.api.get_index_daily, ts_code=code, trade_date=date)
+                df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_index_daily, ts_code=code, trade_date=date)
                 
                 if df is not None and not df.empty:
                     row = df.iloc[0]
@@ -1630,7 +1632,7 @@ class DataProcessor:
 
             # Fetch Northbound Flow
             async def get_hsgt():
-                df = await asyncio.to_thread(self.api.get_moneyflow_hsgt, trade_date=date)
+                df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_moneyflow_hsgt, trade_date=date)
                 if df is not None and not df.empty:
                     row = df.iloc[0]
                     try:

@@ -3,7 +3,8 @@ import pandas as pd
 import datetime
 import logging
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +18,10 @@ class NewsFetcher:
     Fetches news data using AKShare and direct robust Sina/THS clients.
     Replaces blocked EastMoney interfaces.
     """
-    _executor = ThreadPoolExecutor(max_workers=4)
-
     @classmethod
     def shutdown(cls):
-        """Shutdown the thread pool executor. Call on app exit."""
-        if cls._executor:
-            cls._executor.shutdown(wait=False)
-            logger.info("[NewsFetcher] Executor shutdown.")
+        """Deprecated: Executors are managed globally now."""
+        pass
 
     @staticmethod
     async def get_stock_news(ts_code, limit=10):
@@ -52,7 +49,8 @@ class NewsFetcher:
                     return ak.stock_info_global_cls()
 
             try:
-                df = await loop.run_in_executor(NewsFetcher._executor, _fetch)
+                # Use Global IO Pool
+                df = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
             except RuntimeError:
                 return []
             
@@ -110,7 +108,7 @@ class NewsFetcher:
                         return []
                 return []
 
-            data_list = await loop.run_in_executor(NewsFetcher._executor, _fetch)
+            data_list = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
             
             if not data_list:
                 return "Global data unavailable."
@@ -169,7 +167,8 @@ class NewsFetcher:
                     logger.warning(f"[News] Sina Concept Boards failed: {e}")
                     return None
 
-            df = await loop.run_in_executor(NewsFetcher._executor, _fetch)
+            # Use Global IO Pool
+            df = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
             
             if df is None or df.empty:
                 return []
