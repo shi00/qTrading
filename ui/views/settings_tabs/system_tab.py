@@ -110,7 +110,7 @@ class SystemTab(ft.Container):
             expand=True,
             text_size=14,
             content_padding=10,
-            hint_text="example.com, .cn, localhost",
+            hint_text=I18n.get("settings_no_proxy_hint"),
             border_radius=8,
             multiline=False
         )

@@ -448,6 +448,7 @@ class I18n:
             "sys_snack_limit_set": "Tushare API 速率限制已更新为 {limit} 次/分钟",
             "settings_no_proxy_domains": "直连域名配置 (不走代理)",
             "settings_no_proxy_desc": "绕过代理直接连接的域名列表 (Direct Connection)",
+            "settings_no_proxy_hint": "域名之间请用英文逗号分隔 (例如: example.com, .cn)",
             "settings_snack_no_proxy_saved": "直连域名配置已保存",
 
             # Thread Pool & Advanced
@@ -745,6 +746,7 @@ class I18n:
             "settings_init_done": "3-Year Data Initialization Complete!",
             "settings_no_proxy_domains": "Direct Domain Config",
             "settings_no_proxy_desc": "Domains to bypass proxy (Direct Connection)",
+            "settings_no_proxy_hint": "Separate domains with commas (e.g. example.com, .cn)",
             "settings_snack_no_proxy_saved": "No-Proxy settings saved!",
 
             # Thread Pool & Advanced
