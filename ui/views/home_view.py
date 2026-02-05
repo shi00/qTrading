@@ -392,7 +392,7 @@ class HomeView(ft.Container):
         )
 
     def _build_news_item(self, row):
-        raw_tag = row.get('tags', '')
+        raw_tag = row.get('tags', '') or ''  # Ensure not None
         # Localize tags using new keys
         # Mapping: 'Stock' -> 'tag_stock', etc.
         tag_key = f"tag_{raw_tag.lower()}"
