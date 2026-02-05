@@ -494,47 +494,61 @@ class CacheManager:
         """
         logger.info("[CacheManager] Performing Hard Reset (Deleting DB Files)...")
         
-        # 1. Stop Writer & Close Connection
-        await self.close()
+        # 1. Block Readers
+        self._maintenance_event.clear()
         
-        # Give OS a moment to release file handles (Windows specific safety)
-        await asyncio.sleep(0.1)
-        
-        # 2. Delete Files (with retry for Windows locking)
-        for i in range(3):
-            try:
-                if os.path.exists(self.db_path):
-                    os.remove(self.db_path)
-                
-                # WAL files
-                if os.path.exists(self.db_path + "-shm"):
-                    os.remove(self.db_path + "-shm")
-                if os.path.exists(self.db_path + "-wal"):
-                    os.remove(self.db_path + "-wal")
-                
-                logger.info("[CacheManager] DB files deleted.")
-                break # Success
-            except PermissionError:
-                if i < 2:
-                    logger.warning(f"[CacheManager] File locked, retrying deletion ({i+1}/3)...")
-                    await asyncio.sleep(0.5)
-                else:
-                    logger.error("[CacheManager] Failed to delete file (Locked by other process). Fallback to standard init.")
-            except Exception as e:
-                logger.error(f"[CacheManager] Failed to delete DB files: {e}")
-                break
+        try:
+            # 2. Stop Writer & Close Connection
+            await self.close()
+            
+            # Give OS a moment to release file handles (Windows specific safety)
+            await asyncio.sleep(0.1)
+            
+            # 3. Delete Files (with retry for Windows locking)
+            deletion_success = False
+            for i in range(3):
+                try:
+                    if os.path.exists(self.db_path):
+                        os.remove(self.db_path)
+                    
+                    # WAL files
+                    if os.path.exists(self.db_path + "-shm"):
+                        os.remove(self.db_path + "-shm")
+                    if os.path.exists(self.db_path + "-wal"):
+                        os.remove(self.db_path + "-wal")
+                        
+                    logger.info("[CacheManager] DB files deleted.")
+                    deletion_success = True
+                    break # Success
+                except Exception as e:
+                    if i < 2:
+                        logger.warning(f"[CacheManager] File locked, retrying deletion ({i+1}/3)... error: {e}")
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[CacheManager] Failed to delete DB files after retries: {e}")
+            
+            if not deletion_success:
+                 # If we couldn't delete, we shouldn't pretend we did. 
+                 # Raise error so UI shows "Failed".
+                 if os.path.exists(self.db_path):
+                     raise RuntimeError("Cannot delete database file (locked by system). Please restart application.")
 
-        # 3. Restart (Re-init)
-        # Reset state flags just in case
-        self._schema_initialized = False
-        await self.start()
-        
-        # 4. Trigger Schema Init explicitly
-        loop = asyncio.get_running_loop()
-        future = loop.create_future()
-        await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
-        await future
-        logger.info("[CacheManager] Hard Reset Complete.")
+            # 4. Restart (Re-init)
+            # Reset state flags just in case
+            self._schema_initialized = False
+            await self.start()
+            
+            # 5. Trigger Schema Init explicitly
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
+            await future
+            logger.info("[CacheManager] Hard Reset Complete.")
+            
+        finally:
+             # Always unblock readers, even if failed, to prevent App Freeze.
+             # If failed, they might get DB errors, but that is better than hanging.
+             self._maintenance_event.set()
 
     # ========== Review System ==========
     async def get_pending_reviews(self):

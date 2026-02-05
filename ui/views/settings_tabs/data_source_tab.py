@@ -400,7 +400,7 @@ class DataSourceTab(ft.Container):
             self.show_snack(I18n.get("ds_cache_cleared"))
             self.page.pubsub.send_all("cache_cleared")
         except Exception as ex:
-            self.show_snack(I18n.get("ds_clean_fail").format(error=str(ex)[:30]))
+            self.show_snack(I18n.get("ds_clean_fail").format(error=str(ex)[:100]))
         finally:
             logger.info("[clear_cache_async] Releasing sync lock...")
             self._set_sync_busy(False)
