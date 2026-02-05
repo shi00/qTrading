@@ -43,14 +43,15 @@ class ProxyManager:
             [d.strip() for d in current_no_proxy.split(",") if d.strip()]) if current_no_proxy else set()
 
         # Load User Configured Domains ONLY
-        target_domains = ConfigHandler.get_proxy_domains()
+        # Changed to get_no_proxy_domains (was get_proxy_domains)
+        target_domains = ConfigHandler.get_no_proxy_domains()
 
         # Safety Filter: Ensure all items are strings (e.g. if user put int in json)
         # Also strip them here to be safe
         target_domains = list(set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]))
 
         if not target_domains:
-            logger.info("[ProxyManager] No proxy domains configured in user_settings.json. Skipping optimization.")
+            logger.info("[ProxyManager] No no-proxy domains configured. Skipping optimization.")
             return
 
         logger.info(f"[ProxyManager] Testing connectivity for {len(target_domains)} domains from config...")
@@ -77,11 +78,11 @@ class ProxyManager:
             return False
 
         # Use ThreadPool to check fast
-        logger.info(f"[ProxyManager] Testing direct connectivity for {len(target_domains)} domestic domains...")
+        logger.info(f"[ProxyManager] Testing direct connectivity for {len(target_domains)} no-proxy domains...")
 
         manager = ThreadPoolManager()
         futures_map = {}
-        
+
         # Submit tasks to IO pool
         for d in target_domains:
             future = manager.submit(TaskType.IO, check_direct_access, d)
