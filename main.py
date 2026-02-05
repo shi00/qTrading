@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import flet as ft
@@ -24,7 +25,9 @@ logger = logging.getLogger(__name__)
 async def main(page: ft.Page):
     setup_logging()
 
-    # --- Network Optimization (Smart Proxy) ---
+    # --- Network Optimization    # [CRITICAL] Initialize Proxy Manager FIRST
+    # 必须在所有网络请求库（如 TushareClient, Requests）初始化之前设置好 Proxy
+    # 此方法是同步阻塞的，确保环境变量在后续组件加载前就绪
     ProxyManager.apply_smart_proxy_policy()
 
     I18n.initialize()  # Initialize Locale
@@ -139,13 +142,63 @@ async def main(page: ft.Page):
         nonlocal main_layout, nav_rail
 
         # --- Navigation ---
+        import time as _time
+        VIEW_NAMES = ['HomeView', 'ScreenerView', 'DataExplorerView', 'SettingsView']
+
+        # --- Debounce state for tab switching ---
+        _pending_tab_index = [None]  # Use list to allow closure mutation
+        _debounce_task = [None]
+        _current_tab_index = [0]  # Track current tab to avoid redundant switches
+        DEBOUNCE_MS = 50  # Debounce window in milliseconds
+
         def change_tab(e):
+            """Handle tab change with debounce to prevent rapid-click freezing"""
             index = e.control.selected_index
+
+            # Skip if already on this tab
+            if index == _current_tab_index[0]:
+                return
+
+            _pending_tab_index[0] = index
+
+            # Cancel previous pending switch if any
+            if _debounce_task[0]:
+                _debounce_task[0].cancel()
+
+            # Schedule debounced switch
+            _debounce_task[0] = page.run_task(_execute_tab_switch)
+
+        async def _execute_tab_switch():
+            """Execute tab switch after debounce delay"""
+            try:
+                await asyncio.sleep(DEBOUNCE_MS / 1000)  # Wait for debounce window
+            except asyncio.CancelledError:
+                return  # Task was cancelled by a newer click, exit gracefully
+
+            index = _pending_tab_index[0]
+            if index is None or index == _current_tab_index[0]:
+                return
+
+            _t0 = _time.perf_counter()
+            logger.info(f"[PERF] >>> change_tab START: switching to {VIEW_NAMES[index]} (index={index})")
+
+            # Notify HomeView of visibility change (for auto-refresh optimization)
+            home_view.set_visible(index == 0)
+
             body.content = views[index]
+            _current_tab_index[0] = index  # Update current tab
+            _t1 = _time.perf_counter()
+            logger.info(f"[PERF] change_tab: content assignment took {(_t1 - _t0) * 1000:.1f}ms")
+
             body.update()
+            _t2 = _time.perf_counter()
+            logger.info(
+                f"[PERF] <<< change_tab END: body.update() took {(_t2 - _t1) * 1000:.1f}ms, TOTAL={(_t2 - _t0) * 1000:.1f}ms")
 
         async def run_strategy_from_home(strategy_key):
             # Switch to Screener tab (Index 1)
+            home_view.set_visible(False)  # Notify HomeView it's no longer visible
+            _current_tab_index[0] = 1  # Keep debounce state in sync
             nav_rail.selected_index = 1
             body.content = screener_view
             nav_rail.update()
@@ -153,10 +206,26 @@ async def main(page: ft.Page):
             await screener_view.select_and_run_strategy(strategy_key)
 
         # --- Views ---
+        logger.info("[PERF] >>> Creating views START")
+        _t_views_start = _time.perf_counter()
+
+        _t0 = _time.perf_counter()
         home_view = HomeView(on_run_strategy=run_strategy_from_home)
+        logger.info(f"[PERF] HomeView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+        _t0 = _time.perf_counter()
         screener_view = ScreenerView()
+        logger.info(f"[PERF] ScreenerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+        _t0 = _time.perf_counter()
         data_view = DataExplorerView()
+        logger.info(f"[PERF] DataExplorerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+        _t0 = _time.perf_counter()
         settings_view = SettingsView()
+        logger.info(f"[PERF] SettingsView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+        logger.info(f"[PERF] <<< Creating views END, TOTAL={(_time.perf_counter() - _t_views_start) * 1000:.1f}ms")
 
         views = [
             home_view,

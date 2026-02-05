@@ -1,30 +1,30 @@
-﻿import tushare as ts
-import pandas as pd
+﻿import datetime
+import logging
+import random
+import threading
 import time
-import datetime
+
+import pandas as pd
+import requests
+import tushare as ts
 
 from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
-from utils.log_decorators import log_async_operation
-from utils.sanitizers import DataSanitizer
-import logging
-import random
-
-import threading
 
 logger = logging.getLogger(__name__)
+
 
 class TushareClient:
     """
     Enhanced Tushare API client with timeout, retry, trade calendar support, and TokenBucket Rate Limiting.
     """
-    
+
     # Singleton instance
     _instance = None
-    _lock = threading.Lock() # Thread safety lock
+    _lock = threading.Lock()  # Thread safety lock
     _trade_cal_cache = set()  # Cache valid trading days (Set lookup O(1))
-    _loaded_years = set()     # Track which years have been loaded
-    _calendar_lock = threading.Lock() # Lock for cache updates
+    _loaded_years = set()  # Track which years have been loaded
+    _calendar_lock = threading.Lock()  # Lock for cache updates
 
     def __new__(cls, token=None):
         if cls._instance is None:
@@ -33,26 +33,26 @@ class TushareClient:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self, token=None):
         # Double-check locking for initialization to prevent race conditions
         if self._initialized:
             if token and token != self.token:
                 self.set_token(token)
             return
-            
+
         with self._lock:
             if self._initialized:
                 return
-            
+
             self.token = token or ConfigHandler.get_token()
-            self.timeout = ConfigHandler.get_tushare_timeout() # Custom timeout for Tushare
+            self.timeout = ConfigHandler.get_tushare_timeout()  # Custom timeout for Tushare
             self.max_retries = ConfigHandler.get_request_max_retries()
-            
+
             # Initialize Rate Limiter
             # Get limit per minute (default None)
             limit_per_min = ConfigHandler.get_tushare_api_limit()
-            
+
             if limit_per_min and limit_per_min > 0:
                 rate_per_sec = limit_per_min / 60.0
                 # Capacity allows for small bursts (e.g. 5 seconds worth or fixed 10)
@@ -62,15 +62,15 @@ class TushareClient:
             else:
                 self._rate_limiter = None
                 logger.info("[API] Rate Limiter disabled (No limit set)")
-            
+
             if self.token:
                 ts.set_token(self.token)
                 # Pass timeout to requests via tushare SDK
-                self.pro = ts.pro_api(timeout=self.timeout) 
+                self.pro = ts.pro_api(timeout=self.timeout)
                 logger.info(f"[API] Tushare Client initialized with timeout={self.timeout}s")
             else:
                 self.pro = None
-            
+
             self._initialized = True
 
     def set_token(self, token):
@@ -85,40 +85,46 @@ class TushareClient:
         for i in range(self.max_retries):
             if self._rate_limiter:
                 self._rate_limiter.consume(1)
-                
+
             try:
                 if not self.pro:
                     raise Exception("Tushare Token not set. Please set your token in settings.")
                 result = func(**kwargs)
                 return result
-            except Exception as e:
+            except (requests.exceptions.RequestException, Exception) as e:
                 error_msg = str(e)
                 is_rate_limit = "每分钟最多访问" in error_msg or "抱歉" in error_msg or "检测到" in error_msg
-                is_network_error = "timeout" in error_msg.lower() or "connection" in error_msg.lower() or "timed out" in error_msg.lower()
-                
+                # Enhanced network error detection
+                is_network_error = isinstance(e, requests.exceptions.RequestException) or \
+                                   "timeout" in error_msg.lower() or \
+                                   "connection" in error_msg.lower() or \
+                                   "timed out" in error_msg.lower()
+
                 if is_rate_limit:
                     sleep_time = (2 ** i) + random.uniform(0, 1)
                     # Log rate limit backoff
-                    logger.warning(f"[tushare_api] RATE_LIMITED: backoff={sleep_time:.2f}s (attempt {i+1}/{self.max_retries})")
+                    logger.warning(
+                        f"[tushare_api] RATE_LIMITED: backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
-                    
+
                 if is_network_error:
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
-                    logger.warning(f"[tushare_api] CONNECTION_ERROR: retry in {sleep_time:.2f}s (attempt {i+1}/{self.max_retries})")
+                    logger.warning(
+                        f"[tushare_api] CONNECTION_ERROR: {type(e).__name__} - retry in {sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
-                
+
                 # Other errors
                 if i == self.max_retries - 1:
                     logger.error(f"[tushare_api] RETRY_EXHAUSTED: {error_msg[:100]}")
                     raise e
-                
+
                 time.sleep(1)
         return None
 
     # ========== Trade Calendar ==========
-    
+
     def get_trade_cal(self, start_date, end_date, exchange='SSE'):
         """
         Get trade calendar. 
@@ -156,9 +162,9 @@ class TushareClient:
         """
         if date_str is None:
             date_str = datetime.datetime.now().strftime('%Y%m%d')
-        
+
         year = date_str[:4]
-        
+
         # 1. Fast Path: Check if year is already loaded (No Lock)
         if year in TushareClient._loaded_years:
             return date_str in TushareClient._trade_cal_cache
@@ -169,29 +175,29 @@ class TushareClient:
                 # Double-check inside lock
                 if year in TushareClient._loaded_years:
                     return date_str in TushareClient._trade_cal_cache
-                
+
                 logger.info(f"[Cache] Loading trading calendar for year {year}...")
-                
+
                 # Fetch full year data
                 start_date = f"{year}0101"
                 end_date = f"{year}1231"
-                
+
                 df = self.get_trade_cal(start_date, end_date)
-                
+
                 if df is not None and not df.empty:
                     # Helper to bulk update set
                     dates = set(df['cal_date'].tolist())
                     TushareClient._trade_cal_cache.update(dates)
                     TushareClient._loaded_years.add(year)
                     logger.info(f"[Cache] Successfully loaded {len(dates)} trading days for {year}")
-                    
+
                     return date_str in dates
                 else:
                     logger.warning(f"[Cache] Failed to load calendar for {year} (Empty response)")
                     # Do not mark as loaded so we retry next time, or logic below deals with it
-        
+
         except Exception as e:
-             logger.warning(f"[API] Trade calendar cache load failed: {e}, falling back to Offline Calendar")
+            logger.warning(f"[API] Trade calendar cache load failed: {e}, falling back to Offline Calendar")
 
         # 3. Fallback: Offline Calendar (pandas_market_calendars)
         try:
@@ -202,18 +208,22 @@ class TushareClient:
             # Ultimate Fallback: Simple weekday check (Mon-Fri)
             try:
                 dt = datetime.datetime.strptime(date_str, '%Y%m%d')
-                return dt.weekday() < 5
+                is_weekday = dt.weekday() < 5
+                if is_weekday:
+                    logger.warning(
+                        f"[API] UNSAFE_FALLBACK: Assuming {date_str} is trading day (weekday check). May be inaccurate for holidays!")
+                return is_weekday
             except:
                 return True  # Default to allowing if all else fails
 
     # ========== Stock Basic ==========
-    
+
     def get_stock_basic(self):
         """Get basic list of all stocks"""
         return self._handle_api_call(
-            self.pro.stock_basic, 
-            exchange='', 
-            list_status='L', 
+            self.pro.stock_basic,
+            exchange='',
+            list_status='L',
             fields='ts_code,symbol,name,area,industry,list_date,market,list_status'
         )
 
@@ -222,10 +232,10 @@ class TushareClient:
         return self.get_stock_basic()
 
     # ========== Daily Data ==========
-    
+
     def get_daily_quotes(self, trade_date=None, start_date=None, end_date=None, ts_code=None):
         """Get daily quotes with adj_factor joined"""
-        
+
         # 1. Fetch Daily Quotes
         df_daily = self._handle_api_call(
             self.pro.daily,
@@ -234,41 +244,41 @@ class TushareClient:
             end_date=end_date,
             trade_date=trade_date
         )
-        
+
         if df_daily is None or df_daily.empty:
             return df_daily
-            
+
         # 2. Fetch Adj Factor
         # Tushare adj_factor API has same signature logic
         try:
-             df_adj = self._handle_api_call(
+            df_adj = self._handle_api_call(
                 self.pro.adj_factor,
                 ts_code=ts_code,
                 start_date=start_date,
                 end_date=end_date,
                 trade_date=trade_date
             )
-             
-             if df_adj is not None and not df_adj.empty:
-                 # Merge logic
-                 # Tushare returns trade_date, ts_code, adj_factor
-                 # Ensure keys specifically
-                 if 'trade_date' in df_adj.columns and 'ts_code' in df_adj.columns:
-                     df_daily = pd.merge(
-                         df_daily, 
-                         df_adj[['ts_code', 'trade_date', 'adj_factor']], 
-                         on=['ts_code', 'trade_date'], 
-                         how='left'
-                     )
+
+            if df_adj is not None and not df_adj.empty:
+                # Merge logic
+                # Tushare returns trade_date, ts_code, adj_factor
+                # Ensure keys specifically
+                if 'trade_date' in df_adj.columns and 'ts_code' in df_adj.columns:
+                    df_daily = pd.merge(
+                        df_daily,
+                        df_adj[['ts_code', 'trade_date', 'adj_factor']],
+                        on=['ts_code', 'trade_date'],
+                        how='left'
+                    )
         except Exception as e:
             logger.warning(f"[API] Failed to fetch adj_factor: {e}, using default 1.0")
-            
+
         # Fill NaN adj_factor with 1.0
         if 'adj_factor' in df_daily.columns:
             df_daily['adj_factor'] = df_daily['adj_factor'].fillna(1.0)
         else:
             df_daily['adj_factor'] = 1.0
-            
+
         return df_daily
 
     def get_daily_basic(self, trade_date=None, ts_code=None):
@@ -281,7 +291,7 @@ class TushareClient:
         )
 
     # ========== Financial Data ==========
-    
+
     def get_income(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get income statement data"""
 
@@ -291,7 +301,7 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             ts_code=ts_code,
-            fields='ts_code,end_date,ann_date,report_type,n_income,revenue,operate_profit,total_revenue,n_income_attr_p' 
+            fields='ts_code,end_date,ann_date,report_type,n_income,revenue,operate_profit,total_revenue,n_income_attr_p'
         )
 
     def get_cashflow(self, period=None, start_date=None, end_date=None, ts_code=None):
@@ -305,7 +315,7 @@ class TushareClient:
             ts_code=ts_code,
             fields='ts_code,end_date,n_cashflow_act,c_cashflow_return_pay,n_cashflow_inv'
         )
-        
+
     def get_balancesheet(self, period=None, start_date=None, end_date=None, ts_code=None):
         """Get balance sheet data"""
 
@@ -329,7 +339,7 @@ class TushareClient:
             self.pro.top_list,
             trade_date=trade_date
         )
-        
+
     def get_top_inst(self, trade_date):
         """LHB Institutional Seat Transaction Detail"""
 
@@ -396,7 +406,7 @@ class TushareClient:
 
         return self._handle_api_call(
             self.pro.disclosure_date,
-            actual_date=date, 
+            actual_date=date,
             fields='ts_code,ann_date,end_date,actual_date'
         )
 
@@ -458,7 +468,7 @@ class TushareClient:
             self.pro.suspend_d,
             trade_date=trade_date,
             ts_code=ts_code,
-            suspend_type='S' # Only stop
+            suspend_type='S'  # Only stop
         )
 
     def get_margin_detail(self, trade_date=None, ts_code=None):
@@ -506,7 +516,7 @@ class TushareClient:
             period=period,
             start_date=start_date,
             end_date=end_date,
-            type='P' # By Product
+            type='P'  # By Product
         )
 
     def get_pledge_stat(self, ts_code=None, end_date=None):
@@ -526,7 +536,7 @@ class TushareClient:
             ts_code=ts_code,
             start_date=start_date,
             end_date=end_date
-        ) 
+        )
 
     def get_dividend(self, ts_code=None, start_date=None, end_date=None):
         """Get dividend history"""
@@ -534,7 +544,6 @@ class TushareClient:
         return self._handle_api_call(
             self.pro.dividend,
             ts_code=ts_code,
-            ann_date=start_date # Using date range if possible, or ts_code
+            ann_date=start_date  # Using date range if possible, or ts_code
             # Tushare dividend API standard fields
         )
-
