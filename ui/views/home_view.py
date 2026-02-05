@@ -25,7 +25,11 @@ class HomeView(ft.Container):
         # Auto-refresh Configuration
         self.REFRESH_INTERVAL_SECONDS = 30
         self._refresh_task = None
+        self._init_task = None  # Track init task for cancellation
         self._is_mounted = False
+        self._is_visible = True  # Track if HomeView is the active visible view
+        self._data_loaded = False  # Skip re-init if data already loaded
+        self._pubsub_subscribed = False  # Prevent duplicate pubsub subscriptions
 
         # Data Cache (for UI Rebuild)
         self.last_data = {}
@@ -48,22 +52,58 @@ class HomeView(ft.Container):
             logger.error(f"Error refreshing locale: {e}")
 
     def did_mount(self):
-        # Subscribe to broadcast messages
-        if self.page:
+        import time as _time
+        _t0 = _time.perf_counter()
+        logger.info("[PERF] >>> HomeView.did_mount START")
+
+        # Subscribe to broadcast messages (only once)
+        if self.page and not self._pubsub_subscribed:
             self.page.pubsub.subscribe(self._on_broadcast_message)
+            self._pubsub_subscribed = True
 
         self._is_mounted = True
 
-        # Initialize Data & Auto load
-        if self.page:
-            self.page.run_task(self._init_and_load)
+        # Only initialize data on first mount or if data was cleared
+        if not self._data_loaded:
+            if self.page:
+                self._init_task = self.page.run_task(self._init_and_load)
+        else:
+            # Data already loaded, just restart auto-refresh
+            self._start_auto_refresh()
+            logger.debug("[HomeView] Skipping re-init - data already loaded")
+
+        logger.info(f"[PERF] <<< HomeView.did_mount END (sync part) took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
     async def _init_and_load(self):
         """Initial load with DB init"""
+        import time as _time
+        _t_start = _time.perf_counter()
+        logger.info("[PERF] >>> HomeView._init_and_load START")
         try:
+            # Check if still mounted before each long operation
+            if not self._is_mounted:
+                logger.debug("[HomeView] _init_and_load cancelled - view unmounted")
+                return
+
+            _t0 = _time.perf_counter()
             await self.processor.init_data()
+            logger.info(f"[PERF] HomeView: processor.init_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+
+            if not self._is_mounted:
+                logger.debug("[HomeView] _init_and_load cancelled after init - view unmounted")
+                return
+
+            _t0 = _time.perf_counter()
             await self._load_data()
-            self._start_auto_refresh()
+            logger.info(f"[PERF] HomeView: _load_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+
+            if self._is_mounted:
+                self._data_loaded = True  # Mark data as loaded
+                self._start_auto_refresh()
+
+            logger.info(f"[PERF] <<< HomeView._init_and_load END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
+        except asyncio.CancelledError:
+            logger.debug("[HomeView] _init_and_load was cancelled")
         except Exception as e:
             logger.error(f"[HomeView] Init failed: {e}")
 
@@ -71,6 +111,12 @@ class HomeView(ft.Container):
         """Cleanup when view is detached"""
         self._is_mounted = False
         self._stop_auto_refresh()
+        # Cancel any pending init task
+        if self._init_task:
+            self._init_task.cancel()
+            self._init_task = None
+        # Note: pubsub subscription persists - we use _pubsub_subscribed flag to prevent duplicates
+        # Flet handles cleanup automatically when page closes
         I18n.unsubscribe(self.refresh_locale)
 
     def _start_auto_refresh(self):
@@ -91,13 +137,20 @@ class HomeView(ft.Container):
         while self._is_mounted:
             try:
                 await asyncio.sleep(self.REFRESH_INTERVAL_SECONDS)
-                if self._is_mounted:
+                if self._is_mounted and self._is_visible:
                     logger.debug("[HomeView] Auto-refreshing data...")
                     await self._load_data()
+                elif self._is_mounted:
+                    logger.debug("[HomeView] Skipped auto-refresh - view not visible")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"[HomeView] Auto-refresh error: {e}")
+
+    def set_visible(self, visible: bool):
+        """Set the visibility state of HomeView (called by main.py on tab change)"""
+        self._is_visible = visible
+        logger.debug(f"[HomeView] Visibility set to: {visible}")
 
     def _on_broadcast_message(self, message):
         """Handle broadcast messages"""
@@ -107,6 +160,7 @@ class HomeView(ft.Container):
             self.news_data = None
             self.has_more_news = False
             self.news_page = 0
+            self._data_loaded = False  # Force re-init on next mount
 
             # Rebuild UI to show empty state
             self.content = self._build_ui({})
@@ -119,28 +173,46 @@ class HomeView(ft.Container):
             self.page.run_task(self._load_data)
 
     async def _load_data(self):
+        import time as _time
+        _t_start = _time.perf_counter()
+        logger.info("[PERF] >>> HomeView._load_data START")
         try:
             # Reset pagination on full refresh
             self.news_page = 0
             self.has_more_news = True
 
+            _t0 = _time.perf_counter()
             data = await self.processor.get_market_overview()
+            logger.info(f"[PERF] HomeView: get_market_overview() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            
             if not data:
+                logger.info("[PERF] <<< HomeView._load_data END (no data)")
                 return
 
             # Update Cache
             self.last_data = data
 
             # Sync News immediately (Deep Sync Strategy)
+            _t0 = _time.perf_counter()
             await self.processor.sync_market_news()
+            logger.info(f"[PERF] HomeView: sync_market_news() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
             # Load News Data
+            _t0 = _time.perf_counter()
             await self._load_news_data()
+            logger.info(f"[PERF] HomeView: _load_news_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
             # Rebuild UI with fresh data
+            _t0 = _time.perf_counter()
             self.content = self._build_ui(self.last_data)
+            logger.info(f"[PERF] HomeView: _build_ui() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            
+            _t0 = _time.perf_counter()
             if self.page:
                 self.update()
+            logger.info(f"[PERF] HomeView: self.update() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            
+            logger.info(f"[PERF] <<< HomeView._load_data END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
 
         except Exception as e:
             logger.error(f"Error loading home data: {e}")
@@ -305,7 +377,7 @@ class HomeView(ft.Container):
 
         # Assemble Full Layout
         return ft.Column(
-            scroll=ft.ScrollMode.OFF,  # Disable outer scroll so inner listview handles scrolling
+            scroll=None,  # Disable outer scroll so inner listview handles scrolling
             expand=True,
             controls=[
                 header,

@@ -166,6 +166,8 @@ class I18n:
             "data_sql_success_truncated": "查询成功 (耗时 {time:.3f}s). 显示前 {limit} 行 (共 {rows} 行).",
             "data_sql_error": "执行错误: {error}",
             "data_btn_count": "统计行数",
+            "data_loading": "正在加载数据...",
+            "data_loading_hint": "正在读取数据库表结构",
 
             # Settings - Tabs
             "settings_tab_general": "基本配置",
@@ -444,6 +446,7 @@ class I18n:
             "sys_snack_limit_off": "Tushare API 速率限制已解除 (不限速)",
             "sys_snack_limit_min": "若要限制，建议至少 10 次/分钟",
             "sys_snack_limit_set": "Tushare API 速率限制已更新为 {limit} 次/分钟",
+            "settings_no_proxy_domains": "直连域名配置 (不走代理)",
 
             # Thread Pool & Advanced
             "sys_thread_pool_title": "线程池配置",
@@ -693,6 +696,8 @@ class I18n:
             "data_sql_success_truncated": "Success ({time:.3f}s). Showing first {limit} rows (Total {rows}).",
             "data_sql_error": "Execution Error: {error}",
             "data_btn_count": "Count Rows",
+            "data_loading": "Loading data...",
+            "data_loading_hint": "Reading database table structure",
 
             # Settings - Tabs
             "settings_tab_general": "General",
@@ -985,6 +990,7 @@ class I18n:
             "sys_snack_limit_off": "Tushare Limit Removed (Unlimited)",
             "sys_snack_limit_min": "Recommended at least 10/min",
             "sys_snack_limit_set": "Tushare Limit set to {limit}/min",
+            "settings_no_proxy_domains": "No-Proxy Domains",
             # Health Report
             "health_report_title": "Full Data Health Report",
             "health_checking": "Checking Data Health...",

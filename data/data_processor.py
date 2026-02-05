@@ -1536,10 +1536,16 @@ class DataProcessor:
                  return
 
             # Scenario 2: Need older history (backward sync)
+            # Use 10-day tolerance to account for holidays (New Year, Spring Festival, etc.)
+            # where the first trading day may be later than our target_start (e.g., Jan 1 is holiday)
             if target_start < min_db_date:
-                 logger.info(f"[DataProcessor] Calendar cache missing history. Fetching {target_start} to {min_db_date}...")
-                 # Fetch up to min_db_date (exclusive? Tushare is inclusive, overlap is fine/safe)
-                 await self._fetch_and_save_cal(target_start, min_db_date)
+                 gap_days = (datetime.datetime.strptime(min_db_date, '%Y%m%d') - 
+                             datetime.datetime.strptime(target_start, '%Y%m%d')).days
+                 if gap_days > 10:  # Only sync if gap exceeds holiday tolerance
+                     logger.info(f"[DataProcessor] Calendar cache missing history. Fetching {target_start} to {min_db_date}...")
+                     await self._fetch_and_save_cal(target_start, min_db_date)
+                 else:
+                     logger.debug(f"[DataProcessor] Calendar gap ({gap_days} days) within holiday tolerance, skipping backward sync")
 
             # Scenario 3: Need future updates (forward sync)
             if max_db_date < end_date:

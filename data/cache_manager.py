@@ -5,6 +5,7 @@ import datetime
 import os
 import config
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import ThreadPoolManager, TaskType
 from utils.log_decorators import log_async_operation, track_performance
 import logging
 from dataclasses import dataclass, field
@@ -593,7 +594,7 @@ class CacheManager:
         # Offload heavy conversion
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             # Executor likely shut down
             return 0
@@ -630,7 +631,7 @@ class CacheManager:
             
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -818,7 +819,7 @@ class CacheManager:
         # Offload heavy conversion
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -917,8 +918,7 @@ class CacheManager:
         '''
         
         try:
-             loop = asyncio.get_running_loop()
-             params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+             params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
              return 0
              
@@ -931,7 +931,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'end_date', 'ann_date', 'type', 'p_change_min', 'p_change_max', 'net_profit_min', 'net_profit_max']
         sql = "INSERT OR REPLACE INTO fina_forecast (ts_code, end_date, ann_date, type, p_change_min, p_change_max, net_profit_min, net_profit_max) VALUES (?,?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -942,7 +942,7 @@ class CacheManager:
         # We assume bz_item is unique per date per stock? Yes PK.
         cols = ['ts_code', 'end_date', 'bz_item', 'bz_sales', 'bz_profit', 'bz_cost', 'curr_type']
         sql = "INSERT OR REPLACE INTO fina_mainbz (ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type) VALUES (?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -950,7 +950,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'end_date', 'pledge_count', 'unrest_pledge', 'rest_pledge', 'total_share', 'pledge_ratio']
         sql = "INSERT OR REPLACE INTO pledge_stat (ts_code, end_date, pledge_count, unrest_pledge, rest_pledge, total_share, pledge_ratio) VALUES (?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -958,7 +958,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'ann_date', 'end_date', 'proc', 'exp_date', 'vol', 'amount', 'high_limit', 'low_limit']
         sql = "INSERT OR REPLACE INTO repurchase (ts_code, ann_date, end_date, proc, exp_date, vol, amount, high_limit, low_limit) VALUES (?,?,?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -966,7 +966,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'end_date', 'ann_date', 'div_proc', 'stk_div', 'stk_bo_rate', 'stk_co_rate', 'cash_div_tax', 'cash_div_tax_rate', 'record_date', 'ex_date']
         sql = "INSERT OR REPLACE INTO dividend (ts_code, end_date, ann_date, div_proc, stk_div, stk_bo_rate, stk_co_rate, cash_div_tax, cash_div_tax_rate, record_date, ex_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -974,7 +974,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'trade_date', 'close', 'open', 'high', 'low', 'pre_close', 'change', 'pct_chg', 'vol', 'amount']
         sql = "INSERT OR REPLACE INTO index_daily (ts_code, trade_date, close, open, high, low, pre_close, change, pct_chg, vol, amount) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -982,7 +982,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'trade_date', 'total_mv', 'float_mv', 'total_share', 'float_share', 'free_share', 'turnover_rate', 'turnover_rate_f', 'pe', 'pe_ttm', 'pb']
         sql = "INSERT OR REPLACE INTO index_dailybasic (ts_code, trade_date, total_mv, float_mv, total_share, float_share, free_share, turnover_rate, turnover_rate_f, pe, pe_ttm, pb) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -990,7 +990,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['trade_date', 'ts_code', 'name', 'close', 'pct_chg', 'amp', 'fc_ratio', 'fl_ratio', 'fd_amount', 'first_time', 'last_time', 'open_times', 'strth', 'limit_type']
         sql = "INSERT OR REPLACE INTO limit_list (trade_date, ts_code, name, close, pct_chg, amp, fc_ratio, fl_ratio, fd_amount, first_time, last_time, open_times, strth, limit_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -998,7 +998,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'trade_date', 'rzye', 'rqye', 'rzmre', 'rqyl', 'rzrqye']
         sql = "INSERT OR REPLACE INTO margin_daily (ts_code, trade_date, rzye, rqye, rzmre, rqyl, rzrqye) VALUES (?,?,?,?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -1006,7 +1006,7 @@ class CacheManager:
         if df is None or df.empty: return 0
         cols = ['ts_code', 'trade_date', 'suspend_timing', 'suspend_type_name']
         sql = "INSERT OR REPLACE INTO suspend_d (ts_code, trade_date, suspend_timing, suspend_type_name) VALUES (?,?,?,?)"
-        params = await asyncio.get_running_loop().run_in_executor(None, self._prepare_data_params, df, cols)
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
@@ -1060,7 +1060,7 @@ class CacheManager:
         
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1113,7 +1113,7 @@ class CacheManager:
             
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1142,7 +1142,7 @@ class CacheManager:
             
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1196,7 +1196,7 @@ class CacheManager:
             
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1447,7 +1447,7 @@ class CacheManager:
             
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1495,7 +1495,7 @@ class CacheManager:
             
         try:
             loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1551,8 +1551,7 @@ class CacheManager:
         
         # New Helper: _prepare_screening_params(df, strategy_name, trade_date)
         try:
-            loop = asyncio.get_running_loop()
-            records = await loop.run_in_executor(None, self._prepare_screening_params, df, strategy_name, trade_date)
+            records = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_screening_params, df, strategy_name, trade_date)
         except RuntimeError:
             return 0
 

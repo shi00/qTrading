@@ -9,6 +9,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class SettingsView(ft.Container):
     # Tab configuration: (i18n_key, icon)
     TAB_CONFIG = [
@@ -22,10 +23,11 @@ class SettingsView(ft.Container):
     def __init__(self):
         super().__init__()
         self.expand = True
-        
+
         # 1. Header
-        self.header_title = ft.Text(I18n.get("settings_title"), size=24, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY)
-        
+        self.header_title = ft.Text(I18n.get("settings_title"), size=24, weight=ft.FontWeight.BOLD,
+                                    color=AppColors.TEXT_PRIMARY)
+
         # 2. Init Tabs (order must match TAB_CONFIG)
         self.tab_contents = [
             DataSourceTab(self.show_snack),
@@ -36,10 +38,10 @@ class SettingsView(ft.Container):
         ]
         assert len(self.TAB_CONFIG) == len(self.tab_contents), \
             f"TAB_CONFIG ({len(self.TAB_CONFIG)}) and tab_contents ({len(self.tab_contents)}) length mismatch!"
-        
+
         self.tab_buttons = []
         self.current_tab_index = 0
-        
+
         # 3. Build Tab Bar from config
         tab_bar = ft.Container(
             content=ft.Row(
@@ -72,7 +74,11 @@ class SettingsView(ft.Container):
         return self.page
 
     def _on_mount(self):
+        import time as _time
+        _t0 = _time.perf_counter()
+        logger.info("[PERF] >>> SettingsView._on_mount START")
         I18n.subscribe(self.refresh_locale)
+        logger.info(f"[PERF] <<< SettingsView._on_mount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def _on_unmount(self):
         I18n.unsubscribe(self.refresh_locale)
@@ -123,14 +129,14 @@ class SettingsView(ft.Container):
         except (ValueError, TypeError):
             logger.warning(f"Invalid tab index data: {e.control.data}")
             return
-        
+
         if not (0 <= idx < len(self.tab_contents)):
             logger.warning(f"Tab index out of range: {idx}")
             return
-        
+
         self.current_tab_index = idx
         self.tab_body.content = self.tab_contents[idx]
-        
+
         for i, btn in enumerate(self.tab_buttons):
             btn.style = self._get_tab_button_style(is_selected=(i == idx))
         self._safe_update()
@@ -141,9 +147,12 @@ class SettingsView(ft.Container):
 
         if hasattr(self.page, "show_toast"):
             msg_type = "info"
-            if color == ft.Colors.RED: msg_type = "error"
-            elif color == ft.Colors.GREEN: msg_type = "success"
-            elif color == ft.Colors.ORANGE or color == ft.Colors.AMBER: msg_type = "warning"
+            if color == ft.Colors.RED:
+                msg_type = "error"
+            elif color == ft.Colors.GREEN:
+                msg_type = "success"
+            elif color == ft.Colors.ORANGE or color == ft.Colors.AMBER:
+                msg_type = "warning"
             self.page.show_toast(message, type=msg_type)
         else:
             # Clean up old snackbars to prevent overlay bloat

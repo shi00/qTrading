@@ -36,6 +36,8 @@ class TableViewerTab(ft.Container):
         # Sorting state
         self.sort_col = None  # Currently sorted column
         self.sort_asc = True  # Sort direction (True = ASC, False = DESC)
+        self._is_loading = False  # Prevent concurrent data loading
+        self._tables_loaded = False  # Skip re-loading when switching back to this view
 
         # UI Elements
         self.table_selector = ft.Dropdown(
@@ -82,8 +84,52 @@ class TableViewerTab(ft.Container):
         )
 
         # Professional Financial DataTable
+        # Elegant Loading State - Modern centered card design
+        # Store text references for dynamic i18n updates
+        self._loading_text = ft.Text(
+            I18n.get("data_loading"),
+            size=16,
+            weight=ft.FontWeight.W_500,
+            color=AppColors.TEXT_PRIMARY
+        )
+        self._loading_hint = ft.Text(
+            I18n.get("data_loading_hint"),
+            size=13,
+            color=AppColors.TEXT_SECONDARY
+        )
+        self._loading_widget = ft.Container(
+            content=ft.Column([
+                # Animated spinner with glow effect
+                ft.Container(
+                    content=ft.ProgressRing(
+                        width=48,
+                        height=48,
+                        stroke_width=4,
+                        color=AppColors.PRIMARY
+                    ),
+                    padding=20,
+                    border_radius=50,
+                    bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
+                ),
+                ft.Container(height=16),
+                # Main loading text
+                self._loading_text,
+                # Hint text
+                self._loading_hint,
+            ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+            ),
+            alignment=ft.alignment.center,
+            expand=True,
+            padding=40,
+            bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),
+            border_radius=12,
+            border=ft.border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
+        )
+
         self.data_table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Text("Loading..."))],
+            columns=[ft.DataColumn(ft.Text(I18n.get("data_loading")))],  # Initial placeholder
             rows=[],
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),
             horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),
@@ -97,6 +143,19 @@ class TableViewerTab(ft.Container):
             show_checkbox_column=False,
             border_radius=8,
             border=ft.border.all(1, AppColors.TABLE_BORDER),
+        )
+
+        # Scrollable table wrapper
+        self._table_scroll_wrapper = ft.Column(
+            [ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS)],
+            expand=True,
+            scroll=ft.ScrollMode.AUTO
+        )
+
+        # Conditional content container - swaps between loading and table
+        self._grid_content = ft.Container(
+            content=self._loading_widget,  # Start with loading state
+            expand=True,
         )
 
         # Pagination
@@ -161,12 +220,8 @@ class TableViewerTab(ft.Container):
             self.progress_bar  # Loading bar right below toolbar
         ], spacing=0)
 
-        # Data Grid Container (Scrollable)
-        grid_container = ft.Column(
-            [ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS)],
-            expand=True,
-            scroll=ft.ScrollMode.AUTO
-        )
+        # Data Grid Container - Uses conditional content rendering
+        # Content is swapped between loading widget and table in _toggle_loading
 
         # Pagination Bar
         pagination_bar = ft.Container(
@@ -182,16 +237,27 @@ class TableViewerTab(ft.Container):
             border=ft.border.only(top=ft.border.BorderSide(1, AppColors.BORDER))
         )
 
-        return ft.Column([toolbar_container, grid_container, pagination_bar], expand=True, spacing=0)
+        return ft.Column([toolbar_container, self._grid_content, pagination_bar], expand=True, spacing=0)
 
     async def did_mount_async(self):
         """Called when the control is added to the page (Async wrapper manually called)"""
+        import time as _time
+        
+        # Skip re-loading if tables already loaded (switching back to this view)
+        if self._tables_loaded:
+            logger.debug("[TableViewerTab] Skipping re-load - tables already loaded")
+            return
+        
+        _t_start = _time.perf_counter()
+        logger.info("[PERF] >>> TableViewerTab.did_mount_async START")
         # Note: standard did_mount is sync. we call this manually or use create_task in init if possible.
         # But safest is to trigger from a known start point. 
         # In this architecture, we can just launch the task.
         try:
             # Run db fetch in executor (CPU Pool)
+            _t0 = _time.perf_counter()
             tables = await ThreadPoolManager().run_async(TaskType.CPU, self.db_manager.get_all_tables)
+            logger.info(f"[PERF] TableViewerTab: get_all_tables() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
             # Update UI on main thread
             self.table_selector.options = [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in
@@ -202,9 +268,16 @@ class TableViewerTab(ft.Container):
                 default_t = "stock_basic" if "stock_basic" in tables else tables[0]
                 self.table_selector.value = default_t
                 self.current_table = default_t
-                await self._load_schema_and_data()
 
+                _t0 = _time.perf_counter()
+                await self._load_schema_and_data()
+                logger.info(
+                    f"[PERF] TableViewerTab: _load_schema_and_data() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+            self._tables_loaded = True  # Mark as loaded
             self.update()
+            logger.info(
+                f"[PERF] <<< TableViewerTab.did_mount_async END, TOTAL={(_time.perf_counter() - _t_start) * 1000:.1f}ms")
         except Exception as e:
             logger.error(f"Error loading tables: {e}")
             if self.page:
@@ -217,7 +290,18 @@ class TableViewerTab(ft.Container):
         await self._load_schema_and_data()
 
     async def _toggle_loading(self, loading: bool):
+        """Toggle between loading widget and table content"""
         self.progress_bar.visible = loading
+
+        # Swap content: loading widget vs scrollable table
+        if loading:
+            # Update loading text with current locale (dynamic i18n)
+            self._loading_text.value = I18n.get("data_loading")
+            self._loading_hint.value = I18n.get("data_loading_hint")
+            self._grid_content.content = self._loading_widget
+        else:
+            self._grid_content.content = self._table_scroll_wrapper
+
         self.btn_query.disabled = loading
         self.btn_refresh.disabled = loading
         self.btn_prev.disabled = loading or self.current_page <= 1
@@ -226,6 +310,12 @@ class TableViewerTab(ft.Container):
         self.update()
 
     async def _load_schema_and_data(self):
+        # Prevent concurrent loading (race condition guard)
+        if self._is_loading:
+            logger.debug("[TableViewerTab] Skipped load - already loading")
+            return
+        self._is_loading = True
+
         await self._toggle_loading(True)
         try:
 
@@ -294,6 +384,7 @@ class TableViewerTab(ft.Container):
                 self.page.show_toast(f"Error loading schema: {e}", "error")
         finally:
             await self._toggle_loading(False)
+            self._is_loading = False  # Release loading lock
 
     async def _refresh_data_rows(self):
         """Fetch count and data rows based on current state"""
@@ -627,6 +718,7 @@ class DataExplorerView(ft.Container):
 
         self.table_tab = TableViewerTab(self.db_manager)
         self.sql_tab = SQLConsoleTab(self.db_manager)
+        self._pubsub_subscribed = False  # Prevent duplicate pubsub subscriptions
 
         self.tabs = ft.Tabs(
             selected_index=0,
@@ -651,12 +743,26 @@ class DataExplorerView(ft.Container):
     def did_mount(self):
         """
         Trigger async initialization.
-        Since did_mount is sync, we schedule the async init on the existing loop.
+        Uses Flet's page.run_task() to properly schedule async work from sync lifecycle hooks.
         """
-        # This is a critical bridge: Calling async logic from sync lifecycle hook
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self.table_tab.did_mount_async())
-        except RuntimeError:
-            # Fallback if no loop (should not happen in Flet app)
-            logger.warning("No running event loop found in DataExplorerView.did_mount")
+        import time as _time
+        _t0 = _time.perf_counter()
+        logger.info("[PERF] >>> DataExplorerView.did_mount START")
+        
+        # Subscribe to broadcast messages (only once)
+        if self.page and not self._pubsub_subscribed:
+            self.page.pubsub.subscribe(self._on_broadcast_message)
+            self._pubsub_subscribed = True
+        
+        # Use Flet's recommended approach for scheduling async tasks from sync callbacks
+        if self.page:
+            self.page.run_task(self.table_tab.did_mount_async)
+        logger.info(
+            f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+    def _on_broadcast_message(self, message):
+        """Handle broadcast messages like cache_cleared"""
+        if message == "cache_cleared":
+            # Reset tables_loaded flag to force reload on next mount
+            self.table_tab._tables_loaded = False
+            logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")

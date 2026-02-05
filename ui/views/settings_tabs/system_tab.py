@@ -103,7 +103,17 @@ class SystemTab(ft.Container):
             border_radius=8
         )
 
-        # Layout Construction
+        # No-Proxy Domains
+        domains_list = ConfigHandler.get_no_proxy_domains()
+        self.no_proxy_input = ft.TextField(
+            value=",".join(domains_list),
+            expand=True,
+            text_size=14,
+            content_padding=10,
+            hint_text="example.com, .cn, localhost",
+            border_radius=8,
+            multiline=False
+        )
         self.content = ft.ListView(
             controls=[
                 DashboardCard(
@@ -200,7 +210,26 @@ class SystemTab(ft.Container):
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        # 6. Data Maintenance (System Init)
+                        # 6. No-Proxy Domains
+                        self._build_setting_row(
+                            icon=ft.Icons.PUBLIC_OFF_ROUNDED,
+                            icon_color=ft.Colors.TEAL,
+                            title=I18n.get("settings_no_proxy_domains"),
+                            subtitle="Domains to bypass proxy (Direct Connection)",
+                            control=ft.Row([
+                                self.no_proxy_input,
+                                ft.IconButton(
+                                    icon=ft.Icons.SAVE_ROUNDED,
+                                    icon_color=AppColors.PRIMARY,
+                                    tooltip=I18n.get("common_save"),
+                                    on_click=self.save_no_proxy_domains
+                                )
+                            ], spacing=5, expand=True) # expand=True for input to take space
+                        ),
+
+                        ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
+
+                        # 7. Data Maintenance (System Init)
                         ft.Row([
                             ft.Container(
                                 content=ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, color=AppColors.ERROR, size=24),
@@ -455,6 +484,34 @@ class SystemTab(ft.Container):
             logger.info(f"Tushare API rate limit updated to {limit}")
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+
+    def save_no_proxy_domains(self, e):
+        try:
+            raw_text = self.no_proxy_input.value
+            if not raw_text:
+                domains = []
+            else:
+                # Split by comma, strip whitespace, remove empty
+                domains = [d.strip() for d in raw_text.split(',') if d.strip()]
+
+            ConfigHandler.set_no_proxy_domains(domains)
+            # Use generic "Saved" message or construct one
+            self.show_snack("No-Proxy settings saved!", color=AppColors.SUCCESS)
+            
+            # Trigger ProxyManager reload
+            # For now just save.
+            logger.info(f"No-Proxy domains updated: {domains}")
+            
+            # Update ProxyManager runtime? 
+            # We can try to re-apply if possible, but restart is safer.
+            from utils.proxy_manager import ProxyManager
+            from utils.thread_pool import ThreadPoolManager, TaskType
+            
+            # Use standardized ThreadPoolManager instead of ad-hoc asyncio.to_thread
+            ThreadPoolManager().submit(TaskType.IO, ProxyManager.apply_smart_proxy_policy)
+
+        except Exception as ex:
+            self.show_snack(f"Save failed: {ex}", color=AppColors.ERROR)
 
     def on_health_check_click(self, e):
         """Run standalone health check reusing the core logic"""
