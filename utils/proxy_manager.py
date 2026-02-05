@@ -1,11 +1,7 @@
 import logging
 import os
-from concurrent.futures import as_completed
-
-import requests
 
 from utils.config_handler import ConfigHandler
-from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -19,19 +15,18 @@ class ProxyManager:
     @staticmethod
     def apply_smart_proxy_policy():
         """
-        Auto-optimizes network settings at startup.
+        Applies network proxy settings at startup.
         Strategy:
-        1. Identify system proxy settings.
+        1. Identify system proxy settings (inherited from ENV).
         2. Load whitelist from Config (user_settings.json).
-        3. For each critical domestic domain, TEST direct connectivity.
-        4. If Direct works -> Add to NO_PROXY (Performance + Stability).
-        5. If Direct fails -> Do nothing (Allow System Proxy to handle it).
+        3. Merge Config whitelist with existing NO_PROXY.
+        4. Apply updated NO_PROXY to environment.
         """
-        logger.info("[ProxyManager] Starting network optimization...")
+        logger.info("[ProxyManager] Applying proxy configuration...")
 
         # Current Proxy State
         # Note: Even if no ENV proxy is set, Windows might have system proxy (WinINET).
-        # We should ALWAYS test direct connectivity and allow whitelisting to override potential system proxies.
+        # We append user configured domains to NO_PROXY to ensure they bypass any potential proxy.
 
         # Prepare list of domains to whitelist
         # We start with existing NO_PROXY
@@ -43,62 +38,17 @@ class ProxyManager:
             [d.strip() for d in current_no_proxy.split(",") if d.strip()]) if current_no_proxy else set()
 
         # Load User Configured Domains ONLY
-        # Changed to get_no_proxy_domains (was get_proxy_domains)
         target_domains = ConfigHandler.get_no_proxy_domains()
 
-        # Safety Filter: Ensure all items are strings (e.g. if user put int in json)
-        # Also strip them here to be safe
+        # Safety Filter: Ensure all items are strings
         target_domains = list(set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]))
 
         if not target_domains:
-            logger.info("[ProxyManager] No no-proxy domains configured. Skipping optimization.")
-            return
-
-        logger.info(f"[ProxyManager] Testing connectivity for {len(target_domains)} domains from config...")
-
-        # Test Function
-        def check_direct_access(domain):
-            # Candidates to test: original domain, and maybe www if it's missing
-            candidates = [domain]
-            if not domain.startswith("www."):
-                candidates.append(f"www.{domain}")
-
-            session = requests.Session()
-            session.trust_env = False  # Ignore env proxies
-
-            for candidate in candidates:
-                for scheme in ["https", "http"]:
-                    url = f"{scheme}://{candidate}"
-                    try:
-                        resp = session.head(url, timeout=3)
-                        if resp.status_code < 500:
-                            return True
-                    except Exception:
-                        continue
-            return False
-
-        # Use ThreadPool to check fast
-        logger.info(f"[ProxyManager] Testing direct connectivity for {len(target_domains)} no-proxy domains...")
-
-        manager = ThreadPoolManager()
-        futures_map = {}
-
-        # Submit tasks to IO pool
-        for d in target_domains:
-            future = manager.submit(TaskType.IO, check_direct_access, d)
-            futures_map[future] = d
-
-        for future in as_completed(futures_map):
-            domain = futures_map[future]
-            try:
-                is_direct_ok = future.result()
-                if is_direct_ok:
-                    final_domains.add(domain)
-                    logger.info(f"[ProxyManager] Domain {domain} - Direct Access OK -> Whitelisted.")
-                else:
-                    logger.warning(f"[ProxyManager] Domain {domain} - Direct Access FAILED -> Will use Proxy.")
-            except Exception as e:
-                logger.error(f"[ProxyManager] Error checking {domain}: {e}")
+            logger.info("[ProxyManager] No cache/whitelist domains configured.")
+        else:
+            logger.info(
+                f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist.")
+            final_domains.update(target_domains)
 
         # Apply updates
         if final_domains:
@@ -108,33 +58,6 @@ class ProxyManager:
 
             os.environ["NO_PROXY"] = new_no_proxy
             os.environ["no_proxy"] = new_no_proxy
-            logger.info(f"[ProxyManager] Optimization complete. NO_PROXY={new_no_proxy}")
+            logger.info(f"[ProxyManager] Configuration applied. NO_PROXY={new_no_proxy}")
         else:
-            logger.info("[ProxyManager] Optimization complete. No changes.")
-
-    @staticmethod
-    def verify_connectivity():
-        """
-        Diagnose network status for global and domestic access.
-        Returns dict with status.
-        """
-        results = {"domestic": False, "global": False,
-                   "proxy_used": bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"))}
-
-        # Test Domestic (EastMoney)
-        try:
-            requests.get("https://www.eastmoney.com", timeout=5)
-            results["domestic"] = True
-        except Exception as e:
-            logger.warning(f"Domestic connectivity check failed: {e}")
-
-        # Test Global (Google/Github) - Optional, might fail in China
-        # We can check if Proxy is working
-        if results["proxy_used"]:
-            try:
-                requests.get("https://www.google.com", timeout=5)
-                results["global"] = True
-            except:
-                pass
-
-        return results
+            logger.info("[ProxyManager] Configuration applied. No changes.")
