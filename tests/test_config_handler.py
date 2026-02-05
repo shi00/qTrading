@@ -1,14 +1,22 @@
 import unittest
 import os
+import sys
 import json
 import tempfile
 from unittest.mock import patch, mock_open
+
+# Add project root to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from utils.config_handler import ConfigHandler
 import config
 
 class TestConfigHandler(unittest.TestCase):
     
     def setUp(self):
+        # Reset cache
+        ConfigHandler._config_cache = None
+        
         # Create a temporary file for config
         self.test_dir = tempfile.TemporaryDirectory()
         self.config_file = os.path.join(self.test_dir.name, "user_settings.json")

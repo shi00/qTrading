@@ -202,7 +202,8 @@ class ConfigHandler:
     @staticmethod
     def get_sync_concurrency():
         config = ConfigHandler.load_config()
-        return config.get("sync_concurrency", 2)
+        # Default changed from 6 to 3 for stability
+        return config.get("sync_concurrency", 3)
 
     @staticmethod
     def set_sync_concurrency(concurrency):
@@ -227,19 +228,25 @@ class ConfigHandler:
         return ConfigHandler.save_config({"sync_retry_count": int(count)})
 
     @staticmethod
-    def get_proxy_domains():
+    def get_no_proxy_domains():
+        """
+        Get domains that should BYPASS proxy (NO_PROXY).
+        """
         config = ConfigHandler.load_config()
-        val = config.get("proxy_domains", [])
+        val = config.get("no_proxy_domains", [])
         if isinstance(val, list):
             return val
         return []
 
+    # Alias for backward compatibility if needed, but we refactored callers
+    get_proxy_domains = get_no_proxy_domains
+
     @staticmethod
-    def set_proxy_domains(domains):
+    def set_no_proxy_domains(domains):
         if not isinstance(domains, list) or not all(isinstance(x, str) for x in domains):
-            logger.error("Invalid proxy domains format: must be list of strings")
+            logger.error("Invalid no-proxy domains format: must be list of strings")
             return False
-        return ConfigHandler.save_config({"proxy_domains": domains})
+        return ConfigHandler.save_config({"no_proxy_domains": domains})
 
     @staticmethod
     def get_config(key, default=None):
