@@ -38,12 +38,19 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
-    async def run(self, days: int = 365, progress_callback=None, **kwargs) -> SyncResult:
+    async def run(self, days: int = 365, progress_callback=None, cancel_event=None, **kwargs) -> SyncResult:
         """
         Main entry point for historical sync.
         """
         self._shutdown_event.clear()
         result = SyncResult()
+        
+        # Link external cancel event to internal shutdown
+        if cancel_event:
+            async def monitor_cancel():
+                await cancel_event.wait()
+                await self.cancel()
+            asyncio.create_task(monitor_cancel())
         
         try:
             await self._run_historical_sync(days, progress_callback, result)

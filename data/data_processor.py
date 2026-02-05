@@ -104,7 +104,7 @@ class DataProcessor:
     @log_async_operation(operation_name="sync_historical")
     async def sync_historical_data(self, days=365, progress_callback=None, cancel_event=None):
         """Delegated to HistoricalSyncStrategy"""
-        result = await self.strategies['historical'].run(days=days, progress_callback=progress_callback)
+        result = await self.strategies['historical'].run(days=days, progress_callback=progress_callback, cancel_event=cancel_event)
         return result
 
     @log_async_operation(operation_name="sync_financial")
@@ -116,7 +116,7 @@ class DataProcessor:
     async def sync_comprehensive_fundamentals(self, progress_callback=None, force=False, cancel_event=None):
         """Delegated to FinancialSyncStrategy (Full Sync Mode)"""
         # force=True usually implies full sync in strategy
-        result = await self.strategies['financial'].run(force=force, progress_callback=progress_callback)
+        result = await self.strategies['financial'].run(force=force, progress_callback=progress_callback, cancel_event=cancel_event)
         return result.added
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):
@@ -422,10 +422,12 @@ class DataProcessor:
         await self.sync_stock_basic()
         
         # Step 2: History
-        await self.sync_historical_data(days=365*3, progress_callback=None) # Simplified
+        if cancel_event and cancel_event.is_set(): return
+        await self.sync_historical_data(days=365*3, progress_callback=None, cancel_event=cancel_event) # Simplified
         
         # Step 3: Financials
-        await self.sync_comprehensive_fundamentals(progress_callback=None)
+        if cancel_event and cancel_event.is_set(): return
+        await self.sync_comprehensive_fundamentals(progress_callback=None, cancel_event=cancel_event)
         
         return await self.check_data_health()
 

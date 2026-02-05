@@ -40,7 +40,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
-    async def run(self, periods: List[str] = None, force: bool = False, progress_callback=None, **kwargs) -> SyncResult:
+    async def run(self, periods: List[str] = None, force: bool = False, progress_callback=None, cancel_event=None, **kwargs) -> SyncResult:
         """
         Main entry point. Decides between Full vs Incremental sync.
         """
@@ -62,7 +62,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     logger.info("[sync_financial] STRATEGY: Full Sync (first run)")
 
             if should_full_sync:
-                await self._run_full_sync(periods, progress_callback, force=force, result_accumulator=result)
+                await self._run_full_sync(periods, progress_callback, force=force, result_accumulator=result, cancel_event=cancel_event)
             else:
                 await self._run_incremental_sync(progress_callback, result_accumulator=result)
                 
@@ -89,8 +89,16 @@ class FinancialSyncStrategy(ISyncStrategy):
         We will stick to the robust 'sync_comprehensive_fundamentals' logic.
         """
         if self._shutdown_event.is_set(): return
+        if cancel_event and cancel_event.is_set(): return
 
         logger.info(f"[FinancialSyncStrategy] Starting Comprehensive Fundamentals Sync (force={force})...")
+        
+        # Link external cancel event to internal shutdown
+        if cancel_event:
+             async def monitor_cancel():
+                 await cancel_event.wait()
+                 await self.cancel()
+             asyncio.create_task(monitor_cancel())
 
         # Force Logic: Reset sync status for resume
         if force:
