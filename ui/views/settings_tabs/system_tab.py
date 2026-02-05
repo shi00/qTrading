@@ -215,7 +215,7 @@ class SystemTab(ft.Container):
                             icon=ft.Icons.PUBLIC_OFF_ROUNDED,
                             icon_color=ft.Colors.TEAL,
                             title=I18n.get("settings_no_proxy_domains"),
-                            subtitle="Domains to bypass proxy (Direct Connection)",
+                            subtitle=I18n.get("settings_no_proxy_desc"),
                             control=ft.Row([
                                 self.no_proxy_input,
                                 ft.IconButton(
@@ -496,7 +496,7 @@ class SystemTab(ft.Container):
 
             ConfigHandler.set_no_proxy_domains(domains)
             # Use generic "Saved" message or construct one
-            self.show_snack("No-Proxy settings saved!", color=AppColors.SUCCESS)
+            self.show_snack(I18n.get("settings_snack_no_proxy_saved"), color=AppColors.SUCCESS)
             
             # Trigger ProxyManager reload
             # For now just save.
