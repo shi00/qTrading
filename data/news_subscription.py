@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from utils.config_handler import ConfigHandler
 from data.cache_manager import CacheManager
-from data.ai_client import AIClient
+from services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class NewsSubscriptionService:
             return
             
         self.cache = CacheManager()
-        self.ai_client = AIClient()
+        self.ai_client = AIService()
         self._running = False
         self._task = None
         self._last_news_time = None

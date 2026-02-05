@@ -4,7 +4,7 @@ import asyncio
 import logging
 import json
 from data.news_fetcher import NewsFetcher
-from data.ai_client import AIClient
+from services.ai_service import AIService
 from utils.technical_analysis import TechnicalAnalysis
 from utils.config_handler import ConfigHandler
 
@@ -15,7 +15,7 @@ class AISelectionStrategy(BaseStrategy):
         # Description clearly states it uses 30 candidates
         # Description clearly states it uses Top N candidates
         super().__init__("strategy_ai_active_name", "strategy_ai_active_desc")
-        self.ai_client = AIClient()
+        self.ai_client = AIService()
         self.limit = ConfigHandler.get_ai_max_candidates()
         
     async def filter(self, context):
