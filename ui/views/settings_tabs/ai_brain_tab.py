@@ -8,7 +8,7 @@ import logging
 
 import flet as ft
 
-from data.ai_client import AIClient
+from services.ai_service import AIService
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
@@ -402,8 +402,8 @@ class AIBrainTab(ft.Container):
             self._update_connection_status("settings_status_verifying", AppColors.WARNING, ft.Icons.HOURGLASS_EMPTY)
             self._safe_update()
             
-            client = AIClient()
-            await client.reload_config()
+            self.ai_client = AIService()
+            await self.ai_client.reload_config()
             
             if not ai_key:
                 self._update_connection_status("settings_status_no_key", AppColors.TEXT_HINT, ft.Icons.CIRCLE)
@@ -442,7 +442,7 @@ class AIBrainTab(ft.Container):
         self._safe_update()
         
         try:
-            success = await AIClient.test_connection(api_key, base_url, model)
+            success = await AIService.test_connection(api_key, base_url, model)
             if success:
                 self.show_snack(I18n.get("ai_snack_conn_ok"), color=AppColors.SUCCESS)
                 self._update_connection_status("ai_status_connected", AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE)

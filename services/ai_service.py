@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 
 import httpx
 from openai import AsyncOpenAI
@@ -13,16 +14,20 @@ from utils.log_decorators import log_async_operation
 logger = logging.getLogger(__name__)
 
 
-class AIClient:
+class AIService:
     """
-    Generic AI Client for OpenAI-compatible APIs (DeepSeek, Moonshot, etc.)
+    AI Service for OpenAI-compatible APIs (DeepSeek, Moonshot, etc.)
+    Handles prompt engineering, dialogue management, and API interaction.
     """
     _instance = None
+    _lock = threading.Lock()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
 
     def __init__(self):

@@ -1,6 +1,6 @@
 import flet as ft
 from utils.config_handler import ConfigHandler
-from data.ai_client import AIClient
+from services.ai_service import AIService
 from ui.i18n import I18n
 import logging
 
@@ -97,7 +97,7 @@ class AISettingsDialog(ft.AlertDialog):
         self.config.save_ai_system_prompt(self.prompt_field.value)
         
         # Reload AI Client
-        await AIClient().reload_config()
+        await AIService().reload_config()
         
         # Show success
         self.page_ref.snack_bar = ft.SnackBar(ft.Text(I18n.get("ai_settings_saved")))

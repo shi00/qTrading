@@ -610,10 +610,8 @@ class OnboardingWizard(ft.Container):
         self.update()
 
         try:
-            from data.ai_client import AIClient
-            client = AIClient()
-            await client.reload_config()
-            success = await client.verify_connection()
+            from services.ai_service import AIService
+            success = await AIService.test_connection(api_key, base_url, model)
 
             if success:
                 self.ai_status.value = I18n.get("wizard_ai_success")

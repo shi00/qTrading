@@ -408,3 +408,16 @@ class ConfigHandler:
     @staticmethod
     def set_max_cpu_workers(count):
         return ConfigHandler.save_config({"max_cpu_workers": int(count)})
+
+    # === Sync Rate Limiting ===
+    @staticmethod
+    def get_sync_request_delay(is_heavy=False):
+        config = ConfigHandler.load_config()
+        if is_heavy:
+            return config.get("sync_request_delay_heavy", 0.4)
+        return config.get("sync_request_delay_light", 0.1)
+
+    @staticmethod
+    def set_sync_request_delay(delay, is_heavy=False):
+        key = "sync_request_delay_heavy" if is_heavy else "sync_request_delay_light"
+        return ConfigHandler.save_config({key: float(delay)})
