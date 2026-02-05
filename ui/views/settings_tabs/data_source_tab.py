@@ -395,8 +395,8 @@ class DataSourceTab(ft.Container):
         if self.is_syncing: return
         self._set_sync_busy(True, self.action_clear_cache)
         try:
-            # init_db is handled inside clear_all_cache / schema reset, valid check not needed here as we are nuking it.
-            await self._cache.clear_all_cache()
+            # init_db is handled inside hard_reset.
+            await self._cache.hard_reset()
             self.show_snack(I18n.get("ds_cache_cleared"))
             self.page.pubsub.send_all("cache_cleared")
         except Exception as ex:

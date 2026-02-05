@@ -487,6 +487,46 @@ class CacheManager:
             # Exit Maintenance Mode (Unblock readers)
             self._maintenance_event.set()
 
+    async def hard_reset(self):
+        """
+        Destructive Reset: Stop writer, Close DB, Delete File, Restart.
+        Faster and more reliable than DROP TABLE when reads are blocking.
+        """
+        logger.info("[CacheManager] Performing Hard Reset (Deleting DB Files)...")
+        
+        # 1. Stop Writer & Close Connection
+        await self.close()
+        
+        # 2. Delete Files
+        try:
+            if os.path.exists(self.db_path):
+                os.remove(self.db_path)
+            
+            # WAL files
+            if os.path.exists(self.db_path + "-shm"):
+                os.remove(self.db_path + "-shm")
+            if os.path.exists(self.db_path + "-wal"):
+                os.remove(self.db_path + "-wal")
+                
+            logger.info("[CacheManager] DB files deleted.")
+        except Exception as e:
+            logger.error(f"[CacheManager] Failed to delete DB files: {e}")
+            # Try fallback to clear_all_cache logic? No, just re-init what we have.
+            
+        # 3. Restart (Re-init)
+        # Reset state flags just in case
+        self._schema_initialized = False
+        await self.start()
+        
+        # 4. Trigger Schema Init explicitly
+        # Start calls _db_writer_loop -> which handles queue.
+        # We need to queue the init schema task.
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        await self._enqueue((self._execute_schema_internal, [future], 'FUNC'), PRIORITY_CRITICAL)
+        await future
+        logger.info("[CacheManager] Hard Reset Complete.")
+
     # ========== Review System ==========
     async def get_pending_reviews(self):
         """Get predictions that need T+1 review (no result yet)"""
