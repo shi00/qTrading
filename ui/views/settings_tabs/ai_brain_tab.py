@@ -228,7 +228,7 @@ class AIBrainTab(ft.Container):
             self.card_prompt,
             ft.Container(
                 content=ft.Row([self.btn_save_ai], alignment=ft.MainAxisAlignment.END), 
-                padding=ft.padding.only(top=10, bottom=30)
+                padding=ft.padding.only(top=10, bottom=30, right=20)
             )
         ], spacing=15, padding=ft.padding.only(bottom=50))
 
