@@ -297,9 +297,9 @@ class HomeView(ft.Container):
             )
 
         # HSGT
-        hsgt = data.get('hsgt', {})
-        hsgt_val = hsgt.get('value', '--')
-        hsgt_sub = hsgt.get('sub', '--')
+        hsgt = data.get('hsgt') or {}
+        hsgt_val = hsgt.get('value', '--') or '--'
+        hsgt_sub = hsgt.get('sub', '--') or '--'
         is_inflow = I18n.get("home_inflow") in hsgt_sub
         hsgt_color = ft.Colors.RED if is_inflow else ft.Colors.GREEN if 'out' in hsgt_sub or '流出' in hsgt_sub else ft.Colors.GREY
 
