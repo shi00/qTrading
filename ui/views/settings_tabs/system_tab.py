@@ -25,16 +25,15 @@ class SystemTab(ft.Container):
         # --- Controls ---
 
         # Concurrency
-        self.concurrency_text = ft.Text(
-            f"{sync_concurrency}",
-            size=16,
-            weight=ft.FontWeight.BOLD,
-            color=AppColors.PRIMARY
-        )
-        self.concurrency_slider = ft.Slider(
-            min=1, max=10, divisions=9, value=sync_concurrency,
-            label="{value}", on_change=self.on_concurrency_change,
-            active_color=AppColors.PRIMARY
+        self.concurrency_input = ft.TextField(
+            value=str(sync_concurrency),
+            width=100,
+            text_size=14,
+            content_padding=10,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
+            suffix_text=I18n.get("sys_suffix_threads"),
+            border_radius=8
         )
 
         # Log Level
@@ -138,16 +137,15 @@ class SystemTab(ft.Container):
                             icon_color=AppColors.ACCENT,
                             title=I18n.get("sys_concurrency"),
                             subtitle=I18n.get("sys_concurrency_hint"),
-                            control=ft.Container(
-                                content=self.concurrency_text,
-                                padding=ft.padding.symmetric(horizontal=12, vertical=6),
-                                border=ft.border.all(1, AppColors.BORDER),
-                                border_radius=8
-                            )
-                        ),
-                        ft.Container(
-                            content=self.concurrency_slider,
-                            padding=ft.padding.only(left=54)  # Indent to align with text
+                            control=ft.Row([
+                                self.concurrency_input,
+                                ft.IconButton(
+                                    icon=ft.Icons.SAVE_ROUNDED,
+                                    icon_color=AppColors.PRIMARY,
+                                    tooltip=I18n.get("settings_save_config"),
+                                    on_click=self.save_concurrency
+                                )
+                            ], spacing=5)
                         ),
 
                         ft.Container(height=10),
@@ -381,12 +379,23 @@ class SystemTab(ft.Container):
             logger.error(f"Initialization failed: {e}")
             self.show_snack(I18n.get("sys_init_failed").format(error=str(e)), color=AppColors.ERROR)
 
-    def on_concurrency_change(self, e):
-        val = int(self.concurrency_slider.value)
-        self.concurrency_text.value = f"{val}"
-        ConfigHandler.set_sync_concurrency(val)
-        self.show_snack(I18n.get("settings_snack_concurrency_set").format(val=val))
-        self.update()
+    def save_concurrency(self, e):
+        try:
+            val_str = self.concurrency_input.value.strip()
+            if not val_str:
+                self.show_snack(I18n.get("sys_snack_threads_empty"), color=AppColors.ERROR)
+                return
+
+            val = int(val_str)
+            if val < 1 or val > 32: # Expanded range a bit, but kept reasonable
+                self.show_snack(I18n.get("ai_snack_invalid_range").format(field=I18n.get("sys_concurrency"), min=1, max=32), color=AppColors.ERROR)
+                return
+
+            ConfigHandler.set_sync_concurrency(val)
+            self.show_snack(I18n.get("settings_snack_concurrency_set").format(val=val))
+            logger.info(f"Sync concurrency updated to {val}")
+        except ValueError:
+            self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
     def on_log_level_change(self, e):
         level = e.control.value
