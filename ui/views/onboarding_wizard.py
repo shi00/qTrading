@@ -484,10 +484,6 @@ class OnboardingWizard(ft.Container):
         self.sync_progress.value = None  # Indeterminate
         self.update()
 
-        # Initialize cancel event
-        self.cancel_event = asyncio.Event()
-        self.cancel_event.clear()
-
         try:
             processor = DataProcessor()
             await processor.init_data()
@@ -505,7 +501,7 @@ class OnboardingWizard(ft.Container):
                 self.update()
                 await processor.sync_stock_basic()
 
-                if self.cancel_event.is_set():
+                if processor.is_cancelled():
                     raise asyncio.CancelledError("User cancelled")
 
                 self.sync_status.value = I18n.get("wizard_status_history")
@@ -527,14 +523,13 @@ class OnboardingWizard(ft.Container):
                 # Ensure DB is initialized before sync
                 await processor.init_data()
 
-                # Pass cancel_event to processor
+                # Use unified cancellation via processor
                 await processor.sync_historical_data(
                     days=days,
-                    progress_callback=update_progress,
-                    cancel_event=self.cancel_event
+                    progress_callback=update_progress
                 )
 
-                if self.cancel_event.is_set():
+                if processor.is_cancelled():
                     self.sync_status.value = I18n.get("wizard_msg_sync_cancelled")
                     self.sync_status.color = ft.Colors.RED
                     self.sync_progress.value = 0
@@ -545,7 +540,7 @@ class OnboardingWizard(ft.Container):
 
             self.update()
 
-            if not self.cancel_event.is_set():
+            if not processor.is_cancelled():
                 await asyncio.sleep(1)
                 await self._next_step()
 
@@ -639,9 +634,13 @@ class OnboardingWizard(ft.Container):
     async def _handle_cancel_sync(self, e):
         """Cancel the running sync task"""
         from ui.theme import AppColors
-        if hasattr(self, 'cancel_event'):
-            self.cancel_event.set()
+        from data.data_processor import DataProcessor
+        try:
+            processor = DataProcessor()
+            self.page.run_task(processor.request_cancel)
             self.sync_status.value = I18n.get("common_cancelling")
             self.sync_status.color = AppColors.ERROR
             self.btn_cancel_sync.disabled = True
             self.update()
+        except Exception as e:
+            logger.warning(f"Failed to cancel sync: {e}")

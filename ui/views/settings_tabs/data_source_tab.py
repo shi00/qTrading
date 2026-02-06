@@ -21,7 +21,6 @@ class DataSourceTab(ft.Container):
         self.show_snack = show_snack_callback
         self.expand = True
         self.is_syncing = False
-        self.cancel_event = None
 
         # Singleton instances (avoid redundant instantiation)
         self._processor = DataProcessor()

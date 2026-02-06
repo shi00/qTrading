@@ -310,10 +310,10 @@ class SystemTab(ft.Container):
         pb = ft.ProgressBar(width=400, color=AppColors.PRIMARY, bgcolor=AppColors.SURFACE_VARIANT)
         status_text = ft.Text(I18n.get("common_preparing"), size=12, color=AppColors.TEXT_SECONDARY)
 
-        cancel_event = asyncio.Event()
+        dp = DataProcessor()
 
         def cancel_click(e):
-            cancel_event.set()
+            self.page.run_task(dp.request_cancel)
             status_text.value = I18n.get("sys_init_cancel_wait")
             status_text.color = AppColors.ERROR
             status_text.update()
@@ -337,8 +337,6 @@ class SystemTab(ft.Container):
         self.page.open(dlg_progress)
 
         try:
-            dp = DataProcessor()
-
             import time
             last_update_time = 0
 
@@ -365,14 +363,17 @@ class SystemTab(ft.Container):
                     # Ignore UI update errors if dialog is closed or loop is busy
                     pass
 
-            report = await dp.initialize_system(progress_callback=progress_cb, cancel_event=cancel_event)
+            report = await dp.initialize_system(progress_callback=progress_cb)
 
             self.page.close(dlg_progress)
-            self.show_snack(I18n.get("sys_init_success"), color=AppColors.SUCCESS)
-
-            # Auto-Show Health Report if available
-            if isinstance(report, dict):
-                self._show_health_report(report)
+            
+            if dp.is_cancelled():
+                self.show_snack(I18n.get("settings_msg_sync_cancelled"), color=AppColors.WARNING)
+            else:
+                self.show_snack(I18n.get("sys_init_success"), color=AppColors.SUCCESS)
+                # Auto-Show Health Report if available
+                if isinstance(report, dict):
+                    self._show_health_report(report)
 
         except Exception as e:
             self.page.close(dlg_progress)

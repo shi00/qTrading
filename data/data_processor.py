@@ -135,7 +135,7 @@ class DataProcessor:
         return result
 
     @log_async_operation(operation_name="sync_financial")
-    async def sync_financial_reports(self, periods=None, progress_callback=None, force=False, cancel_event=None):
+    async def sync_financial_reports(self, periods=None, progress_callback=None, force=False):
         """Delegated to FinancialSyncStrategy"""
         result = await self.strategies['financial'].run(periods=periods, force=force, progress_callback=progress_callback)
         return result.added
@@ -153,7 +153,7 @@ class DataProcessor:
         """Delegated to FinancialSyncStrategy"""
         return await self.strategies['financial'].repair_financial_data(ts_codes, progress_callback)
         
-    async def sync_daily_market_snapshot(self, trade_date=None, force=False, cancel_event=None):
+    async def sync_daily_market_snapshot(self, trade_date=None, force=False):
         """Delegated to HistoricalSyncStrategy"""
         if trade_date is None:
             trade_date = await self.get_latest_trade_date()
