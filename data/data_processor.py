@@ -223,6 +223,8 @@ class DataProcessor:
         await self.cache.init_db()
 
         try:
+            from ui.i18n import I18n
+            
             end_date = await self.get_latest_trade_date()
             start_date = (datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
             official_dates = await self.get_trade_dates(start_date, end_date)
@@ -234,11 +236,11 @@ class DataProcessor:
             
             # 1. Market Health
             official_set = set(official_dates)
-            last_local = sorted(list(local_dates))[-1] if local_dates else 'None'
+            last_local = sorted(list(local_dates))[-1] if local_dates else None
             
             lag_days = 0
             if official_dates[-1] not in local_dates:
-                if local_dates:
+                if local_dates and last_local:
                     lag_days = len([d for d in official_dates if d > last_local])
                 else:
                     lag_days = len(official_dates)
@@ -252,19 +254,21 @@ class DataProcessor:
 
             if lag_days > 0:
                 status = 'yellow'
-                reasons.append(f"行情滞后 {lag_days} 天")
+                reasons.append(I18n.get('health_market_lag').format(days=lag_days))
             if lag_days > 3:
                 status = 'red'
 
             fin_fresh_ratio = deep_health['tables'].get('financial_reports', {}).get('fresh_ratio', 0)
             if fin_fresh_ratio < 0.90:
                 status = 'red'
-                reasons.append(f"财报缺失 (覆盖率 {fin_fresh_ratio:.0%})")
+                reasons.append(I18n.get('health_financial_missing').format(ratio=f"{fin_fresh_ratio:.0%}"))
+            
+            logger.info(f"[check_data_health] Status: {status}, lag_days: {lag_days}, fin_ratio: {fin_fresh_ratio:.1%}")
             
             return {
                 'status': status,
                 'reasons': reasons,
-                'market': {'lag_days': lag_days, 'latest_local': last_local},
+                'market': {'lag_days': lag_days, 'latest_local': last_local or 'N/A'},
                 'fundamentals': deep_health,
                 'financial_coverage': f"{fin_fresh_ratio:.1%}"
             }

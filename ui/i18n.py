@@ -366,6 +366,8 @@ class I18n:
             "init_step_4": "步骤 4/5: 同步财务数据",
             "init_step_5": "步骤 5/5: 数据健康检查",
             "init_step_complete": "✅ 初始化完成",
+            "health_market_lag": "行情滞后 {days} 天",
+            "health_financial_missing": "财报缺失 (覆盖率 {ratio})",
 
             "wizard_schedule_label": "启用每日自动更新 (16:30)",
             "wizard_step4_title": "步骤 4: 设置自动更新",
@@ -925,6 +927,8 @@ class I18n:
             "init_step_4": "Step 4/5: Syncing Financials",
             "init_step_5": "Step 5/5: Health Check",
             "init_step_complete": "✅ Initialization Complete",
+            "health_market_lag": "Market data {days} days behind",
+            "health_financial_missing": "Financial data missing (coverage {ratio})",
 
             "wizard_schedule_label": "Enable Auto-Update (16:30)",
             "wizard_step4_title": "Step 4: Auto-Update",
