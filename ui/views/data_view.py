@@ -827,10 +827,19 @@ class DataExplorerView(ft.Container):
             
         logger.debug(f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
+    def _on_tab_changed(self, e):
+        """Handle tab switching"""
+        if not self._ui_built: return
+        
+        # Trigger async mount for logic if needed
+        # We can use the page task to run async methods
+        if self.tabs.selected_index == 0:
+            self.page.run_task(self.table_tab.did_mount_async)
+            
     def _on_broadcast_message(self, message):
         """Handle broadcast messages like cache_cleared"""
         if message == "cache_cleared":
             # Reset tables_loaded flag to force reload on next mount
-            if self._is_initialized:
+            if self._ui_built:
                 self.table_tab._tables_loaded = False
             logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
