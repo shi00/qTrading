@@ -76,14 +76,14 @@ class SettingsView(ft.Container):
     def _on_mount(self):
         import time as _time
         _t0 = _time.perf_counter()
-        logger.info("[PERF] >>> SettingsView._on_mount START")
+        logger.debug("[PERF] >>> SettingsView._on_mount START")
         I18n.subscribe(self.refresh_locale)
-        logger.info(f"[PERF] <<< SettingsView._on_mount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] <<< SettingsView._on_mount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def _on_unmount(self):
         import time as _time
         _t0 = _time.perf_counter()
-        logger.info("[PERF] >>> SettingsView._on_unmount START")
+        logger.debug("[PERF] >>> SettingsView._on_unmount START")
         
         I18n.unsubscribe(self.refresh_locale)
         # Cascade cleanup to child tabs
@@ -94,7 +94,7 @@ class SettingsView(ft.Container):
                 except Exception as e:
                     logger.warning(f"Tab {type(tab).__name__} cleanup error: {e}")
                     
-        logger.info(f"[PERF] <<< SettingsView._on_unmount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] <<< SettingsView._on_unmount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def refresh_locale(self):
         self.header_title.value = I18n.get("settings_title")

@@ -206,26 +206,26 @@ async def main(page: ft.Page):
             await screener_view.select_and_run_strategy(strategy_key)
 
         # --- Views ---
-        logger.info("[PERF] >>> Creating views START")
+        logger.debug("[PERF] >>> Creating views START")
         _t_views_start = _time.perf_counter()
 
         _t0 = _time.perf_counter()
         home_view = HomeView(on_run_strategy=run_strategy_from_home)
-        logger.info(f"[PERF] HomeView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] HomeView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
         _t0 = _time.perf_counter()
         screener_view = ScreenerView()
-        logger.info(f"[PERF] ScreenerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] ScreenerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
         _t0 = _time.perf_counter()
         data_view = DataExplorerView()
-        logger.info(f"[PERF] DataExplorerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] DataExplorerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
         _t0 = _time.perf_counter()
         settings_view = SettingsView()
-        logger.info(f"[PERF] SettingsView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] SettingsView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
-        logger.info(f"[PERF] <<< Creating views END, TOTAL={(_time.perf_counter() - _t_views_start) * 1000:.1f}ms")
+        logger.debug(f"[PERF] <<< Creating views END, TOTAL={(_time.perf_counter() - _t_views_start) * 1000:.1f}ms")
 
         views = [
             home_view,

@@ -196,9 +196,9 @@ class ScreenerView(ft.Container):
         """Subscribe to locale changes when mounted"""
         import time as _time
         _t0 = _time.perf_counter()
-        logger.info("[PERF] >>> ScreenerView._on_mount START")
+        logger.debug("[PERF] >>> ScreenerView._on_mount START")
         I18n.subscribe(self.refresh_locale)
-        logger.info(f"[PERF] <<< ScreenerView._on_mount END took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+        logger.debug(f"[PERF] <<< ScreenerView._on_mount END took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
     def _on_unmount(self):
         """Cleanup when view is detached"""

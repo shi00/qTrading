@@ -54,7 +54,7 @@ class HomeView(ft.Container):
     def did_mount(self):
         import time as _time
         _t0 = _time.perf_counter()
-        logger.info("[PERF] >>> HomeView.did_mount START")
+        logger.debug("[PERF] >>> HomeView.did_mount START")
 
         # Subscribe to broadcast messages (only once)
         if self.page and not self._pubsub_subscribed:
@@ -72,13 +72,13 @@ class HomeView(ft.Container):
             self._start_auto_refresh()
             logger.debug("[HomeView] Skipping re-init - data already loaded")
 
-        logger.info(f"[PERF] <<< HomeView.did_mount END (sync part) took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+        logger.debug(f"[PERF] <<< HomeView.did_mount END (sync part) took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
     async def _init_and_load(self):
         """Initial load with DB init"""
         import time as _time
         _t_start = _time.perf_counter()
-        logger.info("[PERF] >>> HomeView._init_and_load START")
+        logger.debug("[PERF] >>> HomeView._init_and_load START")
         try:
             # Check if still mounted before each long operation
             if not self._is_mounted:
@@ -87,7 +87,7 @@ class HomeView(ft.Container):
 
             _t0 = _time.perf_counter()
             await self.processor.init_data()
-            logger.info(f"[PERF] HomeView: processor.init_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: processor.init_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
             if not self._is_mounted:
                 logger.debug("[HomeView] _init_and_load cancelled after init - view unmounted")
@@ -95,13 +95,13 @@ class HomeView(ft.Container):
 
             _t0 = _time.perf_counter()
             await self._load_data()
-            logger.info(f"[PERF] HomeView: _load_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: _load_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
             if self._is_mounted:
                 self._data_loaded = True  # Mark data as loaded
                 self._start_auto_refresh()
 
-            logger.info(f"[PERF] <<< HomeView._init_and_load END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
+            logger.debug(f"[PERF] <<< HomeView._init_and_load END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
         except asyncio.CancelledError:
             logger.debug("[HomeView] _init_and_load was cancelled")
         except Exception as e:
@@ -175,7 +175,7 @@ class HomeView(ft.Container):
     async def _load_data(self):
         import time as _time
         _t_start = _time.perf_counter()
-        logger.info("[PERF] >>> HomeView._load_data START")
+        logger.debug("[PERF] >>> HomeView._load_data START")
         try:
             # Reset pagination on full refresh
             self.news_page = 0
@@ -183,10 +183,10 @@ class HomeView(ft.Container):
 
             _t0 = _time.perf_counter()
             data = await self.processor.get_market_overview()
-            logger.info(f"[PERF] HomeView: get_market_overview() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: get_market_overview() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
             
             if not data:
-                logger.info("[PERF] <<< HomeView._load_data END (no data)")
+                logger.debug("[PERF] <<< HomeView._load_data END (no data)")
                 return
 
             # Update Cache
@@ -195,24 +195,24 @@ class HomeView(ft.Container):
             # Sync News immediately (Deep Sync Strategy)
             _t0 = _time.perf_counter()
             await self.processor.sync_market_news()
-            logger.info(f"[PERF] HomeView: sync_market_news() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: sync_market_news() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
             # Load News Data
             _t0 = _time.perf_counter()
             await self._load_news_data()
-            logger.info(f"[PERF] HomeView: _load_news_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: _load_news_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
             # Rebuild UI with fresh data
             _t0 = _time.perf_counter()
             self.content = self._build_ui(self.last_data)
-            logger.info(f"[PERF] HomeView: _build_ui() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: _build_ui() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
             
             _t0 = _time.perf_counter()
             if self.page:
                 self.update()
-            logger.info(f"[PERF] HomeView: self.update() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            logger.debug(f"[PERF] HomeView: self.update() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
             
-            logger.info(f"[PERF] <<< HomeView._load_data END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
+            logger.debug(f"[PERF] <<< HomeView._load_data END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
 
         except Exception as e:
             logger.error(f"Error loading home data: {e}")

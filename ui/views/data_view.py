@@ -249,7 +249,7 @@ class TableViewerTab(ft.Container):
             return
         
         _t_start = _time.perf_counter()
-        logger.info("[PERF] >>> TableViewerTab.did_mount_async START")
+        logger.debug("[PERF] >>> TableViewerTab.did_mount_async START")
         # Note: standard did_mount is sync. we call this manually or use create_task in init if possible.
         # But safest is to trigger from a known start point. 
         # In this architecture, we can just launch the task.
@@ -257,7 +257,7 @@ class TableViewerTab(ft.Container):
             # Run db fetch in executor (CPU Pool)
             _t0 = _time.perf_counter()
             tables = await ThreadPoolManager().run_async(TaskType.CPU, self.db_manager.get_all_tables)
-            logger.info(f"[PERF] TableViewerTab: get_all_tables() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+            logger.debug(f"[PERF] TableViewerTab: get_all_tables() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
             # Update UI on main thread
             self.table_selector.options = [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in
@@ -271,14 +271,14 @@ class TableViewerTab(ft.Container):
 
                 _t0 = _time.perf_counter()
                 await self._load_schema_and_data()
-                logger.info(
+                logger.debug(
                     f"[PERF] TableViewerTab: _load_schema_and_data() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
             self._tables_loaded = True  # Mark as loaded
             if self.page:
                 self.update()
             
-            logger.info(
+            logger.debug(
                 f"[PERF] <<< TableViewerTab.did_mount_async END, TOTAL={(_time.perf_counter() - _t_start) * 1000:.1f}ms")
         except Exception as e:
             logger.error(f"Error loading tables: {e}")
@@ -737,74 +737,40 @@ class DataExplorerView(ft.Container):
         """
         Trigger lazy initialization.
         """
+        # This method is called by Flet when the control is added to the page.
+        # We delegate to an async method to handle the actual work.
+        self.page.run_task(self.did_mount_async)
+
+    async def did_mount_async(self):
         import time as _time
         _t0 = _time.perf_counter()
-        logger.info("[PERF] >>> DataExplorerView.did_mount START")
+        logger.debug("[PERF] >>> DataExplorerView.did_mount START")
         
         # Subscribe to broadcast messages (only once)
         if self.page and not self._pubsub_subscribed:
             self.page.pubsub.subscribe(self._on_broadcast_message)
             self._pubsub_subscribed = True
             
-        # Lazy Load UI if not ready
-        if not self._is_initialized:
-             # Schedule build task to allow UI to render the loading state first
-             self.page.run_task(self._lazy_build_ui)
-        else:
-            # If already built (switching back), ensure we trigger async data mount if needed
-            self.page.run_task(self.table_tab.did_mount_async)
+        # Start lazy build if not done
+        if not self._ui_built:
+            await self._lazy_build_ui()
+            self._ui_built = True
+        
+        # Trigger data load for child tabs if needed?
+        # Only if we want to eager load the first tab.
+        # But TableViewerTab handles its own did_mount logic.
+        # Let's verify TableViewerTab is triggered properly.
+        # Since it is a container, did_mount might naturally propagate if it was added.
+        # But we added it in a Tabs control.
+        # We can manually trigger it to be safe.
+        
+        if self.tabs.selected_index == 0:
+             await self.table_tab.did_mount_async()
 
-        logger.info(
+        logger.debug(
             f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     async def _lazy_build_ui(self):
-        """Build the heavy UI components in background task"""
-        import time as _time
-        _t0 = _time.perf_counter()
-        logger.info("[PERF] >>> DataExplorerView._lazy_build_ui START")
-        
-        try:
-            # Check if still mounted after potential delay
-            if not self.page:
-                logger.debug("[DataExplorerView] View unmounted before build, aborting.")
-                return
-
-            # Create complex tabs here
-            self.table_tab = TableViewerTab(self.db_manager)
-            self.sql_tab = SQLConsoleTab(self.db_manager)
-            
-            self.tabs = ft.Tabs(
-                selected_index=0,
-                animation_duration=300,
-                tabs=[
-                    ft.Tab(
-                        text=I18n.get("data_tab_viewer"),
-                        icon=ft.Icons.TABLE_CHART,
-                        content=self.table_tab,
-                    ),
-                    ft.Tab(
-                        text=I18n.get("data_tab_sql"),
-                        icon=ft.Icons.CODE,
-                        content=self.sql_tab,
-                    ),
-                ],
-                expand=True,
-            )
-            
-            # Swap content
-            self.content = self.tabs
-            self._is_initialized = True
-            
-            if self.page:
-                self.update()
-                # Trigger initial data load
-                # Ensure we don't block invalid state
-                await self.table_tab.did_mount_async()
-            
-        except Exception as e:
-            logger.error(f"Error building DataExplorerView: {e}")
-            self.content = ft.Text(f"Error loading view: {e}", color=ft.Colors.RED)
-            if self.page:
                 self.update()
             
         logger.info(f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
