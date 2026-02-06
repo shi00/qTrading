@@ -73,11 +73,34 @@ class ThreadPoolManager:
         )
 
     def reload_config(self):
-        """Reload pools with new configuration. Not thread-safe if tasks are running, use with caution."""
+        """Reload pools with new configuration. Swaps pools first to minimize downtime."""
         logger.info("Reloading Thread Pool Configuration...")
-        self.shutdown(wait=True)  # Wait for current tasks to finish
-        self._init_pools()
-        logger.info("Thread Pools reloaded.")
+        
+        # 1. Create NEW pools first
+        io_workers = ConfigHandler.get_max_io_workers()
+        cpu_workers = ConfigHandler.get_max_cpu_workers()
+
+        new_io_pool = concurrent.futures.ThreadPoolExecutor(max_workers=io_workers, thread_name_prefix="IO_Worker")
+        new_cpu_pool = concurrent.futures.ThreadPoolExecutor(max_workers=cpu_workers, thread_name_prefix="CPU_Worker")
+
+        # 2. Swap references (Atomic in Python GIL)
+        old_io_pool = self._io_pool
+        old_cpu_pool = self._cpu_pool
+        
+        self._io_pool = new_io_pool
+        self._cpu_pool = new_cpu_pool
+        
+        logger.info(f"Thread Pools swapped. New sizes: IO={io_workers}, CPU={cpu_workers}")
+
+        # 3. Graceful shutdown of old pools in background thread to avoid blocking reload
+        def shutdown_old_pools():
+            if old_io_pool: 
+                old_io_pool.shutdown(wait=True)
+            if old_cpu_pool: 
+                old_cpu_pool.shutdown(wait=True)
+            logger.info("Old Thread Pools shut down completely.")
+            
+        threading.Thread(target=shutdown_old_pools, daemon=True).start()
 
     @property
     def io_pool(self) -> concurrent.futures.ThreadPoolExecutor:
