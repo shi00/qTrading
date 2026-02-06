@@ -114,10 +114,13 @@ class DataProcessor:
         return result.added
 
     async def sync_comprehensive_fundamentals(self, progress_callback=None, force=False, cancel_event=None):
-        """Delegated to FinancialSyncStrategy (Full Sync Mode)"""
-        # force=True usually implies full sync in strategy
+        """Delegated to FinancialSyncStrategy (Full Sync Mode)
+        
+        Returns:
+            SyncResult: Full result object with status, added count, and errors
+        """
         result = await self.strategies['financial'].run(force=force, progress_callback=progress_callback, cancel_event=cancel_event)
-        return result.added
+        return result
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):
         """Delegated to FinancialSyncStrategy"""
@@ -477,11 +480,13 @@ class DataProcessor:
             def step4_callback(current, total, msg):
                 report_step(4, current, total, msg)
             
-            financial_added = await self.sync_comprehensive_fundamentals(
+            financial_result = await self.sync_comprehensive_fundamentals(
                 progress_callback=step4_callback, 
                 cancel_event=cancel_event
             )
-            # Note: financial sync may return 0 if data is already up-to-date, so we don't abort on 0
+            if financial_result and financial_result.status == "failed":
+                logger.error(f"[initialize_system] Step 4 failed: {financial_result.errors}")
+                return None
             if check_cancel(): return None
             
             # ===== Step 5: Health Check (5%) =====
