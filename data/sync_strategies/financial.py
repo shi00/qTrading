@@ -95,10 +95,13 @@ class FinancialSyncStrategy(ISyncStrategy):
         
         # Link external cancel event to internal shutdown
         if cancel_event:
-             async def monitor_cancel():
-                 await cancel_event.wait()
-                 await self.cancel()
-             asyncio.create_task(monitor_cancel())
+            async def monitor_cancel():
+                await cancel_event.wait()
+                await self.cancel()
+            # Track the monitor task to prevent garbage collection
+            monitor_task = asyncio.create_task(monitor_cancel())
+            with self._tasks_lock:
+                self._active_tasks.add(monitor_task)
 
         # Force Logic: Reset sync status for resume
         if force:
@@ -204,11 +207,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                     if not has_error:
                         await self.context.cache.mark_stock_step4_completed(ts_code, sync_version=1)
-                        # Atomic update for stats? Not thread safe strictly but ok for stats
-                        # We'll update accumulator in bulk or careful way
-                        pass 
                     else:
-                         logger.warning(f"Stock {ts_code} incomplete, will retry.")
+                        logger.warning(f"Stock {ts_code} incomplete, will retry.")
 
             except Exception as e:
                 logger.error(f"Failed Step 4 for {ts_code}: {e}")
@@ -250,9 +250,9 @@ class FinancialSyncStrategy(ISyncStrategy):
         try:
             last_sync_dt = datetime.datetime.strptime(last_sync_str, '%Y-%m-%d %H:%M:%S')
             start_date_dt = last_sync_dt + datetime.timedelta(days=1)
-        except:
-             # Fallback
-             start_date_dt = datetime.datetime.now() - datetime.timedelta(days=30)
+        except Exception:
+            # Fallback
+            start_date_dt = datetime.datetime.now() - datetime.timedelta(days=30)
         
         today_dt = datetime.datetime.now()
         dates_to_sync = []
@@ -266,7 +266,6 @@ class FinancialSyncStrategy(ISyncStrategy):
             return
 
         total_saved = 0
-        loop = asyncio.get_running_loop()
         concurrency = ConfigHandler.get_sync_concurrency()
         semaphore = asyncio.Semaphore(concurrency)
 
