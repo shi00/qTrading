@@ -382,7 +382,7 @@ class ScreenerView(ft.Container):
                 # Update Log View with Reasoning
                 stock_name = row_data.get('name', 'Unknown')
                 score = row_data.get('ai_score', 0)
-                thinking = row_data.get('thinking', '')  # Need to ensure Strategies return this in row_data
+                thinking = str(row_data.get('thinking', '') or '')  # Ensure string
 
                 # Create Log Entry
                 if thinking:

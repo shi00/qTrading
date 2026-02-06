@@ -289,11 +289,12 @@ class HomeView(ft.Container):
             sh, sz, cyb = indices[0], indices[1], indices[2]
 
         def _mk_idx_card(title, info):
-            val_color = getattr(ft.Colors, info.get('color', 'GREY').upper())
+            if not isinstance(info, dict): info = {}
+            val_color = getattr(ft.Colors, info.get('color', 'GREY').upper(), ft.Colors.GREY)
             return self._build_dashboard_card(
                 title,
-                ft.Text(info.get('value', '--'), size=20, weight=ft.FontWeight.BOLD),
-                ft.Text(info.get('change', '--'), size=14, weight=ft.FontWeight.BOLD, color=val_color)
+                ft.Text(str(info.get('value', '--')), size=20, weight=ft.FontWeight.BOLD),
+                ft.Text(str(info.get('change', '--')), size=14, weight=ft.FontWeight.BOLD, color=val_color)
             )
 
         # HSGT
