@@ -122,7 +122,7 @@ class DataProcessor:
 
     async def close(self):
         """Gracefully close resources"""
-        self.stop()
+        await self.stop()
         if self.cache:
             await self.cache.close()
 
