@@ -275,7 +275,9 @@ class TableViewerTab(ft.Container):
                     f"[PERF] TableViewerTab: _load_schema_and_data() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
             self._tables_loaded = True  # Mark as loaded
-            self.update()
+            if self.page:
+                self.update()
+            
             logger.info(
                 f"[PERF] <<< TableViewerTab.did_mount_async END, TOTAL={(_time.perf_counter() - _t_start) * 1000:.1f}ms")
         except Exception as e:
@@ -709,41 +711,31 @@ class SQLConsoleTab(ft.Container):
 class DataExplorerView(ft.Container):
     """
     Main View Container for Data Explorer
+    Refactored to use Lazy Loading to prevent UI freeze during tab switch.
     """
 
     def __init__(self):
         super().__init__()
         self.expand = True
         self.db_manager = DatabaseManager()
+        self._is_initialized = False  # Track if UI has been built
+        self._pubsub_subscribed = False
 
-        self.table_tab = TableViewerTab(self.db_manager)
-        self.sql_tab = SQLConsoleTab(self.db_manager)
-        self._pubsub_subscribed = False  # Prevent duplicate pubsub subscriptions
-
-        self.tabs = ft.Tabs(
-            selected_index=0,
-            animation_duration=300,
-            tabs=[
-                ft.Tab(
-                    text=I18n.get("data_tab_viewer"),
-                    icon=ft.Icons.TABLE_CHART,
-                    content=self.table_tab,
-                ),
-                ft.Tab(
-                    text=I18n.get("data_tab_sql"),
-                    icon=ft.Icons.CODE,
-                    content=self.sql_tab,
-                ),
-            ],
-            expand=True,
+        # Start with a loading state to ensure instant tab switching
+        self.loading_view = ft.Container(
+            content=ft.Column([
+                ft.ProgressRing(),
+                ft.Text(I18n.get("data_loading"), size=12, color=AppColors.TEXT_SECONDARY)
+            ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            alignment=ft.alignment.center,
+            expand=True
         )
-
-        self.content = self.tabs
+        
+        self.content = self.loading_view
 
     def did_mount(self):
         """
-        Trigger async initialization.
-        Uses Flet's page.run_task() to properly schedule async work from sync lifecycle hooks.
+        Trigger lazy initialization.
         """
         import time as _time
         _t0 = _time.perf_counter()
@@ -753,16 +745,74 @@ class DataExplorerView(ft.Container):
         if self.page and not self._pubsub_subscribed:
             self.page.pubsub.subscribe(self._on_broadcast_message)
             self._pubsub_subscribed = True
-        
-        # Use Flet's recommended approach for scheduling async tasks from sync callbacks
-        if self.page:
+            
+        # Lazy Load UI if not ready
+        if not self._is_initialized:
+             # Schedule build task to allow UI to render the loading state first
+             self.page.run_task(self._lazy_build_ui)
+        else:
+            # If already built (switching back), ensure we trigger async data mount if needed
             self.page.run_task(self.table_tab.did_mount_async)
+
         logger.info(
             f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+    async def _lazy_build_ui(self):
+        """Build the heavy UI components in background task"""
+        import time as _time
+        _t0 = _time.perf_counter()
+        logger.info("[PERF] >>> DataExplorerView._lazy_build_ui START")
+        
+        try:
+            # Check if still mounted after potential delay
+            if not self.page:
+                logger.debug("[DataExplorerView] View unmounted before build, aborting.")
+                return
+
+            # Create complex tabs here
+            self.table_tab = TableViewerTab(self.db_manager)
+            self.sql_tab = SQLConsoleTab(self.db_manager)
+            
+            self.tabs = ft.Tabs(
+                selected_index=0,
+                animation_duration=300,
+                tabs=[
+                    ft.Tab(
+                        text=I18n.get("data_tab_viewer"),
+                        icon=ft.Icons.TABLE_CHART,
+                        content=self.table_tab,
+                    ),
+                    ft.Tab(
+                        text=I18n.get("data_tab_sql"),
+                        icon=ft.Icons.CODE,
+                        content=self.sql_tab,
+                    ),
+                ],
+                expand=True,
+            )
+            
+            # Swap content
+            self.content = self.tabs
+            self._is_initialized = True
+            
+            if self.page:
+                self.update()
+                # Trigger initial data load
+                # Ensure we don't block invalid state
+                await self.table_tab.did_mount_async()
+            
+        except Exception as e:
+            logger.error(f"Error building DataExplorerView: {e}")
+            self.content = ft.Text(f"Error loading view: {e}", color=ft.Colors.RED)
+            if self.page:
+                self.update()
+            
+        logger.info(f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def _on_broadcast_message(self, message):
         """Handle broadcast messages like cache_cleared"""
         if message == "cache_cleared":
             # Reset tables_loaded flag to force reload on next mount
-            self.table_tab._tables_loaded = False
+            if self._is_initialized:
+                self.table_tab._tables_loaded = False
             logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")

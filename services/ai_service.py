@@ -244,10 +244,12 @@ class AIService:
         """
 
         try:
-            async with self._get_semaphore():
-                # 3s timeout for classification (fail fast strategy)
-                response = await asyncio.wait_for(
-                    self.client.chat.completions.create(
+            # Enforce global 5s timeout for the entire operation (Semaphore wait + API call)
+            # This prevents queue pile-up where tasks wait 60s+ just to get the lock
+            async def _do_classify():
+                async with self._get_semaphore():
+                    # 3s timeout for API call specifically
+                    response = await self.client.chat.completions.create(
                         model=model,
                         messages=[
                             {"role": "system", "content": system_prompt},
@@ -255,12 +257,13 @@ class AIService:
                         ],
                         response_format={"type": "json_object"},
                         temperature=0.1
-                    ),
-                    timeout=3.0
-                )
-                return json.loads(response.choices[0].message.content)
+                    )
+                    return json.loads(response.choices[0].message.content)
+
+            return await asyncio.wait_for(_do_classify(), timeout=5.0)
+
         except asyncio.TimeoutError:
-            logger.warning("[AI] Classification timeout (>3s), using fallback")
+            logger.warning("[AI] Classification global timeout (>5s), dropped")
             return None
         except Exception as e:
             logger.error(f"[AI] Classification failed: {e}")
