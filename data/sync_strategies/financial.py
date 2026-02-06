@@ -153,7 +153,6 @@ class FinancialSyncStrategy(ISyncStrategy):
                 async with semaphore:
                     if self._shutdown_event.is_set(): return
                     
-                    loop = asyncio.get_running_loop()
                     has_error = False
                     
                     # Fetch Helper
@@ -373,7 +372,6 @@ class FinancialSyncStrategy(ISyncStrategy):
         logger.info(f"[FinancialSyncStrategy] 🚑 Repairing {len(ts_codes)} stocks...")
         
         semaphore = asyncio.Semaphore(1)
-        loop = asyncio.get_running_loop()
         total_saved = 0
         
         # Specific concurrent repair

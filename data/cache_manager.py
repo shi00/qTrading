@@ -1108,6 +1108,11 @@ class CacheManager:
         try:
             await self.wait_for_maintenance()
             
+            # Validate date format (YYYYMMDD)
+            if not end_date or len(end_date) != 8 or not end_date.isdigit():
+                logger.error(f"[CacheManager] Invalid end_date format: {end_date}")
+                return
+            
             # Check current cache coverage
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute("SELECT MIN(cal_date), MAX(cal_date) FROM trade_cal") as cursor:
