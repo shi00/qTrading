@@ -49,7 +49,6 @@ class DataProcessor:
         self.api = TushareClient(token=token)
         self.cache = CacheManager()
         self._first_news_sync = True
-        self._shutdown_event = asyncio.Event()
         self._cancel_event = asyncio.Event()  # Unified cancellation event
 
         # Initialize Context & Strategies
@@ -76,7 +75,6 @@ class DataProcessor:
         """
         logger.info("[DataProcessor] Cancel requested")
         self._cancel_event.set()
-        self._shutdown_event.set()
         
         # Propagate to all strategies
         for name, strategy in self.strategies.items():
@@ -93,21 +91,22 @@ class DataProcessor:
     def clear_cancel(self):
         """Clear cancel state before starting new operation."""
         self._cancel_event.clear()
-        self._shutdown_event.clear()
 
-    def stop(self):
-        """Signal all running tasks to stop"""
+    async def stop(self):
+        """Signal all running tasks to stop. Async to ensure proper cleanup."""
         logger.info("[DataProcessor] Global stop signal received.")
         self._cancel_event.set()
-        self._shutdown_event.set()
             
         # Delegate cancellation to strategies
-        # Note: Since this is synchronous, we verify loop existence
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                for strategy in self.strategies.values():
-                     loop.create_task(strategy.cancel())
+            tasks = []
+            for name, strategy in self.strategies.items():
+                 tasks.append(strategy.cancel())
+            
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                logger.info("[DataProcessor] All strategies cancelled.")
+                
         except Exception as e:
             logger.warning(f"[DataProcessor] Error during stop propagation: {e}")
 

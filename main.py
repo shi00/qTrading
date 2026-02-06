@@ -63,7 +63,7 @@ async def main(page: ft.Page):
             logger.info("[Main] Step 1: Signaling Global Cancellation...")
             from data.data_processor import DataProcessor
             dp = DataProcessor()
-            dp.stop()
+            await dp.stop()
 
             logger.info("[Main] Step 2: Stopping Scheduler...")
             scheduler.stop()
