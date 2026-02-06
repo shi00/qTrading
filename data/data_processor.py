@@ -97,16 +97,19 @@ class DataProcessor:
 
     def stop(self):
         """Signal all running tasks to stop"""
-        if not self._shutdown_event.is_set():
-            self._shutdown_event.set()
-            logger.info("[DataProcessor] Global stop signal received.")
+        logger.info("[DataProcessor] Global stop signal received.")
+        self._cancel_event.set()
+        self._shutdown_event.set()
             
-            # Delegate cancellation
-            for strategy in self.strategies.values():
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                     # Best effort to schedule cancel
+        # Delegate cancellation to strategies
+        # Note: Since this is synchronous, we verify loop existence
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                for strategy in self.strategies.values():
                      loop.create_task(strategy.cancel())
+        except Exception as e:
+            logger.warning(f"[DataProcessor] Error during stop propagation: {e}")
 
     def refresh_token(self, new_token=None):
         """Refresh API token without recreating instance"""
