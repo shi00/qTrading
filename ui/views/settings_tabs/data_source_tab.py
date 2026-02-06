@@ -537,7 +537,13 @@ class DataSourceTab(ft.Container):
             self.show_snack(msg, color=AppColors.WARNING)
             self.progress_text.value = I18n.get("ds_progress_cancelled_fmt", msg=msg)
         except Exception as e:
-            msg = I18n.get("ds_init_fail_fmt", error=str(e)[:30])
+            error_str = str(e)
+            # Avoid double prefixing if it's our own localized message
+            if error_str == I18n.get("ds_init_fail_generic"):
+                msg = error_str
+            else:
+                msg = I18n.get("ds_init_fail_fmt", error=error_str[:30])
+            
             self.show_snack(msg, color=AppColors.ERROR)
             self.progress_text.value = I18n.get("ds_progress_failed_fmt", msg=msg)
             logger.error(f"Sync error: {e}")
