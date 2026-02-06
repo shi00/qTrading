@@ -247,8 +247,8 @@ class DataProcessor:
     @log_async_operation(operation_name="check_data_health", log_result=True)
     async def check_data_health(self):
         """Check data health status."""
-        if self._shutdown_event.is_set():
-            return {'status': 'unknown', 'msg': 'Shutdown in progress'}
+        if self.is_cancelled():
+            return {'status': 'unknown', 'msg': 'Operation cancelled'}
 
         await self.cache.init_db()
 
@@ -312,7 +312,7 @@ class DataProcessor:
     @log_async_operation(operation_name="sync_stock_basic")
     async def sync_stock_basic(self):
         """Sync stock basic info (Step 1 of initialization)."""
-        if self._shutdown_event.is_set(): 
+        if self.is_cancelled(): 
             return 0
         
         # Deduplication Lock - prevent concurrent runs
