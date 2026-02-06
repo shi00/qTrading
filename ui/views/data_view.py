@@ -771,9 +771,61 @@ class DataExplorerView(ft.Container):
             f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     async def _lazy_build_ui(self):
+        """Construct the heavy UI components only when required"""
+        import time as _time
+        _t0 = _time.perf_counter()
+        logger.debug("[PERF] >>> DataExplorerView._lazy_build_ui START")
+        
+        try:
+            # Check if still mounted after potential delay
+            if not self.page:
+                logger.debug("[DataExplorerView] View unmounted before build, aborting.")
+                return
+
+            # Create complex tabs here
+            self.table_tab = TableViewerTab(self.db_manager)
+            self.sql_tab = SQLConsoleTab(self.db_manager)
+            
+            self.tabs = ft.Tabs(
+                selected_index=0,
+                animation_duration=300,
+                tabs=[
+                    ft.Tab(
+                        text=I18n.get("data_tab_explorer"),
+                        icon=ft.Icons.TABLE_CHART,
+                        content=self.table_tab,
+                    ),
+                    ft.Tab(
+                        text=I18n.get("data_tab_sql"),
+                        icon=ft.Icons.CODE,
+                        content=self.sql_tab,
+                    ),
+                ],
+                expand=True,
+                on_change=self._on_tab_changed,
+            )
+            
+            # Swap content
+            self.content = self.tabs
+            
+            # 1. Init child tabs
+            # Note: We clear the loading spinner and add tabs
+            # self.content.controls.clear() # Not needed if we replace self.content
+            # self.content.controls.append(self.tabs)
+            
+            if self.page:
+                self.update()
+                # Trigger initial data load
+                # Ensure we don't block invalid state
+                await self.table_tab.did_mount_async()
+            
+        except Exception as e:
+            logger.error(f"Error building DataExplorerView: {e}")
+            self.content = ft.Text(f"Error loading view: {e}", color=ft.Colors.RED)
+            if self.page:
                 self.update()
             
-        logger.info(f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def _on_broadcast_message(self, message):
         """Handle broadcast messages like cache_cleared"""
