@@ -520,7 +520,7 @@ class DataSourceTab(ft.Container):
             )
 
             if report is None:
-                raise Exception("Initialization failed (Check logs for details)")
+                raise Exception(I18n.get("ds_init_fail_generic"))
 
             if self._processor.is_cancelled(): raise asyncio.CancelledError()
 
