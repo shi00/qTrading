@@ -86,6 +86,22 @@ def setup_logging(name="astock_screener"):
     if not has_app_log:
         log_file_path = os.path.join(LOG_DIR, "app.log")
         try:
+            # Force rollover on startup if file exists and has content
+            # This ensures each run starts with a fresh log file, while keeping history via rotation
+            if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0:
+                try:
+                    # Create a temporary handler to force rollover
+                    temp_handler = RotatingFileHandler(
+                        log_file_path,
+                        maxBytes=max_bytes,
+                        backupCount=backup_count,
+                        encoding='utf-8'
+                    )
+                    temp_handler.doRollover()
+                    temp_handler.close()
+                except Exception as e:
+                    sys.stderr.write(f"Failed to rotate old log: {e}\n")
+
             file_handler = RotatingFileHandler(
                 log_file_path,
                 maxBytes=max_bytes,
