@@ -534,8 +534,11 @@ class DataSourceTab(ft.Container):
 
         except asyncio.CancelledError:
             self.show_snack(I18n.get("settings_msg_sync_cancelled"), color=AppColors.WARNING)
+            self.progress_text.value = f"❌ {I18n.get('settings_msg_sync_cancelled')}"
         except Exception as e:
-            self.show_snack(I18n.get("ds_init_fail_fmt").format(error=str(e)[:30]), color=AppColors.ERROR)
+            msg = I18n.get("ds_init_fail_fmt").format(error=str(e)[:30])
+            self.show_snack(msg, color=AppColors.ERROR)
+            self.progress_text.value = f"❌ {msg}"
             logger.error(f"Sync error: {e}")
         finally:
             self.is_syncing = False
