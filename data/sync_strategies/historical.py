@@ -100,8 +100,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         concurrency = ConfigHandler.get_sync_concurrency()
         semaphore = asyncio.Semaphore(max(1, concurrency)) # Use config
         
-        if concurrency > 3:
-             logger.warning(f"[HistoricalSync] High concurrency {concurrency} detected.")
+        # if concurrency > 3:
+        #      logger.warning(f"[HistoricalSync] High concurrency {concurrency} detected.")
 
         failed_dates = []
         CB_THRESHOLD = max(20, int(total_days * 0.1) if total_days > 0 else 20)
@@ -132,6 +132,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         progress_callback(processed_count, total_days, I18n.get('progress_sync_market').format(date=date))
                 except Exception as e:
                     # Specific error handling
+                    logger.debug(f"[HistoricalSync] Failed to sync {date}: {e}")
                     failed_dates.append(date)
 
         # Batch Processing

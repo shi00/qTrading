@@ -260,10 +260,11 @@ class AIService:
                     )
                     return json.loads(response.choices[0].message.content)
 
-            return await asyncio.wait_for(_do_classify(), timeout=5.0)
+            # Use timeout matching the SDK client (30s) or at least safe enough for LLMs
+            return await asyncio.wait_for(_do_classify(), timeout=30.0)
 
         except asyncio.TimeoutError:
-            logger.warning("[AI] Classification global timeout (>5s), dropped")
+            logger.warning("[AI] Classification global timeout (>30s), dropped")
             return None
         except Exception as e:
             logger.error(f"[AI] Classification failed: {e}")
