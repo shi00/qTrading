@@ -118,6 +118,20 @@ def setup_logging(name="astock_screener"):
     if not has_error_log:
         error_log_path = os.path.join(LOG_DIR, "error.log")
         try:
+            # Force rollover for error log as well
+            if os.path.exists(error_log_path) and os.path.getsize(error_log_path) > 0:
+                try:
+                    temp_err_handler = RotatingFileHandler(
+                        error_log_path,
+                        maxBytes=max_bytes,
+                        backupCount=backup_count,
+                        encoding='utf-8'
+                    )
+                    temp_err_handler.doRollover()
+                    temp_err_handler.close()
+                except Exception:
+                    pass
+
             error_handler = RotatingFileHandler(
                 error_log_path,
                 maxBytes=max_bytes,
