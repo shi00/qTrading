@@ -1162,6 +1162,10 @@ class CacheManager:
                 if max_db < end_date:
                     await fetch_and_save(max_db, end_date)
             
+            # Ensure all writes are flushed to DB
+            logger.info("[CacheManager] Waiting for DB writer to finish...")
+            await self.queue.join()
+
             # Verify calendar data exists
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute("SELECT COUNT(*) FROM trade_cal WHERE is_open = 1") as cursor:
