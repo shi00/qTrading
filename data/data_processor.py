@@ -453,7 +453,10 @@ class DataProcessor:
             report_step(2)
             end_date = datetime.datetime.now().strftime('%Y%m%d')
             start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
-            await self.cache.ensure_trade_cal(end_date, self.api, start_date)
+            cal_success = await self.cache.ensure_trade_cal(end_date, self.api, start_date)
+            if not cal_success:
+                logger.error("[initialize_system] Step 2 failed: Trade calendar sync failed, aborting")
+                return None
             if check_cancel(): return None
             
             # ===== Step 3: Historical Data (50%) =====

@@ -1104,6 +1104,9 @@ class CacheManager:
             end_date: Target end date (YYYYMMDD format)
             api: TushareClient instance for API calls
             required_start_date: Optional start date; defaults to 4 years before end_date
+            
+        Returns:
+            bool: True if calendar data is available, False otherwise
         """
         try:
             await self.wait_for_maintenance()
@@ -1111,7 +1114,12 @@ class CacheManager:
             # Validate date format (YYYYMMDD)
             if not end_date or len(end_date) != 8 or not end_date.isdigit():
                 logger.error(f"[CacheManager] Invalid end_date format: {end_date}")
-                return
+                return False
+            
+            # Validate required_start_date if provided
+            if required_start_date and (len(required_start_date) != 8 or not required_start_date.isdigit()):
+                logger.error(f"[CacheManager] Invalid required_start_date format: {required_start_date}")
+                return False
             
             # Check current cache coverage
             async with aiosqlite.connect(self.db_path) as db:
@@ -1122,8 +1130,11 @@ class CacheManager:
 
             curr_year = int(end_date[:4])
             target_start = required_start_date if required_start_date else datetime.date(curr_year - 4, 1, 1).strftime('%Y%m%d')
+            
+            fetched_any = False
 
             async def fetch_and_save(s, e):
+                nonlocal fetched_any
                 # Extend to year end for better caching
                 y = int(e[:4])
                 real_end = datetime.date(y, 12, 31).strftime('%Y%m%d')
@@ -1135,10 +1146,16 @@ class CacheManager:
                 if df is not None and not df.empty:
                     await self.save_trade_cal(df)
                     logger.info(f"[CacheManager] Trade calendar saved: {s} to {e}, {len(df)} days")
+                    fetched_any = True
+                    return True
+                return False
 
             if not min_db or not max_db:
                 # First time: fetch full range
-                await fetch_and_save(target_start, end_date)
+                success = await fetch_and_save(target_start, end_date)
+                if not success:
+                    logger.error("[CacheManager] Failed to fetch initial trade calendar")
+                    return False
             else:
                 # Fill gaps if needed
                 if target_start < min_db:
@@ -1148,9 +1165,23 @@ class CacheManager:
                 
                 if max_db < end_date:
                     await fetch_and_save(max_db, end_date)
+            
+            # Verify calendar data exists
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("SELECT COUNT(*) FROM trade_cal WHERE is_open = 1") as cursor:
+                    row = await cursor.fetchone()
+                    count = row[0] if row else 0
+            
+            if count == 0:
+                logger.error("[CacheManager] No trade calendar data available after sync")
+                return False
+                
+            logger.info(f"[CacheManager] Trade calendar ready: {count} trading days cached")
+            return True
 
         except Exception as e:
             logger.error(f"[CacheManager] ensure_trade_cal failed: {e}")
+            return False
 
     async def save_trade_cal(self, df):
         """Save trade calendar dataframe (Offloaded to Thread)"""
