@@ -519,6 +519,9 @@ class DataSourceTab(ft.Container):
                 progress_callback=lambda c, t, m: self.update_progress(c, t, m)
             )
 
+            if report is None:
+                raise Exception("Initialization failed (Check logs for details)")
+
             if self._processor.is_cancelled(): raise asyncio.CancelledError()
 
             self.progress_text.value = f"✅ {I18n.get('sys_init_success')}"
