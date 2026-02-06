@@ -359,6 +359,14 @@ class I18n:
             "wizard_msg_history_done": "✅ 历史数据同步完成",
             "wizard_msg_sync_failed": "❌ 同步失败: {error}",
 
+            # 5-Step Init Progress
+            "init_step_1": "步骤 1/5: 同步股票列表",
+            "init_step_2": "步骤 2/5: 同步交易日历",
+            "init_step_3": "步骤 3/5: 同步历史行情",
+            "init_step_4": "步骤 4/5: 同步财务数据",
+            "init_step_5": "步骤 5/5: 数据健康检查",
+            "init_step_complete": "✅ 初始化完成",
+
             "wizard_schedule_label": "启用每日自动更新 (16:30)",
             "wizard_step4_title": "步骤 4: 设置自动更新",
             "wizard_step4_desc": "建议在每个交易日收盘后自动更新数据。\n程序将在后台静默更新，不会打扰您的使用。",
@@ -909,6 +917,14 @@ class I18n:
             "wizard_msg_sync_cancelled": "❌ Sync Cancelled",
             "wizard_msg_history_done": "✅ History synced",
             "wizard_msg_sync_failed": "❌ Sync Failed: {error}",
+
+            # 5-Step Init Progress
+            "init_step_1": "Step 1/5: Syncing Stock List",
+            "init_step_2": "Step 2/5: Syncing Trade Calendar",
+            "init_step_3": "Step 3/5: Syncing History",
+            "init_step_4": "Step 4/5: Syncing Financials",
+            "init_step_5": "Step 5/5: Health Check",
+            "init_step_complete": "✅ Initialization Complete",
 
             "wizard_schedule_label": "Enable Auto-Update (16:30)",
             "wizard_step4_title": "Step 4: Auto-Update",
