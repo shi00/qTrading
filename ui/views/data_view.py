@@ -718,7 +718,7 @@ class DataExplorerView(ft.Container):
         super().__init__()
         self.expand = True
         self.db_manager = DatabaseManager()
-        self._is_initialized = False  # Track if UI has been built
+        self._ui_built = False  # Track if UI has been built
         self._pubsub_subscribed = False
 
         # Start with a loading state to ensure instant tab switching
