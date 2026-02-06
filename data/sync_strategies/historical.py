@@ -70,33 +70,22 @@ class HistoricalSyncStrategy(ISyncStrategy):
         end_date = datetime.datetime.now().strftime('%Y%m%d')
         start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
 
-        # Use context.cache, usually delegated via DataProcessor but here direct access
-        # DataProcessor logic for getting trade dates involves cache + API fallback.
-        # Ideally, we move `get_trade_dates` to a shared helper or strategy, but let's assume
-        # we can access it via context if we expose it or just reimplement simpler logic here.
-        # For now, let's assume we can query cache or API.
-        
-        # Re-implementing get_trade_dates logic via API + Cache Check
-        # Or better: The DataProcessor exposes `get_trade_dates`.
-        # BUT we want to decouple.
-        # Let's use api directly to fetch calendar.
-        
+        # Use cached trade calendar (CacheManager will fetch from API if needed)
         try:
-             df_cal = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_trade_cal, start_date=start_date, end_date=end_date)
-             if df_cal is not None and not df_cal.empty:
-                 # Filter open days
-                 trade_dates = sorted(df_cal[df_cal['is_open'] == 1]['cal_date'].tolist(), reverse=True)
-             else:
-                 trade_dates = []
+            await self.context.cache.ensure_trade_cal(end_date, self.context.api, start_date)
+            df_cal = await self.context.cache.get_trade_cal(start_date=start_date, end_date=end_date, is_open=1)
+            if df_cal is not None and not df_cal.empty:
+                trade_dates = sorted(df_cal['cal_date'].tolist(), reverse=True)
+            else:
+                trade_dates = []
         except Exception as e:
-             logger.warning(f"Failed to fetch calendar: {e}")
-             trade_dates = []
+            logger.warning(f"Failed to get calendar from cache: {e}")
+            trade_dates = []
 
         if not trade_dates:
-             # Fallback
-             result.status = "failed"
-             result.errors.append("No trade dates found")
-             return
+            result.status = "failed"
+            result.errors.append("No trade dates found")
+            return
 
         # Breakpoint Resume (Check Cache)
         try:

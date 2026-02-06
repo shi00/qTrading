@@ -321,39 +321,9 @@ class DataProcessor:
     async def ensure_trade_cal(self, end_date, required_start_date=None):
         """
         Ensure trade calendar is synced covers [required_start_date, end_date].
+        Delegates to CacheManager.ensure_trade_cal.
         """
-        try:
-            async with aiosqlite.connect(self.cache.db_path) as db:
-                async with db.execute("SELECT MIN(cal_date), MAX(cal_date) FROM trade_cal") as cursor:
-                    row = await cursor.fetchone()
-                    min_db = row[0] if row else None
-                    max_db = row[1] if row else None
-
-            curr_year = int(end_date[:4])
-            target_start = required_start_date if required_start_date else datetime.date(curr_year - 4, 1, 1).strftime('%Y%m%d')
-
-            async def fetch_and_save(s, e):
-                # Extend to year end
-                y = int(e[:4])
-                real_end = datetime.date(y, 12, 31).strftime('%Y%m%d')
-                if e < real_end: e = real_end
-                
-                df = await asyncio.to_thread(self.api.get_trade_cal, s, e)
-                if df is not None and not df.empty:
-                    await self.cache.save_trade_cal(df)
-
-            if not min_db or not max_db:
-                await fetch_and_save(target_start, end_date)
-            else:
-                if target_start < min_db:
-                     gap = (datetime.datetime.strptime(min_db, '%Y%m%d') - datetime.datetime.strptime(target_start, '%Y%m%d')).days
-                     if gap > 10: await fetch_and_save(target_start, min_db)
-                
-                if max_db < end_date:
-                     await fetch_and_save(max_db, end_date)
-
-        except Exception as e:
-            logger.error(f"ensure_trade_cal failed: {e}")
+        await self.cache.ensure_trade_cal(end_date, self.api, required_start_date)
 
     async def get_market_overview(self):
         """

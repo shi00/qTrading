@@ -160,8 +160,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     async def fetch_safe(func, kwargs):
                         nonlocal has_error
                         try:
-                             # Tushare Client is sync, run in executor
-                             return await loop.run_in_executor(None, lambda: func(**kwargs))
+                             # Use ThreadPoolManager for consistent thread pool management
+                             return await ThreadPoolManager().run_async(TaskType.IO, lambda: func(**kwargs))
                         except (AttributeError, NameError, TypeError, ImportError) as e:
                             raise e # Critical
                         except Exception as e:
@@ -272,7 +272,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         semaphore = asyncio.Semaphore(concurrency)
 
         for day_str in dates_to_sync:
-            df_disclosure = await loop.run_in_executor(None, lambda: self.context.api.get_disclosure_date(date=day_str))
+            df_disclosure = await ThreadPoolManager().run_async(TaskType.IO, lambda d=day_str: self.context.api.get_disclosure_date(date=d))
             
             if df_disclosure is None or df_disclosure.empty:
                 continue
@@ -320,15 +320,18 @@ class FinancialSyncStrategy(ISyncStrategy):
         """
         Helper: Fetch and merge Income, Balance Sheet, and Financial Indicators.
         """
-        loop = asyncio.get_running_loop()
         api = self.context.api
         
-        t1 = loop.run_in_executor(None, lambda: api.get_income(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
-        t2 = loop.run_in_executor(None, lambda: api.get_balancesheet(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
-        t3 = loop.run_in_executor(None, lambda: api.get_fina_indicator(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
+        # Use ThreadPoolManager for consistent thread pool management
+        async def fetch_income():
+            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_income(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
+        async def fetch_balance():
+            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_balancesheet(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
+        async def fetch_indicator():
+            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_fina_indicator(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
         
         try:
-            results = await asyncio.gather(t1, t2, t3, return_exceptions=True)
+            results = await asyncio.gather(fetch_income(), fetch_balance(), fetch_indicator(), return_exceptions=True)
             df_inc, df_bal, df_fina = results[0], results[1], results[2]
             
             dfs = []
@@ -382,7 +385,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                      try:
                          # Rate limit internal
                          await asyncio.sleep(ConfigHandler.get_sync_request_delay(is_heavy=True))
-                         df = await loop.run_in_executor(None, lambda: self.context.api.get_fina_indicator(period=period, ts_code=ts_code))
+                         df = await ThreadPoolManager().run_async(TaskType.IO, lambda p=period, c=ts_code: self.context.api.get_fina_indicator(period=p, ts_code=c))
                          
                          if df is not None and not df.empty:
                              # Schema fix

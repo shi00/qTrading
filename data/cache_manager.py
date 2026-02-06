@@ -1095,6 +1095,58 @@ class CacheManager:
         await self._enqueue((sql, params, False))
 
     # ========== Trade Calendar ==========
+    async def ensure_trade_cal(self, end_date, api, required_start_date=None):
+        """
+        Ensure trade calendar is cached and covers [required_start_date, end_date].
+        Uses ThreadPoolManager for API calls.
+        
+        Args:
+            end_date: Target end date (YYYYMMDD format)
+            api: TushareClient instance for API calls
+            required_start_date: Optional start date; defaults to 4 years before end_date
+        """
+        try:
+            await self.wait_for_maintenance()
+            
+            # Check current cache coverage
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("SELECT MIN(cal_date), MAX(cal_date) FROM trade_cal") as cursor:
+                    row = await cursor.fetchone()
+                    min_db = row[0] if row else None
+                    max_db = row[1] if row else None
+
+            curr_year = int(end_date[:4])
+            target_start = required_start_date if required_start_date else datetime.date(curr_year - 4, 1, 1).strftime('%Y%m%d')
+
+            async def fetch_and_save(s, e):
+                # Extend to year end for better caching
+                y = int(e[:4])
+                real_end = datetime.date(y, 12, 31).strftime('%Y%m%d')
+                if e < real_end: 
+                    e = real_end
+                
+                # Use ThreadPoolManager instead of asyncio.to_thread
+                df = await ThreadPoolManager().run_async(TaskType.IO, api.get_trade_cal, s, e)
+                if df is not None and not df.empty:
+                    await self.save_trade_cal(df)
+                    logger.info(f"[CacheManager] Trade calendar saved: {s} to {e}, {len(df)} days")
+
+            if not min_db or not max_db:
+                # First time: fetch full range
+                await fetch_and_save(target_start, end_date)
+            else:
+                # Fill gaps if needed
+                if target_start < min_db:
+                    gap = (datetime.datetime.strptime(min_db, '%Y%m%d') - datetime.datetime.strptime(target_start, '%Y%m%d')).days
+                    if gap > 10: 
+                        await fetch_and_save(target_start, min_db)
+                
+                if max_db < end_date:
+                    await fetch_and_save(max_db, end_date)
+
+        except Exception as e:
+            logger.error(f"[CacheManager] ensure_trade_cal failed: {e}")
+
     async def save_trade_cal(self, df):
         """Save trade calendar dataframe (Offloaded to Thread)"""
         if df is None or df.empty:
@@ -1725,8 +1777,7 @@ class CacheManager:
             '''
             
         try:
-            loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
@@ -1769,8 +1820,7 @@ class CacheManager:
             '''
         
         try:
-            loop = asyncio.get_running_loop()
-            params = await loop.run_in_executor(None, self._prepare_data_params, df, cols)
+            params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         except RuntimeError:
             return 0
         
