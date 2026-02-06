@@ -50,6 +50,7 @@ class DataProcessor:
         self.cache = CacheManager()
         self._first_news_sync = True
         self._shutdown_event = asyncio.Event()
+        self._cancel_event = asyncio.Event()  # Unified cancellation event
 
         # Initialize Context & Strategies
         self.context = SyncContext(api=self.api, cache=self.cache, config=ConfigHandler)
@@ -67,6 +68,32 @@ class DataProcessor:
         self._is_syncing_basic = False
 
         self._initialized = True
+
+    async def request_cancel(self):
+        """
+        Request cancellation of current operation.
+        Called by UI when user clicks cancel or closes window.
+        """
+        logger.info("[DataProcessor] Cancel requested")
+        self._cancel_event.set()
+        self._shutdown_event.set()
+        
+        # Propagate to all strategies
+        for name, strategy in self.strategies.items():
+            try:
+                await strategy.cancel()
+                logger.debug(f"[DataProcessor] Cancelled strategy: {name}")
+            except Exception as e:
+                logger.warning(f"[DataProcessor] Failed to cancel {name}: {e}")
+    
+    def is_cancelled(self):
+        """Check if cancellation has been requested."""
+        return self._cancel_event.is_set()
+    
+    def clear_cancel(self):
+        """Clear cancel state before starting new operation."""
+        self._cancel_event.clear()
+        self._shutdown_event.clear()
 
     def stop(self):
         """Signal all running tasks to stop"""
@@ -102,9 +129,9 @@ class DataProcessor:
     # ==========================================
 
     @log_async_operation(operation_name="sync_historical")
-    async def sync_historical_data(self, days=365, progress_callback=None, cancel_event=None):
+    async def sync_historical_data(self, days=365, progress_callback=None):
         """Delegated to HistoricalSyncStrategy"""
-        result = await self.strategies['historical'].run(days=days, progress_callback=progress_callback, cancel_event=cancel_event)
+        result = await self.strategies['historical'].run(days=days, progress_callback=progress_callback)
         return result
 
     @log_async_operation(operation_name="sync_financial")
@@ -113,13 +140,13 @@ class DataProcessor:
         result = await self.strategies['financial'].run(periods=periods, force=force, progress_callback=progress_callback)
         return result.added
 
-    async def sync_comprehensive_fundamentals(self, progress_callback=None, force=False, cancel_event=None):
+    async def sync_comprehensive_fundamentals(self, progress_callback=None, force=False):
         """Delegated to FinancialSyncStrategy (Full Sync Mode)
         
         Returns:
             SyncResult: Full result object with status, added count, and errors
         """
-        result = await self.strategies['financial'].run(force=force, progress_callback=progress_callback, cancel_event=cancel_event)
+        result = await self.strategies['financial'].run(force=force, progress_callback=progress_callback)
         return result
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):
@@ -404,7 +431,7 @@ class DataProcessor:
     async def get_screening_data(self, trade_date=None):
         return await self.cache.get_screening_data(trade_date)
     
-    async def initialize_system(self, progress_callback=None, cancel_event=None):
+    async def initialize_system(self, progress_callback=None):
         """
         Orchestrate system initialization with 5 distinct steps.
         
@@ -418,8 +445,13 @@ class DataProcessor:
         Returns:
             dict: Health check result on success
             None: If cancelled or critical failure
+            
+        Note: Call request_cancel() to cancel this operation.
         """
         from ui.i18n import I18n
+        
+        # Clear any previous cancel state
+        self.clear_cancel()
         
         # Step weights (must sum to 100)
         STEP_WEIGHTS = [5, 5, 50, 35, 5]
@@ -444,9 +476,6 @@ class DataProcessor:
             msg = f"{step_label}" + (f" - {sub_msg}" if sub_msg else "")
             progress_callback(current, 100, msg)
         
-        def check_cancel():
-            return cancel_event and cancel_event.is_set()
-        
         try:
             # ===== Step 1: Stock List (5%) =====
             report_step(1)
@@ -454,7 +483,7 @@ class DataProcessor:
             if stock_count == 0:
                 logger.error("[initialize_system] Step 1 failed: No stocks synced, aborting")
                 return None
-            if check_cancel(): return None
+            if self.is_cancelled(): return None
             
             # ===== Step 2: Trade Calendar (5%) =====
             report_step(2)
@@ -464,7 +493,7 @@ class DataProcessor:
             if not cal_success:
                 logger.error("[initialize_system] Step 2 failed: Trade calendar sync failed, aborting")
                 return None
-            if check_cancel(): return None
+            if self.is_cancelled(): return None
             
             # ===== Step 3: Historical Data (50%) =====
             def step3_callback(current, total, msg):
@@ -472,26 +501,24 @@ class DataProcessor:
             
             history_result = await self.sync_historical_data(
                 days=365*3, 
-                progress_callback=step3_callback, 
-                cancel_event=cancel_event
+                progress_callback=step3_callback
             )
             if history_result and history_result.status == "failed":
                 logger.error(f"[initialize_system] Step 3 failed: {history_result.errors}")
                 return None
-            if check_cancel(): return None
+            if self.is_cancelled(): return None
             
             # ===== Step 4: Financial Data (35%) =====
             def step4_callback(current, total, msg):
                 report_step(4, current, total, msg)
             
             financial_result = await self.sync_comprehensive_fundamentals(
-                progress_callback=step4_callback, 
-                cancel_event=cancel_event
+                progress_callback=step4_callback
             )
             if financial_result and financial_result.status == "failed":
                 logger.error(f"[initialize_system] Step 4 failed: {financial_result.errors}")
                 return None
-            if check_cancel(): return None
+            if self.is_cancelled(): return None
             
             # ===== Step 5: Health Check (5%) =====
             report_step(5)

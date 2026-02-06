@@ -467,11 +467,11 @@ class DataSourceTab(ft.Container):
 
     def init_historical_data(self, e):
         if self.is_syncing and self.sync_button.text.startswith(I18n.get("common_cancel")):
-            if self.cancel_event:
-                self.cancel_event.set()
-                self.sync_button.text = I18n.get("sys_init_cancel_wait")
-                self.sync_button.disabled = True
-                self.update()
+            # Request cancellation via DataProcessor
+            self.page.run_task(self._processor.request_cancel)
+            self.sync_button.text = I18n.get("sys_init_cancel_wait")
+            self.sync_button.disabled = True
+            self.update()
             return
 
         if self.is_syncing: return
@@ -506,7 +506,6 @@ class DataSourceTab(ft.Container):
             self._last_ui_update = now
 
     async def init_historical_async(self):
-        self.cancel_event = asyncio.Event()
         try:
 
             # Unified Initialization Logic (v2.0)
@@ -518,11 +517,10 @@ class DataSourceTab(ft.Container):
             self._safe_update()
 
             report = await self._processor.initialize_system(
-                progress_callback=lambda c, t, m: self.update_progress(c, t, m),
-                cancel_event=self.cancel_event
+                progress_callback=lambda c, t, m: self.update_progress(c, t, m)
             )
 
-            if self.cancel_event.is_set(): raise asyncio.CancelledError()
+            if self._processor.is_cancelled(): raise asyncio.CancelledError()
 
             self.progress_text.value = f"✅ {I18n.get('sys_init_success')}"
             self.progress_bar.value = 1
@@ -539,7 +537,6 @@ class DataSourceTab(ft.Container):
             logger.error(f"Sync error: {e}")
         finally:
             self.is_syncing = False
-            self.cancel_event = None
             self.sync_button.text = I18n.get("settings_init_data")
             self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
             self.sync_button.style = AppStyles.primary_button()

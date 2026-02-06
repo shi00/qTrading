@@ -40,9 +40,10 @@ class FinancialSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
-    async def run(self, periods: List[str] = None, force: bool = False, progress_callback=None, cancel_event=None, **kwargs) -> SyncResult:
+    async def run(self, periods: List[str] = None, force: bool = False, progress_callback=None, **kwargs) -> SyncResult:
         """
         Main entry point. Decides between Full vs Incremental sync.
+        Note: Cancellation is handled via cancel() method called by DataProcessor.request_cancel()
         """
         self._shutdown_event.clear()
         result = SyncResult()
@@ -62,7 +63,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     logger.info("[sync_financial] STRATEGY: Full Sync (first run)")
 
             if should_full_sync:
-                await self._run_full_sync(periods, progress_callback, force=force, result_accumulator=result, cancel_event=cancel_event)
+                await self._run_full_sync(periods, progress_callback, force=force, result_accumulator=result)
             else:
                 await self._run_incremental_sync(progress_callback, result_accumulator=result)
                 
@@ -76,7 +77,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             
         return result
 
-    async def _run_full_sync(self, periods, progress_callback, force, result_accumulator: SyncResult, cancel_event=None):
+    async def _run_full_sync(self, periods, progress_callback, force, result_accumulator: SyncResult):
         """
         Redirects to sync_comprehensive_fundamentals. 
         Note: 'periods' argument was historically used but the new comprehensive sync 
@@ -89,19 +90,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         We will stick to the robust 'sync_comprehensive_fundamentals' logic.
         """
         if self._shutdown_event.is_set(): return
-        if cancel_event and cancel_event.is_set(): return
 
         logger.info(f"[FinancialSyncStrategy] Starting Comprehensive Fundamentals Sync (force={force})...")
-        
-        # Link external cancel event to internal shutdown
-        if cancel_event:
-            async def monitor_cancel():
-                await cancel_event.wait()
-                await self.cancel()
-            # Track the monitor task to prevent garbage collection
-            monitor_task = asyncio.create_task(monitor_cancel())
-            with self._tasks_lock:
-                self._active_tasks.add(monitor_task)
 
         # Force Logic: Reset sync status for resume
         if force:
