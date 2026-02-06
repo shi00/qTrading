@@ -407,14 +407,22 @@ class DataProcessor:
         - Step 3 (50%): Sync historical data
         - Step 4 (35%): Sync financial data
         - Step 5 (5%):  Health check
+        
+        Returns:
+            dict: Health check result on success
+            None: If cancelled or critical failure
         """
         from ui.i18n import I18n
         
         # Step weights (must sum to 100)
         STEP_WEIGHTS = [5, 5, 50, 35, 5]
+        current_step = 0
         
         def report_step(step_num, sub_progress=0, sub_total=1, sub_msg=""):
             """Report progress with weighted calculation."""
+            nonlocal current_step
+            current_step = step_num
+            
             if not progress_callback:
                 return
             
@@ -432,48 +440,57 @@ class DataProcessor:
         def check_cancel():
             return cancel_event and cancel_event.is_set()
         
-        # ===== Step 1: Stock List (5%) =====
-        report_step(1)
-        await self.sync_stock_basic()
-        if check_cancel(): return None
-        
-        # ===== Step 2: Trade Calendar (5%) =====
-        report_step(2)
-        end_date = datetime.datetime.now().strftime('%Y%m%d')
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
-        await self.cache.ensure_trade_cal(end_date, self.api, start_date)
-        if check_cancel(): return None
-        
-        # ===== Step 3: Historical Data (50%) =====
-        def step3_callback(current, total, msg):
-            report_step(3, current, total, msg)
-        
-        await self.sync_historical_data(
-            days=365*3, 
-            progress_callback=step3_callback, 
-            cancel_event=cancel_event
-        )
-        if check_cancel(): return None
-        
-        # ===== Step 4: Financial Data (35%) =====
-        def step4_callback(current, total, msg):
-            report_step(4, current, total, msg)
-        
-        await self.sync_comprehensive_fundamentals(
-            progress_callback=step4_callback, 
-            cancel_event=cancel_event
-        )
-        if check_cancel(): return None
-        
-        # ===== Step 5: Health Check (5%) =====
-        report_step(5)
-        result = await self.check_data_health()
-        
-        # Report completion
-        if progress_callback:
-            progress_callback(100, 100, I18n.get("init_step_complete"))
-        
-        return result
+        try:
+            # ===== Step 1: Stock List (5%) =====
+            report_step(1)
+            stock_count = await self.sync_stock_basic()
+            if stock_count == 0:
+                logger.error("[initialize_system] Step 1 failed: No stocks synced, aborting")
+                return None
+            if check_cancel(): return None
+            
+            # ===== Step 2: Trade Calendar (5%) =====
+            report_step(2)
+            end_date = datetime.datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
+            await self.cache.ensure_trade_cal(end_date, self.api, start_date)
+            if check_cancel(): return None
+            
+            # ===== Step 3: Historical Data (50%) =====
+            def step3_callback(current, total, msg):
+                report_step(3, current, total, msg)
+            
+            await self.sync_historical_data(
+                days=365*3, 
+                progress_callback=step3_callback, 
+                cancel_event=cancel_event
+            )
+            if check_cancel(): return None
+            
+            # ===== Step 4: Financial Data (35%) =====
+            def step4_callback(current, total, msg):
+                report_step(4, current, total, msg)
+            
+            await self.sync_comprehensive_fundamentals(
+                progress_callback=step4_callback, 
+                cancel_event=cancel_event
+            )
+            if check_cancel(): return None
+            
+            # ===== Step 5: Health Check (5%) =====
+            report_step(5)
+            result = await self.check_data_health()
+            
+            # Report completion
+            if progress_callback:
+                progress_callback(100, 100, I18n.get("init_step_complete"))
+            
+            return result
+            
+        except Exception as e:
+            step_label = I18n.get(f"init_step_{current_step}") if current_step > 0 else "Initialization"
+            logger.error(f"[initialize_system] ❌ Failed at {step_label}: {e}")
+            raise  # Re-raise so UI can catch and display
 
     # Proxy methods for backward compatibility
     async def sync_daily_quotes_for_date(self, trade_date):
