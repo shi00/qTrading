@@ -1130,11 +1130,8 @@ class CacheManager:
 
             curr_year = int(end_date[:4])
             target_start = required_start_date if required_start_date else datetime.date(curr_year - 4, 1, 1).strftime('%Y%m%d')
-            
-            fetched_any = False
 
             async def fetch_and_save(s, e):
-                nonlocal fetched_any
                 # Extend to year end for better caching
                 y = int(e[:4])
                 real_end = datetime.date(y, 12, 31).strftime('%Y%m%d')
@@ -1146,7 +1143,6 @@ class CacheManager:
                 if df is not None and not df.empty:
                     await self.save_trade_cal(df)
                     logger.info(f"[CacheManager] Trade calendar saved: {s} to {e}, {len(df)} days")
-                    fetched_any = True
                     return True
                 return False
 

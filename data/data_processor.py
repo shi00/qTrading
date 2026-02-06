@@ -463,21 +463,25 @@ class DataProcessor:
             def step3_callback(current, total, msg):
                 report_step(3, current, total, msg)
             
-            await self.sync_historical_data(
+            history_result = await self.sync_historical_data(
                 days=365*3, 
                 progress_callback=step3_callback, 
                 cancel_event=cancel_event
             )
+            if history_result and history_result.status == "failed":
+                logger.error(f"[initialize_system] Step 3 failed: {history_result.errors}")
+                return None
             if check_cancel(): return None
             
             # ===== Step 4: Financial Data (35%) =====
             def step4_callback(current, total, msg):
                 report_step(4, current, total, msg)
             
-            await self.sync_comprehensive_fundamentals(
+            financial_added = await self.sync_comprehensive_fundamentals(
                 progress_callback=step4_callback, 
                 cancel_event=cancel_event
             )
+            # Note: financial sync may return 0 if data is already up-to-date, so we don't abort on 0
             if check_cancel(): return None
             
             # ===== Step 5: Health Check (5%) =====
