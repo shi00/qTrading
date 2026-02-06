@@ -133,15 +133,24 @@ class NewsSubscriptionService:
                     # AI Success
                     emoji = ai_result.get('emoji', '[NEWS]')
                     category = ai_result.get('category', 'News')
-                    tag = f"【{emoji} {category}】"
+                    
+                    # Map AI category to I18n key if possible
+                    i18n_key = f"tag_{category.lower()}"
+                    localized_category = I18n.get(i18n_key)
+                    
+                    # If key missing or matches fallback (English), use it, otherwise use original if not found
+                    if localized_category == i18n_key: 
+                        localized_category = category # Fallback to original if I18n key missing
+                        
+                    tag = f"【{emoji} {localized_category}】"
                 else:
                     # Fallback to Rule-based
                     if any(k in clean_content for k in ['央行', '证监会', '国务院', '财政部', '政策', '立案', '违规']):
-                        tag = "【🏛️ Policy】"
+                        tag = f"【🏛️ {I18n.get('tag_policy')}】"
                     elif any(k in clean_content for k in ['美联储', '欧佩克', '纳斯达克', '汇率', '外盘', '美元']):
-                        tag = "【🌍 Global】"
+                         tag = f"【🌍 {I18n.get('tag_global')}】"
                     elif any(k in clean_content for k in ['GDP', 'CPI', 'PPI', 'PMI', '社融', '通胀']):
-                        tag = "【📈 Macro】"
+                         tag = f"【📈 {I18n.get('tag_macro')}】"
                 
                 display_msg = f"{tag} {clean_content}" if tag else clean_content
                 

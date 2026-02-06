@@ -558,6 +558,14 @@ class I18n:
             "ai_snack_invalid_range": "{field}超出有效范围 (允许: {min}-{max})",
             "ai_snack_fields_empty": "请填写候选数量和换手率阈值",
             "ai_snack_invalid_url": "API地址必须以 http:// 或 https:// 开头",
+            
+            # News Tags
+            "tag_stock": "个股",
+            "tag_policy": "政策",
+            "tag_market": "市场",
+            "tag_global": "外盘",
+            "tag_international": "国际",
+            "tag_macro": "宏观",
         },
         "en": {
             "app_title": "A-Share Intelligent Screener",
