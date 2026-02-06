@@ -413,8 +413,8 @@ class HomeView(ft.Container):
             else:
                 translated_tag = raw_tag
 
-        content = row.get('content', '')
-        time_str = row.get('publish_time', '')
+        content = str(row.get('content', '') or '')
+        time_str = str(row.get('publish_time', '') or '')
 
         return ft.Container(
             content=ft.Column([
