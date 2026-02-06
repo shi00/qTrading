@@ -180,7 +180,7 @@ async def main(page: ft.Page):
                 return
 
             _t0 = _time.perf_counter()
-            logger.info(f"[PERF] >>> change_tab START: switching to {VIEW_NAMES[index]} (index={index})")
+            logger.debug(f"[PERF] >>> change_tab START: switching to {VIEW_NAMES[index]} (index={index})")
 
             # Notify HomeView of visibility change (for auto-refresh optimization)
             home_view.set_visible(index == 0)
@@ -188,11 +188,11 @@ async def main(page: ft.Page):
             body.content = views[index]
             _current_tab_index[0] = index  # Update current tab
             _t1 = _time.perf_counter()
-            logger.info(f"[PERF] change_tab: content assignment took {(_t1 - _t0) * 1000:.1f}ms")
+            logger.debug(f"[PERF] change_tab: content assignment took {(_t1 - _t0) * 1000:.1f}ms")
 
             body.update()
             _t2 = _time.perf_counter()
-            logger.info(
+            logger.debug(
                 f"[PERF] <<< change_tab END: body.update() took {(_t2 - _t1) * 1000:.1f}ms, TOTAL={(_t2 - _t0) * 1000:.1f}ms")
 
         async def run_strategy_from_home(strategy_key):
