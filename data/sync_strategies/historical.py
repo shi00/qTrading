@@ -70,9 +70,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         end_date = datetime.datetime.now().strftime('%Y%m%d')
         start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
 
-        # Use cached trade calendar (CacheManager will fetch from API if needed)
+        # Use cached trade calendar (Step 2 already ensured calendar is available)
         try:
-            await self.context.cache.ensure_trade_cal(end_date, self.context.api, start_date)
             df_cal = await self.context.cache.get_trade_cal(start_date=start_date, end_date=end_date, is_open=1)
             if df_cal is not None and not df_cal.empty:
                 trade_dates = sorted(df_cal['cal_date'].tolist(), reverse=True)
@@ -126,6 +125,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 # Circuit Breaker Check
                 if len(failed_dates) > CB_THRESHOLD:
                     abort_sync = True
+                    result.status = "failed"
+                    result.errors.append(f"Circuit breaker triggered: {len(failed_dates)} failures")
                     logger.error("Circuit Breaker Triggered.")
                     return
 
@@ -175,7 +176,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             await self.sync_daily_market_snapshot(date)
                             logger.info(f"Retry success: {date}")
                             result.added += 1
-                        except:
+                        except Exception:
                             failed_dates.append(date)
 
                 # Batch Retry
