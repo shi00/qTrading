@@ -273,28 +273,40 @@ class DataProcessor:
     # ... Other simple sync/get methods ...
 
     @log_async_operation(operation_name="sync_stock_basic")
-    async def sync_stock_basic(self, force=False):
-        """Sync stock basic info."""
-        if self._shutdown_event.is_set(): return 0
+    async def sync_stock_basic(self):
+        """Sync stock basic info (Step 1 of initialization)."""
+        if self._shutdown_event.is_set(): 
+            return 0
         
-        # Deduplication Lock
+        # Deduplication Lock - prevent concurrent runs
         should_run = False
         with self._sync_lock:
             if not self._is_syncing_basic:
                 self._is_syncing_basic = True
                 should_run = True
         
-        if not should_run: return 0
+        if not should_run: 
+            logger.debug("[sync_stock_basic] Already running, skipping")
+            return 0
 
         try:
+            logger.info("[sync_stock_basic] Starting stock list sync...")
             df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_stock_list)
+            
             if df is not None and not df.empty:
                 count = await self.cache.save_stock_basic(df)
                 await self.cache.update_sync_status('stock_basic', datetime.datetime.now().strftime('%Y%m%d'), count)
+                logger.info(f"[sync_stock_basic] ✅ Synced {count} stocks")
                 return count
+            else:
+                logger.warning("[sync_stock_basic] API returned empty data")
+                return 0
+                
+        except Exception as e:
+            logger.error(f"[sync_stock_basic] ❌ Failed: {e}")
             return 0
         finally:
-             with self._sync_lock:
+            with self._sync_lock:
                 self._is_syncing_basic = False
 
     async def prepare_market_data(self):
