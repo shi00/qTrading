@@ -208,7 +208,7 @@ class MarketDataService:
             c = row.get('pct_chg', 0) or 0
             v = row.get('close', 0) or 0
             return {
-                'name': I18n.t(name_key),
+                'name': I18n.get(name_key),
                 'value': f"{v:.2f}",
                 'change': f"{c:+.2f}%",
                 'color': 'red' if c >= 0 else 'green'
@@ -216,7 +216,7 @@ class MarketDataService:
         return self._get_empty_index_data(name_key)
 
     def _get_empty_index_data(self, name_key: str) -> dict:
-        return {'name': I18n.t(name_key), 'value': '-', 'change': '-', 'color': 'grey'}
+        return {'name': I18n.get(name_key), 'value': '-', 'change': '-', 'color': 'grey'}
     
     async def _get_hsgt(self, date: str) -> dict:
         """获取北向资金数据"""
@@ -226,12 +226,12 @@ class MarketDataService:
         if df is not None and not df.empty:
             val = float(df.iloc[0]['north_money'] or 0)
             return {
-                'name': I18n.t('home_northbound'),
-                'value': f"{val/100:.2f}{I18n.t('unit_yi')}" if abs(val) > 100 else f"{val:.0f}{I18n.t('unit_wanshou')}",
-                'sub': I18n.t('home_inflow') if val > 0 else I18n.t('home_outflow'),
+                'name': I18n.get('home_northbound'),
+                'value': f"{val/100:.2f}{I18n.get('unit_yi')}" if abs(val) > 100 else f"{val:.0f}{I18n.get('unit_wanshou')}",
+                'sub': I18n.get('home_inflow') if val > 0 else I18n.get('home_outflow'),
                 'color': 'red' if val > 0 else 'green' if val < 0 else 'grey'
             }
         return self._get_empty_hsgt_data()
 
     def _get_empty_hsgt_data(self) -> dict:
-        return {'name': I18n.t('home_northbound'), 'value': '-', 'sub': '-', 'color': 'grey'}
+        return {'name': I18n.get('home_northbound'), 'value': '-', 'sub': '-', 'color': 'grey'}
