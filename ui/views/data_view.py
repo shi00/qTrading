@@ -476,6 +476,16 @@ class TableViewerTab(ft.Container):
             self.btn_prev.disabled = self.current_page <= 1
             self.btn_next.disabled = self.current_page >= total_pages
 
+            # Update DataTable Sort State (Show sort arrow)
+            if self.sort_col and self.sort_col in self.table_columns:
+                try:
+                    self.data_table.sort_column_index = self.table_columns.index(self.sort_col)
+                    self.data_table.sort_ascending = self.sort_asc
+                except ValueError:
+                    self.data_table.sort_column_index = None
+            else:
+                self.data_table.sort_column_index = None
+
             self.update()
 
         except Exception as e:
