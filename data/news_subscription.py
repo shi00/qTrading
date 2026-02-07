@@ -5,6 +5,7 @@ from datetime import datetime
 from utils.config_handler import ConfigHandler
 from data.cache_manager import CacheManager
 from services.ai_service import AIService
+from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,8 @@ class NewsSubscriptionService:
         if self._running:
             return
             
-        self.on_news_callback = callback
+        if callback:
+            self.on_news_callback = callback
         
         # Check config
         enabled = ConfigHandler.get_config('enable_news_alerts', True)
@@ -66,9 +68,11 @@ class NewsSubscriptionService:
 
     async def _poll_loop(self):
         """Main polling loop"""
-        base_interval = ConfigHandler.get_config('news_poll_interval', 60) # Default 60s
         
         while self._running:
+            # Read config dynamically
+            base_interval = ConfigHandler.get_config('news_poll_interval', 60)
+            
             # Fire and forget (but track it for cleanup). 
             # We use create_task so the sleep interval is independent of fetch duration (strict interval).
             self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())

@@ -456,7 +456,8 @@ class DataProcessor:
         self.clear_cancel()
         
         # Step weights (must sum to 100)
-        STEP_WEIGHTS = [5, 5, 50, 35, 5]
+        # Optimized based on user feedback (Steps 1 & 2 represent 2% total)
+        STEP_WEIGHTS = [1, 1, 50, 43, 5]
         current_step = 0
         
         def report_step(step_num, sub_progress=0, sub_total=1, sub_msg=""):

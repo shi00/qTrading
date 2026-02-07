@@ -6,6 +6,7 @@ import flet as ft
 from data.cache_manager import CacheManager
 from data.news_fetcher import NewsFetcher
 from data.news_subscription import NewsSubscriptionService
+from services.local_model_manager import LocalModelManager
 from ui.components.toast_manager import ToastManager
 from ui.i18n import I18n
 from ui.theme import AppColors, apply_page_theme
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 async def main(page: ft.Page):
     setup_logging()
+    
+    # Ensure config file has all defaults populated
+    ConfigHandler.ensure_defaults()
 
     # --- Network Optimization    # [CRITICAL] Initialize Proxy Manager FIRST
     # 必须在所有网络请求库（如 TushareClient, Requests）初始化之前设置好 Proxy
@@ -75,14 +79,16 @@ async def main(page: ft.Page):
             logger.info("[Main] Step 4: Stopping Toast Manager...")
             if hasattr(page, "toast") and page.toast:
                 try:
-                    await page.toast.stop_all()
+                    # Robust shutdown: handle if stop_all is async or somehow mis-assigned
+                    if asyncio.iscoroutinefunction(page.toast.stop_all):
+                        await page.toast.stop_all()
+                    else:
+                        # Fallback if it's sync (unlikely but safe)
+                        page.toast.stop_all()
                 except Exception as ex:
                     logger.warning(f"Failed to stop toast manager: {ex}")
 
             logger.info("[Main] Step 5: Waiting for resources to release...")
-
-            # Shutdown IO Thread Pools
-            NewsFetcher.shutdown()
 
             # Flush and Close Database
             await dp.close()
@@ -302,10 +308,21 @@ async def main(page: ft.Page):
 
         # Start News Service
         def on_news_alert(msg):
-            # Show snackbar on main page (thread safe)
-            page.open(ft.SnackBar(ft.Text(f"📰 {msg}"), open=True))
+            # Show snackbar on main page
+            try:
+                snackbar = ft.SnackBar(
+                    content=ft.Text(f"📰 {msg}"),
+                    duration=5000,  # Keep 5 seconds visibility for better UX
+                    open=True
+                )
+                page.open(snackbar)
+                page.update()  # Critical: force UI refresh
+            except Exception as e:
+                logger.error(f"[NewsAlert] Failed to open snackbar: {e}")
 
         NewsSubscriptionService().start(callback=on_news_alert)
+
+
 
     async def on_onboarding_complete():
         """Callback when onboarding wizard completes"""
@@ -316,7 +333,7 @@ async def main(page: ft.Page):
     token = ConfigHandler.get_token()
     onboarding_complete = ConfigHandler.is_onboarding_complete()
     masked_token = f"{token[:4]}****" if token and len(token) > 4 else "None"
-    logger.info(f"DEBUG: Token='{masked_token}', Onboarding='{onboarding_complete}'")
+    logger.debug(f"Token='{masked_token}', Onboarding='{onboarding_complete}'")
 
     if not token or not onboarding_complete:
         # Show onboarding wizard

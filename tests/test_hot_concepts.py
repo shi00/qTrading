@@ -22,8 +22,6 @@ async def main():
             print(f"{i+1}. {item['name']}: {item['change']} (Color: {item['color']})")
     except Exception as e:
         print(f"Error: {e}")
-    finally:
-        NewsFetcher.shutdown()
 
 if __name__ == "__main__":
     if sys.platform.startswith('win'):

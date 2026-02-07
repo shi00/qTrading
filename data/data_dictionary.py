@@ -89,10 +89,14 @@ COMMON_COLUMNS = {
     "goodwill": "商誉",
     
     # Money Flow
-    "buy_sm_vol": "小单买量", "sell_sm_vol": "小单卖量", 
+    "buy_sm_vol": "小单买量", "sell_sm_vol": "小单卖量",
+    "buy_sm_amount": "小单买额", "sell_sm_amount": "小单卖额",
     "buy_md_vol": "中单买量", "sell_md_vol": "中单卖量",
+    "buy_md_amount": "中单买额", "sell_md_amount": "中单卖额",
     "buy_lg_vol": "大单买量", "sell_lg_vol": "大单卖量",
+    "buy_lg_amount": "大单买额", "sell_lg_amount": "大单卖额",
     "buy_elg_vol": "特大单买量", "sell_elg_vol": "特大单卖量",
+    "buy_elg_amount": "特大单买额", "sell_elg_amount": "特大单卖额",
     "net_mf_amount": "净流入额",
     "net_mf_vol": "净流入量",
 
@@ -109,6 +113,7 @@ COMMON_COLUMNS = {
     "tags": "标签",
     "is_open": "是否开市",
     "status": "状态",
+    "exchange": "交易所",
 }
 
 # Table Definitions with Table-Specific Column Overrides
@@ -274,6 +279,13 @@ TABLE_DEFINITIONS = {
             "last_sync_date": "最后同步",
             "last_data_date": "最新数据",
             "record_count": "记录数",
+        }
+    },
+    "stock_sync_status": {
+        "alias": "股票同步详情",
+        "columns": {
+            "step4_completed_at": "完成时间",
+            "sync_version": "同步版本",
         }
     }
 }

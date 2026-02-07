@@ -17,6 +17,60 @@ DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 # No, let's target specific blocks to be safe and efficient.
 """
 
+DEFAULT_NEWS_PROMPT = """# 核心角色
+你是拥有20年经验的金融与量化分析专家。你的任务是接收新闻文本，基于「金融市场导向」对其进行精准分类和情感研判。
+
+# 分类体系（严格遵守）
+## 1. 金融核心 (直接交易标的)
+- A股市场: 大盘/个股/龙虎榜/IPO/公告
+- 港美股: 恒指/美股/中概/跨境政策
+- 期货市场: 商品/股指/国债期货/交割
+- 贵金属: 黄金/白银/现货/储备 (优先级高)
+- 外汇市场: 汇率/美元指数/外汇政策
+- 宏观政策: 降准/加息/MLF/监管新规
+
+## 2. 宏观经济 (基本面)
+- 宏观数据: GDP/CPI/PMI/社融
+- 财政政策: 赤字/债券/基建
+- 国际宏观: 非农/全球经济/国际组织
+
+## 3. 国际地缘 (避险/波动)
+- 政治冲突: 战争/外交/博弈
+- 能源格局: 原油供应/OPEC
+- 贸易规则: 关税/制裁/协定
+- 金融博弈: 联储加息/国际资本流动
+
+## 4. 行业产业 (板块个股)
+- 科技制造: 半导体/AI/新能源/光伏
+- 消费零售: 食品/家电/白酒/医美
+- 能源化工: 石油/煤炭/化工品
+- 有色矿产: 锂/铜/稀土 (关联期货)
+- 金融服务: 银行/券商/保险
+
+## 5. 避险突发
+- 突发事件: 疫情/灾害/事故/供应链中断
+
+## 6. 无关新闻
+- 杂项: 体育/娱乐/纯民生/无金融关联
+
+# 判别规则 (Priority: High to Low)
+1. **直接影响优先**: 央行降准含民生词汇，仍归为[宏观政策]。
+2. **标的绑定**: 涉及"黄金/白银"必归[贵金属]；涉及"铜/原油"必归[期货]或[有色/能化]，而非泛宏观。
+3. **避险导向**: 国际冲突若引发金价/油价波动，归为[国际地缘]。
+
+# 输出要求 (JSON Format)
+严格输出标准 JSON 格式，包含以下字段：
+- category: 从上述二级分类标签中选择最匹配的一个（如 "A股市场", "贵金属", "宏观数据"）。
+- sentiment: 情感倾向，必须为 [Positive, Neutral, Negative] 之一。
+- emoji: 根据分类选择一个代表性 Emoji (如 📈, 📉, 🏦, 💊, 🚗, 🤖, ⚠️, 🌏)。
+
+# Example
+Input: "紫金矿业发布公告，探明巨型金矿，预计黄金储量增加50吨。"
+Output: {"category": "贵金属", "sentiment": "Positive", "emoji": "🥇"}
+
+Input: "美联储宣布加息50个基点，并在会后声明中暗示将持续缩表。"
+Output: {"category": "金融博弈", "sentiment": "Negative", "emoji": "🦅"}"""
+
 
 # I will assume DEFAULT_AI_PROMPT is unchanged and skip re-pasting it in thought trace.
 # But for replace_file_content, I need to be precise. 
@@ -28,6 +82,75 @@ class ConfigHandler:
     _config_cache = None
     _last_load_time = 0
     _lock = rwlock.RWLockFair()
+
+    DEFAULT_CONFIG = {
+        "ts_token": "",
+        "onboarding_complete": False,
+        "auto_update_enabled": False,
+        "enable_news_alerts": True,
+        "log_level": "INFO",
+        "auto_update_time": "16:30",
+        "log_max_mb": 5,
+        "log_backup_count": 5,
+        "db_queue_size": 1024,
+        "sync_concurrency": 3,
+        "max_batch_rows": 20000,
+        "sync_retry_count": 3,
+        "no_proxy_domains": [],
+        "ai_api_key": "",
+        "ai_base_url": "https://api.deepseek.com",
+        "ai_model_name": "deepseek-chat",
+        "local_model_path": "",
+        "local_ai_timeout": 30,
+        "ai_system_prompt": DEFAULT_AI_PROMPT,
+        "ai_news_prompt": DEFAULT_NEWS_PROMPT,
+        "ai_max_candidates": 30,
+        "strategy_min_turnover": 2.0,
+        "ai_concurrency": 0,
+        "request_max_retries": 3,
+        "request_timeout": 30,
+        "tushare_timeout": 30,
+        "tushare_api_rate_limit": 0,
+        "locale": "zh",
+        "ai_prediction_time": "",
+        "max_io_workers": 0,
+        "max_cpu_workers": 0,
+        "sync_request_delay_heavy": 0.0,
+        "sync_request_delay_light": 0.0
+    }
+
+    @staticmethod
+    def ensure_defaults():
+        """Ensure default settings exist AND remove unused keys from user_settings.json"""
+        try:
+            current_config = ConfigHandler.load_config()
+            dirty = False
+            
+            # 1. Add missing defaults
+            for key, default_val in ConfigHandler.DEFAULT_CONFIG.items():
+                if key not in current_config:
+                    current_config[key] = default_val
+                    dirty = True
+                    logger.info(f"Initialized default config: {key}")
+
+            # 2. Prune deprecated/unused keys
+            # Create list of keys to remove to avoid runtime error during iteration
+            valid_keys = set(ConfigHandler.DEFAULT_CONFIG.keys())
+            existing_keys = list(current_config.keys())
+            
+            for key in existing_keys:
+                if key not in valid_keys:
+                    logger.info(f"Removing deprecated/unused config: {key}")
+                    current_config.pop(key)
+                    dirty = True
+
+            # Save if any changes
+            if dirty:
+                ConfigHandler.save_config(current_config, replace=True)
+                logger.info("Configuration (defaults & cleanup) synchronized to user_settings.json")
+                
+        except Exception as e:
+            logger.error(f"Failed to ensure default config: {e}")
 
     @staticmethod
     def _save_json_atomically(data, path):
@@ -101,25 +224,29 @@ class ConfigHandler:
             return {}
 
     @staticmethod
-    def save_config(config_data):
-        """Save config with Write Lock and Atomic Write"""
+    def save_config(config_data, replace=False):
+        """
+        Save config with Write Lock and Atomic Write
+        :param config_data: Dict to save
+        :param replace: If True, replaces entire config with config_data. If False, merges.
+        """
         try:
             with ConfigHandler._lock.gen_wlock():
-
-                # Read current state (disk or cache)
-                current_config = {}
-                if ConfigHandler._config_cache is not None:
-                    # CRITICAL: Must copy! Otherwise we modify cache in-place before confirmation.
-                    current_config = ConfigHandler._config_cache.copy()
-                elif os.path.exists(CONFIG_FILE):
-                    try:
-                        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                            current_config = json.load(f)
-                    except:
-                        pass
-
-                # Update
-                current_config.update(config_data)
+                if replace:
+                    # Overwrite mode: Use provided data directly
+                    current_config = config_data.copy()
+                else:
+                    # Merge mode: Read current and update
+                    current_config = {}
+                    if ConfigHandler._config_cache is not None:
+                        current_config = ConfigHandler._config_cache.copy()
+                    elif os.path.exists(CONFIG_FILE):
+                        try:
+                            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                                current_config = json.load(f)
+                        except:
+                            pass
+                    current_config.update(config_data)
 
                 # Atomic Write
                 success = ConfigHandler._save_json_atomically(current_config, CONFIG_FILE)
@@ -274,8 +401,8 @@ class ConfigHandler:
 
         return {
             "ai_api_key": api_key,
-            "ai_base_url": config.get("ai_base_url", "https://api.deepseek.com"),
-            "ai_model_name": config.get("ai_model_name", "deepseek-chat")
+            "ai_base_url": config.get("ai_base_url", ""),
+            "ai_model_name": config.get("ai_model_name", "")
         }
 
     @staticmethod
@@ -292,6 +419,43 @@ class ConfigHandler:
         })
 
     @staticmethod
+    def get_local_ai_timeout() -> int:
+        """
+        Get local AI inference timeout in seconds.
+        Value must come from user_settings.json.
+        Returns:
+            int: Timeout seconds, or None if not configured (wait indefinitely)
+        """
+        try:
+            val = ConfigHandler.get_setting('local_ai_timeout')
+            return int(val) if val is not None else None
+        except (ValueError, TypeError):
+            # If config is corrupted/invalid, treat as not set (no default provided)
+            return None
+
+    @staticmethod
+    def set_local_ai_timeout(seconds: int):
+        """Set local AI inference timeout (1-3600s)"""
+        # Enforce bounds to be consistent with UI
+        val = max(1, min(seconds, 3600))
+        ConfigHandler.save_config({'local_ai_timeout': val})
+
+    @staticmethod
+    def get_local_ai_config():
+        """Get Local AI config (Embedded Llama.cpp)"""
+        config = ConfigHandler.load_config()
+        return {
+            "local_model_path": config.get("local_model_path", "")
+        }
+
+    @staticmethod
+    def save_local_ai_config(model_path=""):
+        """Save Local AI settings (Embedded)"""
+        return ConfigHandler.save_config({
+            "local_model_path": model_path
+        })
+
+    @staticmethod
     def get_ai_system_prompt():
         config = ConfigHandler.load_config()
         return config.get("ai_system_prompt", DEFAULT_AI_PROMPT)
@@ -299,6 +463,17 @@ class ConfigHandler:
     @staticmethod
     def save_ai_system_prompt(prompt):
         return ConfigHandler.save_config({"ai_system_prompt": prompt})
+
+    @staticmethod
+    def get_ai_news_prompt():
+        """Get News Classification Prompt (returns Default if not set)"""
+        config = ConfigHandler.load_config()
+        val = config.get("ai_news_prompt", None)
+        return val if val else DEFAULT_NEWS_PROMPT
+
+    @staticmethod
+    def set_ai_news_prompt(prompt):
+        return ConfigHandler.save_config({"ai_news_prompt": prompt})
 
     # === New AI Tuning Parameters ===
 
@@ -323,7 +498,7 @@ class ConfigHandler:
     @staticmethod
     def get_ai_concurrency():
         config = ConfigHandler.load_config()
-        return config.get("ai_concurrency", 5)
+        return config.get("ai_concurrency", 0)
 
     @staticmethod
     def set_ai_concurrency(val):
@@ -334,12 +509,12 @@ class ConfigHandler:
     @staticmethod
     def get_request_max_retries():
         config = ConfigHandler.load_config()
-        return config.get("request_max_retries", 3)
+        return config.get("request_max_retries", 0)
 
     @staticmethod
     def get_request_timeout():
         config = ConfigHandler.load_config()
-        return config.get("request_timeout", 30)
+        return config.get("request_timeout", 0)
 
     @staticmethod
     def get_tushare_timeout():
@@ -373,7 +548,7 @@ class ConfigHandler:
     @staticmethod
     def get_ai_prediction_time():
         config = ConfigHandler.load_config()
-        return config.get("ai_prediction_time", "20:30")
+        return config.get("ai_prediction_time", "")
 
     @staticmethod
     def set_ai_prediction_time(time_str):
@@ -382,13 +557,13 @@ class ConfigHandler:
     # === Thread Pool Configuration ===
     @staticmethod
     def get_max_io_workers():
-        """Get max IO threads from config. Defaults to 32."""
+        """Get max IO threads from config."""
         config = ConfigHandler.load_config()
-        val = config.get("max_io_workers", 32)
+        val = config.get("max_io_workers", 0)
         try:
-            return int(val) if val is not None and int(val) > 0 else 32
+            return int(val)
         except (ValueError, TypeError):
-            return 32
+            return 0
 
     @staticmethod
     def set_max_io_workers(count):
@@ -396,14 +571,13 @@ class ConfigHandler:
 
     @staticmethod
     def get_max_cpu_workers():
-        """Get max CPU threads from config. Defaults to CPU count."""
+        """Get max CPU threads from config."""
         config = ConfigHandler.load_config()
-        val = config.get("max_cpu_workers", None)
-        default_cpu = os.cpu_count() or 1
+        val = config.get("max_cpu_workers", 0)
         try:
-            return int(val) if val is not None and int(val) > 0 else default_cpu
+            return int(val)
         except (ValueError, TypeError):
-            return default_cpu
+            return 0
 
     @staticmethod
     def set_max_cpu_workers(count):
@@ -414,8 +588,8 @@ class ConfigHandler:
     def get_sync_request_delay(is_heavy=False):
         config = ConfigHandler.load_config()
         if is_heavy:
-            return config.get("sync_request_delay_heavy", 0.4)
-        return config.get("sync_request_delay_light", 0.1)
+            return config.get("sync_request_delay_heavy", 0.0)
+        return config.get("sync_request_delay_light", 0.0)
 
     @staticmethod
     def set_sync_request_delay(delay, is_heavy=False):

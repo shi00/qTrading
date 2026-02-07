@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta
+
 
 import akshare as ak
 import pandas as pd
@@ -18,10 +20,6 @@ class NewsFetcher:
     Replaces blocked EastMoney interfaces.
     """
 
-    @classmethod
-    def shutdown(cls):
-        """Deprecated: Executors are managed globally now."""
-        pass
 
     @staticmethod
     async def get_stock_news(ts_code, limit=10):
@@ -58,11 +56,40 @@ class NewsFetcher:
                 return []
 
             news_list = []
+            now = datetime.now()
+            today_str = now.strftime('%Y-%m-%d')
+            
             for _, row in df.head(limit).iterrows():
+                # Extract raw time string
+                raw_time = row.get('发布时间') or row.get('时间') or row.get('time', '')
+                final_time = raw_time
+                
+                # Handle time-only string (e.g. "09:30:00") -> Prepend Date
+                if raw_time and len(str(raw_time)) <= 8 and ':' in str(raw_time):
+                    try:
+                        # Parse time to determine if it's today or yesterday
+                        # e.g. If now is 00:05 and news is 23:55 -> Yesterday
+                        t_parts = list(map(int, str(raw_time).split(':')))
+                        # Handle HH:MM or HH:MM:SS
+                        if len(t_parts) >= 2:
+                            news_dt = now.replace(hour=t_parts[0], minute=t_parts[1], second=t_parts[2] if len(t_parts)>2 else 0)
+                            
+                            # If news time is significantly in the future (> 30 mins), it's likely yesterday's news
+                            # (e.g. Now 10:00, News 23:00 -> Yesterday 23:00)
+                            if news_dt > now + timedelta(minutes=30):
+                                news_dt -= timedelta(days=1)
+                                
+                            final_time = news_dt.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            final_time = f"{today_str} {raw_time}"
+                    except Exception as e:
+                        # Fallback
+                        final_time = f"{today_str} {raw_time}"
+                
                 news_list.append({
                     'title': row.get('标题') or row.get('title', '无标题'),
                     'content': row.get('内容') or row.get('content', ''),
-                    'time': row.get('发布时间') or row.get('时间') or row.get('time', '')
+                    'time': final_time
                 })
             return news_list
 

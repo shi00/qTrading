@@ -17,3 +17,4 @@ sqlparse>=0.4.4
 tzdata>=2023.3 # Required for APScheduler timezone support on Windows
 
 apscheduler>=3.10.0
+llama-cpp-python>=0.2.79

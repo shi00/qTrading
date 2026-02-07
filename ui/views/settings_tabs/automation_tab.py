@@ -169,14 +169,32 @@ class NotificationsTab(ft.Container):
         self._locale_subscription_id = None
 
         enable_news = ConfigHandler.get_config("enable_news_alerts", True)
+        news_interval = ConfigHandler.get_config("news_poll_interval", 60)
 
         self.news_alerts_enabled = ft.Switch(
             label=I18n.get("settings_news_alerts"),
             value=enable_news,
             on_change=self.on_news_toggle
         )
+        
+        self.news_interval = ft.Dropdown(
+            label=I18n.get("settings_news_interval"),
+            width=200,
+            value=str(news_interval),
+            options=self._build_interval_options(),
+            on_change=self.on_interval_change,
+            visible=enable_news
+        )
 
         self._build_content()
+
+    def _build_interval_options(self):
+        return [
+            ft.dropdown.Option("30", I18n.get("settings_news_interval_30s")),
+            ft.dropdown.Option("60", I18n.get("settings_news_interval_60s")),
+            ft.dropdown.Option("300", I18n.get("settings_news_interval_5m")),
+            ft.dropdown.Option("900", I18n.get("settings_news_interval_15m")),
+        ]
 
     def _build_content(self):
         """构建 UI 内容"""
@@ -186,7 +204,14 @@ class NotificationsTab(ft.Container):
                         color=AppColors.TEXT_PRIMARY),
                 ft.Container(height=_SPACING_SMALL),
                 ft.Container(
-                    content=ft.Row([self.news_alerts_enabled]),
+                    content=ft.Column([
+                        ft.Row([self.news_alerts_enabled]),
+                        ft.Container(height=5),
+                        ft.Row([
+                            ft.Icon(ft.Icons.TIMER, size=_ICON_SIZE_SMALL, color=AppColors.TEXT_SECONDARY),
+                            self.news_interval,
+                        ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                    ]),
                     padding=_CARD_PADDING, border=ft.border.all(1, AppColors.BORDER), border_radius=_CARD_BORDER_RADIUS,
                 ),
                 ft.Text(I18n.get("settings_notify_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
@@ -213,6 +238,8 @@ class NotificationsTab(ft.Container):
         """
         try:
             self.news_alerts_enabled.label = I18n.get("settings_news_alerts")
+            self.news_interval.label = I18n.get("settings_news_interval")
+            self.news_interval.options = self._build_interval_options()
             self._build_content()
             self._safe_update()
         except Exception as e:
@@ -226,37 +253,32 @@ class NotificationsTab(ft.Container):
         except Exception:
             pass
 
-    def _create_news_callback(self):
-        """创建新闻回调函数
-        
-        使用 weakref 包装 self 和 page_ref，避免闭包持有强引用导致 Tab 无法被 GC
-        """
-        weak_self = weakref.ref(self)
-
-        def callback(msg):
-            tab = weak_self()
-            if tab is None:
-                return
-            page = tab._page_ref() if tab._page_ref else None
-            if page:
-                try:
-                    page.open(ft.SnackBar(ft.Text(f"📰 {msg}"), open=True))
-                except Exception as e:
-                    logger.warning(f"[NotificationsTab] Failed to show news snackbar: {e}")
-
-        return callback
-
     def on_news_toggle(self, e):
         """处理新闻推送开关切换"""
         enabled = self.news_alerts_enabled.value
         ConfigHandler.save_config({"enable_news_alerts": enabled})
+        
+        # Update visibility
+        self.news_interval.visible = enabled
+        self.update()
 
         service = NewsSubscriptionService()
         if enabled:
-            service.start(callback=self._create_news_callback())
+            # Re-start service using existing global callback (set in main.py)
+            service.start()
             if self.show_snack:
                 self.show_snack(I18n.get("settings_snack_news_on"))
         else:
             service.stop()
             if self.show_snack:
                 self.show_snack(I18n.get("settings_snack_news_off"))
+
+    def on_interval_change(self, e):
+        """处理拉取间隔变更"""
+        try:
+            val = int(self.news_interval.value)
+            ConfigHandler.save_config({"news_poll_interval": val})
+            if self.show_snack:
+                self.show_snack(I18n.get("settings_snack_interval_set").format(interval=val))
+        except ValueError:
+            pass

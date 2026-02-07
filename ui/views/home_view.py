@@ -3,6 +3,7 @@ import logging
 
 import flet as ft
 
+import pandas as pd
 from data.data_processor import DataProcessor
 from ui.i18n import I18n
 from ui.theme import AppColors
@@ -20,7 +21,8 @@ class HomeView(ft.Container):
         # Pagination State
         self.news_page = 0
         self.PAGE_SIZE = 20
-        self.has_more_news = True
+        self.has_more_news = False
+        self._is_loading_more = False  # Lock for load more action
 
         # Auto-refresh Configuration
         self.REFRESH_INTERVAL_SECONDS = 30
@@ -46,7 +48,7 @@ class HomeView(ft.Container):
         try:
             # Rebuild UI using cached data
             self.content = self._build_ui(self.last_data)
-            if self.page:
+            if self.page and self._is_mounted:
                 self.update()
         except Exception as e:
             logger.error(f"Error refreshing locale: {e}")
@@ -69,8 +71,13 @@ class HomeView(ft.Container):
                 self._init_task = self.page.run_task(self._init_and_load)
         else:
             # Data already loaded, just restart auto-refresh
+            # Force UI update to ensure data is visible after tab switch
+            if self.last_data:
+                self.content = self._build_ui(self.last_data)
+                self.update()
+            
             self._start_auto_refresh()
-            logger.debug("[HomeView] Skipping re-init - data already loaded")
+            logger.debug("[HomeView] Skipping re-init - data restored")
 
         logger.debug(f"[PERF] <<< HomeView.did_mount END (sync part) took {(_time.perf_counter()-_t0)*1000:.1f}ms")
 
@@ -115,9 +122,8 @@ class HomeView(ft.Container):
         if self._init_task:
             self._init_task.cancel()
             self._init_task = None
-        # Note: pubsub subscription persists - we use _pubsub_subscribed flag to prevent duplicates
-        # Flet handles cleanup automatically when page closes
-        I18n.unsubscribe(self.refresh_locale)
+        # Subscriptions persist for singleton views, no need to unsubscribe (it clears all)
+        # I18n.unsubscribe(self.refresh_locale) # Singleton: keep listening
 
     def _start_auto_refresh(self):
         """Start the periodic auto-refresh task"""
@@ -164,7 +170,9 @@ class HomeView(ft.Container):
 
             # Rebuild UI to show empty state
             self.content = self._build_ui({})
-            if self.page:
+            
+            # Only update UI if mounted
+            if self.page and self._is_mounted:
                 self.update()
 
     def _refresh_data(self, e):
@@ -219,15 +227,25 @@ class HomeView(ft.Container):
 
     async def _on_load_more_click(self, e):
         """Handle Load More button click"""
-        if self.has_more_news:
-            self.news_page += 1
-            await self._load_news_data(load_more=True)
+        if self._is_loading_more or not self.has_more_news:
+            return
 
-            # Rebuild UI to append news (or in full rebuild case, show all)
-            # Optimization: could just update news list, but full rebuild is safer for I18n consistency
-            self.content = self._build_ui(self.last_data)
-            if self.page:
-                self.update()
+        self._is_loading_more = True
+        try:
+            self.news_page += 1
+            success = await self._load_news_data(load_more=True)
+
+            if success:
+                # Rebuild UI to append news (or in full rebuild case, show all)
+                self.content = self._build_ui(self.last_data)
+                if self.page:
+                    self.update()
+            else:
+                # Revert page increment on failure
+                self.news_page -= 1
+                # Optional: Show error snackbar here if needed
+        finally:
+            self._is_loading_more = False
 
     async def _load_news_data(self, load_more=False):
         try:
@@ -248,15 +266,17 @@ class HomeView(ft.Container):
                     self.news_data = new_batch
                 else:
                     # Append new data
-                    import pandas as pd
                     self.news_data = pd.concat([self.news_data, new_batch], ignore_index=True)
 
                 # Check if we likely have more
                 if len(new_batch) < self.PAGE_SIZE:
                     self.has_more_news = False
+                    
+            return True
 
         except Exception as e:
             logger.error(f"Error loading news: {e}")
+            return False
 
     def _build_ui(self, data=None):
         """
@@ -334,47 +354,7 @@ class HomeView(ft.Container):
         ], spacing=10)
 
         # 4. News Feed Section
-        news_items = []
-        if self.news_data is not None and not self.news_data.empty:
-            for _, row in self.news_data.iterrows():
-                news_items.append(self._build_news_item(row))
-        else:
-            news_items.append(ft.Text(I18n.get("home_news_empty"), color=ft.Colors.GREY))
-
-        # Load More Button
-        load_more_btn = ft.Container(
-            content=ft.ElevatedButton(
-                text=I18n.get("news_load_more"),
-                on_click=self._on_load_more_click,
-                style=ft.ButtonStyle(
-                    color=AppColors.TEXT_SECONDARY,
-                    bgcolor=ft.Colors.TRANSPARENT,
-                    shape=ft.RoundedRectangleBorder(radius=8),
-                    side=ft.BorderSide(1, AppColors.BORDER)
-                )
-            ),
-            alignment=ft.alignment.center,
-            padding=10,
-            visible=self.has_more_news and len(news_items) > 0
-        )
-
-        news_list = ft.ListView(
-            controls=news_items + [load_more_btn],
-            spacing=10,
-            padding=10,
-            auto_scroll=False,
-            expand=True  # Important: Expand within the column
-        )
-
-        news_section = ft.Container(
-            content=news_list,
-            # Removed fixed height=400 to allow expansion
-            expand=True,
-            bgcolor=AppColors.SURFACE,
-            border_radius=12,
-            border=ft.border.all(1, AppColors.BORDER),
-            padding=10
-        )
+        news_section = self._build_news_section()
 
         # Assemble Full Layout
         return ft.Column(
@@ -390,6 +370,63 @@ class HomeView(ft.Container):
                 ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
                 news_section
             ]
+        )
+
+    def _build_news_section(self):
+        """Builder for the news list section with empty state handling"""
+        # Case 1: Empty Data (No News)
+        if self.news_data is None or self.news_data.empty:
+            return ft.Container(
+                content=ft.Column([
+                    ft.Icon(ft.Icons.ARTICLE_OUTLINED, size=48, color=ft.Colors.GREY_300),
+                    ft.Text(I18n.get("home_news_empty"), color=ft.Colors.GREY)
+                ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                alignment=ft.alignment.center,
+                expand=True,
+                bgcolor=AppColors.SURFACE,
+                border_radius=12,
+                border=ft.border.all(1, AppColors.BORDER),
+                padding=20
+            )
+            
+        # Case 2: News List Present
+        news_items = []
+        for _, row in self.news_data.iterrows():
+            news_items.append(self._build_news_item(row))
+
+        # Add "Load More" button only if we have more pages
+        if self.has_more_news:
+            load_more_btn = ft.Container(
+                content=ft.ElevatedButton(
+                    text=I18n.get("news_load_more"),
+                    on_click=self._on_load_more_click,
+                    style=ft.ButtonStyle(
+                        color=AppColors.TEXT_SECONDARY,
+                        bgcolor=ft.Colors.TRANSPARENT,
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                        side=ft.BorderSide(1, AppColors.BORDER)
+                    )
+                ),
+                alignment=ft.alignment.center,
+                padding=10
+            )
+            news_items.append(load_more_btn)
+
+        news_list = ft.ListView(
+            controls=news_items,
+            spacing=10,
+            padding=10,
+            auto_scroll=False,
+            expand=True
+        )
+
+        return ft.Container(
+            content=news_list,
+            expand=True,
+            bgcolor=AppColors.SURFACE,
+            border_radius=12,
+            border=ft.border.all(1, AppColors.BORDER),
+            padding=10
         )
 
     def _build_news_item(self, row):

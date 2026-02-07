@@ -132,7 +132,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         progress_callback(processed_count, total_days, I18n.get('progress_sync_market').format(date=date))
                 except Exception as e:
                     # Specific error handling
-                    logger.debug(f"[HistoricalSync] Failed to sync {date}: {e}")
+                    logger.error(f"[HistoricalSync] Failed to sync {date}: {e}", exc_info=True)
                     failed_dates.append(date)
 
         # Batch Processing
@@ -203,8 +203,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
              # Fast check using sync status first (if implemented in cache/test)
              # Fallback to checking data existence (as per test expectation)
              # Check quotes as proxy for daily data
-             existing = await self.context.cache.get_daily_quotes(trade_date=trade_date)
-             if existing is not None and not existing.empty:
+             if await self.context.cache.check_data_exists(trade_date):
                  logger.info(f"[DailySync] Data for {trade_date} already exists.")
                  return True
 

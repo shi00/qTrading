@@ -695,13 +695,25 @@ class CacheManager:
         try:
             loop = asyncio.get_running_loop()
             params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
-        except RuntimeError:
+        except Exception as e:
+            logger.error(f"[CacheManager] save_daily_quotes failed: {e}", exc_info=True)
             return 0
         
         if params:
             await self._enqueue((sql, params, True), priority)
             return len(params)
         return 0
+
+    async def check_data_exists(self, trade_date: str) -> bool:
+        """
+        Fast check if data exists for a given date.
+        Uses SELECT 1 LIMIT 1 for minimal overhead.
+        """
+        await self.wait_for_maintenance()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT 1 FROM daily_quotes WHERE trade_date=? LIMIT 1", (trade_date,)) as cursor:
+                result = await cursor.fetchone()
+                return result is not None
 
     async def get_daily_quotes(self, ts_code=None, start_date=None, end_date=None, ts_code_list=None):
         """
@@ -713,6 +725,11 @@ class CacheManager:
         async with aiosqlite.connect(self.db_path) as db:
             base_sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
             params = []
+            
+            # [Safety] Prevent full table scan
+            if not any([ts_code, start_date, end_date, ts_code_list]):
+                logger.warning("[CacheManager] get_daily_quotes called without filters! returning empty.")
+                return pd.DataFrame()
             
             if ts_code:
                 base_sql += " AND ts_code = ?"
@@ -727,18 +744,38 @@ class CacheManager:
                 params.append(end_date)
 
             if ts_code_list:
-                # Optimized IN query
-                placeholders = ','.join(['?'] * len(ts_code_list))
-                base_sql += f" AND ts_code IN ({placeholders})"
-                params.extend(ts_code_list)
+                # Optimized IN query with Chunking for SQLite limit (999 variables)
+                CHUNK_SIZE = 900 
+                all_rows = []
+                cols = []
+                
+                # If list is small, run once
+                if len(ts_code_list) <= CHUNK_SIZE:
+                    placeholders = ','.join(['?'] * len(ts_code_list))
+                    chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
+                    chunk_params = params + ts_code_list
+                    async with db.execute(chunk_sql, chunk_params) as cursor:
+                         if not cols:
+                             cols = [desc[0] for desc in cursor.description]
+                         all_rows.extend(await cursor.fetchall())
+                else:
+                    # Run in chunks
+                    for i in range(0, len(ts_code_list), CHUNK_SIZE):
+                        chunk = ts_code_list[i:i + CHUNK_SIZE]
+                        placeholders = ','.join(['?'] * len(chunk))
+                        chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
+                        chunk_params = params + chunk
+                        async with db.execute(chunk_sql, chunk_params) as cursor:
+                             if not cols:
+                                 cols = [desc[0] for desc in cursor.description]
+                             all_rows.extend(await cursor.fetchall())
+                
+                return pd.DataFrame(all_rows, columns=cols)
             
+            # Normal single query
             async with db.execute(base_sql, params) as cursor:
-                # Use row factory or manual column mapping
                 cols = [desc[0] for desc in cursor.description]
                 rows = await cursor.fetchall()
-                if not rows:
-                    return pd.DataFrame()
-                
                 return pd.DataFrame(rows, columns=cols)
 
     async def get_latest_trade_date(self):

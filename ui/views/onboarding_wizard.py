@@ -496,43 +496,32 @@ class OnboardingWizard(ft.Container):
                 self.sync_status.value = I18n.get("wizard_msg_today_done")
                 self.sync_status.color = ft.Colors.GREEN
             else:
-                # Full sync
-                self.sync_status.value = I18n.get("wizard_status_stock_list")
-                self.update()
-                await processor.sync_stock_basic()
-
-                if processor.is_cancelled():
-                    raise asyncio.CancelledError("User cancelled")
-
-                self.sync_status.value = I18n.get("wizard_status_history")
-                self.sync_progress.value = 0
-                self.update()
-
-                days = DEFAULT_SYNC_DAYS
                 _last_update_ts = [0]
-
                 def update_progress(current, total, msg):
                     import time
                     now = time.time()
                     if current == total or (now - _last_update_ts[0] > 0.1):
-                        self.sync_progress.value = current / total
-                        self.sync_status.value = f"{msg} ({int(current / total * 100)}%)"
+                        # Clamp ratio to 1.0
+                        ratio = min(current / max(total, 0.001), 1.0)
+                        self.sync_progress.value = ratio
+                        self.sync_status.value = f"{msg} ({ratio * 100:.1f}%)"
                         self._safe_update()
                         _last_update_ts[0] = now
 
                 # Ensure DB is initialized before sync
-                await processor.init_data()
-
-                # Use unified cancellation via processor
-                await processor.sync_historical_data(
-                    days=days,
-                    progress_callback=update_progress
-                )
+                # initialize_system handles DB init internally
+                
+                # Use unified initialization workflow
+                # This ensures Stock List -> Calendar -> History -> Financials -> Health Check
+                result = await processor.initialize_system(progress_callback=update_progress)
 
                 if processor.is_cancelled():
                     self.sync_status.value = I18n.get("wizard_msg_sync_cancelled")
                     self.sync_status.color = ft.Colors.RED
                     self.sync_progress.value = 0
+                elif result is None:
+                    # Critical failure without explicit cancellation
+                    raise Exception("Initialization task failed unexpectedly. Check logs.")
                 else:
                     self.sync_status.value = I18n.get("wizard_msg_history_done")
                     self.sync_status.color = ft.Colors.GREEN
