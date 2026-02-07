@@ -364,11 +364,12 @@ class TableViewerTab(ft.Container):
                             ),
                             alignment=ft.alignment.center,
                             expand=True,
-                            on_click=lambda e, c=col: asyncio.create_task(self._on_sort(c))
                             # Allow clicking header to sort
+                            # Use page.run_task to bridge sync event to async method
+                            on_click=lambda e, c=col: self.page.run_task(self._on_sort, c)
                         ),
                         numeric=is_numeric,
-                        on_sort=lambda e, c=col: asyncio.create_task(self._on_sort(c)),
+                        on_sort=lambda e, c=col: self.page.run_task(self._on_sort, c),
                     )
                 )
 
