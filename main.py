@@ -6,6 +6,7 @@ import flet as ft
 from data.cache_manager import CacheManager
 from data.news_fetcher import NewsFetcher
 from data.news_subscription import NewsSubscriptionService
+from data.market_data_service import MarketDataService
 from services.local_model_manager import LocalModelManager
 from ui.components.toast_manager import ToastManager
 from ui.i18n import I18n
@@ -74,6 +75,9 @@ async def main(page: ft.Page):
 
             logger.info("[Main] Step 3: Stopping News Service...")
             NewsSubscriptionService().stop()
+            
+            logger.info("[Main] Step 3b: Stopping Market Data Service...")
+            MarketDataService().stop()
 
             # Stop Toasts (Cancel pending timers)
             logger.info("[Main] Step 4: Stopping Toast Manager...")
@@ -319,8 +323,19 @@ async def main(page: ft.Page):
                 page.update()  # Critical: force UI refresh
             except Exception as e:
                 logger.error(f"[NewsAlert] Failed to open snackbar: {e}")
+        
+        def on_news_update():
+            """新闻数据更新时通知 HomeView 刷新"""
+            home_view.refresh_news_if_visible()
 
-        NewsSubscriptionService().start(callback=on_news_alert)
+        NewsSubscriptionService().start(callback=on_news_alert, on_update=on_news_update)
+        
+        # Start Market Data Service
+        def on_market_update():
+            """市场数据更新时通知 HomeView 刷新"""
+            home_view.refresh_market_if_visible()
+        
+        MarketDataService().start(on_update=on_market_update)
 
 
 

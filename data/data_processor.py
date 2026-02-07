@@ -555,13 +555,15 @@ class DataProcessor:
     async def sync_market_news(self, limit=None):
         """Sync market news."""
         try:
-             news = await NewsFetcher.get_latest_global_news(limit=limit or 20)
-             if news:
-                 for item in news:
-                      await self.cache.save_market_news(item)
-             return len(news) if news else 0
+            news = await NewsFetcher.get_latest_global_news(limit=limit or 20)
+            if news:
+                for item in news:
+                    # 使用公共方法标准化字段
+                    normalized = CacheManager.normalize_news_item(item, default_source='CLS')
+                    await self.cache.save_market_news(normalized)
+            return len(news) if news else 0
         except:
-             return 0
+            return 0
 
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365):

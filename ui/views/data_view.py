@@ -136,7 +136,7 @@ class TableViewerTab(ft.Container):
             heading_row_color=AppColors.TABLE_HEADER_BG,
             heading_row_height=42,
             data_row_min_height=40,
-            data_row_max_height=40,
+            data_row_max_height=None,  # 不限制行高，允许长文本换行
             column_spacing=20,
             horizontal_margin=16,
             divider_thickness=0,
@@ -438,17 +438,32 @@ class TableViewerTab(ft.Container):
                     elif 'date' in col_name.lower() and isinstance(val, str) and len(val) == 8 and val.isdigit():
                         str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
 
+                    # 仅对 market_news 表的长文本字段使用左对齐和自动换行
+                    is_news_table = self.current_table == 'market_news'
+                    is_long_text = is_news_table and col_name.lower() in ('content', 'tags')
+                    
                     cell_text = ft.Text(
                         str_val,
                         size=13,
-                        max_lines=1,
-                        overflow=ft.TextOverflow.ELLIPSIS,
+                        max_lines=None if is_long_text else 1,  # 新闻内容不限制行数
+                        overflow=ft.TextOverflow.VISIBLE if is_long_text else ft.TextOverflow.ELLIPSIS,
                         font_family="Roboto Mono" if is_numeric or "code" in col_name.lower() or "date" in col_name.lower() else None,
                         color=AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT,
-                        text_align=ft.TextAlign.CENTER,
+                        text_align=ft.TextAlign.LEFT if is_long_text else ft.TextAlign.CENTER,  # 新闻内容左对齐
                     )
-                    cells.append(
-                        ft.DataCell(ft.Container(content=cell_text, alignment=ft.alignment.center, expand=True)))
+                    
+                    # 新闻内容使用左对齐容器，并设置固定宽度保证换行
+                    if is_long_text:
+                        cell_container = ft.Container(
+                            content=cell_text,
+                            alignment=ft.alignment.top_left,
+                            width=400,  # 固定宽度确保换行
+                            padding=ft.padding.symmetric(vertical=5),
+                        )
+                    else:
+                        cell_container = ft.Container(content=cell_text, alignment=ft.alignment.center, expand=True)
+                    
+                    cells.append(ft.DataCell(cell_container))
 
                 row_color = AppColors.TABLE_ROW_ODD if idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
                 self.data_table.rows.append(ft.DataRow(cells=cells, color=row_color))

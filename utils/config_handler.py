@@ -116,7 +116,9 @@ class ConfigHandler:
         "max_io_workers": 0,
         "max_cpu_workers": 0,
         "sync_request_delay_heavy": 0.0,
-        "sync_request_delay_light": 0.0
+        "sync_request_delay_light": 0.0,
+        "news_poll_interval": 60,
+        "market_data_poll_interval": 30
     }
 
     @staticmethod
@@ -595,3 +597,22 @@ class ConfigHandler:
     def set_sync_request_delay(delay, is_heavy=False):
         key = "sync_request_delay_heavy" if is_heavy else "sync_request_delay_light"
         return ConfigHandler.save_config({key: float(delay)})
+
+    # === Polling Intervals ===
+    @staticmethod
+    def get_news_poll_interval():
+        config = ConfigHandler.load_config()
+        return config.get("news_poll_interval", 60)
+
+    @staticmethod
+    def set_news_poll_interval(seconds):
+        return ConfigHandler.save_config({"news_poll_interval": int(max(10, seconds))})
+
+    @staticmethod
+    def get_market_data_poll_interval():
+        config = ConfigHandler.load_config()
+        return config.get("market_data_poll_interval", 30)
+
+    @staticmethod
+    def set_market_data_poll_interval(seconds):
+        return ConfigHandler.save_config({"market_data_poll_interval": int(max(10, seconds))})

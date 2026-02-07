@@ -5,6 +5,7 @@ import flet as ft
 
 import pandas as pd
 from data.data_processor import DataProcessor
+from data.market_data_service import MarketDataService
 from ui.i18n import I18n
 from ui.theme import AppColors
 
@@ -52,6 +53,24 @@ class HomeView(ft.Container):
                 self.update()
         except Exception as e:
             logger.error(f"Error refreshing locale: {e}")
+    
+    def _run_if_visible(self, task_func, log_msg="Refreshing"):
+        """辅助方法：仅在可见且已挂载时运行任务"""
+        if not self._is_visible or not self._is_mounted:
+            logger.debug(f"[HomeView] Skipping {log_msg} - not visible or not mounted")
+            return
+        
+        logger.debug(f"[HomeView] {log_msg}")
+        if self.page:
+            self.page.run_task(task_func)
+
+    def refresh_news_if_visible(self):
+        """刷新新闻列表（供 NewsSubscriptionService 回调使用）"""
+        self._run_if_visible(self._refresh_news_only, "Refreshing news list")
+    
+    def refresh_market_if_visible(self):
+        """刷新市场数据（供 MarketDataService 回调使用）"""
+        self._run_if_visible(self._refresh_from_cache, "Refreshing market data from cache")
 
     def did_mount(self):
         import time as _time
@@ -76,7 +95,7 @@ class HomeView(ft.Container):
                 self.content = self._build_ui(self.last_data)
                 self.update()
             
-            self._start_auto_refresh()
+            # self._start_auto_refresh()
             logger.debug("[HomeView] Skipping re-init - data restored")
 
         logger.debug(f"[PERF] <<< HomeView.did_mount END (sync part) took {(_time.perf_counter()-_t0)*1000:.1f}ms")
@@ -106,7 +125,7 @@ class HomeView(ft.Container):
 
             if self._is_mounted:
                 self._data_loaded = True  # Mark data as loaded
-                self._start_auto_refresh()
+                # self._start_auto_refresh()
 
             logger.debug(f"[PERF] <<< HomeView._init_and_load END, TOTAL={(_time.perf_counter()-_t_start)*1000:.1f}ms")
         except asyncio.CancelledError:
@@ -117,7 +136,7 @@ class HomeView(ft.Container):
     def will_unmount(self):
         """Cleanup when view is detached"""
         self._is_mounted = False
-        self._stop_auto_refresh()
+        # self._stop_auto_refresh()
         # Cancel any pending init task
         if self._init_task:
             self._init_task.cancel()
@@ -125,33 +144,10 @@ class HomeView(ft.Container):
         # Subscriptions persist for singleton views, no need to unsubscribe (it clears all)
         # I18n.unsubscribe(self.refresh_locale) # Singleton: keep listening
 
-    def _start_auto_refresh(self):
-        """Start the periodic auto-refresh task"""
-        if self._refresh_task is None and self.page and self._is_mounted:
-            self._refresh_task = self.page.run_task(self._auto_refresh_loop)
-            logger.info(f"[HomeView] Auto-refresh started (interval: {self.REFRESH_INTERVAL_SECONDS}s)")
-
-    def _stop_auto_refresh(self):
-        """Stop the auto-refresh task"""
-        if self._refresh_task:
-            self._refresh_task.cancel()
-            self._refresh_task = None
-            logger.info("[HomeView] Auto-refresh stopped")
-
-    async def _auto_refresh_loop(self):
-        """Background loop for periodic data refresh"""
-        while self._is_mounted:
-            try:
-                await asyncio.sleep(self.REFRESH_INTERVAL_SECONDS)
-                if self._is_mounted and self._is_visible:
-                    logger.debug("[HomeView] Auto-refreshing data...")
-                    await self._load_data()
-                elif self._is_mounted:
-                    logger.debug("[HomeView] Skipped auto-refresh - view not visible")
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"[HomeView] Auto-refresh error: {e}")
+    # Auto-refresh logic moved to MarketDataService (event-driven)
+    # def _start_auto_refresh(self): ...
+    # def _stop_auto_refresh(self): ...
+    # async def _auto_refresh_loop(self): ...
 
     def set_visible(self, visible: bool):
         """Set the visibility state of HomeView (called by main.py on tab change)"""
@@ -189,23 +185,27 @@ class HomeView(ft.Container):
             self.news_page = 0
             self.has_more_news = True
 
+            # 从 MarketDataService 缓存读取市场数据
+            # 首次加载时服务可能还没准备好，等待重试
             _t0 = _time.perf_counter()
-            data = await self.processor.get_market_overview()
-            logger.debug(f"[PERF] HomeView: get_market_overview() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
+            data = None
+            for attempt in range(5):  # 最多等待 2.5 秒
+                data = MarketDataService().get_cached_data()
+                if data:
+                    break
+                await asyncio.sleep(0.5)
+                logger.debug(f"[HomeView] Waiting for market data cache... (attempt {attempt + 1})")
+            
+            logger.debug(f"[PERF] HomeView: get_cached_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
             
             if not data:
-                logger.debug("[PERF] <<< HomeView._load_data END (no data)")
+                logger.debug("[PERF] <<< HomeView._load_data END (no cached data)")
                 return
 
             # Update Cache
             self.last_data = data
 
-            # Sync News immediately (Deep Sync Strategy)
-            _t0 = _time.perf_counter()
-            await self.processor.sync_market_news()
-            logger.debug(f"[PERF] HomeView: sync_market_news() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
-
-            # Load News Data
+            # 读取新闻数据（由 NewsSubscriptionService 后台服务负责同步和保存）
             _t0 = _time.perf_counter()
             await self._load_news_data()
             logger.debug(f"[PERF] HomeView: _load_news_data() took {(_time.perf_counter()-_t0)*1000:.1f}ms")
@@ -224,6 +224,39 @@ class HomeView(ft.Container):
 
         except Exception as e:
             logger.error(f"Error loading home data: {e}")
+    
+    async def _refresh_news_only(self):
+        """只刷新新闻部分，不重新加载其他数据（供事件驱动刷新使用）"""
+        try:
+            await self._load_news_data()
+            # 只重建 UI（使用缓存的 last_data）
+            self.content = self._build_ui(self.last_data)
+            if self.page:
+                self.update()
+            logger.debug("[HomeView] News section refreshed")
+        except Exception as e:
+            logger.error(f"[HomeView] Failed to refresh news: {e}")
+    
+
+    
+    async def _refresh_from_cache(self):
+        """从 MarketDataService 缓存读取市场数据并刷新 UI"""
+        try:
+            data = MarketDataService().get_cached_data()
+            if not data:
+                logger.debug("[HomeView] No cached market data available")
+                return
+            
+            # 更新行情缓存
+            self.last_data = data
+            
+            # 重建 UI（使用缓存的 news_data）
+            self.content = self._build_ui(self.last_data)
+            if self.page:
+                self.update()
+            logger.debug("[HomeView] UI refreshed from cache")
+        except Exception as e:
+            logger.error(f"[HomeView] Failed to refresh from cache: {e}")
 
     async def _on_load_more_click(self, e):
         """Handle Load More button click"""
@@ -232,24 +265,26 @@ class HomeView(ft.Container):
 
         self._is_loading_more = True
         try:
-            self.news_page += 1
-            success = await self._load_news_data(load_more=True)
+            # Try to load next page
+            next_page = self.news_page + 1
+            success = await self._load_news_data(target_page=next_page)
 
             if success:
-                # Rebuild UI to append news (or in full rebuild case, show all)
+                # Rebuild UI
                 self.content = self._build_ui(self.last_data)
                 if self.page:
                     self.update()
-            else:
-                # Revert page increment on failure
-                self.news_page -= 1
-                # Optional: Show error snackbar here if needed
         finally:
             self._is_loading_more = False
 
-    async def _load_news_data(self, load_more=False):
+    async def _load_news_data(self, target_page=0):
+        """
+        Load news data for a specific page.
+        Args:
+            target_page: The page index to load.
+        """
         try:
-            offset = self.news_page * self.PAGE_SIZE
+            offset = target_page * self.PAGE_SIZE
 
             # Fetch batch
             new_batch = await self.processor.cache.get_market_news(
@@ -259,18 +294,23 @@ class HomeView(ft.Container):
 
             if new_batch.empty:
                 self.has_more_news = False
-                if not load_more:
+                # If we were trying to load page 0 and it's empty, clear data
+                if target_page == 0:
                     self.news_data = None
             else:
-                if not load_more or self.news_data is None:
+                # If loading page 0 (refresh), replace data. Else append.
+                if target_page == 0:
                     self.news_data = new_batch
+                    self.news_page = 0
                 else:
-                    # Append new data
                     self.news_data = pd.concat([self.news_data, new_batch], ignore_index=True)
+                    self.news_page = target_page
 
                 # Check if we likely have more
                 if len(new_batch) < self.PAGE_SIZE:
                     self.has_more_news = False
+                else:
+                    self.has_more_news = True
                     
             return True
 
@@ -321,8 +361,10 @@ class HomeView(ft.Container):
         hsgt = data.get('hsgt') or {}
         hsgt_val = hsgt.get('value', '--') or '--'
         hsgt_sub = hsgt.get('sub', '--') or '--'
-        is_inflow = I18n.get("home_inflow") in hsgt_sub
-        hsgt_color = ft.Colors.RED if is_inflow else ft.Colors.GREEN if 'out' in hsgt_sub or '流出' in hsgt_sub else ft.Colors.GREY
+        hsgt_sub = hsgt.get('sub', '--') or '--'
+        # 使用 Service 返回的 color，如果不存在则回退到 GREY
+        color_str = hsgt.get('color', 'GREY').upper()
+        hsgt_color = getattr(ft.Colors, color_str, ft.Colors.GREY)
 
         indices_row = ft.ResponsiveRow([
             _mk_idx_card(I18n.get("home_index_sh"), sh),

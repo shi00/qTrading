@@ -1200,7 +1200,7 @@ class CacheManager:
                     await fetch_and_save(max_db, end_date)
             
             # Ensure all writes are flushed to DB
-            logger.info("[CacheManager] Waiting for DB writer to finish...")
+            logger.debug("[CacheManager] Waiting for DB writer to finish...")
             await self.queue.join()
 
             # Verify calendar data exists
@@ -1213,7 +1213,7 @@ class CacheManager:
                 logger.error("[CacheManager] No trade calendar data available after sync")
                 return False
                 
-            logger.info(f"[CacheManager] Trade calendar ready: {count} trading days cached")
+            logger.debug(f"[CacheManager] Trade calendar ready: {count} trading days cached")
             return True
 
         except Exception as e:
@@ -1916,6 +1916,27 @@ class CacheManager:
                 return pd.DataFrame(rows, columns=cols)
 
     # ========== Market News ==========
+    @staticmethod
+    def normalize_news_item(raw_item: dict, default_source: str = 'CLS') -> dict:
+        """
+        统一新闻字段格式的公共方法。
+        所有新闻保存路径都应使用此方法来确保字段一致性。
+        
+        Args:
+            raw_item: 原始新闻数据（可能来自不同数据源）
+            default_source: 默认来源标识
+            
+        Returns:
+            dict: 标准化后的新闻数据，包含 content, tags, publish_time, source 字段
+        """
+        return {
+            'content': raw_item.get('content', '') or '',
+            'tags': raw_item.get('tags', '') or '',
+            # 兼容不同数据源：'time' 或 'publish_time'
+            'publish_time': raw_item.get('publish_time') or raw_item.get('time', '') or '',
+            'source': raw_item.get('source', default_source) or default_source
+        }
+    
     async def save_market_news(self, news_item):
         """Save a single news item (dict)"""
         if not news_item:

@@ -30,30 +30,35 @@ class NewsSubscriptionService:
         self._running = False
         self._task = None
         self._last_news_time = None
-        self.on_news_callback = None # Function to call when news arrives (e.g. show snackbar)
+        self._last_news_content = None
+        self.on_news_callback = None  # 弹窗通知回调 (受 enable_news_alerts 控制)
+        self.on_news_update = None     # 数据更新回调 (始终触发，用于UI刷新)
         self._current_fetch_task = None
         self._initialized = True
         
-    def start(self, callback=None):
-        """Start the subscription service"""
+    def start(self, callback=None, on_update=None):
+        """
+        Start the subscription service.
+        
+        Args:
+            callback: 弹窗通知回调（受 enable_news_alerts 配置控制）
+            on_update: 数据更新回调（始终触发，用于 UI 刷新）
+        """
         if self._running:
             return
             
         if callback:
             self.on_news_callback = callback
-        
-        # Check config
-        enabled = ConfigHandler.get_config('enable_news_alerts', True)
-        if not enabled:
-            logger.info("[NewsService] News alerts disabled in config.")
-            return
+        if on_update:
+            self.on_news_update = on_update
 
+        # 始终启动服务进行数据同步（enable_news_alerts 只控制弹窗推送）
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("[NewsService] Started news polling service [STARTED]")
         
     def stop(self):
-        """Stop the service"""
+        """Stop the service and reset state"""
         self._running = False
         if self._task:
             self._task.cancel()
@@ -63,6 +68,14 @@ class NewsSubscriptionService:
         if self._current_fetch_task and not self._current_fetch_task.done():
             self._current_fetch_task.cancel()
             self._current_fetch_task = None
+        
+        # 重置状态，确保下次 start() 时能正确执行首次同步
+        self._last_news_time = None
+        self._last_news_content = None
+        
+        # 清理回调引用，防止内存泄漏
+        self.on_news_callback = None
+        self.on_news_update = None
             
         logger.info("[NewsService] Stopped news polling service")
 
@@ -97,25 +110,43 @@ class NewsSubscriptionService:
 
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""
+        logger.debug("[NewsService] Polling for latest news...")
         try:
             # Use centralized NewsFetcher (which handles proxies and data normalization)
             from data.news_fetcher import NewsFetcher
+            from data.cache_manager import CacheManager
             
-            # Fetch latest 1 news item
-            news_list = await NewsFetcher.get_latest_global_news(limit=1)
+            # 首次启动时批量拉取新闻（确保首页有数据显示）
+            is_initial_sync = self._last_news_time is None
+            fetch_limit = 20 if is_initial_sync else 1
+            
+            news_list = await NewsFetcher.get_latest_global_news(limit=fetch_limit)
             
             if not news_list:
                 return
-
+            
+            # 首次启动：批量保存所有新闻到数据库（无AI分类，快速同步）
+            if is_initial_sync:
+                logger.info(f"[NewsService] Initial sync: saving {len(news_list)} news items")
+                for item in news_list:
+                    normalized = CacheManager.normalize_news_item(item, default_source='CLS')
+                    await self.cache.save_market_news(normalized)
+                
+                # 设置初始状态（用最新一条作为基准）
+                latest_item = news_list[0]
+                self._last_news_time = latest_item.get('time', '')
+                self._last_news_content = latest_item.get('content', '')
+                logger.info("[NewsService] Initial sync complete, monitoring for new news...")
+                
+                # 通知 UI 数据已就绪（首次同步完成）
+                if self.on_news_update:
+                    self.on_news_update()
+                return
+            
+            # 后续轮询：只检测最新1条，用于判断是否有新消息
             latest_item = news_list[0]
             current_news_content = latest_item.get('content', '')
             current_news_time = latest_item.get('time', '')
-            
-            # Setup initial state
-            if self._last_news_time is None:
-                self._last_news_time = current_news_time
-                self._last_news_content = current_news_content
-                return # Don't alert on startup, just sync
                 
             # Check for new news
             if current_news_time != self._last_news_time or current_news_content != self._last_news_content:
@@ -160,17 +191,24 @@ class NewsSubscriptionService:
                 
                 logger.info(f"[NewsService] [ALERT] New Alert: {display_msg[:30]}...")
                 
-                if self.on_news_callback:
-                    # Notify UI
+                # 弹窗通知（受 enable_news_alerts 配置控制）
+                enable_alerts = ConfigHandler.get_config('enable_news_alerts', True)
+                if enable_alerts and self.on_news_callback:
                     self.on_news_callback(display_msg)
                     
-                # PERSISTENCE: Save to DB for AI
-                await self.cache.save_market_news({
+                # PERSISTENCE: Save to DB for AI（使用公共方法标准化字段）
+                from data.cache_manager import CacheManager
+                normalized = CacheManager.normalize_news_item({
                     'content': clean_content,
                     'tags': tag,
                     'publish_time': current_news_time,
                     'source': 'CLS'
                 })
+                await self.cache.save_market_news(normalized)
+                
+                # 通知 UI 有新数据（始终触发）
+                if self.on_news_update:
+                    self.on_news_update()
                     
         except Exception as e:
             logger.warning(f"[NewsService] Poll failed: {e}")
