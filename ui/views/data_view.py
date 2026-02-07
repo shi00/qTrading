@@ -135,8 +135,8 @@ class TableViewerTab(ft.Container):
             horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),
             heading_row_color=AppColors.TABLE_HEADER_BG,
             heading_row_height=42,
-            data_row_min_height=40,
-            data_row_max_height=None,  # 不限制行高，允许长文本换行
+            data_row_min_height=48,  # 使用标准行高
+            data_row_max_height=float("inf"),  # 允许行高无限撑开，解决长文本重叠问题
             column_spacing=20,
             horizontal_margin=16,
             divider_thickness=0,
