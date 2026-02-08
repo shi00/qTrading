@@ -39,6 +39,11 @@ class AIService:
         self._setup_client()
         self._semaphore = None  # Lazy creation to avoid cross-event-loop issues
         self._semaphore_loop = None  # Track which loop the semaphore belongs to
+        
+        # Locks for Local Model
+        self._setup_lock = asyncio.Lock() # Protect auto-init
+        self._local_llama_lock = threading.Lock() # Protect inference (Llama is not thread safe)
+        
         self._initialized = True
 
     def _get_semaphore(self):
@@ -99,6 +104,15 @@ class AIService:
         # Force semaphore rebuild with new concurrency
         self._semaphore = None
         self._semaphore_loop = None
+        
+        # Reset Local Model state to allow hot-swapping model path
+        # Use simple assignment as we are in main loop single thread (mostly)
+        # But to be safe with async, we just flag it. 
+        # Ideally we should stop current inferences? Too complex. 
+        # Just reset flags so next call re-loads.
+        self._local_model_attempted = False
+        # We don't unset _local_llama immediately to avoid crashing running threads
+        # It will be overwritten on next _setup_local_model success.
 
     @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=30000)
     async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="") -> dict:
@@ -209,11 +223,124 @@ class AIService:
             logger.error(f"[AI] Analysis failed: {e}")
             return {"error": str(e), "score": 0}
 
+    async def _setup_local_model(self):
+        """
+        Lazily initialize local GGUF model if configured.
+        Thread-safe (Async-safe).
+        """
+        # Double-check locking pattern for async
+        if hasattr(self, '_local_model_attempted') and self._local_model_attempted:
+             return
+
+        async with self._setup_lock:
+            if hasattr(self, '_local_model_attempted') and self._local_model_attempted:
+                return
+
+            self._local_model_attempted = True
+            local_path = ConfigHandler.get_setting('local_model_path')
+            
+            if not local_path:
+                return
+
+            import os
+            if not os.path.exists(local_path):
+                logger.warning(f"[AI] Local model path not found: {local_path}")
+                return
+
+            try:
+                # Lazy import to avoid hard dependency
+                import importlib.util
+                if importlib.util.find_spec("llama_cpp") is None:
+                     raise ImportError("llama-cpp-python not found")
+
+                logger.info(f"[AI] Loading local model from {local_path}...")
+                
+                # Calculate optimal thread count: Leave 1 or 2 cores free for OS/UI
+                # min(2, cpu-1) means: if 4 cores, use 3 (or 2 to be safe). safe default is 2.
+                # Safety: os.cpu_count() can return None
+                cpu_count = os.cpu_count() or 1
+                n_threads = max(1, min(2, cpu_count - 1))
+                
+                # Run in thread pool to avoid blocking async loop
+                def _load():
+                    from llama_cpp import Llama
+                    return Llama(
+                        model_path=local_path,
+                        n_ctx=2048,
+                        n_threads=n_threads,
+                        verbose=False
+                    )
+                
+                from utils.thread_pool import ThreadPoolManager, TaskType
+                # Loading model is CPU heavy? actually it creates the object. The inference is CPU heavy.
+                # Loading reads disk (IO) but also allocates RAM. 
+                # Use run_async with CPU task type generally.
+                self._local_llama = await ThreadPoolManager().run_async(TaskType.CPU, _load)
+                
+                logger.info(f"[AI] Local model loaded successfully (threads={n_threads}).")
+            except ImportError:
+                logger.warning("[AI] llama-cpp-python not installed. Local model disabled. Install via: pip install llama-cpp-python")
+            except Exception as e:
+                logger.error(f"[AI] Failed to load local model: {e}")
+
     @log_async_operation(operation_name="classify_news", performance_threshold_ms=5000)
     async def classify_news(self, text: str) -> dict:
         """
-        Classify news text using LLM.
+        Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).
         """
+        # 1. Try Local Model first
+        await self._setup_local_model()
+        
+        if hasattr(self, '_local_llama') and self._local_llama:
+            try:
+                # Prompt for Qwen/Llama style
+                prompt = f"""<|im_start|>system
+You are a financial news classifier. 
+Output JSON with fields: category (Policy,International,Macro,Market,Stock), sentiment (Positive,Neutral,Negative), emoji.
+<|im_end|>
+<|im_start|>user
+{text[:500]}
+<|im_end|>
+<|im_start|>assistant
+"""
+                # Llama.cpp is not thread-safe for parallel inference on same instance
+                # Lock is initialized in __init__
+
+                # Llama.cpp is not thread-safe for parallel inference on same instance
+                # Lock is initialized in __init__
+                
+                # CAPTURE instance to avoid race condition with reload_config setting it to None
+                local_model_instance = self._local_llama
+
+                def _run_local():
+                    with self._local_llama_lock:
+                        return local_model_instance(
+                            prompt, 
+                            max_tokens=200, 
+                            stop=["<|im_end|>"], 
+                            echo=False,
+                            temperature=0.1
+                        )
+                
+                from utils.thread_pool import ThreadPoolManager, TaskType
+                # Use Global ThreadPool
+                response = await ThreadPoolManager().run_async(TaskType.CPU, _run_local)
+                
+                output_text = response['choices'][0]['text'].strip()
+                
+                # Try to extract JSON
+                start = output_text.find('{')
+                end = output_text.rfind('}')
+                if start != -1 and end != -1:
+                    json_str = output_text[start:end+1]
+                    return json.loads(json_str)
+                else:
+                    logger.warning(f"[AI] Local model output not JSON: {output_text}")
+            except Exception as e:
+                logger.error(f"[AI] Local model inference failed: {e}")
+                # Fallback to cloud...
+
+        # 2. Fallback to Cloud API
         if not self.client:
             return None
 

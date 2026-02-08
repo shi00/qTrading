@@ -262,14 +262,13 @@ class NotificationsTab(ft.Container):
         self.news_interval.visible = enabled
         self.update()
 
-        service = NewsSubscriptionService()
+        # Note: We do NOT stop/start the service here.
+        # The service runs globally and checks 'enable_news_alerts' dynamically.
+        # Stopping it would break data sync for HomeView.
         if enabled:
-            # Re-start service using existing global callback (set in main.py)
-            service.start()
             if self.show_snack:
                 self.show_snack(I18n.get("settings_snack_news_on"))
         else:
-            service.stop()
             if self.show_snack:
                 self.show_snack(I18n.get("settings_snack_news_off"))
 

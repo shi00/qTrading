@@ -588,6 +588,11 @@ class I18n:
             "tag_global": "外盘",
             "tag_international": "国际",
             "tag_macro": "宏观",
+
+            # Data View - Missing Keys
+            "data_date_fmt_hint": "💡 日期格式: YYYYMMDD (如 '20260203')",
+            "data_status_executing": "正在执行查询...",
+            "data_sys_error": "系统错误: {error}",
         },
         "en": {
             "app_title": "A-Share Intelligent Screener",
@@ -1153,6 +1158,11 @@ class I18n:
             "ai_snack_invalid_range": "{field} out of valid range (Allowed: {min}-{max})",
             "ai_snack_fields_empty": "Please fill in candidate count and turnover threshold",
             "ai_snack_invalid_url": "API URL must start with http:// or https://",
+
+            # Data View - Missing Keys
+            "data_date_fmt_hint": "💡 Date Fmt: YYYYMMDD (e.g. '20260203')",
+            "data_status_executing": "Executing Query...",
+            "data_sys_error": "System Error: {error}",
         }
     }
 

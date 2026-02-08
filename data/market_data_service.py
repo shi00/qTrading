@@ -50,23 +50,32 @@ class MarketDataService:
         self._running = False
         self._task = None
         self._cached_data = None  # 内存缓存
-        self.on_update = None     # 数据更新回调（通知 UI 刷新）
+        # Observer Pattern: List of listeners
+        self._listeners = set()
         self._initialized = True
+        
+    def add_listener(self, callback):
+        """Add a listener for market data updates"""
+        self._listeners.add(callback)
+        logger.info(f"[MarketDataService] Added listener: {callback}")
+        
+    def remove_listener(self, callback):
+        """Remove a listener"""
+        try:
+            self._listeners.remove(callback)
+            logger.info(f"[MarketDataService] Removed listener: {callback}")
+        except KeyError:
+            pass
     
-    def start(self, on_update=None):
+    def start(self):
         """
         启动服务。
-        
-        Args:
-            on_update: 数据更新回调（用于通知 UI 刷新）
         """
         if self._running:
             return
         
-        if on_update:
-            self.on_update = on_update
-        
         self._running = True
+
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("[MarketDataService] Started market data polling service")
     
@@ -78,8 +87,9 @@ class MarketDataService:
             self._task = None
         
         # 清理状态
+        # 清理状态
         self._cached_data = None
-        self.on_update = None
+        # Note: Do not clear listeners, let components unregister themselves
         
         logger.info("[MarketDataService] Stopped market data polling service")
     
@@ -175,8 +185,14 @@ class MarketDataService:
             logger.debug(f"[MarketDataService] Market data updated for date {date}")
             
             # 通知 UI 更新
-            if self.on_update:
-                self.on_update()
+            listener_count = len(self._listeners)
+            if listener_count > 0:
+                logger.debug(f"[MarketDataService] Notifying {listener_count} listeners of update")
+                for listener in list(self._listeners):
+                    try:
+                        listener()
+                    except Exception as e:
+                        logger.error(f"[MarketDataService] Listener error: {e}")
                 
         except Exception as e:
             logger.error(f"[MarketDataService] Failed to fetch market data: {e}")

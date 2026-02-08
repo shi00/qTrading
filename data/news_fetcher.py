@@ -86,11 +86,23 @@ class NewsFetcher:
                         # Fallback
                         final_time = f"{today_str} {raw_time}"
                 
+                # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
+                try:
+                     # Try parsing with pandas for robustness (handles multiple formats)
+                    dt_obj = pd.to_datetime(final_time)
+                    final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    # Fallback: if pandas fails, try to ensure at least string format
+                    final_time = str(final_time)
+
                 news_list.append({
                     'title': row.get('标题') or row.get('title', '无标题'),
                     'content': row.get('内容') or row.get('content', ''),
                     'time': final_time
                 })
+            
+            # Ensure we sort by time DESC so news_list[0] is truly the latest
+            news_list.sort(key=lambda x: x['time'], reverse=True)
             return news_list
 
         except Exception as e:

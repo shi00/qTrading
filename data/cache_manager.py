@@ -1937,23 +1937,29 @@ class CacheManager:
             'source': raw_item.get('source', default_source) or default_source
         }
     
-    async def save_market_news(self, news_item):
-        """Save a single news item (dict)"""
+    async def save_market_news(self, news_item, wait=False):
+        """
+        Save a single news item (dict).
+        Args:
+            news_item: News data dict
+            wait: If True, wait for DB write to complete (prevents stale stale reads in UI)
+        """
         if not news_item:
             return 0
             
         cols = ['content', 'tags', 'publish_time', 'source']
-        
         
         if not self._running and not self._closing:
             pass # Explicit start required
 
 
         sql = '''
-                INSERT OR IGNORE INTO market_news 
-                (content, tags, publish_time, source, created_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            '''
+            INSERT INTO market_news 
+            (content, tags, publish_time, source, created_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(content, publish_time) DO UPDATE SET
+                tags = COALESCE(excluded.tags, market_news.tags)
+        '''
         # Prepare params with type conversion
         params = []
         for c in cols:
@@ -1963,8 +1969,32 @@ class CacheManager:
                 val = str(val)
             params.append(val)
             
-        await self._enqueue((sql, params, False))
-        return 1
+        if wait:
+            # Create Future to wait for completion
+            try:
+                loop = asyncio.get_running_loop()
+                future = loop.create_future()
+                
+                async def _exec_write(db, s, p):
+                    try:
+                        await db.execute(s, p)
+                        await db.commit()
+                        # Safely resolve future in the original loop
+                        loop.call_soon_threadsafe(lambda: future.set_result(True) if not future.done() else None)
+                    except Exception as e:
+                        loop.call_soon_threadsafe(lambda: future.set_exception(e) if not future.done() else None)
+
+                # Queue as FUNC (Functional Task) which is processed immediately (non-batched)
+                await self._enqueue((_exec_write, [sql, params], 'FUNC'))
+                await future
+                return 1
+            except Exception as e:
+                logger.error(f"[CacheManager] Save news wait error: {e}")
+                return 0
+        else:
+            # Standard Fire-and-Forget (Batched)
+            await self._enqueue((sql, params, False))
+            return 1
 
     async def get_market_news(self, limit=50, offset=0, min_publish_time=None):
         """

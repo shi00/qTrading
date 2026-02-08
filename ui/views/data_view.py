@@ -34,7 +34,7 @@ class TableViewerTab(ft.Container):
         self.numeric_cols = set()  # Track numeric columns for alignment
 
         # Sorting state
-        self.sort_col = None  # Currently sorted column
+        self.sort_col_index = None  # Currently sorted column index (Safe INT)
         self.sort_asc = True  # Sort direction (True = ASC, False = DESC)
         self._is_loading = False  # Prevent concurrent data loading
         self._tables_loaded = False  # Skip re-loading when switching back to this view
@@ -346,7 +346,7 @@ class TableViewerTab(ft.Container):
 
             # Update DataTable Columns
             self.data_table.columns = []
-            for col in self.table_columns:
+            for idx, col in enumerate(self.table_columns):
                 is_numeric = col in self.numeric_cols
                 header_text = MetaDataManager.get_column_alias(self.current_table, col)
 
@@ -366,15 +366,16 @@ class TableViewerTab(ft.Container):
                             expand=True,
                             # Allow clicking header to sort
                             # Use page.run_task to bridge sync event to async method
-                            on_click=lambda e, c=col: self.page.run_task(self._on_sort, c)
+                            # Pass INDEX, not name
+                            on_click=lambda e, i=idx: self.page.run_task(self._on_sort, i)
                         ),
                         numeric=is_numeric,
-                        on_sort=lambda e, c=col: self.page.run_task(self._on_sort, c),
+                        on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),
                     )
                 )
 
             # Reset sorting
-            self.sort_col = None
+            self.sort_col_index = None
             self.sort_asc = True
 
             # 2. Get Data
@@ -412,6 +413,11 @@ class TableViewerTab(ft.Container):
 
             total_pages = max(1, (self.total_rows // self.page_size) + 1)
 
+            # Resolve Sort Column Name from Index
+            sort_col_name = None
+            if self.sort_col_index is not None and 0 <= self.sort_col_index < len(self.table_columns):
+                sort_col_name = self.table_columns[self.sort_col_index]
+
             df = await ThreadPoolManager().run_async(TaskType.CPU,
                                                      functools.partial(
                                                          self.db_manager.query_table,
@@ -419,7 +425,7 @@ class TableViewerTab(ft.Container):
                                                          page=self.current_page,
                                                          page_size=self.page_size,
                                                          filters=filters,
-                                                         sort_col=self.sort_col,
+                                                         sort_col=sort_col_name,
                                                          sort_asc=self.sort_asc
                                                      )
                                                      )
@@ -478,14 +484,9 @@ class TableViewerTab(ft.Container):
             self.btn_next.disabled = self.current_page >= total_pages
 
             # Update DataTable Sort State (Show sort arrow)
-            if self.sort_col and self.sort_col in self.table_columns:
-                try:
-                    self.data_table.sort_column_index = self.table_columns.index(self.sort_col)
-                    self.data_table.sort_ascending = self.sort_asc
-                except ValueError:
-                    self.data_table.sort_column_index = None
-            else:
-                self.data_table.sort_column_index = None
+            # Direct INT assignment - Type Safe!
+            self.data_table.sort_column_index = self.sort_col_index
+            self.data_table.sort_ascending = self.sort_asc
 
             self.update()
 
@@ -504,11 +505,11 @@ class TableViewerTab(ft.Container):
         await self._refresh_data_rows()
         await self._toggle_loading(False)
 
-    async def _on_sort(self, col_name):
-        if self.sort_col == col_name:
+    async def _on_sort(self, col_index):
+        if self.sort_col_index == col_index:
             self.sort_asc = not self.sort_asc
         else:
-            self.sort_col = col_name
+            self.sort_col_index = col_index
             self.sort_asc = True
 
         self.current_page = 1
@@ -550,13 +551,18 @@ class TableViewerTab(ft.Container):
                     filter_val = filter_val.replace('-', '')
                 filters.append((filter_col, self.filter_op.value, filter_val))
 
+            # Resolve Sort Column Name for Export
+            sort_col_name = None
+            if self.sort_col_index is not None and 0 <= self.sort_col_index < len(self.table_columns):
+                sort_col_name = self.table_columns[self.sort_col_index]
+
             query_func = functools.partial(
                 self.db_manager.query_table,
                 self.current_table,
                 page=self.current_page if current_page else 1,
                 page_size=self.page_size if current_page else 50000,
                 filters=filters,
-                sort_col=self.sort_col,
+                sort_col=sort_col_name,
                 sort_asc=self.sort_asc
             )
 
@@ -640,7 +646,7 @@ class SQLConsoleTab(ft.Container):
                         self.btn_run,
                         self.progress_ring,
                         ft.Container(expand=True),
-                        ft.Text("💡 日期格式: YYYYMMDD (如 '20260203')", size=11, color=ft.Colors.GREY_500, italic=True),
+                        ft.Text(I18n.get("data_date_fmt_hint"), size=11, color=ft.Colors.GREY_500, italic=True),
                         ft.OutlinedButton("SELECT * LIMIT 10",
                                           on_click=lambda e: self._set_sql("SELECT * FROM stock_basic LIMIT 10")),
                         ft.OutlinedButton(I18n.get("data_btn_count"),
@@ -676,7 +682,7 @@ class SQLConsoleTab(ft.Container):
 
         self.btn_run.disabled = True
         self.progress_ring.visible = True
-        self.status_text.value = "Executing..."
+        self.status_text.value = I18n.get("data_status_executing")
         self.status_text.color = ft.Colors.BLUE
         self.update()
 
@@ -725,7 +731,7 @@ class SQLConsoleTab(ft.Container):
                 self.result_table.rows = []
 
         except Exception as e:
-            self.status_text.value = f"System Error: {str(e)}"
+            self.status_text.value = I18n.get("data_sys_error", error=str(e))
             self.status_text.color = ft.Colors.RED
             logger.error(f"SQL Execution error: {e}")
         finally:

@@ -3,7 +3,6 @@ import atexit
 import concurrent.futures
 import functools
 import logging
-import os
 import threading
 from enum import Enum, auto
 from typing import Optional, Callable, TypeVar
@@ -75,7 +74,7 @@ class ThreadPoolManager:
     def reload_config(self):
         """Reload pools with new configuration. Swaps pools first to minimize downtime."""
         logger.info("Reloading Thread Pool Configuration...")
-        
+
         # 1. Create NEW pools first
         io_workers = ConfigHandler.get_max_io_workers()
         cpu_workers = ConfigHandler.get_max_cpu_workers()
@@ -86,20 +85,20 @@ class ThreadPoolManager:
         # 2. Swap references (Atomic in Python GIL)
         old_io_pool = self._io_pool
         old_cpu_pool = self._cpu_pool
-        
+
         self._io_pool = new_io_pool
         self._cpu_pool = new_cpu_pool
-        
+
         logger.info(f"Thread Pools swapped. New sizes: IO={io_workers}, CPU={cpu_workers}")
 
         # 3. Graceful shutdown of old pools in background thread to avoid blocking reload
         def shutdown_old_pools():
-            if old_io_pool: 
+            if old_io_pool:
                 old_io_pool.shutdown(wait=True)
-            if old_cpu_pool: 
+            if old_cpu_pool:
                 old_cpu_pool.shutdown(wait=True)
             logger.info("Old Thread Pools shut down completely.")
-            
+
         threading.Thread(target=shutdown_old_pools, daemon=True).start()
 
     @property

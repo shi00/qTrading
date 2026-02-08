@@ -4,10 +4,8 @@ import logging
 import flet as ft
 
 from data.cache_manager import CacheManager
-from data.news_fetcher import NewsFetcher
-from data.news_subscription import NewsSubscriptionService
 from data.market_data_service import MarketDataService
-from services.local_model_manager import LocalModelManager
+from data.news_subscription import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
 from ui.i18n import I18n
 from ui.theme import AppColors, apply_page_theme
@@ -26,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 async def main(page: ft.Page):
     setup_logging()
-    
+
     # Ensure config file has all defaults populated
     ConfigHandler.ensure_defaults()
 
@@ -75,7 +73,7 @@ async def main(page: ft.Page):
 
             logger.info("[Main] Step 3: Stopping News Service...")
             NewsSubscriptionService().stop()
-            
+
             logger.info("[Main] Step 3b: Stopping Market Data Service...")
             MarketDataService().stop()
 
@@ -323,21 +321,14 @@ async def main(page: ft.Page):
                 page.update()  # Critical: force UI refresh
             except Exception as e:
                 logger.error(f"[NewsAlert] Failed to open snackbar: {e}")
-        
-        def on_news_update():
-            """新闻数据更新时通知 HomeView 刷新"""
-            home_view.refresh_news_if_visible()
 
-        NewsSubscriptionService().start(callback=on_news_alert, on_update=on_news_update)
-        
-        # Start Market Data Service
-        def on_market_update():
-            """市场数据更新时通知 HomeView 刷新"""
-            home_view.refresh_market_if_visible()
-        
-        MarketDataService().start(on_update=on_market_update)
+        # Observer Pattern: Register alert listener
+        NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
+        # Start Service (no args)
+        NewsSubscriptionService().start()
 
-
+        # Start Market Data Service (no callback args needed, views listen directly)
+        MarketDataService().start()
 
     async def on_onboarding_complete():
         """Callback when onboarding wizard completes"""
