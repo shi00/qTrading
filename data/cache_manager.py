@@ -14,6 +14,7 @@ from typing import Any
 from dataclasses import dataclass, field
 from typing import Any
 import itertools
+from data.constants import HEALTH_CHECK_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -1035,6 +1036,16 @@ class CacheManager:
         if params: await self._enqueue((sql, params, True))
         return len(params)
 
+    async def save_fina_audit(self, df):
+        """Save financial audit opinions"""
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'end_date', 'ann_date', 'audit_result', 'audit_fees', 'audit_agency']
+        sql = "INSERT OR REPLACE INTO fina_audit (ts_code, end_date, ann_date, audit_result, audit_fees, audit_agency) VALUES (?,?,?,?,?,?)"
+        try:
+             params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
+        except RuntimeError: return 0
+        if params: await self._enqueue((sql, params, True))
+        return len(params)
     async def save_fina_mainbz(self, df):
         if df is None or df.empty: return 0
         # fina_mainbz columns in schema: ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type, update_flag
@@ -1492,59 +1503,28 @@ class CacheManager:
             all_codes = {row[0] for row in all_stocks}
             total_count = len(all_codes)
             
-            # 2. Calculate recent quarter thresholds (last 2 quarters)
-            now = datetime.datetime.now()
-            # Generate recent 2 quarter end dates
-            # Generate recent 2 quarter end dates (Precise logic considering disclosure deadlines)
-            recent_quarters = []
+            # 2. Calculate recent quarter thresholds (last ~6-9 months)
+            # Instead of complex quarter mapping, we simply look for any report ending in the last 270 days.
+            # (9 months covers the worst case gap: Q3 end (Sep) -> Annual end (Dec) -> Q1 disclosure (Apr))
+            # Actually, standard is:
+            # - Annual (12-31) due 04-30 (4 months later)
+            # - Q1 (03-31) due 04-30
+            # - So in May, we expect 03-31 or 12-31.
+            # - In Sep, we expect 06-30.
+            # A 9-month rolling window on 'end_date' is safe to catch the "latest" available report.
             
-            # Helper to get latest AVAILABLE quarter (considering A-share disclosure deadlines)
-            # Q1 (0331): Due April 30
-            # H1 (0630): Due August 31
-            # Q3 (0930): Due October 31
-            # Annual (1231): Due April 30 next year
-            def get_latest_available_quarter(dt):
-                month = dt.month
-                year = dt.year
-                # After Oct 31: Q3 (0930) available
-                if month >= 11:
-                    return f"{year}0930"
-                # After Aug 31: H1 (0630) available
-                elif month >= 9:
-                    return f"{year}0630"
-                # After Apr 30: Q1 (0331) and Annual (1231) available
-                elif month >= 5:
-                    return f"{year}0331"
-                # Jan-Apr: Only last year's Q3 (0930) is guaranteed
-                else:
-                    return f"{year-1}0930"
-
-            # Get Q1 (latest available quarter)
-            q1 = get_latest_available_quarter(now)
-            recent_quarters.append(q1)
-            
-            # Get Q2 (previous available quarter)
-            # Parse Q1 back to date to find previous
-            q1_date = datetime.datetime.strptime(q1, "%Y%m%d")
-            # Go back 1 day from Q1 end date to be in Q2
-            q2_date = q1_date - datetime.timedelta(days=1) 
-            q2 = get_latest_available_quarter(q2_date)
-            recent_quarters.append(q2)
+            recent_cutoff = (datetime.datetime.now() - datetime.timedelta(days=270)).strftime('%Y%m%d')
             
             # 3. Stocks with ANY financial record
             async with db.execute("SELECT DISTINCT ts_code FROM financial_reports") as cursor:
                 covered_stocks = await cursor.fetchall()
             covered_codes = {row[0] for row in covered_stocks}
             
-            # 4. Stocks with RECENT data (within last 2 quarters)
-            if recent_quarters:
-                placeholders = ",".join("?" * len(recent_quarters))
-                query = f"SELECT DISTINCT ts_code FROM financial_reports WHERE end_date IN ({placeholders})"
-                async with db.execute(query, recent_quarters) as cursor:
-                    recent_stocks = await cursor.fetchall()
-                recent_codes = {row[0] for row in recent_stocks}
-            else:
-                recent_codes = covered_codes
+            # 4. Stocks with RECENT data
+            query = "SELECT DISTINCT ts_code FROM financial_reports WHERE end_date >= ?"
+            async with db.execute(query, (recent_cutoff,)) as cursor:
+                recent_stocks = await cursor.fetchall()
+            recent_codes = {row[0] for row in recent_stocks}
             
             # 5. Calculate categories (filter to only stocks in all_codes)
             no_data_codes = list(all_codes - covered_codes)  # Never had any data
@@ -1913,6 +1893,7 @@ class CacheManager:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(query, params) as cursor:
                 cols = [desc[0] for desc in cursor.description]
+                rows = await cursor.fetchall()
                 return pd.DataFrame(rows, columns=cols)
 
     # ========== Market News ==========
@@ -2070,20 +2051,51 @@ class CacheManager:
             required_period = f"{target_y}0930"
             deadline_desc = f"三季报 ({target_y})"
         
-        # Tables Config
-        # Schema: (Table, Date Column, Days Lag or 'dynamic')
-        check_list = [
-            ('fina_mainbz', 'end_date', 'dynamic'),
-            ('fina_forecast', 'end_date', 180),
-            ('pledge_stat', 'end_date', 90), 
-            ('repurchase', 'ann_date', 365), 
-            ('dividend', 'ann_date', 365),
+        # Tables Config: Use Single Source of Truth
+        # Map constants to check list
+        check_list = []
+        for table, cfg in HEALTH_CHECK_TABLES.items():
+            # Criterion: 
+            # If 'fina_mainbz' -> dynamic (mainbz usually follows report deadline)
+            # If 'pledge_stat' -> 90 days? (pledge is snapshot)
+            # If 'dividend' -> 365 days (annual event)
+            # If 'fina_forecast' -> 180 days?
+            
+            # We can define default criteria or map specific ones.
+            # Ideally, this config should also be in constants.py, but for now we map here.
+            crit = 30 # Default 30 days freshness for high freq events
+            
+            if table == 'fina_mainbz': crit = 'dynamic'
+            elif table == 'fina_audit': crit = 'dynamic'
+            elif table == 'fina_forecast': crit = 180
+            elif table == 'dividend': crit = 365
+            elif table == 'repurchase': crit = 365
+            elif table == 'pledge_stat': crit = 90
+            elif table == 'northbound_holding': crit = 5
+            elif table == 'margin_daily': crit = 5
+            elif table == 'block_trade': crit = 5
+            elif table == 'top_list': crit = 5
+            
+            check_list.append((table, cfg['date_col'], crit))
+        
+        # Add legacy/other tables not in FINANCIAL_AUX
+        check_list.extend([
             ('northbound_holding', 'trade_date', 5),
             ('margin_daily', 'trade_date', 5),
             ('suspend_d', 'trade_date', 5),
             ('top_list', 'trade_date', 5),
             ('block_trade', 'trade_date', 5),
-        ]
+        ])
+        
+        # Deduplicate if unified list already covered them? 
+        # Actually FINANCIAL_BATCH/STOCK tables might not cover market data like top_list.
+        # Let's filter duplicates.
+        seen_tables = set()
+        final_check_list = []
+        for item in check_list:
+            if item[0] not in seen_tables:
+                final_check_list.append(item)
+                seen_tables.add(item[0])
         
         async with aiosqlite.connect(self.db_path) as db:
             # 1. Total Active Stocks
@@ -2114,7 +2126,7 @@ class CacheManager:
                 results['financial_reports'] = {'error': str(e)}
 
             # --- 3. Other Tables (Standard Logic) ---
-            for table, date_col, criterion in check_list:
+            for table, date_col, criterion in final_check_list:
                 try:
                     # Coverage
                     cursor = await db.execute(f"SELECT count(DISTINCT ts_code) FROM {table}")
@@ -2129,11 +2141,30 @@ class CacheManager:
                     cursor = await db.execute(f"SELECT count(DISTINCT ts_code) FROM {table} WHERE {date_col} >= '{cutoff}'")
                     fresh = (await cursor.fetchone())[0] or 0
                     
+                    # Check for permission denied if count is 0
+                    skipped = False
+                    if fresh == 0:
+                        # Check sync_status for permission_denied
+                        # We use a broad check: if ANY recent sync attempt failed due to permission
+                        # or if the MOST RECENT entry is permission_denied
+                        try:
+                            # Check last 3 days
+                            check_date = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime('%Y-%m-%d')
+                            c2 = await db.execute(
+                                "SELECT count(*) FROM sync_status WHERE table_name=? AND status='permission_denied' AND updated_at >= ?", 
+                                (table, check_date)
+                            )
+                            perm_err_count = (await c2.fetchone())[0] or 0
+                            if perm_err_count > 0:
+                                skipped = True
+                        except: pass
+
                     results[table] = {
                         'covered': covered,
                         'ratio': covered / total_stocks,
                         'fresh': fresh,
-                        'fresh_ratio': fresh / total_stocks
+                        'fresh_ratio': fresh / total_stocks,
+                        'skipped': skipped
                     }
                 except:
                     results[table] = {'covered': 0, 'ratio': 0, 'fresh': 0, 'fresh_ratio': 0}

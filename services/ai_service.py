@@ -10,6 +10,7 @@ from data.review_manager import ReviewManager
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
+from services.local_model_manager import LocalModelManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ class AIService:
         
         # Locks for Local Model
         self._setup_lock = asyncio.Lock() # Protect auto-init
-        self._local_llama_lock = threading.Lock() # Protect inference (Llama is not thread safe)
         
         self._initialized = True
 
@@ -55,7 +55,10 @@ class AIService:
 
         # Create new semaphore if none exists or loop changed
         if self._semaphore is None or self._semaphore_loop != current_loop:
-            concurrency = ConfigHandler.get_ai_concurrency()
+            # Enforce minimum concurrency of 1 to prevent deadlock
+            # Default to 5 if config is missing/zero/negative
+            raw_val = ConfigHandler.get_ai_concurrency()
+            concurrency = max(1, int(raw_val)) if raw_val else 5
             self._semaphore = asyncio.Semaphore(concurrency)
             self._semaphore_loop = current_loop
 
@@ -225,119 +228,105 @@ class AIService:
 
     async def _setup_local_model(self):
         """
-        Lazily initialize local GGUF model if configured.
-        Thread-safe (Async-safe).
+        Ensure local model is loaded via Manager.
         """
-        # Double-check locking pattern for async
-        if hasattr(self, '_local_model_attempted') and self._local_model_attempted:
+        # Optimized: Delegate entirely to LocalModelManager
+        # This prevents double-loading the model (once here, once in Manager)
+        manager = await LocalModelManager.get_instance()
+        
+        # We don't need to explicitly call load_model here because 
+        # manager.run_inference() performs auto-loading check.
+        # But calling it here ensures "warm-up" behavior if strictly needed.
+        # For now, let's just ensure the path is set in config (done by UI)
+        # and checking if we need to trigger an initial load?
+        
+        # Actually, let's keep it simple. The Manager handles state.
+        # If we want to pre-load, we can do:
+        config_path = ConfigHandler.get_setting('local_model_path')
+        if not config_path:
              return
+             
+        # Optional: Trigger load if not loaded?
+        # await manager.load_model(config_path) 
+        # But this might be redundant if run_inference does it.
+        # However, to be consistent with method name "_setup", we should try loading.
+        if not manager.get_loaded_model_path():
+             await manager.load_model(config_path)
 
-        async with self._setup_lock:
-            if hasattr(self, '_local_model_attempted') and self._local_model_attempted:
-                return
-
-            self._local_model_attempted = True
-            local_path = ConfigHandler.get_setting('local_model_path')
-            
-            if not local_path:
-                return
-
-            import os
-            if not os.path.exists(local_path):
-                logger.warning(f"[AI] Local model path not found: {local_path}")
-                return
-
-            try:
-                # Lazy import to avoid hard dependency
-                import importlib.util
-                if importlib.util.find_spec("llama_cpp") is None:
-                     raise ImportError("llama-cpp-python not found")
-
-                logger.info(f"[AI] Loading local model from {local_path}...")
-                
-                # Calculate optimal thread count: Leave 1 or 2 cores free for OS/UI
-                # min(2, cpu-1) means: if 4 cores, use 3 (or 2 to be safe). safe default is 2.
-                # Safety: os.cpu_count() can return None
-                cpu_count = os.cpu_count() or 1
-                n_threads = max(1, min(2, cpu_count - 1))
-                
-                # Run in thread pool to avoid blocking async loop
-                def _load():
-                    from llama_cpp import Llama
-                    return Llama(
-                        model_path=local_path,
-                        n_ctx=2048,
-                        n_threads=n_threads,
-                        verbose=False
-                    )
-                
-                from utils.thread_pool import ThreadPoolManager, TaskType
-                # Loading model is CPU heavy? actually it creates the object. The inference is CPU heavy.
-                # Loading reads disk (IO) but also allocates RAM. 
-                # Use run_async with CPU task type generally.
-                self._local_llama = await ThreadPoolManager().run_async(TaskType.CPU, _load)
-                
-                logger.info(f"[AI] Local model loaded successfully (threads={n_threads}).")
-            except ImportError:
-                logger.warning("[AI] llama-cpp-python not installed. Local model disabled. Install via: pip install llama-cpp-python")
-            except Exception as e:
-                logger.error(f"[AI] Failed to load local model: {e}")
+    def _parse_news_result(self, raw_result: dict) -> dict:
+        """
+        Helper to normalize news classification result.
+        Handles the L1/L2 category logic to provide a clean 'category' string for UI.
+        """
+        # We combine L1 and L2 for category to display "金融核心-贵金属"
+        l1 = raw_result.get('category_L1', '')
+        l2 = raw_result.get('category_L2', '')
+        # Prefer L2 if available, or L1-L2 combo
+        # If L2 is present, just use L2 for conciseness as per user preference (or "L1-L2"? User originally wanted concise)
+        # Reverting to my previous logic: "f"{l2}" if l2 else l1"
+        final_category = f"{l2}" if l2 else l1
+        
+        # Store structured data back 
+        raw_result['category'] = final_category
+        # Ensure emoji/sentiment exist
+        if 'emoji' not in raw_result: raw_result['emoji'] = '📰'
+        if 'sentiment' not in raw_result: raw_result['sentiment'] = 'Neutral'
+        
+        return raw_result
 
     @log_async_operation(operation_name="classify_news", performance_threshold_ms=5000)
     async def classify_news(self, text: str) -> dict:
         """
         Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).
+        Optimized for Qwen2.5 1.5B with Few-Shot prompting details in Config.
         """
+        # Prompt from Config (Content Only)
+        system_instruction = self.config.get_ai_news_prompt()
+
         # 1. Try Local Model first
         await self._setup_local_model()
         
-        if hasattr(self, '_local_llama') and self._local_llama:
+        manager = await LocalModelManager.get_instance()
+        if manager.get_loaded_model_path():
             try:
-                # Prompt for Qwen/Llama style
-                prompt = f"""<|im_start|>system
-You are a financial news classifier. 
-Output JSON with fields: category (Policy,International,Macro,Market,Stock), sentiment (Positive,Neutral,Negative), emoji.
-<|im_end|>
-<|im_start|>user
-{text[:500]}
-<|im_end|>
-<|im_start|>assistant
-"""
-                # Llama.cpp is not thread-safe for parallel inference on same instance
-                # Lock is initialized in __init__
-
-                # Llama.cpp is not thread-safe for parallel inference on same instance
-                # Lock is initialized in __init__
+                # Use Manager for safe inference
+                # output_text is the string content directly
+                output_text = await manager.run_inference(
+                    prompt=text[:500],
+                    system_prompt=system_instruction
+                )
                 
-                # CAPTURE instance to avoid race condition with reload_config setting it to None
-                local_model_instance = self._local_llama
-
-                def _run_local():
-                    with self._local_llama_lock:
-                        return local_model_instance(
-                            prompt, 
-                            max_tokens=200, 
-                            stop=["<|im_end|>"], 
-                            echo=False,
-                            temperature=0.1
-                        )
-                
-                from utils.thread_pool import ThreadPoolManager, TaskType
-                # Use Global ThreadPool
-                response = await ThreadPoolManager().run_async(TaskType.CPU, _run_local)
-                
-                output_text = response['choices'][0]['text'].strip()
-                
-                # Try to extract JSON
-                start = output_text.find('{')
-                end = output_text.rfind('}')
-                if start != -1 and end != -1:
-                    json_str = output_text[start:end+1]
-                    return json.loads(json_str)
+                # Check for empty output
+                if not output_text:
+                     logger.warning("[AI] Local model returned empty output.")
                 else:
-                    logger.warning(f"[AI] Local model output not JSON: {output_text}")
+                    # Try to extract JSON
+                    start = output_text.find('{')
+                    if start != -1:
+                        # Best Practice: Use raw_decode to parse ONE valid JSON object and ignore the rest
+                        # This natively handles "Extra data" without try-catch hacks
+                        try:
+                            decoder = json.JSONDecoder()
+                            json_str = output_text[start:]
+                            result, end_idx = decoder.raw_decode(json_str)
+                            
+                            # Optional: Log if we ignored significant garbage?
+                            if end_idx < len(json_str):
+                                trailing = json_str[end_idx:].strip()
+                                if len(trailing) > 5:
+                                    logger.info(f"[AI] Ignored trailing garbage chars: {len(trailing)}")
+                                    
+                            return self._parse_news_result(result)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[AI] Local model JSON decode failed: {e}")
+                    else:
+                        logger.warning(f"[AI] Local model output not JSON: {output_text}")
+                        
+            except (RuntimeError, ImportError) as e:
+                logger.warning(f"[AI] Local model inference failed: {e}")
+                # Fallback to cloud...
             except Exception as e:
-                logger.error(f"[AI] Local model inference failed: {e}")
+                logger.error(f"[AI] Unexpected local inference error: {e}", exc_info=True)
                 # Fallback to cloud...
 
         # 2. Fallback to Cloud API
@@ -349,46 +338,30 @@ Output JSON with fields: category (Policy,International,Macro,Market,Stock), sen
             logger.error("[AI] Configuration Error: 'ai_model_name' is not configured.")
             return None
 
-        system_prompt = """
-        You are a financial news assistant.
-        Classify the input news into ONE category: [Policy, International, Macro, Market, Stock].
-        Assess sentiment: [Positive, Neutral, Negative].
+        # Use the SAME system prompt from config for Cloud Model
+        # But pass it as "content", avoiding manual ChatML tags if using standard API
         
-        Categories:
-        - Policy: Government regulations, central bank, official announcements.
-        - International: Global markets, geopolitics, exchange rates, US Fed.
-        - Macro: GDP, CPI, PMI, Economy data.
-        - Market: Broad market trends, sector rotation, fund flows.
-        - Stock: Specific company news.
-
-        Output JSON:
-        {
-            "category": "Policy",
-            "sentiment": "Neutral",
-            "emoji": "🏛️" 
-        }
-        Map Emojis: Policy=🏛️, International=🌍, Macro=📈, Market=📊, Stock=🏢.
-        """
-
+        # NOTE: If user put ChatML tags in the Config UI manually (against default), this might leak tags.
+        # But we assume standard usage (Text content).
+        
         try:
-            # Enforce global 5s timeout for the entire operation (Semaphore wait + API call)
-            # This prevents queue pile-up where tasks wait 60s+ just to get the lock
+            # Enforce global 5s timeout for the entire operation
             async def _do_classify():
                 async with self._get_semaphore():
-                    # 3s timeout for API call specifically
                     response = await self.client.chat.completions.create(
                         model=model,
                         messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": text[:500]}  # Truncate to save tokens
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": text[:500]}
                         ],
                         response_format={"type": "json_object"},
                         temperature=0.1
                     )
-                    return json.loads(response.choices[0].message.content)
+                    content = response.choices[0].message.content
+                    return json.loads(content)
 
-            # Use timeout matching the SDK client (30s) or at least safe enough for LLMs
-            return await asyncio.wait_for(_do_classify(), timeout=30.0)
+            raw_result = await asyncio.wait_for(_do_classify(), timeout=30.0)
+            return self._parse_news_result(raw_result)
 
         except asyncio.TimeoutError:
             logger.warning("[AI] Classification global timeout (>30s), dropped")

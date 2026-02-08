@@ -113,6 +113,35 @@ class AIBrainTab(ft.Container):
             keyboard_type=ft.KeyboardType.NUMBER,
             hint_text="30"
         )
+
+        # --- Advanced Local Settings ---
+        self.local_threads_input = ft.Slider(
+            min=1, max=16, divisions=15, 
+            value=local_cfg.get('n_threads', 4),
+            label="{value}"
+        )
+        self.local_gpu_layers_input = ft.Slider(
+            min=0, max=100, divisions=100, 
+            value=local_cfg.get('n_gpu_layers', 0),
+            label="{value}"
+        )
+        self.local_batch_input = ft.Dropdown(
+            label=I18n.get("settings_local_batch"),
+            value=str(local_cfg.get('n_batch', 512)),
+            options=[ft.dropdown.Option(str(x)) for x in [512, 1024, 2048, 4096]],
+            width=_INPUT_WIDTH_SMALL
+        )
+        self.local_ctx_input = ft.Dropdown(
+            label=I18n.get("settings_local_ctx"),
+            value=str(local_cfg.get('n_ctx', 4096)),
+            options=[ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]],
+            width=_INPUT_WIDTH_SMALL
+        )
+        self.local_flash_attn_switch = ft.Switch(
+            label=I18n.get("settings_local_flash_attn"),
+            value=local_cfg.get('flash_attn', True)
+        )
+
         
         # File Picker (Must be added to overlay)
         self.file_picker = ft.FilePicker(on_result=self._on_file_picked)
@@ -243,6 +272,32 @@ class AIBrainTab(ft.Container):
                     ], col={"sm": 6, "md": 2}),
                     ft.Column([self.local_timeout_input], col={"sm": 6, "md": 3}),
                 ], run_spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                
+                # Advanced Settings Expansion
+                ft.ExpansionTile(
+                    title=ft.Text(I18n.get("settings_sec_tuning"), size=_FONT_SIZE_BODY, weight=ft.FontWeight.BOLD),
+                    subtitle=ft.Text(I18n.get("settings_hint_restart"), size=_FONT_SIZE_HINT, color=AppColors.WARNING),
+                    controls=[
+                        ft.Container(height=10),
+                        ft.ResponsiveRow([
+                            ft.Column([
+                                ft.Text(I18n.get("settings_local_threads"), size=_FONT_SIZE_BODY),
+                                self.local_threads_input
+                            ], col={"sm": 12, "md": 6}),
+                            
+                            ft.Column([
+                                ft.Text(I18n.get("settings_local_gpu_layers"), size=_FONT_SIZE_BODY),
+                                self.local_gpu_layers_input
+                            ], col={"sm": 12, "md": 6}),
+                            
+                            ft.Column([self.local_batch_input], col={"sm": 6, "md": 3}),
+                            ft.Column([self.local_ctx_input], col={"sm": 6, "md": 3}),
+                            
+                            ft.Column([self.local_flash_attn_switch], col={"sm": 12, "md": 4}),
+                        ], run_spacing=15)
+                    ],
+                    initially_expanded=False
+                )
             ])
         )
 
@@ -367,13 +422,20 @@ class AIBrainTab(ft.Container):
                 'model': self.ai_model_dropdown.value,
                 
                 'local_path': self.local_model_path_input.value,
-                'local_timeout': self.local_timeout_input.value, # 修复：保存未保存的输入值
+                'local_timeout': self.local_timeout_input.value,
+                
+                # New advanced local settings
+                'local_threads': self.local_threads_input.value,
+                'local_gpu': self.local_gpu_layers_input.value,
+                'local_batch': self.local_batch_input.value,
+                'local_ctx': self.local_ctx_input.value,
+                'local_flash': self.local_flash_attn_switch.value,
 
                 'max_cand': self.ai_max_candidates_input.value,
                 'min_turn': self.strategy_min_turnover_input.value,
                 'concurrency': self.ai_concurrency_input.value,
                 'prompt': self.ai_prompt_input.value,
-                'news_prompt': self.ai_news_prompt_input.value, # Save news prompt
+                'news_prompt': self.ai_news_prompt_input.value,
 
                 'status_text': self.ai_status_text.value,
                 'status_color': self.ai_status_text.color,
@@ -389,16 +451,23 @@ class AIBrainTab(ft.Container):
             self.ai_model_dropdown.value = saved_values['model']
             
             self.local_model_path_input.value = saved_values['local_path']
-            # 修复：优先恢复用户输入
+            
             timeout_input_val = saved_values.get('local_timeout')
             if timeout_input_val is not None:
                 self.local_timeout_input.value = timeout_input_val
+                
+            # Restore new settings
+            self.local_threads_input.value = saved_values.get('local_threads', 4)
+            self.local_gpu_layers_input.value = saved_values.get('local_gpu', 0)
+            self.local_batch_input.value = saved_values.get('local_batch', "512")
+            self.local_ctx_input.value = saved_values.get('local_ctx', "4096")
+            self.local_flash_attn_switch.value = saved_values.get('local_flash', True)
 
             self.ai_max_candidates_input.value = saved_values['max_cand']
             self.strategy_min_turnover_input.value = saved_values['min_turn']
             self.ai_concurrency_input.value = saved_values['concurrency']
             self.ai_prompt_input.value = saved_values['prompt']
-            self.ai_news_prompt_input.value = saved_values['news_prompt'] # Restore news prompt
+            self.ai_news_prompt_input.value = saved_values['news_prompt']
             
             # 恢复连接状态
             self.ai_status_text.value = saved_values.get('status_text', I18n.get('ai_status_disconnected'))
@@ -513,9 +582,17 @@ class AIBrainTab(ft.Container):
             
             # Save Cloud & Local Configs
             ConfigHandler.save_ai_config(ai_key, ai_base, ai_model)
-            # Save Local Model Path (Deprecated args removed)
-            ConfigHandler.save_local_ai_config(model_path=local_path)
-            ConfigHandler.set_local_ai_timeout(local_timeout)
+            
+            # Save Local Model Configs
+            ConfigHandler.save_local_ai_config(
+                model_path=local_path,
+                timeout=local_timeout,
+                n_threads=int(self.local_threads_input.value),
+                n_batch=int(self.local_batch_input.value),
+                n_ctx=int(self.local_ctx_input.value),
+                flash_attn=self.local_flash_attn_switch.value,
+                n_gpu_layers=int(self.local_gpu_layers_input.value)
+            )
             
             ConfigHandler.save_ai_system_prompt(ai_prompt)
             ConfigHandler.set_ai_news_prompt(self.ai_news_prompt_input.value)

@@ -9,7 +9,7 @@ import threading
 from data.cache_manager import CacheManager
 from data.news_fetcher import NewsFetcher
 from data.tushare_client import TushareClient
-from data.constants import MAJOR_INDICES
+from data.constants import MAJOR_INDICES, MARKET_CLOSE_HOUR
 from data.sync_strategies.base import SyncContext
 from data.sync_strategies.financial import FinancialSyncStrategy
 from data.sync_strategies.historical import HistoricalSyncStrategy
@@ -24,49 +24,55 @@ class DataProcessor:
     """
     Main data processing class (Refactored Facade).
     Delegates complex sync logic to specific Strategies.
+    Safeguarded with strict Singleton pattern.
     """
     _instance = None
     _lock = threading.Lock()
+    _is_initialized = False
 
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
         return cls._instance
 
     def __init__(self):
-        if self._initialized:
+        # Double-check initialization state with lock to prevent race conditions
+        if self.__class__._is_initialized:
             # Check if token has changed since initialization
             current_token = ConfigHandler.get_token()
             if hasattr(self, '_current_token') and current_token != self._current_token:
                 self.refresh_token(current_token)
             return
 
-        token = ConfigHandler.get_token()
-        self._current_token = token
-        self.api = TushareClient(token=token)
-        self.cache = CacheManager()
-        self._first_news_sync = True
-        self._cancel_event = asyncio.Event()  # Unified cancellation event
+        with self.__class__._lock:
+            if self.__class__._is_initialized:
+                return
 
-        # Initialize Context & Strategies
-        self.context = SyncContext(api=self.api, cache=self.cache, config=ConfigHandler)
-        self.strategies = {
-            'financial': FinancialSyncStrategy(self.context),
-            'historical': HistoricalSyncStrategy(self.context)
-        }
+            token = ConfigHandler.get_token()
+            self._current_token = token
+            self.api = TushareClient(token=token)
+            self.cache = CacheManager()
+            self._first_news_sync = True
+            self._cancel_event = asyncio.Event()  # Unified cancellation event
 
-        # Memory Cache for high-frequency small data
-        self._trade_cal_cache = None  # Cache structure: {'start': str, 'end': str, 'df': DataFrame}
+            # Initialize Context & Strategies
+            self.context = SyncContext(api=self.api, cache=self.cache, config=ConfigHandler)
+            self.strategies = {
+                'financial': FinancialSyncStrategy(self.context),
+                'historical': HistoricalSyncStrategy(self.context)
+            }
 
-        # Concurrency Control (Cross-Loop safe) - kept for basic locking if needed
-        import threading
-        self._sync_lock = threading.Lock()
-        self._is_syncing_basic = False
+            # Memory Cache for high-frequency small data
+            self._trade_cal_cache = None  # Cache structure: {'start': str, 'end': str, 'df': DataFrame}
 
-        self._initialized = True
+            # Concurrency Control (Cross-Loop safe) - kept for basic locking if needed
+            import threading
+            self._sync_lock = threading.Lock()
+            self._is_syncing_basic = False
+
+            self.__class__._is_initialized = True
 
     async def request_cancel(self):
         """
@@ -172,7 +178,7 @@ class DataProcessor:
     async def get_latest_trade_date(self):
         """Get absolute latest trading date (today or previous trading day)."""
         now = datetime.datetime.now()
-        if now.hour < 16:
+        if now.hour < MARKET_CLOSE_HOUR:
             end_dt = now - datetime.timedelta(days=1)
         else:
             end_dt = now

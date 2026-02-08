@@ -352,6 +352,17 @@ CREATE TABLE IF NOT EXISTS stock_sync_status (
     sync_version INTEGER DEFAULT 1  -- Version for forced resync (increment to invalidate)
 );
 
+-- 23. Financial Audit
+CREATE TABLE IF NOT EXISTS fina_audit (
+    ts_code TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    ann_date TEXT,
+    audit_result TEXT,
+    audit_fees REAL,
+    audit_agency TEXT,
+    PRIMARY KEY (ts_code, end_date)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date);
 CREATE INDEX IF NOT EXISTS idx_quotes_code ON daily_quotes(ts_code);

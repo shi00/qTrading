@@ -495,13 +495,14 @@ class TushareClient:
             fields='ts_code,end_date,ann_date,audit_result,audit_agency,audit_sign'
         )
 
-    def get_forecast(self, ts_code=None, period=None, start_date=None, end_date=None):
+    def get_forecast(self, ts_code=None, period=None, start_date=None, end_date=None, ann_date=None):
         """Get performance forecast"""
 
         return self._handle_api_call(
             self.pro.forecast,
             ts_code=ts_code,
             period=period,
+            ann_date=ann_date,
             start_date=start_date,
             end_date=end_date,
             fields='ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,net_profit_max'
@@ -528,22 +529,26 @@ class TushareClient:
             end_date=end_date
         )
 
-    def get_repurchase(self, ts_code=None, start_date=None, end_date=None):
+    def get_repurchase(self, ts_code=None, start_date=None, end_date=None, ann_date=None):
         """Get share repurchase"""
 
         return self._handle_api_call(
             self.pro.repurchase,
             ts_code=ts_code,
+            ann_date=ann_date,
             start_date=start_date,
             end_date=end_date
         )
 
-    def get_dividend(self, ts_code=None, start_date=None, end_date=None):
+    def get_dividend(self, ts_code=None, start_date=None, end_date=None, ann_date=None):
         """Get dividend history"""
 
+        # Tushare dividend API standard fields
+        # Note: ann_date is a valid param in pro.dividend
         return self._handle_api_call(
             self.pro.dividend,
             ts_code=ts_code,
-            ann_date=start_date  # Using date range if possible, or ts_code
-            # Tushare dividend API standard fields
+            ann_date=ann_date,
+            end_date=end_date
+            # Tushare dividend has diverse params, ann_date is key for batch
         )

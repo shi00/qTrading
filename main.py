@@ -117,223 +117,19 @@ async def main(page: ft.Page):
 
     page.show_toast = show_toast  # Helper for views
 
-    # --- State Management ---
-    main_layout = None
-    nav_rail = None
+    # --- Initialize App Layout ---
+    from ui.app_layout import AppLayout
 
-    def on_locale_change():
-        """Refresh UI on locale change"""
-        page.title = I18n.get("app_title")
-        if nav_rail:
-            # Update Nav Rail Labels
-            # format: (index, i18n_key)
-            nav_items = [
-                (0, "nav_market"),
-                (1, "nav_screener"),
-                (2, "nav_data"),
-                (3, "nav_settings"),
-            ]
+    app_layout = AppLayout(page)
 
-            for index, key in nav_items:
-                if index < len(nav_rail.destinations):
-                    text = I18n.get(key)
-                    nav_rail.destinations[index].label = text
-                    nav_rail.destinations[index].label_content.value = text
-
-            nav_rail.update()
-        page.update()
-
-    I18n.subscribe(on_locale_change)
-
-    async def show_main_app():
-        """Show main application after onboarding"""
-        nonlocal main_layout, nav_rail
-
-        # --- Navigation ---
-        import time as _time
-        VIEW_NAMES = ['HomeView', 'ScreenerView', 'DataExplorerView', 'SettingsView']
-
-        # --- Debounce state for tab switching ---
-        _pending_tab_index = [None]  # Use list to allow closure mutation
-        _debounce_task = [None]
-        _current_tab_index = [0]  # Track current tab to avoid redundant switches
-        DEBOUNCE_MS = 50  # Debounce window in milliseconds
-
-        def change_tab(e):
-            """Handle tab change with debounce to prevent rapid-click freezing"""
-            index = e.control.selected_index
-
-            # Skip if already on this tab
-            if index == _current_tab_index[0]:
-                return
-
-            _pending_tab_index[0] = index
-
-            # Cancel previous pending switch if any
-            if _debounce_task[0]:
-                _debounce_task[0].cancel()
-
-            # Schedule debounced switch
-            _debounce_task[0] = page.run_task(_execute_tab_switch)
-
-        async def _execute_tab_switch():
-            """Execute tab switch after debounce delay"""
-            try:
-                await asyncio.sleep(DEBOUNCE_MS / 1000)  # Wait for debounce window
-            except asyncio.CancelledError:
-                return  # Task was cancelled by a newer click, exit gracefully
-
-            index = _pending_tab_index[0]
-            if index is None or index == _current_tab_index[0]:
-                return
-
-            _t0 = _time.perf_counter()
-            logger.debug(f"[PERF] >>> change_tab START: switching to {VIEW_NAMES[index]} (index={index})")
-
-            # Notify HomeView of visibility change (for auto-refresh optimization)
-            home_view.set_visible(index == 0)
-
-            body.content = views[index]
-            _current_tab_index[0] = index  # Update current tab
-            _t1 = _time.perf_counter()
-            logger.debug(f"[PERF] change_tab: content assignment took {(_t1 - _t0) * 1000:.1f}ms")
-
-            body.update()
-            _t2 = _time.perf_counter()
-            logger.debug(
-                f"[PERF] <<< change_tab END: body.update() took {(_t2 - _t1) * 1000:.1f}ms, TOTAL={(_t2 - _t0) * 1000:.1f}ms")
-
-        async def run_strategy_from_home(strategy_key):
-            # Switch to Screener tab (Index 1)
-            home_view.set_visible(False)  # Notify HomeView it's no longer visible
-            _current_tab_index[0] = 1  # Keep debounce state in sync
-            nav_rail.selected_index = 1
-            body.content = screener_view
-            nav_rail.update()
-            body.update()
-            await screener_view.select_and_run_strategy(strategy_key)
-
-        # --- Views ---
-        logger.debug("[PERF] >>> Creating views START")
-        _t_views_start = _time.perf_counter()
-
-        _t0 = _time.perf_counter()
-        home_view = HomeView(on_run_strategy=run_strategy_from_home)
-        logger.debug(f"[PERF] HomeView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
-
-        _t0 = _time.perf_counter()
-        screener_view = ScreenerView()
-        logger.debug(f"[PERF] ScreenerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
-
-        _t0 = _time.perf_counter()
-        data_view = DataExplorerView()
-        logger.debug(f"[PERF] DataExplorerView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
-
-        _t0 = _time.perf_counter()
-        settings_view = SettingsView()
-        logger.debug(f"[PERF] SettingsView.__init__ took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
-
-        logger.debug(f"[PERF] <<< Creating views END, TOTAL={(_time.perf_counter() - _t_views_start) * 1000:.1f}ms")
-
-        views = [
-            home_view,
-            screener_view,
-            data_view,
-            settings_view
-        ]
-
-        # Brand header for navigation
-        brand_header = ft.Container(
-            content=ft.Column([
-                ft.Image(src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN),
-                ft.Text(I18n.get("app_brand"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_ON_PRIMARY),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5),
-            padding=ft.padding.only(top=20, bottom=10),
-        )
-
-        nav_rail = ft.NavigationRail(
-            selected_index=0,
-            label_type=ft.NavigationRailLabelType.ALL,
-            min_width=100,
-            min_extended_width=200,
-            bgcolor=AppColors.PRIMARY_DARK,
-            indicator_color=AppColors.ACCENT,
-            leading=brand_header,
-            destinations=[
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.DASHBOARD_OUTLINED,
-                    selected_icon=ft.Icons.DASHBOARD,
-                    label=I18n.get("nav_market"),
-                    label_content=ft.Text(I18n.get("nav_market"), color=AppColors.TEXT_ON_PRIMARY),
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.FILTER_ALT_OUTLINED,
-                    selected_icon=ft.Icons.FILTER_ALT,
-                    label=I18n.get("nav_screener"),
-                    label_content=ft.Text(I18n.get("nav_screener"), color=AppColors.TEXT_ON_PRIMARY),
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.STORAGE_OUTLINED,
-                    selected_icon=ft.Icons.STORAGE_ROUNDED,
-                    label=I18n.get("nav_data"),
-                    label_content=ft.Text(I18n.get("nav_data"), color=AppColors.TEXT_ON_PRIMARY),
-                ),
-                ft.NavigationRailDestination(
-                    icon=ft.Icons.SETTINGS_OUTLINED,
-                    selected_icon=ft.Icons.SETTINGS,
-                    label=I18n.get("nav_settings"),
-                    label_content=ft.Text(I18n.get("nav_settings"), color=AppColors.TEXT_ON_PRIMARY),
-                ),
-            ],
-            on_change=change_tab,
-        )
-
-        body = ft.Container(
-            content=views[0],
-            expand=True,
-            padding=20,
-            bgcolor=AppColors.BACKGROUND,
-        )
-
-        main_layout = ft.Row(
-            [
-                nav_rail,
-                ft.VerticalDivider(width=1),
-                body
-            ],
-            expand=True,
-        )
-
-        page.clean()
-        page.add(main_layout)
-        page.update()
-
-        # Start News Service
-        def on_news_alert(msg):
-            # Show snackbar on main page
-            try:
-                snackbar = ft.SnackBar(
-                    content=ft.Text(f"📰 {msg}"),
-                    duration=5000,  # Keep 5 seconds visibility for better UX
-                    open=True
-                )
-                page.open(snackbar)
-                page.update()  # Critical: force UI refresh
-            except Exception as e:
-                logger.error(f"[NewsAlert] Failed to open snackbar: {e}")
-
-        # Observer Pattern: Register alert listener
-        NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
-        # Start Service (no args)
-        NewsSubscriptionService().start()
-
-        # Start Market Data Service (no callback args needed, views listen directly)
-        MarketDataService().start()
+    async def start_app():
+        """Start the main app layout"""
+        app_layout.show()
 
     async def on_onboarding_complete():
         """Callback when onboarding wizard completes"""
         ConfigHandler.set_onboarding_complete(True)
-        await show_main_app()
+        await start_app()
 
     # --- Check if onboarding is needed ---
     token = ConfigHandler.get_token()
@@ -353,7 +149,7 @@ async def main(page: ft.Page):
         )
     else:
         # Show main app directly
-        await show_main_app()
+        await start_app()
 
 
 if __name__ == "__main__":
