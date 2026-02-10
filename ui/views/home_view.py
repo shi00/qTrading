@@ -119,9 +119,10 @@ class HomeView(ft.Container):
     def _on_broadcast_message(self, message):
         if message == "cache_cleared":
             self.vm.clear_state()
-            self.dashboard.update_data({})
-            self.news_feed.set_news(None, False)
+            # Only update UI if mounted
             if self.page and self._is_mounted:
+                self.dashboard.update_data({})
+                self.news_feed.set_news(None, False)
                 self.update()
 
     def _refresh_clicked(self, e):
@@ -148,6 +149,23 @@ class HomeView(ft.Container):
         except Exception as e:
             logger.error(f"Error refreshing locale: {e}")
 
+    def update_theme(self):
+        """Handle theme change"""
+        try:
+            # 1. Update sub-components
+            self.dashboard.update_theme()
+            self.news_feed.update_theme()
+            
+            # 2. Update local controls
+            self.header_title.color = None # Default
+            self.date_text.color = AppColors.TEXT_SECONDARY 
+            
+            # Refresh button icon?
+            # It's an IconButton, default icon color might need refresh if not set?
+            # It usually picks up theme primary/on_surface.
+        except Exception as e:
+            logger.error(f"Error updating theme: {e}")
+
     # --- Data Loading Logic ---
 
     async def _init_and_load(self):
@@ -172,6 +190,10 @@ class HomeView(ft.Container):
             data = await self.vm.load_market_data()
             if data:
                 # Update UI
+                # DEBUG: Log indices count to investigate RangeError
+                indices = data.get('indices', [])
+                logger.debug(f"[HomeView] Market Data Indices: {len(indices)}")
+                
                 date_str = data.get('date', '--')
                 self.date_text.value = I18n.get("home_data_date").format(date=date_str)
                 self.date_text.update()

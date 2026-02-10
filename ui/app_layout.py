@@ -1,16 +1,15 @@
-
 import asyncio
 import logging
 import time as _time
 from enum import IntEnum
+from typing import Dict
 
 import flet as ft
 
-from data.market_data_service import MarketDataService
-from data.news_subscription import NewsSubscriptionService
-from ui.components.toast_manager import ToastManager
+# Removed MarketDataService import
+# Removed NewsSubscriptionService import
 from ui.i18n import I18n
-from ui.theme import AppColors
+from ui.theme import AppColors, apply_page_theme
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
@@ -18,23 +17,30 @@ from ui.views.settings_view import SettingsView
 
 logger = logging.getLogger(__name__)
 
+
 class NavTabs(IntEnum):
     MARKET = 0
     SCREENER = 1
     DATA = 2
     SETTINGS = 3
 
+
 class AppLayout(ft.Container):
     """
     Main Application Layout Container.
     Manages Navigation Rail, Views, and State Switching.
+
+    Theme Architecture:
+        Standard colors use Flet semantic tokens (ft.Colors.SURFACE etc.)
+        and update automatically when page.theme changes.
+        Only custom business colors (UP/DOWN, TABLE_*) need manual propagation.
     """
 
     def __init__(self, page: ft.Page):
         super().__init__()
         self.page = page
         self.expand = True
-        
+
         # State
         self._current_tab_index = NavTabs.MARKET
         self._pending_tab_index = None
@@ -44,84 +50,81 @@ class AppLayout(ft.Container):
         # UI Components Placeholders
         self.nav_rail = None
         self.body = None
-        self.views = []
         self.main_layout = None
-        
+
+        # Lazy Loading Cache
+        self._view_cache: Dict[int, ft.Control] = {}
+
         # Initialize
         self._init_ui()
         self._subscribe_events()
 
+        # Subscribe to Theme Changes (for custom business colors only)
+        AppColors.subscribe(self.update_theme)
+
+    def will_unmount(self):
+        AppColors.unsubscribe(self.update_theme)
+
     def _init_ui(self):
         """Initialize all UI components"""
-        
-        # 1. Create Views
-        logger.debug("[AppLayout] >>> Creating views START")
-        _t0 = _time.perf_counter()
-        
-        self.home_view = HomeView(on_run_strategy=self.run_strategy_from_home)
-        self.screener_view = ScreenerView()
-        self.data_view = DataExplorerView()
-        self.settings_view = SettingsView()
-        
-        self.views = [
-            self.home_view,
-            self.screener_view,
-            self.data_view,
-            self.settings_view
-        ]
-        
-        logger.debug(f"[AppLayout] <<< Creating views END, TOTAL={(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
-        # 2. Brand Header
+        # 1. Create Layout Structure (No Views yet)
+        logger.debug("[AppLayout] >>> Initializing Layout")
+
+        # 2. Brand Header — uses semantic token, auto-updates with theme
         brand_header = ft.Container(
             content=ft.Column([
                 ft.Image(src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN),
-                ft.Text(I18n.get("app_brand"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_ON_PRIMARY),
+                ft.Text(I18n.get("app_brand"), size=14, weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5),
             padding=ft.padding.only(top=20, bottom=10),
         )
 
-        # 3. Navigation Rail
+        # 3. Navigation Rail — uses semantic tokens
         self.nav_rail = ft.NavigationRail(
             selected_index=int(self._current_tab_index),
             label_type=ft.NavigationRailLabelType.ALL,
-            min_width=100,
-            min_extended_width=200,
-            bgcolor=AppColors.PRIMARY_DARK,
-            indicator_color=AppColors.ACCENT,
+            min_width=80,
+            min_extended_width=180,
+            bgcolor=ft.Colors.SURFACE,
+            indicator_color=ft.Colors.PRIMARY,
+            indicator_shape=ft.RoundedRectangleBorder(radius=4),
             leading=brand_header,
             destinations=[
                 ft.NavigationRailDestination(
                     icon=ft.Icons.DASHBOARD_OUTLINED,
                     selected_icon=ft.Icons.DASHBOARD,
                     label=I18n.get("nav_market"),
-                    label_content=ft.Text(I18n.get("nav_market"), color=AppColors.TEXT_ON_PRIMARY),
+                    label_content=ft.Text(I18n.get("nav_market"), size=12, weight=ft.FontWeight.BOLD),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.FILTER_ALT_OUTLINED,
                     selected_icon=ft.Icons.FILTER_ALT,
                     label=I18n.get("nav_screener"),
-                    label_content=ft.Text(I18n.get("nav_screener"), color=AppColors.TEXT_ON_PRIMARY),
+                    label_content=ft.Text(I18n.get("nav_screener"), size=12, weight=ft.FontWeight.BOLD),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.STORAGE_OUTLINED,
                     selected_icon=ft.Icons.STORAGE_ROUNDED,
                     label=I18n.get("nav_data"),
-                    label_content=ft.Text(I18n.get("nav_data"), color=AppColors.TEXT_ON_PRIMARY),
+                    label_content=ft.Text(I18n.get("nav_data"), size=12, weight=ft.FontWeight.BOLD),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED,
                     selected_icon=ft.Icons.SETTINGS,
                     label=I18n.get("nav_settings"),
-                    label_content=ft.Text(I18n.get("nav_settings"), color=AppColors.TEXT_ON_PRIMARY),
+                    label_content=ft.Text(I18n.get("nav_settings"), size=12, weight=ft.FontWeight.BOLD),
                 ),
             ],
             on_change=self._on_nav_change,
         )
 
-        # 4. Body Container
+        # 4. Body Container — uses semantic token for background
+        home_view = self._get_view(NavTabs.MARKET)
+
         self.body = ft.Container(
-            content=self.views[0],
+            content=home_view,
             expand=True,
             padding=20,
             bgcolor=AppColors.BACKGROUND,
@@ -137,23 +140,35 @@ class AppLayout(ft.Container):
             expand=True,
         )
 
+    def _get_view(self, index: int) -> ft.Control:
+        """Lazy load view by index"""
+        if index in self._view_cache:
+            return self._view_cache[index]
+
+        logger.debug(f"[AppLayout] Lazy loading view for index {index}")
+        _t0 = _time.perf_counter()
+
+        view = None
+        if index == NavTabs.MARKET:
+            view = HomeView(on_run_strategy=self.run_strategy_from_home)
+        elif index == NavTabs.SCREENER:
+            view = ScreenerView(self.page)
+        elif index == NavTabs.DATA:
+            view = DataExplorerView()
+        elif index == NavTabs.SETTINGS:
+            view = SettingsView()
+        else:
+            view = ft.Text(I18n.get("view_unknown"))
+
+        self._view_cache[index] = view
+        logger.debug(f"[AppLayout] View {index} loaded in {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        return view
+
     def show(self):
         """Mount this layout to the page"""
         self.page.clean()
         self.page.add(self)
         self.page.update()
-        
-        # Start Background Services
-        self._start_services()
-
-    def _start_services(self):
-        """Start required background services"""
-        # Subscribe to News Alerts
-        NewsSubscriptionService().add_listener(self._on_news_alert, is_alert=True)
-        NewsSubscriptionService().start()
-        
-        # Start Market Data
-        MarketDataService().start()
 
     def _subscribe_events(self):
         """Subscribe to global events"""
@@ -172,22 +187,40 @@ class AppLayout(ft.Container):
             self.nav_rail.update()
         self.page.update()
 
-    def _on_news_alert(self, msg):
-        """Handle news alert snackbar"""
-        try:
-            snackbar = ft.SnackBar(
-                content=ft.Text(f"📰 {msg}"),
-                duration=5000,
-                open=True
-            )
-            self.page.open(snackbar)
-            self.page.update()
-        except Exception as e:
-            logger.error(f"[AppLayout] Failed to show news alert: {e}")
-
     def _on_nav_change(self, e):
-        """Handle navigation/tab change event"""
-        self.change_tab(e.control.selected_index)
+        """Handle Navigation Rail Change"""
+        selected_index = e.control.selected_index
+        self.change_tab(selected_index)
+
+    def update_theme(self):
+        """
+        Handle global theme change event.
+
+        Architecture:
+          - Standard colors (SURFACE, PRIMARY, TEXT) use semantic tokens and
+            auto-update when page.theme/page.dark_theme changes — NO manual work.
+          - Only custom business colors (UP/DOWN, TABLE_*) need manual propagation
+            to views that use them (tables, charts, market dashboard).
+        """
+        logger.info("[AppLayout] Updating theme...")
+
+        # 1. Apply new theme to page (sets page.theme, page.dark_theme, page.theme_mode)
+        # REMOVED: apply_page_theme(self.page, AppColors._CURRENT_THEME_NAME)
+        # Reason: apply_page_theme calls AppColors.load_theme, which triggers this listener.
+        # Calling it here creates an infinite recursion loop.
+        # The initiator (e.g., SystemTab or main) is responsible for calling apply_page_theme.
+
+        # 2. Propagate custom color updates to ALL views that have update_theme
+        #    (Tables, charts, settings inputs — anything with Layer 2 colors)
+        for tab_index, view in self._view_cache.items():
+            if hasattr(view, "update_theme"):
+                try:
+                    view.update_theme()
+                except Exception as e:
+                    logger.error(f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}")
+
+        # 3. Single page update — Flet redraws all semantic-token-based colors automatically
+        self.page.update()
 
     def change_tab(self, index: int):
         """Change tab with debounce logic"""
@@ -217,34 +250,32 @@ class AppLayout(ft.Container):
         _t0 = _time.perf_counter()
         logger.debug(f"[AppLayout] Switching to tab index {index}")
 
-        # Optimize HomeView visibility
-        if hasattr(self.home_view, 'set_visible'):
-            self.home_view.set_visible(index == NavTabs.MARKET)
+        # Optimize HomeView visibility for background resource saving
+        home_view = self._get_view(NavTabs.MARKET)
+        if hasattr(home_view, 'set_visible'):
+            home_view.set_visible(index == NavTabs.MARKET)
 
-        # Switch Content
-        self.body.content = self.views[index]
+        # Switch Content (Lazy Load here)
+        new_view = self._get_view(index)
+        self.body.content = new_view
+
         self._current_tab_index = index
-        self.nav_rail.selected_index = index # Ensure UI sync if called programmatically
-        
+        self.nav_rail.selected_index = index
+
         self.body.update()
         self.nav_rail.update()
-        
+
         logger.debug(f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     async def run_strategy_from_home(self, strategy_key):
         """Callback to switch to Screener and run strategy"""
-        # Switch to Screener Tab
         self.change_tab(NavTabs.SCREENER)
-        
-        # Wait for switch (Since change_tab is debounced/async, we might need to ensure it happens)
-        # However, change_tab spawns disjoint task. 
-        # Ideally we force immediate switch for this user interaction.
-        
-        # Force immediate switch logic for direct action
+
         if self._debounce_task: self._debounce_task.cancel()
-        
+
         self._pending_tab_index = NavTabs.SCREENER
-        await self._execute_tab_switch() # Await directly
-        
-        # Trigger Strategy
-        await self.screener_view.select_and_run_strategy(strategy_key)
+        await self._execute_tab_switch()
+
+        screener_view = self._get_view(NavTabs.SCREENER)
+        if isinstance(screener_view, ScreenerView):
+            await screener_view.select_and_run_strategy(strategy_key)

@@ -1,5 +1,5 @@
-import sys
 import os
+import sys
 
 # Determine application root directory
 if getattr(sys, 'frozen', False):
@@ -10,5 +10,3 @@ else:
     APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 DB_PATH = os.path.join(APP_ROOT, "astock.db")
-
-

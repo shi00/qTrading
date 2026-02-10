@@ -96,7 +96,7 @@ class ReviewManager:
                         df_idx = await self.api.get_index_daily(ts_code=index_code, start_date=t1_row['trade_date'], end_date=t1_row['trade_date'])
                         if not df_idx.empty:
                             index_pct = float(df_idx.iloc[0]['pct_chg'])
-                    except:
+                    except Exception:
                         pass # Network fail, assume 0 benchmark
                     
                     # Alpha Calculation
@@ -238,8 +238,9 @@ class ReviewManager:
         """Update DB with result"""
         # We could store index_pct if schema supported it, for now just use it for logging above
         sql = "UPDATE screening_history SET t1_pct=?, prediction_result=? WHERE id=?"
-        # Use _enqueue to wrap in PrioritizedTask
-        await self.cache._enqueue((sql, (pct, label, record_id), False))
+        # Use _write_db instead of deprecated _enqueue
+        # Wrap params in list for is_many=True just to be safe/consistent or use is_many=False
+        await self.cache._write_db(sql, (pct, label, record_id), is_many=False)
 
     async def save_results(self, strategy_name, df):
         """
@@ -263,7 +264,7 @@ class ReviewManager:
             # Handle NaN/None for Score
             try:
                 ai_score = int(ai_score) if pd.notnull(ai_score) else 0
-            except:
+            except (ValueError, TypeError):
                 ai_score = 0
                 
             ai_reason = row.get('ai_reason', '')
@@ -289,7 +290,7 @@ class ReviewManager:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         '''
         
-        # We need to access CacheManager queue
+        # We need to access CacheManager execution directly
         # CacheManager queue items: (sql, params, is_many)
-        await self.cache._enqueue((sql, records, True))
+        await self.cache._write_db(sql, records, is_many=True)
         logger.info(f"[Review] Saved {len(records)} predictions for {strategy_name}")

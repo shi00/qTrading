@@ -95,7 +95,7 @@ class LocalModelManager:
                 return True
             
             self._is_loading = True
-            logger.info(f"[LocalModel] Loading model from {model_path} with config: {config}...")
+            logger.info(f"[LocalModel] Scheduling model load from {model_path} on TaskType.CPU...")
             start_time = asyncio.get_event_loop().time()
             
             try:
@@ -112,8 +112,8 @@ class LocalModelManager:
                 logger.info(f"[LocalModel] Model loaded successfully in {elapsed:.2f}s.")
                 return True
             except Exception as e:
-                logger.error(f"[LocalModel] Failed to load model: {e}", exc_info=True)
                 self._llm = None
+                logger.error(f"[LocalModel] Failed to load model: {e}", exc_info=True)
                 return False
             finally:
                 self._is_loading = False
@@ -123,6 +123,9 @@ class LocalModelManager:
         """
         Sync factory method to create Llama instance with config.
         """
+        import threading
+        logger.info(f"[LocalModel] Initializing Llama in thread: {threading.current_thread().name}")
+        
         return Llama(
             model_path=model_path,
             n_threads=config.get('n_threads', 4),
@@ -164,7 +167,7 @@ class LocalModelManager:
         if not self._llm:
             raise RuntimeError("No model loaded.")
 
-        logger.info(f"[LocalModel] Starting inference. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}")
+        logger.info(f"[LocalModel] Scheduling inference on TaskType.CPU. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}")
         start_time = asyncio.get_event_loop().time()
         
         # Serialize inference to prevent native crash (Llama instance is not thread-safe)
@@ -197,6 +200,9 @@ class LocalModelManager:
         """
         Sync generation logic.
         """
+        import threading
+        logger.info(f"[LocalModel] Running generation in thread: {threading.current_thread().name}")
+
         if not self._llm:
             raise ValueError("Model is None inside worker thread")
 

@@ -1,12 +1,16 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest
 import pandas as pd
 from strategies.all_strategies import (
     StrategyManager, ValueStrategy, GrowthStrategy, DividendStrategy,
-    TechnicalBreakoutStrategy, NorthboundStrategy, OversoldStrategy,
+    TechnicalBreakoutStrategy, NorthboundStrategy,
     InstitutionalStrategy, BlockTradeStrategy, CashFlowStrategy, LargePEStrategy
 )
+from strategies.oversold_strategy import OversoldStrategy
 
-class TestStrategies(unittest.TestCase):
+class TestStrategies(unittest.IsolatedAsyncioTestCase):
     
     def setUp(self):
         self.mgr = StrategyManager()
@@ -15,6 +19,7 @@ class TestStrategies(unittest.TestCase):
         self.base_data = pd.DataFrame({
             'ts_code': ['000001.SZ', '000002.SZ', '000003.SZ'],
             'name': ['Stock A', 'Stock B', 'Stock C'],
+            'industry': ['Bank', 'Real Estate', 'Tech'],
             'pe_ttm': [10.0, 50.0, 5.0],
             'pb': [1.0, 5.0, 0.8],
             'dv_ttm': [3.0, 0.5, 4.5], # Dividend yield
@@ -88,7 +93,7 @@ class TestStrategies(unittest.TestCase):
             'ts_code': ['000001.SZ', '000002.SZ'],
             'ratio': [6.0, 1.0] 
         })
-        ctx = {'northbound_data': nb_data}
+        ctx = {'northbound_data': nb_data, 'screening_data': self.base_data}
         
         s = NorthboundStrategy()
         res = s.filter(ctx)
@@ -99,11 +104,42 @@ class TestStrategies(unittest.TestCase):
         # Empty context
         self.assertTrue(s.filter({}).empty)
 
-    def test_oversold(self):
+    async def test_oversold(self):
         """Test Oversold: Pct < -3, PE < 30"""
-        # Stock C: Pct -4 (Pass), PE 5 (Pass)
         s = OversoldStrategy()
-        res = s.filter(self.context)
+        
+        # Mock DataProcessor
+        from unittest.mock import AsyncMock, MagicMock
+        dp_mock = MagicMock()
+        dp_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
+        
+        # Mock CacheManager
+        cache_mock = MagicMock()
+        
+        # Create dummy history for RSI
+        # Stock C needs to have RSI < 20
+        # We need significant drop in recent days.
+        # 10 days of data
+        dates = pd.date_range(end='20230101', periods=14).strftime('%Y%m%d').tolist()
+        
+        # Stock C logs: Drop from 20 to 10 -> Low RSI
+        c_prices = [20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7]
+        
+        history_data = []
+        for d, p in zip(dates, c_prices):
+            history_data.append({'ts_code': '000003.SZ', 'trade_date': d, 'close': p})
+            
+        history_df = pd.DataFrame(history_data)
+        cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
+        
+        dp_mock.cache = cache_mock
+        
+        # Update context
+        ctx = self.context.copy()
+        ctx['data_processor'] = dp_mock
+        
+        import asyncio
+        res = await s.filter(ctx)
         
         self.assertIn('000003.SZ', res['ts_code'].values)
 
@@ -113,7 +149,7 @@ class TestStrategies(unittest.TestCase):
             'ts_code': ['000001.SZ', '000002.SZ'],
             'net_amount': [3500.0, 100.0]
         })
-        ctx = {'top_list': lhb_data}
+        ctx = {'top_list': lhb_data, 'screening_data': self.base_data}
         
         s = InstitutionalStrategy()
         res = s.filter(ctx)
@@ -139,7 +175,7 @@ class TestStrategies(unittest.TestCase):
             'vol': [10], 'price': [10]
         })
         
-        ctx = {'block_trade': block_data_pass}
+        ctx = {'block_trade': block_data_pass, 'screening_data': self.base_data}
         s = BlockTradeStrategy()
         res = s.filter(ctx)
         self.assertIn('000001.SZ', res['ts_code'].values)

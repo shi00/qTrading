@@ -104,9 +104,9 @@ class NewsSubscriptionService:
         self._last_news_time = None
         self._last_news_content = None
         
-        # Note: We do NOT clear listeners here, as they might belong to 
-        # persistent UI components (though components should unregister themselves).
-        # But for safety in this specific app structure, we keep them.
+        # Prevent memory leaks / zombie listeners (especially on hot reload or View reconstruction)
+        self._listeners.clear()
+        self._alert_listeners.clear()
 
             
         logger.info("[NewsService] Stopped news polling service")
@@ -136,7 +136,7 @@ class NewsSubscriptionService:
         try:
             await self._fetch_and_notify()
         except Exception as e:
-            logger.error(f"[NewsService] Error in background fetch task: {e}")
+            logger.error(f"[NewsService] Error in background fetch task: {e}", exc_info=True)
             # Optional: Implement retry logic here if needed, but for periodic polling, 
             # just failing and waiting for next interval is often cleaner.
 
@@ -219,7 +219,7 @@ class NewsSubscriptionService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[NewsService] Error in processing loop: {e}")
+                logger.error(f"[NewsService] Error in processing loop: {e}", exc_info=True)
                 # Prevent tight error loop logging
                 await asyncio.sleep(5.0)
 
@@ -315,4 +315,4 @@ class NewsSubscriptionService:
                             logger.error(f"[NewsService] Alert listener error: {e}")
                     
         except Exception as e:
-            logger.warning(f"[NewsService] Poll failed: {e}")
+            logger.warning(f"[NewsService] Poll failed: {e}", exc_info=True)

@@ -1,234 +1,21 @@
-from abc import ABC, abstractmethod
-import pandas as pd
-from ui.i18n import I18n
-from strategies.base_strategy import BaseStrategy
-
-class ValueStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_value_name", "strategy_value_desc")
-
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Drop rows with NaN in critical columns
-        required_cols = ['pe_ttm', 'pb', 'dv_ttm']
-        df = df.dropna(subset=[c for c in required_cols if c in df.columns])
-        if df.empty:
-            return pd.DataFrame()
-        
-        # Simple screening: PE 5-20, PB 0.5-3, Div Yield > 2%
-        mask = (
-            (df['pe_ttm'] > 5) & (df['pe_ttm'] < 20) &
-            (df['pb'] > 0.5) & (df['pb'] < 3) &
-            (df['dv_ttm'] > 2)
-        )
-        result = df[mask].copy()
-        return result.sort_values('dv_ttm', ascending=False)
-
-# --- 2. Growth Strategy ---
-class GrowthStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_growth_name", "strategy_growth_desc")
-
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Drop NaN in required columns
-        required_cols = ['or_yoy', 'netprofit_yoy', 'roe']
-        df = df.dropna(subset=[c for c in required_cols if c in df.columns])
-        if df.empty:
-            return pd.DataFrame()
-        
-        # Use or_yoy (revenue YoY) and netprofit_yoy from financial_reports
-        # Filter: revenue growth > 20%, profit growth > 25%, ROE > 15%
-        mask = (
-            (df['or_yoy'] > 20) &
-            (df['netprofit_yoy'] > 25) &
-            (df['roe'] > 15)
-        )
-        result = df[mask].copy()
-        return result.sort_values('roe', ascending=False)
-
-# --- 3. Dividend Strategy ---
-class DividendStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_dividend_name", "strategy_dividend_desc")
-        
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Drop NaN in required columns
-        df = df.dropna(subset=['dv_ttm'])
-        if df.empty:
-            return pd.DataFrame()
-        
-        # High dividend yield > 4%
-        mask = (df['dv_ttm'] > 4)
-        result = df[mask].copy()
-        return result.sort_values('dv_ttm', ascending=False)
-
-# --- 4. Technical Breakout ---
-class TechnicalBreakoutStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_tech_breakout_name", "strategy_tech_breakout_desc")
-
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Drop NaN in required columns
-        required_cols = ['pct_chg', 'turnover_rate']
-        df = df.dropna(subset=[c for c in required_cols if c in df.columns])
-        if df.empty:
-            return pd.DataFrame()
-        
-        # Simplified: Today's gain 2-7%, high turnover
-        # Full implementation would need historical data for MA comparison
-        mask = (
-            (df['pct_chg'] > 2) & 
-            (df['pct_chg'] < 7) &
-            (df['turnover_rate'] > 3) &
-            (df['turnover_rate'] < 15)
-        )
-        result = df[mask].copy()
-        return result.sort_values('pct_chg', ascending=False)
-
-# --- 5. Northbound Capital ---
-class NorthboundStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_northbound_name", "strategy_northbound_desc")
-
-    def filter(self, context):
-        # This requires northbound holding data from cache
-        df = context.get('northbound_data')
-        if df is None or df.empty:
-            # Fallback to screening_data with note
-            return pd.DataFrame()
-        
-        # Filter high holding ratio > 5% and ensure A-Share code
-        mask = (df['ratio'] > 5) & (df['ts_code'].astype(str).str.endswith(('.SH', '.SZ')))
-        return df[mask].sort_values('ratio', ascending=False)
-
-# --- 6. Oversold Rebound ---
-
-
-# --- 7. Institutional Buying (LHB) ---
-class InstitutionalStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_institutional_name", "strategy_institutional_desc")
-
-    def filter(self, context):
-        # Requires top_list data
-        lhb = context.get('top_list')
-        if lhb is None or lhb.empty:
-            return pd.DataFrame()
-        
-        # Filter for rows where data exists
-        if 'net_amount' not in lhb.columns:
-            return pd.DataFrame()
-            
-        # Logic:
-        # 1. Net buying > 3000万 (30 million)
-        # 2. Buying amount / Turnover > 10% (Indicates high institutional participation)
-        
-        # Keep non-NaN
-        df = lhb.dropna(subset=['net_amount'])
-        
-        # 3000万 = 30000000 (unit in table might be 10000? Tushare top_list amount is in 10000 RMB usually, need to verify. 
-        # Tushare doc: net_amount is "净成交额", unit "万元" usually? Let's assume 万.
-        # Actually Tushare top_list amount is usually in "万元". So 3000万 = 3000.
-        
-        mask = (df['net_amount'] > 3000) 
-        result = df[mask].copy()
-        return result.sort_values('net_amount', ascending=False)
-
-# --- 8. Shareholder Concentration ---
-
-
-# --- 9. Block Trade ---
-class BlockTradeStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_block_trade_name", "strategy_block_trade_desc")
-
-    def filter(self, context):
-        block = context.get('block_trade')
-        if block is None or block.empty:
-            return pd.DataFrame()
-            
-        # Tushare block_trade: price, vol(万股), amount(万元), buyer, seller
-        
-        # Logic:
-        # 1. Premium or near-price trade (price >= yesterday close... but we only have deal price)
-        # 2. Large amount > 1000万 (1000)
-        
-        if 'amount' not in block.columns:
-            return pd.DataFrame()
-            
-        df = block.dropna(subset=['amount'])
-        mask = (df['amount'] > 1000)
-        
-        result = df[mask].copy()
-        
-        # Group by stock to sum up amounts if multiple deals
-        if not result.empty:
-            result = result.groupby('ts_code').agg({
-                'amount': 'sum',
-                'volume': 'sum',
-                'price': 'mean' # Weighted avg ideal but this is simple
-            }).reset_index()
-            
-        return result.sort_values('amount', ascending=False)
-
-# --- 10. High Quality Cashflow ---
-class CashFlowStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_cashflow_name", "strategy_cashflow_desc")
-    
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Low debt, high ROE
-        mask = (
-            (df['debt_to_assets'] < 50) &
-            (df['roe'] > 10)
-        )
-        result = df[mask].copy()
-        return result.sort_values('roe', ascending=False)
-
-# --- 11. Low PE Large Cap ---
-class LargePEStrategy(BaseStrategy):
-    def __init__(self):
-        super().__init__("strategy_large_pe_name", "strategy_large_pe_desc")
-    
-    def filter(self, context):
-        df = context.get('screening_data')
-        if df is None or df.empty:
-            return pd.DataFrame()
-        
-        # Market cap > 500亿, PE < 15
-        mask = (
-            (df['total_mv'] > 5000000) &  # 万元 -> 500亿
-            (df['pe_ttm'] > 0) & (df['pe_ttm'] < 15)
-        )
-        result = df[mask].copy()
-        return result.sort_values('total_mv', ascending=False)
-
+from strategies.ai_strategy import AISelectionStrategy
+from strategies.oversold_strategy import OversoldStrategy
+from strategies.fundamental import (
+    ValueStrategy, 
+    GrowthStrategy, 
+    DividendStrategy, 
+    CashFlowStrategy, 
+    LargePEStrategy
+)
+from strategies.market import (
+    TechnicalBreakoutStrategy, 
+    NorthboundStrategy, 
+    InstitutionalStrategy, 
+    BlockTradeStrategy
+)
 
 class StrategyManager:
     def __init__(self):
-        # Local import to avoid circular dependency
-        from strategies.ai_strategy import AISelectionStrategy
-        from strategies.oversold_strategy import OversoldStrategy
-        
         self.strategies = {
             "ai_active": AISelectionStrategy(),
             "oversold": OversoldStrategy(),
@@ -248,3 +35,4 @@ class StrategyManager:
     
     def get_all_names(self):
         return {k: v.name for k, v in self.strategies.items()}
+

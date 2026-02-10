@@ -117,7 +117,7 @@ class TushareClient:
 
                 # Other errors
                 if i == self.max_retries - 1:
-                    logger.error(f"[tushare_api] RETRY_EXHAUSTED: {error_msg[:100]}")
+                    logger.error(f"[tushare_api] RETRY_EXHAUSTED: {error_msg}")
                     raise e
 
                 time.sleep(1)
@@ -213,7 +213,7 @@ class TushareClient:
                     logger.warning(
                         f"[API] UNSAFE_FALLBACK: Assuming {date_str} is trading day (weekday check). May be inaccurate for holidays!")
                 return is_weekday
-            except:
+            except (ValueError, TypeError):
                 return True  # Default to allowing if all else fails
 
     # ========== Stock Basic ==========

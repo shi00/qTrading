@@ -2,6 +2,7 @@ import base64
 import logging
 import os
 import secrets
+import subprocess
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -112,14 +113,14 @@ class SecurityManager:
 
             # Hide the file on Windows
             if os.name == 'nt':
-                os.system(f'attrib +h "{cls.KEY_FILE}"')
-                os.system(f'attrib +h "{cls.KEY_FILE_BAK}"')
+                subprocess.run(['attrib', '+h', cls.KEY_FILE], check=False, capture_output=True)
+                subprocess.run(['attrib', '+h', cls.KEY_FILE_BAK], check=False, capture_output=True)
         except Exception as e:
             logger.error(f"Error saving key: {e}")
             if os.path.exists(tmp_file):
                 try:
                     os.remove(tmp_file)
-                except:
+                except Exception:
                     pass
             raise e
 

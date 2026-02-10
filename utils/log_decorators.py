@@ -109,12 +109,11 @@ def log_async_operation(
                 if log_exceptions:
                     # 脱敏异常信息
                     error_msg = DataSanitizer.sanitize_error(e)
+                    # Always log traceback for errors to ensure debuggability
                     logger.error(
-                        f"[{op_name}] failed after {elapsed_str}: {type(e).__name__} - {error_msg}"
+                        f"[{op_name}] failed after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                        exc_info=True
                     )
-                    # DEBUG级别记录完整堆栈
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"[{op_name}] traceback:", exc_info=True)
 
                 # 重新抛出异常
                 raise

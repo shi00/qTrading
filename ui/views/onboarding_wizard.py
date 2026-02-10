@@ -173,7 +173,7 @@ class OnboardingWizard(ft.Container):
                     ft.Container(
                         content=ft.Icon(ft.Icons.ARROW_RIGHT_ALT, color=color, size=24),
                         padding=ft.padding.symmetric(horizontal=10),
-                        offset=ft.transform.Offset(0, -0.2)
+                        offset=ft.Offset(0, -0.2)
                     )
                 )
         return controls

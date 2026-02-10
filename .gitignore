@@ -58,3 +58,4 @@ AStockScreener.spec
 .gemini/
 
 .secret.key
+.secret.key.bak

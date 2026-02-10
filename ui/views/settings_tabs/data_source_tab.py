@@ -1,16 +1,14 @@
-import asyncio
 import logging
-
+import asyncio
 import flet as ft
-
-from data.cache_manager import CacheManager
-from data.data_processor import DataProcessor
-from data.tushare_client import TushareClient
-from ui.components.settings_widgets import DashboardCard, MetricCard, ActionChip, SectionHeader
+from ui.components.settings_widgets import DashboardCard, MetricCard, ActionChip, SectionHeader, SettingRow
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
+from data.data_processor import DataProcessor
+from data.cache_manager import CacheManager
+from data.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +130,8 @@ class DataSourceTab(ft.Container):
             password=True,
             can_reveal_password=True,
             value=current_token,
-            width=400,
+            # width=400, # Handled by SettingRow layout
+            expand=True,
             on_submit=self.save_and_verify_tushare
         )
         self.btn_save_token = ft.ElevatedButton(
@@ -140,24 +139,28 @@ class DataSourceTab(ft.Container):
             icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
             on_click=self.save_and_verify_tushare,
             style=AppStyles.primary_button(),
-            width=400
+            # width=400
         )
         self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT)
         self.status_text = ft.Text(I18n.get("settings_verify_failed"), color=AppColors.TEXT_HINT)
 
+        # Refactored Connection Card using SettingRow
+        # Refactored Connection Card using SettingRow
+        self.row_token = SettingRow(
+            icon=ft.Icons.KEY_ROUNDED,
+            title=I18n.get("settings_token"),
+            subtitle=I18n.get("settings_token_desc"),
+            control=ft.Column([
+                ft.Row([self.token_input, self.btn_save_token]),
+                ft.Row([self.status_icon, self.status_text])
+            ], spacing=5, expand=True), # Control takes remaining space
+            icon_color=AppColors.ACCENT
+        )
         self.connection_card = DashboardCard(
             content=ft.Column([
                 SectionHeader(I18n.get("settings_sec_api")),
-                ft.Text(I18n.get("settings_token_desc"), size=12, color=AppColors.TEXT_SECONDARY),
-                ft.Container(height=5),
-                ft.Row([
-                    self.token_input,
-                    self.btn_save_token
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                ft.Row([
-                    self.status_icon,
-                    self.status_text
-                ])
+                ft.Container(height=10),
+                self.row_token
             ])
         )
 
@@ -170,19 +173,16 @@ class DataSourceTab(ft.Container):
             on_click=self.init_historical_data,
             tooltip=I18n.get("settings_init_desc"),
             style=AppStyles.primary_button(),
-            width=400
+            # width=400
         )
 
-        self.historical_card = DashboardCard(
-            content=ft.Column([
-                ft.Row([
-                    ft.Column([
-                        SectionHeader(I18n.get("settings_init_data")),
-                        ft.Text(I18n.get("settings_hint_first_run"), size=12, color=AppColors.TEXT_SECONDARY),
-                    ]),
-                    self.sync_button
-                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-
+        # Refactored Historical Card using SettingRow
+        self.row_init = SettingRow(
+            icon=ft.Icons.HISTORY_ROUNDED,
+            title=I18n.get("settings_init_data"),
+            subtitle=I18n.get("settings_hint_first_run"),
+            control=ft.Column([
+                self.sync_button,
                 ft.Container(
                     content=ft.Column([
                         self.progress_bar,
@@ -190,7 +190,15 @@ class DataSourceTab(ft.Container):
                     ]),
                     padding=ft.padding.only(top=5),
                 ),
-            ], spacing=5)
+            ], horizontal_alignment=ft.CrossAxisAlignment.END), # Button aligned to right
+            icon_color=ft.Colors.PURPLE
+        )
+        self.historical_card = DashboardCard(
+            content=ft.Column([
+                SectionHeader(I18n.get("settings_init_data")),
+                ft.Container(height=10),
+                self.row_init
+            ])
         )
 
         # Assemble logic
@@ -217,6 +225,20 @@ class DataSourceTab(ft.Container):
                 self.update()
         except Exception:
             pass
+            
+    def update_theme(self):
+        """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
+        # Input fields use custom colors
+        self.token_input.bgcolor = AppColors.INPUT_BG
+        self.token_input.color = AppColors.INPUT_TEXT
+        self.token_input.border_color = AppColors.INPUT_BORDER
+
+        # MetricCards still need UP/DOWN color refresh
+        for card in [self.metric_sync, self.metric_coverage, self.metric_health, self.metric_storage]:
+            if hasattr(card, 'update_theme'): card.update_theme()
+
+        # Standard colors auto-update via semantic tokens
+        self._safe_update()
 
     def refresh_locale(self):
         # Update text labels here... simplified for brevity, in real impl should match SettingsView

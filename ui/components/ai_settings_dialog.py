@@ -2,6 +2,7 @@ import flet as ft
 from utils.config_handler import ConfigHandler
 from services.ai_service import AIService
 from ui.i18n import I18n
+from ui.theme import AppColors
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,13 +22,15 @@ class AISettingsDialog(ft.AlertDialog):
             password=True, 
             can_reveal_password=True,
             value=ai_cfg.get('ai_api_key', ''),
-            hint_text="sk-..."
+            hint_text="sk-...",
+            border_color=AppColors.BORDER
         )
         
         self.base_url_field = ft.TextField(
             label=I18n.get("settings_ai_base_url_label"), 
             value=ai_cfg.get('ai_base_url', 'https://api.deepseek.com'),
-            hint_text="https://api.deepseek.com"
+            hint_text="https://api.deepseek.com",
+            border_color=AppColors.BORDER
         )
         
         self.model_field = ft.Dropdown(
@@ -39,7 +42,8 @@ class AISettingsDialog(ft.AlertDialog):
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
                 ft.dropdown.Option("gpt-4o", "OpenAI GPT-4o"),
-            ]
+            ],
+            border_color=AppColors.BORDER
         )
 
         self.prompt_field = ft.TextField(
@@ -49,20 +53,20 @@ class AISettingsDialog(ft.AlertDialog):
             min_lines=5,
             max_lines=10,
             text_size=12,
-            border_color=ft.Colors.GREY_400,
+            border_color=AppColors.BORDER,
         )
 
         super().__init__(
             modal=True,
-            title=ft.Text(I18n.get("ai_settings_title")),
+            title=ft.Text(I18n.get("ai_settings_title"), color=AppColors.TEXT_PRIMARY),
             content=ft.Column([
-                ft.Text(I18n.get("ai_settings_desc"), size=12, color=ft.Colors.GREY),
+                ft.Text(I18n.get("ai_settings_desc"), size=12, color=AppColors.TEXT_SECONDARY),
                 self.base_url_field,
                 self.api_key_field,
                 self.model_field,
                 ft.Container(height=10),
                 ft.Row([
-                    ft.Text(I18n.get("ai_prompt_label"), size=14, weight=ft.FontWeight.BOLD),
+                    ft.Text(I18n.get("ai_prompt_label"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
                     ft.TextButton(I18n.get("ai_reset_default"), on_click=self.reset_prompt, style=ft.ButtonStyle(padding=0))
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 self.prompt_field,
@@ -71,6 +75,7 @@ class AISettingsDialog(ft.AlertDialog):
                 ft.TextButton(I18n.get("common_cancel"), on_click=self.close),
                 ft.ElevatedButton(I18n.get("common_save"), on_click=self.save_settings),
             ],
+            actions_alignment=ft.MainAxisAlignment.END,
         )
 
     def close(self, e):

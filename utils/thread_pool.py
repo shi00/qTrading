@@ -63,11 +63,11 @@ class ThreadPoolManager:
         logger.info(f"ThreadPool: CPU Pool size: {cpu_workers}")
 
         self._io_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=io_workers,
+            max_workers=io_workers if io_workers > 0 else None,
             thread_name_prefix="IO_Worker"
         )
         self._cpu_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=cpu_workers,
+            max_workers=cpu_workers if cpu_workers > 0 else None,
             thread_name_prefix="CPU_Worker"
         )
 

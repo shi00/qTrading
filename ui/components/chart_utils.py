@@ -3,17 +3,23 @@ import pandas as pd
 from ui.theme import AppColors
 from ui.i18n import I18n
 
-def create_kline_chart(df, title="", theme_mode="light"):
+import flet as ft # Needed for ThemeMode comparison
+
+def create_kline_chart(df, title="", theme_mode=None):
     """
     Create a Plotly K-line chart (Candlestick) with Moving Averages.
     
     :param df: DataFrame with columns: trade_date, open, high, low, close
     :param title: Chart title
-    :param theme_mode: "light" or "dark" (to adjust background)
+    :param theme_mode: "light", "dark", or None (auto-detect)
     :return: plotly.graph_objects.Figure
     """
     if df is None or df.empty:
         return go.Figure()
+
+    # Auto-detect theme if not provided
+    if theme_mode is None:
+        theme_mode = "dark" if AppColors._CURRENT_THEME_MODE == ft.ThemeMode.DARK else "light"
 
     # Ensure date is string format (YYYY-MM-DD) for maximum compatibility
     dates = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d').tolist()
@@ -44,15 +50,17 @@ def create_kline_chart(df, title="", theme_mode="light"):
     fig = go.Figure(data=[candlestick, ma5, ma10, ma20])
     
     # Layout styling matching App Theme
-    bg_color = '#FFFFFF' if theme_mode == 'light' else '#1E3A5F'
-    grid_color = '#EEEEEE' if theme_mode == 'light' else '#2C4F7C'
-    text_color = '#333333' if theme_mode == 'light' else '#FFFFFF'
+    is_dark = theme_mode == 'dark'
+    bg_color = AppColors.BACKGROUND if is_dark else '#FFFFFF' # AppColors might be hex, plotly handles it
+    paper_color = AppColors.SURFACE if is_dark else '#FFFFFF'
+    grid_color = '#333333' if is_dark else '#EEEEEE'
+    text_color = '#FFFFFF' if is_dark else '#333333'
     
     fig.update_layout(
         title=dict(text=title, font=dict(color=text_color, size=16)),
         xaxis_rangeslider_visible=False,
         plot_bgcolor=bg_color,
-        paper_bgcolor=bg_color,
+        paper_bgcolor=paper_color,
         xaxis=dict(
             showgrid=True, 
             gridcolor=grid_color,
@@ -78,7 +86,7 @@ def create_kline_chart(df, title="", theme_mode="light"):
     
     return fig
 
-def generate_kline_html(df, title="", theme_mode="light"):
+def generate_kline_html(df, title="", theme_mode=None):
     """
     Generate HTML string for the K-line chart.
     """

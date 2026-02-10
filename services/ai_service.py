@@ -12,6 +12,8 @@ from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
 from services.local_model_manager import LocalModelManager
 
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -113,23 +115,92 @@ class AIService:
         # But to be safe with async, we just flag it. 
         # Ideally we should stop current inferences? Too complex. 
         # Just reset flags so next call re-loads.
-        self._local_model_attempted = False
         # We don't unset _local_llama immediately to avoid crashing running threads
         # It will be overwritten on next _setup_local_model success.
+
+    async def _chat_completion(self, messages: list, model: str = None, provider: str = "cloud", 
+                             temperature: float = 0.3, timeout: float = 30.0, json_mode: bool = True) -> dict:
+        """
+        Unified helper for Chat Completions (Cloud or Local).
+        Args:
+            messages: List of {"role":..., "content":...}
+            model: Model name (optional, defaults to config)
+            provider: 'cloud' or 'local'
+            temperature: sampling temp
+            timeout: timeout in seconds
+            json_mode: whether to enforce JSON return
+        Returns:
+            dict: Parsed JSON content (or raw dict if non-json)
+        Raises:
+            Exception: on failure (caller should handle fallback)
+        """
+        response_content = ""
+        
+        # --- Local Provider ---
+        if provider == "local":
+            await self._setup_local_model()
+            manager = await LocalModelManager.get_instance()
+            
+            system_prompt = next((m['content'] for m in messages if m['role'] == 'system'), "You are a helpful assistant.")
+            user_prompt = next((m['content'] for m in messages if m['role'] == 'user'), "")
+            
+            if not manager.get_loaded_model_path():
+                 raise ValueError("Local model not loaded")
+
+            response_content = await manager.run_inference(
+                prompt=user_prompt,
+                max_tokens=2048, # config?
+                temperature=temperature,
+                system_prompt=system_prompt
+            )
+            
+        # --- Cloud Provider ---
+        else:
+            if not self.client:
+                raise ValueError("Cloud Client not initialized")
+                
+            model = model or ConfigHandler.get_setting('ai_model_name')
+            if not model:
+               raise ValueError("Model not configured")
+
+            async with self._get_semaphore():
+                response = await asyncio.wait_for(
+                    self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        response_format={"type": "json_object"} if json_mode else None,
+                        temperature=temperature
+                    ),
+                    timeout=timeout
+                )
+                response_content = response.choices[0].message.content
+
+        # --- Post-Processing (JSON Parsing) ---
+        if json_mode:
+            # 1. Cleaner: Try direct parse
+            try:
+                return json.loads(response_content)
+            except json.JSONDecodeError:
+                # 2. Dirty JSON extraction (common in LLMs)
+                start = response_content.find('{')
+                end = response_content.rfind('}') + 1
+                if start != -1 and end > start:
+                    json_str = response_content[start:end]
+                    return json.loads(json_str)
+                raise ValueError(f"Invalid JSON response: {response_content[:100]}...")
+        
+        return {"content": response_content}
 
     @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=30000)
     async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="") -> dict:
         """
-        Analyze a single stock using the LLM.
+        Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'ai_model_name' to be configured.
         """
         if not self.client:
+            # Minimal check, though _chat_completion checks it too. 
+            # But analyze_stock might return specific error dicts expected by Strategy.
             return None
-
-        model = ConfigHandler.get_setting('ai_model_name')
-        if not model:
-            logger.error("[AI] Configuration Error: 'ai_model_name' must be set in settings.")
-            return {"error": "AI Model not configured", "score": 0}
 
         # Build Prompt
         # Convert dicts to XML-like string
@@ -196,34 +267,21 @@ class AIService:
           (Data not available yet, assume neutral)
         </financials>
         """
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
 
         try:
-            async with self._get_semaphore():
-                # Corner case: API timeout protection (30s max)
-                response = await asyncio.wait_for(
-                    self.client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.3
-                    ),
-                    timeout=30.0  # 30 second timeout
-                )
-
-                content = response.choices[0].message.content
-                return json.loads(content)
+            # Analyze Stock uses Cloud by default as it requires high reasoning capability
+            return await self._chat_completion(messages, provider="cloud", timeout=30.0, json_mode=True)
 
         except asyncio.TimeoutError:
-            logger.error("[AI] Analysis timeout (>30s)")
+            logger.error(f"[AI] Analysis timeout")
             return {"error": "Analysis timeout", "score": 0}
-        except json.JSONDecodeError as e:
-            logger.error(f"[AI] Invalid JSON response: {e}")
-            return {"error": "Invalid response format", "score": 0}
         except Exception as e:
-            logger.error(f"[AI] Analysis failed: {e}")
+            logger.error(f"[AI] Analysis failed: {e}", exc_info=True)
             return {"error": str(e), "score": 0}
 
     async def _setup_local_model(self):
@@ -278,96 +336,35 @@ class AIService:
     async def classify_news(self, text: str) -> dict:
         """
         Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).
-        Optimized for Qwen2.5 1.5B with Few-Shot prompting details in Config.
         """
-        # Prompt from Config (Content Only)
         system_instruction = self.config.get_ai_news_prompt()
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": text[:500]}
+        ]
 
-        # 1. Try Local Model first
-        await self._setup_local_model()
-        
-        manager = await LocalModelManager.get_instance()
-        if manager.get_loaded_model_path():
-            try:
-                # Use Manager for safe inference
-                # output_text is the string content directly
-                output_text = await manager.run_inference(
-                    prompt=text[:500],
-                    system_prompt=system_instruction
-                )
-                
-                # Check for empty output
-                if not output_text:
-                     logger.warning("[AI] Local model returned empty output.")
-                else:
-                    # Try to extract JSON
-                    start = output_text.find('{')
-                    if start != -1:
-                        # Best Practice: Use raw_decode to parse ONE valid JSON object and ignore the rest
-                        # This natively handles "Extra data" without try-catch hacks
-                        try:
-                            decoder = json.JSONDecoder()
-                            json_str = output_text[start:]
-                            result, end_idx = decoder.raw_decode(json_str)
-                            
-                            # Optional: Log if we ignored significant garbage?
-                            if end_idx < len(json_str):
-                                trailing = json_str[end_idx:].strip()
-                                if len(trailing) > 5:
-                                    logger.info(f"[AI] Ignored trailing garbage chars: {len(trailing)}")
-                                    
-                            return self._parse_news_result(result)
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"[AI] Local model JSON decode failed: {e}")
-                    else:
-                        logger.warning(f"[AI] Local model output not JSON: {output_text}")
-                        
-            except (RuntimeError, ImportError) as e:
-                logger.warning(f"[AI] Local model inference failed: {e}")
-                # Fallback to cloud...
-            except Exception as e:
-                logger.error(f"[AI] Unexpected local inference error: {e}", exc_info=True)
-                # Fallback to cloud...
-
-        # 2. Fallback to Cloud API
-        if not self.client:
-            return None
-
-        model = self.config.get_setting('ai_model_name')
-        if not model:
-            logger.error("[AI] Configuration Error: 'ai_model_name' is not configured.")
-            return None
-
-        # Use the SAME system prompt from config for Cloud Model
-        # But pass it as "content", avoiding manual ChatML tags if using standard API
-        
-        # NOTE: If user put ChatML tags in the Config UI manually (against default), this might leak tags.
-        # But we assume standard usage (Text content).
-        
+        # 1. Try Local Model
         try:
-            # Enforce global 5s timeout for the entire operation
-            async def _do_classify():
-                async with self._get_semaphore():
-                    response = await self.client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_instruction},
-                            {"role": "user", "content": text[:500]}
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.1
-                    )
-                    content = response.choices[0].message.content
-                    return json.loads(content)
-
-            raw_result = await asyncio.wait_for(_do_classify(), timeout=30.0)
+            raw_result = await self._chat_completion(messages, provider="local", json_mode=True)
             return self._parse_news_result(raw_result)
+        except Exception as local_e:
+            # Local failed (not configured, crash, etc.)
+            # Log only if it wasn't just "not configured" (which is common)
+            if "not installed" not in str(local_e) and "not configured" not in str(local_e):
+                logger.warning(f"[AI] Local classification failed, falling back to cloud: {local_e}")
+            else:
+                logger.info(f"[AI] Local model unavailable ({local_e}). Using Cloud.")
 
-        except asyncio.TimeoutError:
-            logger.warning("[AI] Classification global timeout (>30s), dropped")
-            return None
+        # 2. Fallback to Cloud
+        try:
+            # Enforce global 5s timeout? The original code had per-call timeout.
+            # _chat_completion has default 30s. classify used to wrap in wait_for 30s.
+            # Inner cloud call had 30s timeout on client.
+            # We will use 30s default.
+            raw_result = await self._chat_completion(messages, provider="cloud", json_mode=True)
+            return self._parse_news_result(raw_result)
         except Exception as e:
-            logger.error(f"[AI] Classification failed: {e}")
+            logger.error(f"[AI] Classification failed (All providers): {e}", exc_info=True)
             return None
 
     async def verify_connection(self) -> bool:

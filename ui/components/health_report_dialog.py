@@ -28,10 +28,10 @@ class HealthReportDialog(ft.AlertDialog):
         fundamentals = self.report.get('fundamentals', {})
         tables = fundamentals.get('tables', {})
         
-        color_map = {'green': ft.Colors.GREEN, 'yellow': ft.Colors.ORANGE, 'red': ft.Colors.RED}
+        color_map = {'green': AppColors.SUCCESS, 'yellow': AppColors.WARNING, 'red': AppColors.ERROR}
         icon_map = {'green': ft.Icons.CHECK_CIRCLE, 'yellow': ft.Icons.WARNING, 'red': ft.Icons.ERROR}
         
-        status_color = color_map.get(status, ft.Colors.GREY)
+        status_color = color_map.get(status, AppColors.TEXT_HINT)
         status_icon = icon_map.get(status, ft.Icons.HELP)
         
         # Helper to create table row
@@ -39,14 +39,14 @@ class HealthReportDialog(ft.AlertDialog):
             ratio = stats.get('ratio', 0)
             fresh_ratio = stats.get('fresh_ratio', 0)
             # Color code coverage
-            col = ft.Colors.GREEN if ratio > 0.98 else (ft.Colors.ORANGE if ratio > 0.9 else ft.Colors.RED)
+            col = AppColors.SUCCESS if ratio > 0.98 else (AppColors.WARNING if ratio > 0.9 else AppColors.ERROR)
             
             return ft.Row([
-                ft.Text(name, width=120, size=12, weight=ft.FontWeight.BOLD),
-                ft.ProgressBar(value=ratio, width=80, color=col, bgcolor=ft.Colors.GREY_200),
-                ft.Text(f"{ratio*100:.1f}%", width=50, size=12),
-                ft.Icon(ft.Icons.ACCESS_TIME, size=12, color=ft.Colors.BLUE if fresh_ratio > 0.8 else ft.Colors.GREY),
-                ft.Text(f"{fresh_ratio*100:.0f}%", size=12)
+                ft.Text(name, width=120, size=12, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                ft.ProgressBar(value=ratio, width=80, color=col, bgcolor=AppColors.SURFACE_VARIANT),
+                ft.Text(f"{ratio*100:.1f}%", width=50, size=12, color=AppColors.TEXT_SECONDARY),
+                ft.Icon(ft.Icons.ACCESS_TIME, size=12, color=AppColors.INFO if fresh_ratio > 0.8 else AppColors.TEXT_HINT),
+                ft.Text(f"{fresh_ratio*100:.0f}%", size=12, color=AppColors.TEXT_SECONDARY)
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
 
         # Build Table List (Priority Order)
@@ -60,9 +60,9 @@ class HealthReportDialog(ft.AlertDialog):
         reasons = self.report.get('reasons', [])
         reason_controls = []
         if reasons:
-                reason_controls = [ft.Text("⚠️ " + r, size=12, color=ft.Colors.RED) for r in reasons]
-                reason_controls.insert(0, ft.Text(I18n.get("common_reason"), weight=ft.FontWeight.BOLD, size=12))
-                reason_controls.append(ft.Divider())
+                reason_controls = [ft.Text("⚠️ " + r, size=12, color=AppColors.ERROR) for r in reasons]
+                reason_controls.insert(0, ft.Text(I18n.get("common_reason"), weight=ft.FontWeight.BOLD, size=12, color=AppColors.TEXT_PRIMARY))
+                reason_controls.append(ft.Divider(color=AppColors.DIVIDER))
 
         # Data Quality Metrics
         gap_count = fundamentals.get('gap_count', 0)
@@ -73,56 +73,56 @@ class HealthReportDialog(ft.AlertDialog):
                 ft.Icon(status_icon, color=status_color, size=40),
                 ft.Column([
                     ft.Text(I18n.get("health_status_label").format(status=status.upper()), size=20, weight=ft.FontWeight.BOLD, color=status_color),
-                    ft.Text(I18n.get("health_checked_count").format(count=len(tables)), size=12, color=ft.Colors.GREY)
+                    ft.Text(I18n.get("health_checked_count").format(count=len(tables)), size=12, color=AppColors.TEXT_SECONDARY)
                 ])
             ], alignment=ft.MainAxisAlignment.CENTER),
-            ft.Divider(),
+            ft.Divider(color=AppColors.DIVIDER),
             
             # Reasons
             *reason_controls,
             
             # Market Section
-            ft.Text(I18n.get("health_market_ts"), weight=ft.FontWeight.BOLD),
+            ft.Text(I18n.get("health_market_ts"), weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
             ft.Row([
                 ft.Column([
-                    ft.Text(I18n.get("health_sync_latest"), size=12, color=ft.Colors.GREY),
-                    ft.Text(f"{market.get('latest_local', 'N/A')}", size=14)
+                    ft.Text(I18n.get("health_sync_latest"), size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Text(f"{market.get('latest_local', 'N/A')}", size=14, color=AppColors.TEXT_PRIMARY)
                 ]),
                 ft.Column([
-                    ft.Text(I18n.get("health_sync_official"), size=12, color=ft.Colors.GREY),
-                    ft.Text(f"{market.get('latest_official', 'N/A')}", size=14)
+                    ft.Text(I18n.get("health_sync_official"), size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Text(f"{market.get('latest_official', 'N/A')}", size=14, color=AppColors.TEXT_PRIMARY)
                 ]),
                 ft.Column([
-                    ft.Text(I18n.get("health_lag_days"), size=12, color=ft.Colors.GREY),
-                    ft.Text(f"{market.get('lag_days', 0)} {I18n.get('common_suffix_day')}", size=14, color=ft.Colors.RED if market.get('lag_days', 0) > 0 else ft.Colors.GREEN)
+                    ft.Text(I18n.get("health_lag_days"), size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Text(f"{market.get('lag_days', 0)} {I18n.get('common_suffix_day')}", size=14, color=AppColors.ERROR if market.get('lag_days', 0) > 0 else AppColors.SUCCESS)
                 ]),
             ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
             
-            ft.Divider(),
+            ft.Divider(color=AppColors.DIVIDER),
             
             # Quality Assurance Section (v2.0)
-            ft.Text(I18n.get("health_qa"), weight=ft.FontWeight.BOLD),
+            ft.Text(I18n.get("health_qa"), weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
             ft.Row([
                 ft.Column([
-                    ft.Text(I18n.get("health_gap_count"), size=12, color=ft.Colors.GREY),
-                    ft.Text(f"{gap_count} {I18n.get('common_suffix_place')}", size=14, color=ft.Colors.RED if gap_count > 0 else ft.Colors.GREEN, weight=ft.FontWeight.BOLD)
+                    ft.Text(I18n.get("health_gap_count"), size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Text(f"{gap_count} {I18n.get('common_suffix_place')}", size=14, color=AppColors.ERROR if gap_count > 0 else AppColors.SUCCESS, weight=ft.FontWeight.BOLD)
                 ]),
                 ft.Column([
-                    ft.Text(I18n.get("health_sanity_err"), size=12, color=ft.Colors.GREY),
-                    ft.Text(f"{sanity_errors} {I18n.get('common_items')}", size=14, color=ft.Colors.RED if sanity_errors > 0 else ft.Colors.GREEN, weight=ft.FontWeight.BOLD)
+                    ft.Text(I18n.get("health_sanity_err"), size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Text(f"{sanity_errors} {I18n.get('common_items')}", size=14, color=AppColors.ERROR if sanity_errors > 0 else AppColors.SUCCESS, weight=ft.FontWeight.BOLD)
                 ]),
             ], alignment=ft.MainAxisAlignment.SPACE_AROUND),
-            ft.Divider(),
+            ft.Divider(color=AppColors.DIVIDER),
             
             # Fundamentals Section
             ft.Row([
-                ft.Text(I18n.get("health_coverage"), weight=ft.FontWeight.BOLD),
-                ft.Text(I18n.get("health_threshold"), size=10, color=ft.Colors.GREY)
+                ft.Text(I18n.get("health_coverage"), weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                ft.Text(I18n.get("health_threshold"), size=10, color=AppColors.TEXT_HINT)
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(height=10),
             *table_rows,
             
             ft.Container(height=10),
-            ft.Text(f"{I18n.get('health_missing_sample')}: {len(fundamentals.get('missing_samples', []))} {I18n.get('common_items')}", size=10, color=ft.Colors.GREY),
+            ft.Text(f"{I18n.get('health_missing_sample')}: {len(fundamentals.get('missing_samples', []))} {I18n.get('common_items')}", size=10, color=AppColors.TEXT_HINT),
         ], width=450, height=550, scroll=ft.ScrollMode.AUTO)
         return content

@@ -8,12 +8,8 @@ from data.market_data_service import MarketDataService
 from data.news_subscription import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
 from ui.i18n import I18n
-from ui.theme import AppColors, apply_page_theme
-from ui.views.data_view import DataExplorerView
-from ui.views.home_view import HomeView
+from ui.theme import apply_page_theme
 from ui.views.onboarding_wizard import OnboardingWizard
-from ui.views.screener_view import ScreenerView
-from ui.views.settings_view import SettingsView
 from utils.config_handler import ConfigHandler
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
@@ -35,14 +31,9 @@ async def main(page: ft.Page):
 
     I18n.initialize()  # Initialize Locale
 
-    # Silence asyncio 'ConnectionResetError' on Windows exit
-
-    def silence_event_loop_closed(loop, context):
-        if "Event loop is closed" not in str(context.get("message")):
-            loop.default_exception_handler(context)
 
     # Start Cache Manager explicitly on Main Loop
-    await CacheManager().start()
+    await CacheManager().init_db()
 
     # Start background scheduler
     scheduler.start()
@@ -63,34 +54,39 @@ async def main(page: ft.Page):
         logger.info("[Main] Cleanup initiated. Stopping services...")
 
         try:
-            logger.info("[Main] Step 1: Signaling Global Cancellation...")
+            logger.info("[Main] Step 1: Stopping Background Services...")
+            
+            logger.info("[Main] - Stopping Scheduler...")
+            scheduler.stop()
+
+            logger.info("[Main] - Stopping News Service...")
+            NewsSubscriptionService().stop()
+
+            logger.info("[Main] - Stopping Market Data Service...")
+            MarketDataService().stop()
+            
+            # Give services a moment to stop internal loops
+            await asyncio.sleep(0.5)
+
+            logger.info("[Main] Step 2: Signaling Global Cancellation...")
             from data.data_processor import DataProcessor
             dp = DataProcessor()
             await dp.stop()
 
-            logger.info("[Main] Step 2: Stopping Scheduler...")
-            scheduler.stop()
-
-            logger.info("[Main] Step 3: Stopping News Service...")
-            NewsSubscriptionService().stop()
-
-            logger.info("[Main] Step 3b: Stopping Market Data Service...")
-            MarketDataService().stop()
-
             # Stop Toasts (Cancel pending timers)
-            logger.info("[Main] Step 4: Stopping Toast Manager...")
+            logger.info("[Main] Step 3: Stopping Toast Manager...")
             if hasattr(page, "toast") and page.toast:
                 try:
-                    # Robust shutdown: handle if stop_all is async or somehow mis-assigned
-                    if asyncio.iscoroutinefunction(page.toast.stop_all):
-                        await page.toast.stop_all()
-                    else:
-                        # Fallback if it's sync (unlikely but safe)
-                        page.toast.stop_all()
+                    import inspect
+                    # Robust shutdown: handle sync or async stop_all
+                    if hasattr(page.toast, "stop_all"):
+                        res = page.toast.stop_all()
+                        if inspect.isawaitable(res):
+                            await res
                 except Exception as ex:
                     logger.warning(f"Failed to stop toast manager: {ex}")
 
-            logger.info("[Main] Step 5: Waiting for resources to release...")
+            logger.info("[Main] Step 4: Waiting for resources to release...")
 
             # Flush and Close Database
             await dp.close()
@@ -105,9 +101,16 @@ async def main(page: ft.Page):
 
     page.on_disconnect = cleanup_resources
 
+    def on_error(e):
+        logger.error(f"[App] Unhandled UI Exception: {e}", exc_info=True)
+        # Optional: Show toast to user if critical?
+        # if hasattr(page, "toast"): page.toast.show(f"Error: {e}", "error")
+
+    page.on_error = on_error
+
     page.padding = 0
     apply_page_theme(page)
-    page.theme_mode = ft.ThemeMode.LIGHT
+
 
     # --- Toast Manager (Proposal A) ---
     page.toast = ToastManager(page)
@@ -124,6 +127,18 @@ async def main(page: ft.Page):
 
     async def start_app():
         """Start the main app layout"""
+        # Register Global News Alert (Decoupled from AppLayout)
+        def on_news_alert(msg):
+            if hasattr(page, "toast") and page.toast:
+                page.toast.show(f"📰 {msg}", type="info")
+
+        NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
+        
+        # Start Background Services (Moved from AppLayout)
+        NewsSubscriptionService().start()
+        MarketDataService().start()
+        
+        # Show UI
         app_layout.show()
 
     async def on_onboarding_complete():

@@ -62,7 +62,7 @@ def setup_logging(name="astock_screener"):
 
     # Formatter
     formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] - %(message)s',
+        '%(asctime)s [%(levelname)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
@@ -70,7 +70,7 @@ def setup_logging(name="astock_screener"):
     try:
         max_mb = ConfigHandler.get_log_max_mb()
         backup_count = ConfigHandler.get_log_backup_count()
-    except:
+    except Exception:
         max_mb = 5
         backup_count = 5
     max_bytes = int(max_mb * 1024 * 1024)

@@ -58,6 +58,7 @@ def mock_data_processor():
         })
     
     mock_dp.get_stock_history = mock_get_history
+    mock_dp.is_cancelled.return_value = False
     return mock_dp
 
 

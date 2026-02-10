@@ -234,10 +234,12 @@ class AIBrainTab(ft.Container):
     def _build_content(self):
         """组装 UI 布局"""
         # Card 1: Cloud AI Connection (Reasoning)
+        self.txt_cloud_desc = ft.Text(I18n.get("settings_ai_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+        
         self.card_connection = DashboardCard(
             content=ft.Column([
                 ft.Row([SectionHeader(I18n.get("settings_sec_cloud_ai"))]),
-                ft.Text(I18n.get("settings_ai_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY),
+                self.txt_cloud_desc,
                 ft.Container(height=10),
                 ft.ResponsiveRow([
                     ft.Column([self.ai_base_url_input], col={"sm": 12, "md": 6}),
@@ -257,10 +259,12 @@ class AIBrainTab(ft.Container):
         )
 
         # Card 2: Local AI (Embedded Functionality)
+        self.txt_local_desc = ft.Text(I18n.get("settings_local_ai_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+        
         self.card_local_ai = DashboardCard(
             content=ft.Column([
                 ft.Row([SectionHeader(I18n.get("settings_sec_local_ai"))]),
-                ft.Text(I18n.get("settings_local_ai_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY),
+                self.txt_local_desc,
                 ft.Container(height=10),
                 ft.ResponsiveRow([
                     ft.Column([self.local_model_path_input], col={"sm": 12, "md": 5}),
@@ -302,31 +306,36 @@ class AIBrainTab(ft.Container):
         )
 
         # Card 3: Strategy Engine
+        self.txt_tuning_desc = ft.Text(I18n.get("ai_tuning_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+        self.icon_help_max = ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("ai_hint_cap"))
+        self.icon_help_min = ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("ai_hint_turnover_min"))
+        self.icon_help_conc = ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("settings_hint_ai_model"))
+
         self.card_tuning = DashboardCard(
             content=ft.Column([
                 ft.Row([
                     SectionHeader(I18n.get("settings_sec_tuning")),
                     ft.Icon(ft.Icons.TUNE, size=20, color=AppColors.PRIMARY)
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                ft.Text(I18n.get("ai_tuning_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY),
+                self.txt_tuning_desc,
                 ft.Container(height=10),
                 ft.ResponsiveRow([
                     ft.Column([
                         ft.Row([
                             self.ai_max_candidates_input,
-                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("ai_hint_cap"))
+                            self.icon_help_max
                         ], spacing=5),
                     ], col={"sm": 12, "md": 4}),
                     ft.Column([
                         ft.Row([
                             self.strategy_min_turnover_input,
-                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("ai_hint_turnover_min"))
+                            self.icon_help_min
                         ], spacing=5),
                     ], col={"sm": 12, "md": 4}),
                     ft.Column([
                         ft.Row([
                             self.ai_concurrency_input,
-                            ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=AppColors.TEXT_HINT, tooltip=I18n.get("settings_hint_ai_model"))
+                            self.icon_help_conc
                         ], spacing=5),
                     ], col={"sm": 12, "md": 4}),
                 ], run_spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -334,6 +343,9 @@ class AIBrainTab(ft.Container):
         )
 
         # Card 4: System Persona
+        self.txt_prompt_hint = ft.Text(I18n.get("settings_ai_prompt_hint"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT)
+        self.txt_news_prompt_hint = ft.Text(I18n.get("settings_news_prompt_hint"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT)
+
         self.card_prompt = DashboardCard(
             content=ft.Column([
                 ft.Row([SectionHeader(I18n.get("ai_sec_persona")), self.btn_reset_prompt], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -343,7 +355,7 @@ class AIBrainTab(ft.Container):
                     border_radius=8,
                     bgcolor=ft.Colors.with_opacity(0.02, AppColors.BORDER)
                 ),
-                ft.Text(I18n.get("settings_ai_prompt_hint"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT),
+                self.txt_prompt_hint,
                 
                 # Divider
                 ft.Divider(height=20, color=AppColors.BORDER),
@@ -356,7 +368,7 @@ class AIBrainTab(ft.Container):
                     border_radius=8,
                     bgcolor=ft.Colors.with_opacity(0.02, AppColors.BORDER)
                 ),
-                ft.Text(I18n.get("settings_news_prompt_hint"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT)
+                self.txt_news_prompt_hint
             ])
         )
 
@@ -371,6 +383,24 @@ class AIBrainTab(ft.Container):
                 padding=ft.padding.only(top=10, bottom=30, right=20)
             )
         ], spacing=15, padding=ft.padding.only(bottom=50))
+        
+    def update_theme(self):
+        """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
+        inputs = [
+            self.ai_api_key_input, self.ai_base_url_input, self.ai_model_dropdown,
+            self.local_model_path_input, self.local_timeout_input,
+            self.local_batch_input, self.local_ctx_input,
+            self.ai_max_candidates_input, self.strategy_min_turnover_input, self.ai_concurrency_input,
+            self.ai_prompt_input, self.ai_news_prompt_input
+        ]
+        for ctrl in inputs:
+            ctrl.bgcolor = AppColors.INPUT_BG
+            if isinstance(ctrl, ft.TextField):
+                ctrl.color = AppColors.INPUT_TEXT
+            ctrl.border_color = AppColors.INPUT_BORDER
+
+        # Standard colors auto-update via semantic tokens
+        self._safe_update()
 
     # =========================================================================
     # Lifecycle Hooks

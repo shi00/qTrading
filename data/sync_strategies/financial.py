@@ -1,4 +1,3 @@
-
 """
 Financial Sync Strategy.
 Handles comprehensive fundamentals, incremental updates, and data repair.
@@ -6,17 +5,18 @@ Handles comprehensive fundamentals, incremental updates, and data repair.
 import asyncio
 import datetime
 import logging
-import pandas as pd
-from typing import List, Optional
+from typing import List
 
+import pandas as pd
+
+from data.constants import FINANCIAL_REPORT_SCHEMA_COLS, FINANCIAL_BATCH_TABLES
 from data.sync_strategies.base import ISyncStrategy, SyncResult
-from data.sync_strategies.base import ISyncStrategy, SyncResult
-from data.constants import FINANCIAL_REPORT_SCHEMA_COLS, EARNINGS_SEASON_MONTHS, FINANCIAL_BATCH_TABLES, FINANCIAL_STOCK_TABLES, HEALTH_CHECK_TABLES
+from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
-from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
+
 
 class FinancialSyncStrategy(ISyncStrategy):
     """
@@ -48,7 +48,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         """
         self._shutdown_event.clear()
         result = SyncResult()
-        
+
         try:
             should_full_sync = False
             if periods is not None:
@@ -67,7 +67,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 await self._run_full_sync(periods, progress_callback, force=force, result_accumulator=result)
             else:
                 await self._run_incremental_sync(progress_callback, result_accumulator=result)
-                
+
         except asyncio.CancelledError:
             logger.info("[FinancialSyncStrategy] Operation cancelled.")
             result.status = "cancelled"
@@ -75,7 +75,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.error(f"[FinancialSyncStrategy] Error: {e}", exc_info=True)
             result.status = "failed"
             result.errors.append(str(e))
-            
+
         return result
 
     async def _run_full_sync(self, periods, progress_callback, force, result_accumulator: SyncResult):
@@ -119,9 +119,9 @@ class FinancialSyncStrategy(ISyncStrategy):
         synced_stocks = await self.context.cache.get_completed_step4_stocks(sync_version=1)
         pending_stocks = sorted([s for s in all_stocks if s not in synced_stocks])
         skipped_count = total_stocks - len(pending_stocks)
-        
+
         # Update result stats
-        result_accumulator.updated += skipped_count # Technically skipped, but "done"
+        result_accumulator.updated += skipped_count  # Technically skipped, but "done"
 
         if skipped_count > 0:
             logger.info(f"[sync_fundamentals] RESUME: {skipped_count} stocks completed, {len(pending_stocks)} pending")
@@ -129,16 +129,18 @@ class FinancialSyncStrategy(ISyncStrategy):
         if not pending_stocks:
             logger.info("[sync_fundamentals] All stocks already synced.")
             if progress_callback:
-                progress_callback(total_stocks, total_stocks, 
-                                  I18n.get('progress_sync_fundamentals').format(current=total_stocks, total=total_stocks, stock="Done"))
+                progress_callback(total_stocks, total_stocks,
+                                  I18n.get('progress_sync_fundamentals').format(current=total_stocks,
+                                                                                total=total_stocks,
+                                                                                stock=I18n.get("status_ready")))
             return
 
         completed_count = skipped_count
-        
+
         # Invariant Dates
         end_date = datetime.datetime.now().strftime('%Y%m%d')
         start_date = (datetime.datetime.now() - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
-        
+
         # Full Sync should also perform the Date-Based Batch Sync for the whole period
         # We spawn this as a side-task or do it after?
         # Let's do it concurrently to save time, or after to avoid rate limits?
@@ -151,7 +153,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         while curr <= end_dt_obj:
             all_dates.append(curr.strftime('%Y%m%d'))
             curr += datetime.timedelta(days=1)
-        
+
         # Fire and forget (it has its own concurrency control)? No, await it to ensure completion.
         # But we don't want to block the stock loop. 
         # Create task.
@@ -164,17 +166,17 @@ class FinancialSyncStrategy(ISyncStrategy):
             try:
                 async with semaphore:
                     if self._shutdown_event.is_set(): return
-                    
+
                     has_error = False
-                    
+
                     # Fetch Helper
                     async def fetch_safe(func, kwargs):
                         nonlocal has_error
                         try:
-                             # Use ThreadPoolManager for consistent thread pool management
-                             return await ThreadPoolManager().run_async(TaskType.IO, lambda: func(**kwargs))
+                            # Use ThreadPoolManager for consistent thread pool management
+                            return await ThreadPoolManager().run_async(TaskType.IO, lambda: func(**kwargs))
                         except (AttributeError, NameError, TypeError, ImportError) as e:
-                            raise e # Critical
+                            raise e  # Critical
                         except Exception as e:
                             has_error = True
                             logger.warning(f"Fetch failed for {ts_code} [{func.__name__}]: {e}")
@@ -226,30 +228,31 @@ class FinancialSyncStrategy(ISyncStrategy):
             except Exception as e:
                 logger.error(f"Failed Step 4 for {ts_code}: {e}")
                 # Don't abort all, just this stock
-        
+
         # Batch execution
-        batch_size = 50
+        batch_size = ConfigHandler.get_max_batch_rows()
         for i in range(0, len(pending_stocks), batch_size):
             if self._shutdown_event.is_set(): break
-            
+
             batch = pending_stocks[i: i + batch_size]
             tasks = [asyncio.create_task(process_one_stock(code)) for code in batch]
 
             with self._tasks_lock:
                 self._active_tasks.update(tasks)
-            
+
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
-            
+
             completed_count += len(batch)
-            result_accumulator.added += len(batch) # Rough count
-            
+            result_accumulator.added += len(batch)  # Rough count
+
             if progress_callback:
-                progress_callback(completed_count, total_stocks, 
-                                  I18n.get('progress_sync_fundamentals').format(current=completed_count, total=total_stocks, stock=batch[0]))
+                progress_callback(completed_count, total_stocks,
+                                  I18n.get('progress_sync_fundamentals').format(current=completed_count,
+                                                                                total=total_stocks, stock=batch[0]))
 
         # Wait for batch task
         await batch_task
@@ -262,21 +265,21 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         status = await self.context.cache.get_sync_status('financial_reports')
         last_sync_str = status.get('last_sync_date')
-        
+
         try:
             last_sync_dt = datetime.datetime.strptime(last_sync_str, '%Y-%m-%d %H:%M:%S')
             start_date_dt = last_sync_dt + datetime.timedelta(days=1)
         except Exception:
             # Fallback
             start_date_dt = datetime.datetime.now() - datetime.timedelta(days=30)
-        
+
         today_dt = datetime.datetime.now()
         dates_to_sync = []
         curr = start_date_dt
         while curr.date() <= today_dt.date():
             dates_to_sync.append(curr.strftime('%Y%m%d'))
             curr += datetime.timedelta(days=1)
-            
+
         if not dates_to_sync:
             logger.debug("[incremental_sync] Data already up-to-date")
             return
@@ -286,33 +289,35 @@ class FinancialSyncStrategy(ISyncStrategy):
         semaphore = asyncio.Semaphore(concurrency)
 
         for day_str in dates_to_sync:
-            df_disclosure = await ThreadPoolManager().run_async(TaskType.IO, lambda d=day_str: self.context.api.get_disclosure_date(date=d))
-            
+            df_disclosure = await ThreadPoolManager().run_async(TaskType.IO,
+                                                                lambda d=day_str: self.context.api.get_disclosure_date(
+                                                                    date=d))
+
             if df_disclosure is None or df_disclosure.empty:
                 continue
-                
+
             target_list = df_disclosure[['ts_code', 'end_date']].drop_duplicates().to_dict('records')
             if not target_list: continue
-            
+
             tasks = []
-            
+
             async def sync_one_target(item):
                 nonlocal total_saved
                 ts_code = item['ts_code']
                 period = item['end_date']
-                
+
                 async with semaphore:
                     try:
                         await asyncio.sleep(ConfigHandler.get_sync_request_delay(is_heavy=False))
                         # Use internal helper
                         df = await self._fetch_comprehensive_financial_data(ts_code, period=period)
-                        
+
                         if df is not None and not df.empty:
                             # Apply Schema
                             for col in FINANCIAL_REPORT_SCHEMA_COLS:
                                 if col not in df.columns:
                                     df[col] = None
-                            
+
                             count = await self.context.cache.save_financial_reports(df[FINANCIAL_REPORT_SCHEMA_COLS])
                             if count > 0:
                                 total_saved += count
@@ -321,17 +326,18 @@ class FinancialSyncStrategy(ISyncStrategy):
 
             for item in target_list:
                 tasks.append(sync_one_target(item))
-            
+
             await asyncio.gather(*tasks)
-            
+
             if progress_callback:
                 progress_callback(0, 0, f"{I18n.get('progress_sync_done')} {day_str}")
-        
+
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
         # Sync Forecasts, Dividends, etc. by date
         await self._sync_corporate_actions_by_date(dates_to_sync)
 
-        await self.context.cache.update_sync_status('financial_reports', datetime.datetime.now().strftime('%Y%m%d'), total_saved)
+        await self.context.cache.update_sync_status('financial_reports', datetime.datetime.now().strftime('%Y%m%d'),
+                                                    total_saved)
         result_accumulator.added = total_saved
 
     async def _sync_corporate_actions_by_date(self, dates: List[str]):
@@ -340,19 +346,19 @@ class FinancialSyncStrategy(ISyncStrategy):
         Uses O(Time) strategy instead of O(Stock).
         """
         if not dates: return
-        
+
         logger.info(f"[HybridSync] Batch syncing corporate actions for {len(dates)} days...")
-        
+
         concurrency = ConfigHandler.get_sync_concurrency()
         semaphore = asyncio.Semaphore(concurrency)
-        
+
         async def sync_one_date_table(date_str, table_name, table_cfg):
             async with semaphore:
                 try:
                     api_method = getattr(self.context.api, table_cfg['api'])
                     # Batch fetch by 'ann_date'
                     df = await ThreadPoolManager().run_async(TaskType.IO, lambda: api_method(ann_date=date_str))
-                    
+
                     if df is not None and not df.empty:
                         # Dynamic save method? 
                         # CacheManager usually has specific save methods.
@@ -365,12 +371,12 @@ class FinancialSyncStrategy(ISyncStrategy):
                             'repurchase': self.context.cache.save_repurchase,
                             # Add others if batchable
                         }
-                        
+
                         save_func = save_map.get(table_name)
                         if save_func:
                             await save_func(df)
                             logger.debug(f"[HybridSync] Synced {table_name} for {date_str}: {len(df)} records")
-                            
+
                 except Exception as e:
                     # Capture permission-like errors
                     err_str = str(e).lower()
@@ -386,7 +392,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         for d in dates:
             for tbl, cfg in FINANCIAL_BATCH_TABLES.items():
                 tasks.append(asyncio.create_task(sync_one_date_table(d, tbl, cfg)))
-        
+
         if tasks:
             await asyncio.gather(*tasks)
 
@@ -395,15 +401,25 @@ class FinancialSyncStrategy(ISyncStrategy):
         Helper: Fetch and merge Income, Balance Sheet, and Financial Indicators.
         """
         api = self.context.api
-        
+
         # Use ThreadPoolManager for consistent thread pool management
         async def fetch_income():
-            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_income(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
+            return await ThreadPoolManager().run_async(TaskType.IO,
+                                                       lambda: api.get_income(ts_code=ts_code, start_date=start_date,
+                                                                              end_date=end_date, period=period))
+
         async def fetch_balance():
-            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_balancesheet(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
+            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_balancesheet(ts_code=ts_code,
+                                                                                                 start_date=start_date,
+                                                                                                 end_date=end_date,
+                                                                                                 period=period))
+
         async def fetch_indicator():
-            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_fina_indicator(ts_code=ts_code, start_date=start_date, end_date=end_date, period=period))
-        
+            return await ThreadPoolManager().run_async(TaskType.IO, lambda: api.get_fina_indicator(ts_code=ts_code,
+                                                                                                   start_date=start_date,
+                                                                                                   end_date=end_date,
+                                                                                                   period=period))
+
         # New: Fetch Stock-Based Auxiliary Tables (MainBz, Audit, Pledge)
         # We wrap these in individual try-except blocks to allow partial success (Graceful Degradation)
         async def fetch_aux(api_func, save_func, table_name, **kwargs):
@@ -418,24 +434,27 @@ class FinancialSyncStrategy(ISyncStrategy):
             except Exception as e:
                 err_str = str(e).lower()
                 if "permission" in err_str or "积分" in err_str:
-                     logger.debug(f"Permission denied for {table_name} on {ts_code}")
+                    logger.debug(f"Permission denied for {table_name} on {ts_code}")
                 return False
 
         try:
             # Launch Aux Tasks
             aux_tasks = [
-                fetch_aux(api.get_fina_mainbz, self.context.cache.save_fina_mainbz, 'fina_mainbz', ts_code=ts_code, period=period, start_date=start_date, end_date=end_date),
-                fetch_aux(api.get_fina_audit, self.context.cache.save_fina_audit, 'fina_audit', ts_code=ts_code, start_date=start_date, end_date=end_date),
-                fetch_aux(api.get_pledge_stat, self.context.cache.save_pledge_stat, 'pledge_stat', ts_code=ts_code, end_date=end_date)
+                fetch_aux(api.get_fina_mainbz, self.context.cache.save_fina_mainbz, 'fina_mainbz', ts_code=ts_code,
+                          period=period, start_date=start_date, end_date=end_date),
+                fetch_aux(api.get_fina_audit, self.context.cache.save_fina_audit, 'fina_audit', ts_code=ts_code,
+                          start_date=start_date, end_date=end_date),
+                fetch_aux(api.get_pledge_stat, self.context.cache.save_pledge_stat, 'pledge_stat', ts_code=ts_code,
+                          end_date=end_date)
             ]
-            
+
             # Parallel fetch core + aux
             results = await asyncio.gather(
-                fetch_income(), fetch_balance(), fetch_indicator(), 
+                fetch_income(), fetch_balance(), fetch_indicator(),
                 *aux_tasks,
                 return_exceptions=True
             )
-            
+
             # Unpack Core Results
             # results[0-2] are core, results[3-5] are aux (bools)
             df_inc, df_bal, df_fina = results[0], results[1], results[2]
@@ -448,17 +467,17 @@ class FinancialSyncStrategy(ISyncStrategy):
                 dfs.append(df_bal.sort_values('end_date').drop_duplicates(subset=['end_date'], keep='last'))
             if isinstance(df_fina, pd.DataFrame) and not df_fina.empty:
                 dfs.append(df_fina.sort_values('end_date').drop_duplicates(subset=['end_date'], keep='last'))
-                 
+
             if not dfs: return None
-            
+
             df_merged = dfs[0]
             for i in range(1, len(dfs)):
                 df_merged = pd.merge(df_merged, dfs[i], on=['ts_code', 'end_date'], how='outer', suffixes=('', '_drop'))
-                
+
             for col in df_merged.columns:
                 if col.endswith('_drop'):
                     df_merged.drop(columns=[col], inplace=True)
-            
+
             return df_merged
 
         except Exception as e:
@@ -471,46 +490,47 @@ class FinancialSyncStrategy(ISyncStrategy):
         Fixes ALL tables defined in constants.
         """
         if not ts_codes: return 0
-        
+
         # ... (Period generation logic remains same) ...
         now = datetime.datetime.now()
         current_year = now.year
         p_cands = []
         for y in range(current_year, current_year - 4, -1):
-             p_cands.extend([f"{y}0331", f"{y}0630", f"{y}0930", f"{y}1231"])
+            p_cands.extend([f"{y}0331", f"{y}0630", f"{y}0930", f"{y}1231"])
         periods = sorted([p for p in p_cands if p < now.strftime('%Y%m%d')], reverse=True)[:12]
-        
+
         logger.info(f"[FinancialSyncStrategy] 🚑 Comprehensive Repairing {len(ts_codes)} stocks...")
-        
+
         semaphore = asyncio.Semaphore(1)
         total_saved = 0
-        
+
         # Specific concurrent repair
         tasks = []
         for period_idx, period in enumerate(periods):
             async def repair_one(ts_code, idx):
-                 nonlocal total_saved
-                 async with semaphore:
-                     try:
-                         # Rate limit internal
-                         await asyncio.sleep(ConfigHandler.get_sync_request_delay(is_heavy=True))
-                         
-                         # Call the COMPREHENSIVE fetcher instead of just fina_indicator
-                         # This automatically fixes Income, Balance, MainBz, Audit, etc.
-                         # Note: Start/End date are None, relying on 'period'
-                         await self._fetch_comprehensive_financial_data(ts_code, period=period)
-                         total_saved += 1 # Rough count
-                             
-                         if progress_callback and idx % 10 == 0:
-                             progress_callback(period_idx * len(ts_codes) + idx, len(periods) * len(ts_codes), f"Repairing {period} - {ts_code}")
-                     except Exception as e:
-                         pass
+                nonlocal total_saved
+                async with semaphore:
+                    try:
+                        # Rate limit internal
+                        await asyncio.sleep(ConfigHandler.get_sync_request_delay(is_heavy=True))
+
+                        # Call the COMPREHENSIVE fetcher instead of just fina_indicator
+                        # This automatically fixes Income, Balance, MainBz, Audit, etc.
+                        # Note: Start/End date are None, relying on 'period'
+                        await self._fetch_comprehensive_financial_data(ts_code, period=period)
+                        total_saved += 1  # Rough count
+
+                        if progress_callback and idx % 10 == 0:
+                            progress_callback(period_idx * len(ts_codes) + idx, len(periods) * len(ts_codes),
+                                              I18n.get("status_repairing", period=period, code=ts_code))
+                    except Exception as e:
+                        pass
 
             for i, ts_code in enumerate(ts_codes):
                 tasks.append(asyncio.create_task(repair_one(ts_code, i)))
-                
+
         # Run all tasks (semaphore controls concurrency)
         if tasks:
             await asyncio.gather(*tasks)
-        
+
         return total_saved

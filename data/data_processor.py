@@ -17,6 +17,8 @@ from data.sync_strategies.historical import HistoricalSyncStrategy
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation, track_performance
 from utils.thread_pool import ThreadPoolManager, TaskType
+from ui.i18n import I18n
+from async_lru import alru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,6 @@ class DataProcessor:
             self._trade_cal_cache = None  # Cache structure: {'start': str, 'end': str, 'df': DataFrame}
 
             # Concurrency Control (Cross-Loop safe) - kept for basic locking if needed
-            import threading
             self._sync_lock = threading.Lock()
             self._is_syncing_basic = False
 
@@ -128,9 +129,15 @@ class DataProcessor:
 
     async def close(self):
         """Gracefully close resources"""
-        await self.stop()
-        if self.cache:
-            await self.cache.close()
+        try:
+            await self.stop()
+            # Give pending tasks a moment to catch cancellation and release DB locks
+            await asyncio.sleep(1.0) 
+            
+            if self.cache:
+                await self.cache.close()
+        except Exception as e:
+            logger.error(f"[DataProcessor] Error during close: {e}")
 
     # ==========================================
     # Delegated Sync Methods
@@ -174,6 +181,9 @@ class DataProcessor:
     # Core Logic (Business/Orchestration)
     # ==========================================
 
+
+
+    @alru_cache(maxsize=1)
     @log_async_operation(operation_name="get_latest_trade_date", log_exceptions=True)
     async def get_latest_trade_date(self):
         """Get absolute latest trading date (today or previous trading day)."""
@@ -199,13 +209,18 @@ class DataProcessor:
             dt -= datetime.timedelta(days=1)
         return dt.strftime('%Y%m%d')
 
+    @alru_cache(maxsize=32)
     async def get_trade_dates(self, start_date, end_date):
         """Get list of actual trade dates using Persistent DB Cache."""
         try:
             await self.ensure_trade_cal(end_date, required_start_date=start_date)
+            # Use strict type check for safety with generic read
             cache_df = await self.cache.get_trade_cal(start_date=start_date, end_date=end_date, is_open=1)
+            
             if not cache_df.empty:
-                return sorted(cache_df['cal_date'].tolist())
+                # Polars or Pandas? CacheManager returns DataFrame (Pandas)
+                # Ensure it's list of strings
+                return sorted(cache_df['cal_date'].astype(str).tolist())
         except Exception as e:
             logger.warning(f"[DataProcessor] Trade calendar sync failed: {e}")
             
@@ -219,6 +234,7 @@ class DataProcessor:
             current += datetime.timedelta(days=1)
         return dates
 
+    @log_async_operation(operation_name="init_data")
     async def init_data(self):
         """Initialize DB with enhanced schema"""
         await self.cache.init_db()
@@ -232,20 +248,20 @@ class DataProcessor:
         try:
             status = await self.cache.get_sync_status('financial_reports')
             if status is None or not status.get('last_sync_date'):
-                return True, "never synced"
+                return True, I18n.get("status_never_synced")
 
             last_sync = datetime.datetime.strptime(status.get('last_sync_date'), '%Y-%m-%d %H:%M:%S')
             days_since = (datetime.datetime.now() - last_sync).days
 
             if days_since >= 30:
-                return True, f"last sync was {days_since} days ago"
+                return True, I18n.get("status_days_ago", days=days_since)
 
             current_month = datetime.datetime.now().month
             if current_month in [1, 4, 7, 10]: # Earnings season
                  if days_since >= 7:
-                     return True, "earnings season"
+                     return True, I18n.get("status_earnings_season")
 
-            return False, "recent"
+            return False, I18n.get("status_recent")
         except Exception as e:
             return True, f"error: {e}"
 
@@ -345,7 +361,7 @@ class DataProcessor:
                 return 0
                 
         except Exception as e:
-            logger.error(f"[sync_stock_basic] ❌ Failed: {e}")
+            logger.error(f"[sync_stock_basic] ❌ Failed: {e}", exc_info=True)
             return 0
         finally:
             with self._sync_lock:
@@ -374,10 +390,48 @@ class DataProcessor:
 
     async def ensure_trade_cal(self, end_date, required_start_date=None):
         """
-        Ensure trade calendar is synced covers [required_start_date, end_date].
-        Delegates to CacheManager.ensure_trade_cal.
+        Ensure trade calendar covers [required_start_date, end_date].
         """
-        await self.cache.ensure_trade_cal(end_date, self.api, required_start_date)
+        try:
+            min_db, max_db = await self.cache.get_trade_cal_range()
+            
+            curr_year = int(end_date[:4])
+            # Default start to 4 years ago if not specified
+            target_start = required_start_date if required_start_date else datetime.date(curr_year - 4, 1, 1).strftime('%Y%m%d')
+
+            async def fetch_and_save(s, e):
+                y = int(e[:4])
+                real_end = datetime.date(y, 12, 31).strftime('%Y%m%d')
+                if e < real_end: e = real_end
+                
+                logger.info(f"[DataProcessor] Syncing trade calendar: {s} - {e}")
+                df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_trade_cal, start_date=s, end_date=e)
+                if df is not None and not df.empty:
+                    await self.cache.save_trade_cal(df)
+                    return True
+                return False
+
+            if not min_db or not max_db:
+                return await fetch_and_save(target_start, end_date)
+            else:
+                # Check coverage and fetch missing parts
+                tasks = []
+                if target_start < min_db:
+                    gap = (datetime.datetime.strptime(min_db, '%Y%m%d') - datetime.datetime.strptime(target_start, '%Y%m%d')).days
+                    if gap > 10: 
+                        tasks.append(fetch_and_save(target_start, min_db))
+                
+                if max_db < end_date:
+                    tasks.append(fetch_and_save(max_db, end_date))
+                
+                if tasks:
+                    results = await asyncio.gather(*tasks)
+                    return all(results)
+                    
+            return True
+        except Exception as e:
+             logger.error(f"[DataProcessor] ensure_trade_cal failed: {e}")
+             return False
 
     async def get_market_overview(self):
         """
@@ -389,8 +443,10 @@ class DataProcessor:
             today_str = now.strftime('%Y%m%d')
             start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
 
-            # Calendar Check (Simplified vs Original but functional)
-            await self.ensure_trade_cal(today_str)
+            # Calendar Check (with Memory Cache)
+            if not self._trade_cal_cache or self._trade_cal_cache.get('date') != today_str:
+                await self.ensure_trade_cal(today_str)
+                self._trade_cal_cache = {'date': today_str}
             
             # Find latest valid date
             cache_df = await self.cache.get_trade_cal(start_date=start_str, end_date=today_str, is_open=1)
@@ -433,7 +489,7 @@ class DataProcessor:
             }
 
         except Exception as e:
-            logger.error(f"Failed to get market overview: {e}")
+            logger.error(f"Failed to get market overview: {e}", exc_info=True)
             return None
 
     async def get_screening_data(self, trade_date=None):
@@ -498,7 +554,7 @@ class DataProcessor:
             report_step(2)
             end_date = datetime.datetime.now().strftime('%Y%m%d')
             start_date = (datetime.datetime.now() - datetime.timedelta(days=365*3)).strftime('%Y%m%d')
-            cal_success = await self.cache.ensure_trade_cal(end_date, self.api, start_date)
+            cal_success = await self.ensure_trade_cal(end_date, required_start_date=start_date)
             if not cal_success:
                 logger.error("[initialize_system] Step 2 failed: Trade calendar sync failed, aborting")
                 return None
@@ -545,31 +601,8 @@ class DataProcessor:
             raise  # Re-raise so UI can catch and display
 
     # Proxy methods for backward compatibility
-    async def sync_daily_quotes_for_date(self, trade_date):
-        # We don't really use this individually anymore, but if needed:
-        return 0 
-    
-    async def sync_daily_indicators_for_date(self, trade_date):
-        return 0
-
-    async def sync_moneyflow(self, trade_date=None):
-        return await self.strategies['historical'].sync_moneyflow(trade_date)
-
-    async def sync_northbound(self, trade_date=None):
-        return await self.strategies['historical'].sync_northbound(trade_date)
-
-    async def sync_market_news(self, limit=None):
-        """Sync market news."""
-        try:
-            news = await NewsFetcher.get_latest_global_news(limit=limit or 20)
-            if news:
-                for item in news:
-                    # 使用公共方法标准化字段
-                    normalized = CacheManager.normalize_news_item(item, default_source='CLS')
-                    await self.cache.save_market_news(normalized)
-            return len(news) if news else 0
-        except:
-            return 0
+    # (Removed unused sync_daily_quotes_for_date and sync_daily_indicators_for_date)
+    # (Removed unused sync_moneyflow, sync_northbound, sync_market_news)
 
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365):
@@ -580,37 +613,38 @@ class DataProcessor:
     async def get_strategy_data(self):
         return await self.prepare_screening_context()
 
+    @log_async_operation(operation_name="prepare_screening_context")
     async def prepare_screening_context(self):
         """Prepare context for screening execution."""
         context = {}
-        try:
-            # 1. Main Screening Data (Quotes + Indicators)
-            # Use latest trade date logic
-            trade_date = await self.get_latest_trade_date()
-            context['screening_data'] = await self.get_screening_data(trade_date)
+        # Decorator handles exception logging. Exceptions will bubble up to ViewModel.
+        
+        # 1. Main Screening Data (Quotes + Indicators)
+        # Use latest trade date logic
+        trade_date = await self.get_latest_trade_date()
+        context['screening_data'] = await self.get_screening_data(trade_date)
+        
+        # 2. Auxiliary Data
+        # Northbound
+        nb = await self.context.cache.get_northbound(trade_date=trade_date)
+        if nb is not None:
+            context['northbound_data'] = nb
             
-            # 2. Auxiliary Data
-            # Northbound
-            nb = await self.context.cache.get_northbound(trade_date=trade_date)
-            if nb is not None:
-                context['northbound_data'] = nb
-                
-            # Moneyflow
-            mf = await self.context.cache.get_moneyflow(trade_date=trade_date)
-            if mf is not None:
-                context['moneyflow_data'] = mf
+        # Moneyflow
+        mf = await self.context.cache.get_moneyflow(trade_date=trade_date)
+        if mf is not None:
+            context['moneyflow_data'] = mf
+        
+        # Top List (LHB)
+        lhb = await self.context.cache.get_top_list(trade_date=trade_date)
+        if lhb is not None:
+            context['top_list'] = lhb
             
-            # Top List (LHB)
-            lhb = await self.context.cache.get_top_list(trade_date=trade_date)
-            if lhb is not None:
-                context['top_list'] = lhb
-                
-            # Block Trade
-            blk = await self.context.cache.get_block_trade(trade_date=trade_date)
-            if blk is not None:
-                context['block_trade'] = blk
-                
-        except Exception as e:
-            logger.error(f"prepare_screening_context failed: {e}")
+        # Block Trade
+        blk = await self.context.cache.get_block_trade(trade_date=trade_date)
+        if blk is not None:
+            context['block_trade'] = blk
             
         return context
+
+

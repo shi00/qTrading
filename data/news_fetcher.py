@@ -230,7 +230,7 @@ class NewsFetcher:
                     else:
                         change_val = float(raw_val)
                     change_str = f"{change_val:.2f}%"
-                except:
+                except (ValueError, TypeError):
                     change_str = "0.00%"
                     change_val = 0.0
 

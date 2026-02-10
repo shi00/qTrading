@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 
 DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
-# ... (Prompt content unchanged, just kept as constant in file if I don't touch it, but wait, replace needs full block if I touch surrounding)
-# Wait, I am replacing the whole file content from line 5 down since I'm adding methods and changing imports? 
-# No, let's target specific blocks to be safe and efficient.
+你是一个专业的金融量化分析助手，专注于A股市场分析。
+请基于提供的数据（行情、财务、新闻等）进行客观分析，不要提供投资建议。
+输出格式要求清晰、结构化，关键指标请高亮显示。
 """
 
 DEFAULT_NEWS_PROMPT = """你是拥有20年经验的金融量化分析师。任务是对新闻进行**金融交易导向分类**。
@@ -63,13 +63,14 @@ class ConfigHandler:
         "auto_update_enabled": False,
         "enable_news_alerts": True,
         "log_level": "INFO",
+        "theme_name": "dark",
         "auto_update_time": "16:30",
         "log_max_mb": 5,
         "log_backup_count": 5,
         "db_queue_size": 1024,
         "sync_concurrency": 3,
         "max_batch_rows": 20000,
-        "sync_retry_count": 3,
+
         "no_proxy_domains": [],
         "ai_api_key": "",
         "ai_base_url": "https://api.deepseek.com",
@@ -148,38 +149,25 @@ class ConfigHandler:
             if os.path.exists(tmp_file):
                 try:
                     os.remove(tmp_file)
-                except:
+                except Exception:
                     pass
             return False
 
     @staticmethod
-    def _decrypt_or_migrate(value, key_name, validator=None):
+    def _try_decrypt(value):
         """
-        Helper: Decrypt value, or migrate if it's plaintext.
-        Returns: Decrypted value (str) or "" if invalid.
+        Helper: Try to decrypt value. Returns empty string if failed.
         """
         if not value:
             return ""
-
         try:
             return SecurityManager.decrypt_data(value)
         except DecryptionError:
-            # Failed to decrypt. Check if it's a legacy plaintext value.
-            is_valid_plaintext = validator(value) if validator else True
-
-            if is_valid_plaintext:
-                logger.info(f"Migrating plaintext config '{key_name}' to encrypted storage...")
-                try:
-                    encrypted = SecurityManager.encrypt_data(value)
-                    # Safe to call save_config here as load_config lock is already released by caller
-                    ConfigHandler.save_config({key_name: encrypted})
-                    return value
-                except Exception as e:
-                    logger.warning(f"Failed to migrate '{key_name}': {e}")
-                    return value
-            else:
-                logger.warning(f"Config '{key_name}' contains invalid data (Undecryptable). Ignoring.")
-                return ""
+            logger.warning(f"Failed to decrypt config value. It might be invalid or legacy plaintext.")
+            return ""
+        except Exception as e:
+            logger.error(f"Decryption error: {e}")
+            return ""
 
     @staticmethod
     def load_config():
@@ -216,7 +204,7 @@ class ConfigHandler:
                         try:
                             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                                 current_config = json.load(f)
-                        except:
+                        except (json.JSONDecodeError, OSError):
                             pass
                     current_config.update(config_data)
 
@@ -231,19 +219,10 @@ class ConfigHandler:
             return False
 
     @staticmethod
-    def _is_valid_tushare_format(token):
-        """Check if string looks like valid Tushare token (Hex, len 32-56)"""
-        if not token or not isinstance(token, str):
-            return False
-        # Tushare tokens are hex strings. Encrypted are base64.
-        if len(token) > 60: return False  # Encrypted usually longer
-        return True
-
-    @staticmethod
     def get_token():
         config = ConfigHandler.load_config()
         token = config.get("ts_token", "")
-        return ConfigHandler._decrypt_or_migrate(token, "ts_token", ConfigHandler._is_valid_tushare_format)
+        return ConfigHandler._try_decrypt(token)
 
     @staticmethod
     def save_token(token):
@@ -317,15 +296,6 @@ class ConfigHandler:
         return ConfigHandler.save_config({"max_batch_rows": int(rows)})
 
     @staticmethod
-    def get_sync_retry_count():
-        config = ConfigHandler.load_config()
-        return config.get("sync_retry_count", 3)
-
-    @staticmethod
-    def set_sync_retry_count(count):
-        return ConfigHandler.save_config({"sync_retry_count": int(count)})
-
-    @staticmethod
     def get_no_proxy_domains():
         """
         Get domains that should BYPASS proxy (NO_PROXY).
@@ -363,7 +333,7 @@ class ConfigHandler:
         encrypted_key = config.get("ai_api_key", "")
 
         # Use helper
-        api_key = ConfigHandler._decrypt_or_migrate(encrypted_key, "ai_api_key")
+        api_key = ConfigHandler._try_decrypt(encrypted_key)
 
         return {
             "ai_api_key": api_key,
@@ -525,6 +495,16 @@ class ConfigHandler:
     @staticmethod
     def set_locale(locale):
         return ConfigHandler.save_config({"locale": locale})
+
+    # === Theme ===
+    @staticmethod
+    def get_theme_name():
+        config = ConfigHandler.load_config()
+        return config.get("theme_name", "dark")
+
+    @staticmethod
+    def set_theme_name(theme_name):
+        return ConfigHandler.save_config({"theme_name": theme_name})
 
     # === Scheduler ===
     # ai_prediction_time removed as it was unused

@@ -3,6 +3,7 @@ import pandas as pd
 from flet.plotly_chart import PlotlyChart # Keeping this import might be safer if used elsewhere, but we don't use it here anymore.
 from ui.components.chart_utils import generate_kline_html
 from ui.i18n import I18n
+from ui.theme import AppColors
 import logging
 import tempfile
 import os
@@ -34,8 +35,8 @@ class StockDetailDialog(ft.AlertDialog):
         code = self.stock_data.get('ts_code', '')
         name = self.stock_data.get('name', '')
         return ft.Row([
-            ft.Text(f"{name}", size=20, weight=ft.FontWeight.BOLD),
-            ft.Text(f"({code})", size=14, color=ft.Colors.GREY_600),
+            ft.Text(f"{name}", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+            ft.Text(f"({code})", size=14, color=AppColors.TEXT_SECONDARY),
         ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
     
     def _build_content(self):
@@ -45,24 +46,24 @@ class StockDetailDialog(ft.AlertDialog):
         self.chart_container = ft.Container(
             content=ft.Column([
                 ft.ProgressRing(), 
-                ft.Text(I18n.get("detail_loading_chart"), size=12, color=ft.Colors.GREY)
+                ft.Text(I18n.get("detail_loading_chart"), size=12, color=AppColors.TEXT_SECONDARY)
             ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             height=350,
             alignment=ft.alignment.center,
-            bgcolor=ft.Colors.GREY_50,
-            border=ft.border.all(1, ft.Colors.GREY_200),
+            bgcolor=AppColors.BACKGROUND,
+            border=ft.border.all(1, AppColors.BORDER),
             border_radius=8,
         )
 
         # Price section
         close = self._format_val('close', I18n.get("unit_yuan"))
         pct = self.stock_data.get('pct_chg', 0)
-        pct_color = ft.Colors.RED if pct and pct > 0 else ft.Colors.GREEN
+        pct_color = AppColors.UP if pct and pct > 0 else AppColors.DOWN
         pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
         
         price_section = ft.Column([
-            ft.Text(I18n.get("detail_sec_price"), size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
-            ft.Divider(height=5),
+            ft.Text(I18n.get("detail_sec_price"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.PRIMARY),
+            ft.Divider(height=5, color=AppColors.DIVIDER),
             ft.Row([
                 self._info_chip(I18n.get("detail_price"), close),
                 self._info_chip(I18n.get("detail_pct_chg"), pct_str, color=pct_color),
@@ -77,8 +78,8 @@ class StockDetailDialog(ft.AlertDialog):
         # Valuation section
         valuation_section = ft.Column([
             ft.Container(height=10),
-            ft.Text(I18n.get("detail_sec_valuation"), size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
-            ft.Divider(height=5),
+            ft.Text(I18n.get("detail_sec_valuation"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.PRIMARY),
+            ft.Divider(height=5, color=AppColors.DIVIDER),
             ft.Row([
                 self._info_chip(I18n.get("detail_pe"), self._format_val('pe_ttm')),
                 self._info_chip(I18n.get("detail_pb"), self._format_val('pb')),
@@ -94,8 +95,8 @@ class StockDetailDialog(ft.AlertDialog):
         # Financial section
         financial_section = ft.Column([
             ft.Container(height=10),
-            ft.Text(I18n.get("detail_sec_financial"), size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
-            ft.Divider(height=5),
+            ft.Text(I18n.get("detail_sec_financial"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.PRIMARY),
+            ft.Divider(height=5, color=AppColors.DIVIDER),
             ft.Row([
                 self._info_chip(I18n.get("detail_roe"), self._format_val('roe', '%')),
                 self._info_chip(I18n.get("detail_gpm"), self._format_val('grossprofit_margin', '%')),
@@ -110,8 +111,8 @@ class StockDetailDialog(ft.AlertDialog):
         # Basic info section
         basic_section = ft.Column([
             ft.Container(height=10),
-            ft.Text(I18n.get("detail_sec_basic"), size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
-            ft.Divider(height=5),
+            ft.Text(I18n.get("detail_sec_basic"), size=14, weight=ft.FontWeight.BOLD, color=AppColors.PRIMARY),
+            ft.Divider(height=5, color=AppColors.DIVIDER),
             ft.Row([
                 self._info_chip(I18n.get("detail_industry"), str(self.stock_data.get('industry', '-'))),
                 self._info_chip(I18n.get("detail_list_date"), str(self.stock_data.get('list_date', '-'))),
@@ -126,40 +127,42 @@ class StockDetailDialog(ft.AlertDialog):
         if ai_reason or ai_score:
             try:
                 score_val = float(ai_score) if ai_score is not None else 0
-            except:
+            except (ValueError, TypeError):
                 score_val = 0
                 
-            score_color = ft.Colors.GREEN if score_val >= 80 else (ft.Colors.ORANGE if score_val >= 60 else ft.Colors.RED)
+            score_color = AppColors.SUCCESS if score_val >= 80 else (AppColors.WARNING if score_val >= 60 else AppColors.ERROR)
             
             ai_section = ft.Column([
                 ft.Container(height=10),
                 ft.Row([
-                    ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.PURPLE),
-                    ft.Text(I18n.get("detail_ai_analysis"), size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.PURPLE),
+                    ft.Icon(ft.Icons.AUTO_AWESOME, color=AppColors.ACCENT),
+                    ft.Text(I18n.get("detail_ai_analysis"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.ACCENT),
                     ft.Container(expand=True),
                     ft.Container(
-                        content=ft.Text(f"{I18n.get('detail_ai_score_prefix')}{score_val}", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+                        content=ft.Text(f"{I18n.get('detail_ai_score_prefix')}{score_val}", color=AppColors.TEXT_ON_PRIMARY, weight=ft.FontWeight.BOLD),
                         bgcolor=score_color,
                         padding=ft.padding.symmetric(horizontal=10, vertical=5),
                         border_radius=12
                     ) if ai_score is not None else ft.Container(),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Divider(height=10, color=ft.Colors.PURPLE_100),
+                ft.Divider(height=10, color=AppColors.DIVIDER),
                 ft.Container(
                     content=ft.Markdown(
                         str(ai_reason) if ai_reason else I18n.get("detail_ai_no_analysis"), 
                         extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                         selectable=True,
+                        # Markdown styles need care, but default usually adapts or we can set code_theme?
+                        # Flet Markdown inherits default theme colors.
                     ),
                     padding=10,
-                    bgcolor=ft.Colors.PURPLE_50,
+                    bgcolor=AppColors.SURFACE_VARIANT,
                     border_radius=8,
-                    border=ft.border.all(1, ft.Colors.PURPLE_100)
+                    border=ft.border.all(1, AppColors.BORDER)
                 ),
                 
                 # --- AI Thinking Chain ---
                 ft.ExpansionTile(
-                    title=ft.Text(I18n.get("detail_ai_thinking"), size=12, color=ft.Colors.GREY_700),
+                    title=ft.Text(I18n.get("detail_ai_thinking"), size=12, color=AppColors.TEXT_SECONDARY),
                     controls=[
                         ft.Container(
                             content=ft.Markdown(
@@ -168,9 +171,9 @@ class StockDetailDialog(ft.AlertDialog):
                                 selectable=True,
                             ),
                             padding=10,
-                            bgcolor=ft.Colors.GREY_50,
+                            bgcolor=AppColors.SURFACE_VARIANT,
                             border_radius=8,
-                            border=ft.border.all(1, ft.Colors.GREY_200)
+                            border=ft.border.all(1, AppColors.BORDER)
                         )
                     ]
                 ) if self.stock_data.get('thinking') else ft.Container(),
@@ -193,12 +196,12 @@ class StockDetailDialog(ft.AlertDialog):
         """Create an info chip with label and value"""
         return ft.Container(
             content=ft.Column([
-                ft.Text(label, size=11, color=ft.Colors.GREY_600),
+                ft.Text(label, size=11, color=AppColors.TEXT_SECONDARY),
                 ft.Text(str(value), size=14, weight=ft.FontWeight.W_500, 
-                       color=color or ft.Colors.BLACK),
+                       color=color or AppColors.TEXT_PRIMARY),
             ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.padding.all(8),
-            bgcolor=ft.Colors.GREY_100,
+            bgcolor=AppColors.SURFACE_VARIANT,
             border_radius=8,
             width=120,
         )
@@ -210,7 +213,7 @@ class StockDetailDialog(ft.AlertDialog):
             return '-'
         try:
             return f"{float(val):.2f}{suffix}"
-        except:
+        except (ValueError, TypeError):
             return '-'
     
     def _format_mv(self, key):
@@ -221,7 +224,7 @@ class StockDetailDialog(ft.AlertDialog):
         try:
             # Tushare returns in 万元, convert to 亿
             return f"{float(val) / 10000:.1f}{I18n.get('unit_yi')}"
-        except:
+        except (ValueError, TypeError):
             return '-'
     
     def _format_vol(self, key):
@@ -234,7 +237,7 @@ class StockDetailDialog(ft.AlertDialog):
             if v >= 10000:
                 return f"{v / 10000:.1f}{I18n.get('unit_wanshou')}"
             return f"{v:.0f}{I18n.get('unit_shou')}"
-        except:
+        except (ValueError, TypeError):
             return '-'
     
     def _format_amount(self, key):
@@ -245,7 +248,7 @@ class StockDetailDialog(ft.AlertDialog):
         try:
             # Amount is in 千元
             return f"{float(val) / 100000:.2f}{I18n.get('unit_yi')}"
-        except:
+        except (ValueError, TypeError):
             return '-'
     
     def _close(self, e):
@@ -262,7 +265,7 @@ class StockDetailDialog(ft.AlertDialog):
     async def load_chart(self, ts_code: str):
         """Asynchronously load and render the chart"""
         if not self.data_processor:
-            self.chart_container.content = ft.Text(I18n.get("detail_err_no_processor"), color=ft.Colors.RED)
+            self.chart_container.content = ft.Text(I18n.get("detail_err_no_processor"), color=AppColors.ERROR)
             self.chart_container.update()
             return
             
@@ -270,7 +273,7 @@ class StockDetailDialog(ft.AlertDialog):
             # Show loading
             self.chart_container.content = ft.Column([
                 ft.ProgressRing(),
-                ft.Text(I18n.get("detail_loading_history"), size=12, color=ft.Colors.GREY)
+                ft.Text(I18n.get("detail_loading_history"), size=12, color=AppColors.TEXT_SECONDARY)
             ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
             self.chart_container.update()
             
@@ -278,7 +281,7 @@ class StockDetailDialog(ft.AlertDialog):
             df = await self.data_processor.get_stock_history(ts_code, days=365)
             
             if df.empty:
-                self.chart_container.content = ft.Text(I18n.get("detail_no_history"), color=ft.Colors.GREY)
+                self.chart_container.content = ft.Text(I18n.get("detail_no_history"), color=AppColors.TEXT_HINT)
                 self.chart_container.update()
                 return
 
@@ -314,9 +317,9 @@ class StockDetailDialog(ft.AlertDialog):
                 webbrowser.open(file_uri)
                 
             content_col = ft.Column([
-                ft.Icon(ft.Icons.SHOW_CHART, size=48, color=ft.Colors.BLUE),
-                ft.Text(I18n.get("detail_chart_generated"), size=16, weight=ft.FontWeight.BOLD),
-                ft.Text(I18n.get("detail_chart_browser_hint"), size=12, color=ft.Colors.GREY),
+                ft.Icon(ft.Icons.SHOW_CHART, size=48, color=AppColors.INFO),
+                ft.Text(I18n.get("detail_chart_generated"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                ft.Text(I18n.get("detail_chart_browser_hint"), size=12, color=AppColors.TEXT_SECONDARY),
                 ft.Container(height=10),
                 ft.ElevatedButton(I18n.get("detail_open_browser"), on_click=open_browser, icon=ft.Icons.OPEN_IN_BROWSER)
             ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
@@ -327,7 +330,7 @@ class StockDetailDialog(ft.AlertDialog):
         except Exception as e:
             import traceback
             logger.error(f"Error loading chart: {e}\n{traceback.format_exc()}")
-            self.chart_container.content = ft.Text(I18n.get("detail_err_load_chart").format(error=str(e)), color=ft.Colors.RED)
+            self.chart_container.content = ft.Text(I18n.get("detail_err_load_chart").format(error=str(e)), color=AppColors.ERROR)
             self.chart_container.update()
 
     def _cleanup_old_charts(self, tmp_dir):

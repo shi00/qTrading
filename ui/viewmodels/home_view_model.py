@@ -47,7 +47,7 @@ class HomeViewModel:
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
         except Exception as e:
-            logger.warning(f"[HomeVM] Dispose error: {e}")
+            logger.warning(f"[HomeVM] Dispose error: {e}", exc_info=True)
             
     # --- Service Event Handlers ---
     def _on_news_service_update(self):
@@ -148,7 +148,7 @@ class HomeViewModel:
                 offset=offset
             )
         except Exception as e:
-            logger.error(f"[HomeVM] Error fetching news: {e}")
+            logger.error(f"[HomeVM] Error fetching news: {e}", exc_info=True)
             return None
 
     def clear_state(self):

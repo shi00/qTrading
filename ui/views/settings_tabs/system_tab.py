@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import flet as ft
 
-from ui.components.settings_widgets import DashboardCard, SectionHeader
+from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.i18n import I18n
 from ui.theme import AppColors
 from utils.config_handler import ConfigHandler
@@ -23,6 +23,21 @@ class SystemTab(ft.Container):
         sync_concurrency = ConfigHandler.get_sync_concurrency()
 
         # --- Controls ---
+
+        # Theme Selector
+        self.theme_dropdown = ft.Dropdown(
+            value=ConfigHandler.get_theme_name(),
+            width=180,
+            text_size=14,
+            border_radius=8,
+            content_padding=10,
+            options=[
+                ft.dropdown.Option("dark", I18n.get("theme_dark")),
+                ft.dropdown.Option("light", I18n.get("theme_light")),
+                ft.dropdown.Option("navy", I18n.get("theme_navy")),
+            ],
+            on_change=self.on_theme_change
+        )
 
         # Concurrency
         self.concurrency_input = ft.TextField(
@@ -113,6 +128,112 @@ class SystemTab(ft.Container):
             border_radius=8,
             multiline=False
         )
+        # --- Instantiate Rows (for theme updates) ---
+        
+        # 1. Theme Selector
+        self.row_theme = SettingRow(
+            icon=ft.Icons.COLOR_LENS_ROUNDED,
+            icon_color=ft.Colors.PURPLE,
+            title=I18n.get("settings_theme"),
+            subtitle=I18n.get("settings_snack_theme_updated"),
+            control=self.theme_dropdown
+        )
+
+        # 2. Log Level Item
+        self.row_log = SettingRow(
+            icon=ft.Icons.BUG_REPORT_ROUNDED,
+            icon_color=AppColors.PRIMARY,
+            title=I18n.get("settings_log_level"),
+            subtitle=I18n.get("sys_log_label"),
+            control=self.log_level_dropdown
+        )
+
+        # 3. Concurrency Item
+        self.row_concurrency = SettingRow(
+            icon=ft.Icons.SPEED_ROUNDED,
+            icon_color=AppColors.ACCENT,
+            title=I18n.get("sys_concurrency"),
+            subtitle=I18n.get("sys_concurrency_hint"),
+            control=ft.Row([
+                self.concurrency_input,
+                ft.IconButton(
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    icon_color=AppColors.PRIMARY,
+                    tooltip=I18n.get("settings_save_config"),
+                    on_click=self.save_concurrency
+                )
+            ], spacing=5)
+        )
+
+        # 4. Thread Pool Settings (Advanced)
+        self.row_pool = SettingRow(
+            icon=ft.Icons.MEMORY_ROUNDED,
+            icon_color=ft.Colors.INDIGO,
+            title=I18n.get("sys_thread_pool_title"),
+            subtitle=I18n.get("sys_thread_pool_desc"),
+            control=ft.Row([
+                self.io_workers_input,
+                self.cpu_workers_input,
+                ft.IconButton(
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    icon_color=AppColors.PRIMARY,
+                    tooltip=I18n.get("settings_save_config"),
+                    on_click=self.save_thread_pool_settings
+                )
+            ], spacing=5)
+        )
+
+        # 5. DB Buffer Item
+        self.row_buffer = SettingRow(
+            icon=ft.Icons.STORAGE_ROUNDED,
+            icon_color=ft.Colors.ORANGE,
+            title=I18n.get("settings_db_buffer"),
+            subtitle=I18n.get("settings_buffer_desc"),
+            control=ft.Row([
+                self.queue_size_input,
+                ft.IconButton(
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    icon_color=AppColors.PRIMARY,
+                    tooltip=I18n.get("settings_save_config"),
+                    on_click=self.save_queue_size
+                )
+            ], spacing=5)
+        )
+
+        # 6. API Rate Limit Item
+        self.row_limit = SettingRow(
+            icon=ft.Icons.SPEED,
+            icon_color=ft.Colors.CYAN,
+            title=I18n.get("sys_tushare_limit"),
+            subtitle=I18n.get("sys_tushare_limit_desc"),
+            control=ft.Row([
+                self.rate_limit_input,
+                ft.IconButton(
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    icon_color=AppColors.PRIMARY,
+                    tooltip=I18n.get("settings_save_config"),
+                    on_click=self.save_rate_limit
+                )
+            ], spacing=5)
+        )
+
+        # 7. No-Proxy Domains
+        self.row_proxy = SettingRow(
+            icon=ft.Icons.PUBLIC_OFF_ROUNDED,
+            icon_color=ft.Colors.TEAL,
+            title=I18n.get("settings_no_proxy_domains"),
+            subtitle=I18n.get("settings_no_proxy_desc"),
+            control=ft.Row([
+                self.no_proxy_input,
+                ft.IconButton(
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    icon_color=AppColors.PRIMARY,
+                    tooltip=I18n.get("common_save"),
+                    on_click=self.save_no_proxy_domains
+                )
+            ], spacing=5, expand=True) # expand=True for input to take space
+        )
+
         self.content = ft.ListView(
             controls=[
                 DashboardCard(
@@ -120,125 +241,47 @@ class SystemTab(ft.Container):
                         SectionHeader(I18n.get("sys_core_config")),
                         ft.Container(height=10),
 
-                        # 1. Log Level Item
-                        self._build_setting_row(
-                            icon=ft.Icons.BUG_REPORT_ROUNDED,
-                            icon_color=AppColors.PRIMARY,
-                            title=I18n.get("settings_log_level"),
-                            subtitle=I18n.get("sys_log_label"),
-                            control=self.log_level_dropdown
-                        ),
+                        self.row_theme,
+                        
+                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+
+                        self.row_log,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        # 2. Concurrency Item
-                        self._build_setting_row(
-                            icon=ft.Icons.SPEED_ROUNDED,
-                            icon_color=AppColors.ACCENT,
-                            title=I18n.get("sys_concurrency"),
-                            subtitle=I18n.get("sys_concurrency_hint"),
-                            control=ft.Row([
-                                self.concurrency_input,
-                                ft.IconButton(
-                                    icon=ft.Icons.SAVE_ROUNDED,
-                                    icon_color=AppColors.PRIMARY,
-                                    tooltip=I18n.get("settings_save_config"),
-                                    on_click=self.save_concurrency
-                                )
-                            ], spacing=5)
-                        ),
+                        self.row_concurrency,
 
                         ft.Container(height=10),
 
-                        # 3. Thread Pool Settings (Advanced)
-                        self._build_setting_row(
-                            icon=ft.Icons.MEMORY_ROUNDED,
-                            icon_color=ft.Colors.INDIGO,
-                            title=I18n.get("sys_thread_pool_title"),
-                            subtitle=I18n.get("sys_thread_pool_desc"),
-                            control=ft.Row([
-                                self.io_workers_input,
-                                self.cpu_workers_input,
-                                ft.IconButton(
-                                    icon=ft.Icons.SAVE_ROUNDED,
-                                    icon_color=AppColors.PRIMARY,
-                                    tooltip=I18n.get("settings_save_config"),
-                                    on_click=self.save_thread_pool_settings
-                                )
-                            ], spacing=5)
-                        ),
+                        self.row_pool,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        # 4. DB Buffer Item
-                        self._build_setting_row(
-                            icon=ft.Icons.STORAGE_ROUNDED,
-                            icon_color=ft.Colors.ORANGE,
-                            title=I18n.get("settings_db_buffer"),
-                            subtitle=I18n.get("settings_buffer_desc"),
-                            control=ft.Row([
-                                self.queue_size_input,
-                                ft.IconButton(
-                                    icon=ft.Icons.SAVE_ROUNDED,
-                                    icon_color=AppColors.PRIMARY,
-                                    tooltip=I18n.get("settings_save_config"),
-                                    on_click=self.save_queue_size
-                                )
-                            ], spacing=5)
-                        ),
+                        self.row_buffer,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        # 5. API Rate Limit Item
-                        self._build_setting_row(
-                            icon=ft.Icons.SPEED,
-                            icon_color=ft.Colors.CYAN,
-                            title=I18n.get("sys_tushare_limit"),
-                            subtitle=I18n.get("sys_tushare_limit_desc"),
-                            control=ft.Row([
-                                self.rate_limit_input,
-                                ft.IconButton(
-                                    icon=ft.Icons.SAVE_ROUNDED,
-                                    icon_color=AppColors.PRIMARY,
-                                    tooltip=I18n.get("settings_save_config"),
-                                    on_click=self.save_rate_limit
-                                )
-                            ], spacing=5)
-                        ),
+                        self.row_limit,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        # 6. No-Proxy Domains
-                        self._build_setting_row(
-                            icon=ft.Icons.PUBLIC_OFF_ROUNDED,
-                            icon_color=ft.Colors.TEAL,
-                            title=I18n.get("settings_no_proxy_domains"),
-                            subtitle=I18n.get("settings_no_proxy_desc"),
-                            control=ft.Row([
-                                self.no_proxy_input,
-                                ft.IconButton(
-                                    icon=ft.Icons.SAVE_ROUNDED,
-                                    icon_color=AppColors.PRIMARY,
-                                    tooltip=I18n.get("common_save"),
-                                    on_click=self.save_no_proxy_domains
-                                )
-                            ], spacing=5, expand=True) # expand=True for input to take space
-                        ),
+                        self.row_proxy,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        # 7. Data Maintenance (System Init)
+                        # 8. Data Maintenance (System Init)
                         ft.Row([
                             ft.Container(
                                 content=ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, color=AppColors.ERROR, size=24),
                                 padding=10,
                                 bgcolor=ft.Colors.with_opacity(0.1, AppColors.ERROR),
-                                border_radius=10
+                                border_radius=10,
+                                data="maint_icon" # Mark for update
                             ),
                             ft.Column([
                                 ft.Text(I18n.get("sys_data_maint"), size=16, weight=ft.FontWeight.BOLD,
-                                        color=AppColors.TEXT_PRIMARY),
-                                ft.Text(I18n.get("sys_data_maint_desc"), size=12, color=AppColors.TEXT_SECONDARY),
+                                        color=AppColors.TEXT_PRIMARY, data="maint_title"),
+                                ft.Text(I18n.get("sys_data_maint_desc"), size=12, color=AppColors.TEXT_SECONDARY, data="maint_desc"),
                             ], expand=True, spacing=2),
                             ft.ElevatedButton(
                                 text=I18n.get("sys_btn_init"),
@@ -261,171 +304,124 @@ class SystemTab(ft.Container):
             ],
             padding=ft.padding.only(bottom=50)
         )
+        self.card_main = self.content.controls[0]
 
-    def _build_setting_row(self, icon, icon_color, title, subtitle, control):
-        return ft.Row([
-            ft.Container(
-                content=ft.Icon(icon, color=icon_color, size=24),
-                padding=10,
-                bgcolor=ft.Colors.with_opacity(0.1, icon_color),
-                border_radius=10
-            ),
-            ft.Column([
-                ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                ft.Text(subtitle, size=12, color=AppColors.TEXT_SECONDARY),
-            ], expand=True, spacing=2),
-            control
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
-
-    def show_init_dialog(self, e):
-        # Confirmation Dialog
-        def close_dlg(e):
-            self.page.close(dlg_modal)
-
-        def start_init(e):
-            self.page.close(dlg_modal)
-            self.page.run_task(self.run_system_initialization)
-
-        dlg_modal = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(I18n.get("sys_init_confirm_title")),
-            content=ft.Text(I18n.get("sys_init_confirm_content")),
-            actions=[
-                ft.TextButton(I18n.get("common_cancel"), on_click=close_dlg),
-                ft.TextButton(
-                    I18n.get("common_start_exec"),
-                    on_click=start_init,
-                    style=ft.ButtonStyle(color=AppColors.ERROR)
-                ),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        self.page.open(dlg_modal)
-
-    async def run_system_initialization(self):
-        # Local import to avoid circular dependency
-        from data.data_processor import DataProcessor
-
-        # Progress Dialog UI
-        pb = ft.ProgressBar(width=400, color=AppColors.PRIMARY, bgcolor=AppColors.SURFACE_VARIANT)
-        status_text = ft.Text(I18n.get("common_preparing"), size=12, color=AppColors.TEXT_SECONDARY)
-
-        dp = DataProcessor()
-
-        def cancel_click(e):
-            self.page.run_task(dp.request_cancel)
-            status_text.value = I18n.get("sys_init_cancel_wait")
-            status_text.color = AppColors.ERROR
-            status_text.update()
-
-        dlg_progress = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(I18n.get("sys_init_progress_title")),
-            content=ft.Column([
-                ft.Text(I18n.get("sys_init_wait")),
-                ft.Container(height=10),
-                pb,
-                ft.Container(height=5),
-                status_text
-            ], height=100, width=400),
-            actions=[
-                ft.TextButton(I18n.get("common_cancel"), on_click=cancel_click,
-                              style=ft.ButtonStyle(color=AppColors.ERROR))
-            ],
-            actions_alignment=ft.MainAxisAlignment.CENTER
-        )
-        self.page.open(dlg_progress)
-
+    def on_theme_change(self, e):
+        """Handle theme change"""
         try:
-            import time
-            last_update_time = 0
-
-            def progress_cb(current, total, msg):
-                nonlocal last_update_time
-                try:
-                    current_time = time.time()
-                    # Throttle updates to ~10fps or if completed
-                    if current_time - last_update_time < 0.1 and current < total:
-                        return
-
-                    last_update_time = current_time
-
-                    # Validate inputs
-                    safe_total = max(1, total) if total is not None else 1
-                    safe_current = current if current is not None else 0
-
-                    status_text.value = f"{msg} ({int(safe_current / safe_total * 100)}%)" if total > 0 else msg
-                    pb.value = float(safe_current) / float(safe_total)
-
-                    status_text.update()
-                    pb.update()
-                except Exception:
-                    # Ignore UI update errors if dialog is closed or loop is busy
-                    pass
-
-            report = await dp.initialize_system(progress_callback=progress_cb)
-
-            self.page.close(dlg_progress)
+            theme_name = self.theme_dropdown.value
+            ConfigHandler.set_theme_name(theme_name)
             
-            if dp.is_cancelled():
-                self.show_snack(I18n.get("settings_msg_sync_cancelled"), color=AppColors.WARNING)
-            else:
-                self.show_snack(I18n.get("sys_init_success"), color=AppColors.SUCCESS)
-                # Auto-Show Health Report if available
-                if isinstance(report, dict):
-                    self._show_health_report(report)
+            from ui.theme import apply_page_theme
+            if self.page:
+                apply_page_theme(self.page, theme_name)
+                self.page.update()
+            
+            self.show_snack(I18n.get("settings_snack_theme_updated"))
+        except Exception as ex:
+            logger.error(f"Theme change failed: {ex}")
+            self.show_snack(f"Theme Error: {ex}", color=AppColors.ERROR)
 
-        except Exception as e:
-            self.page.close(dlg_progress)
-            logger.error(f"Initialization failed: {e}")
-            self.show_snack(I18n.get("sys_init_failed").format(error=str(e)), color=AppColors.ERROR)
+    def on_log_level_change(self, e):
+        """Handle log level change"""
+        level = self.log_level_dropdown.value
+        ConfigHandler.set_log_level(level)
+        self.show_snack(I18n.get("sys_log_label") + ": " + level)
 
     def save_concurrency(self, e):
+        """Save concurrency setting"""
         try:
-            val_str = self.concurrency_input.value.strip()
-            if not val_str:
-                self.show_snack(I18n.get("sys_snack_threads_empty"), color=AppColors.ERROR)
+            val = int(self.concurrency_input.value)
+            if val < 1 or val > 32:
+                self.show_snack(I18n.get("sys_snack_io_range"), color=AppColors.ERROR)
                 return
-
-            val = int(val_str)
-            if val < 1 or val > 32: # Expanded range a bit, but kept reasonable
-                self.show_snack(I18n.get("ai_snack_invalid_range").format(field=I18n.get("sys_concurrency"), min=1, max=32), color=AppColors.ERROR)
-                return
-
             ConfigHandler.set_sync_concurrency(val)
-            self.show_snack(I18n.get("settings_snack_concurrency_set").format(val=val))
-            logger.info(f"Sync concurrency updated to {val}")
+            self.show_snack(I18n.get("sys_concurrency") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
-    def on_log_level_change(self, e):
-        level = e.control.value
-        if ConfigHandler.set_log_level(level):
-            from utils.logger import update_log_level
-            update_log_level(level)
-            self.show_snack(I18n.get("settings_snack_log_level").format(level=level))
-            logger.info(f"User changed log level to {level}")
-        else:
-            self.show_snack(I18n.get("settings_snack_saved_fail"), color=AppColors.ERROR)
-
     def save_queue_size(self, e):
+        """Save DB buffer size"""
         try:
-            size_str = self.queue_size_input.value.strip()
-            if not size_str:
-                self.show_snack(I18n.get("snack_queue_empty"))
+            val = int(self.queue_size_input.value)
+            if val < 100 or val > 10000:
+                self.show_snack(I18n.get("sys_snack_io_range"), color=AppColors.ERROR)
                 return
+            ConfigHandler.set_db_queue_size(val)
+            self.show_snack(I18n.get("settings_db_buffer") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
+        except ValueError:
+            self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
-            size = int(size_str)
-            if size < 10:
-                self.show_snack(I18n.get("snack_queue_min"))
-                return
+    def show_init_dialog(self, e):
+        """Show system initialization confirmation"""
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(I18n.get("sys_btn_init")),
+            content=ft.Text(I18n.get("sys_data_maint_desc")),
+            actions=[
+                ft.TextButton(I18n.get("common_cancel"), on_click=lambda e: self.page.close(dlg)),
+                ft.TextButton(I18n.get("common_confirm"), 
+                              style=ft.ButtonStyle(color=AppColors.ERROR),
+                              on_click=lambda e: self._on_init_confirm(dlg)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.open(dlg)
 
-            ConfigHandler.set_db_queue_size(size)
-            self.show_snack(I18n.get("snack_queue_saved"))
-            logger.info(f"DB queue size updated to {size}")
+    def _on_init_confirm(self, dlg):
+        self.page.close(dlg)
+        self.page.run_task(self._run_system_init)
+
+    async def _run_system_init(self):
+        """Run system initialization logic"""
+        from data.data_processor import DataProcessor
+        
+        p_bar = ft.ProgressBar(width=300)
+        p_text = ft.Text(I18n.get("common_preparing"))
+        dlg_progress = ft.AlertDialog(
+            modal=True,
+            content=ft.Column([p_text, p_bar], height=70, alignment=ft.MainAxisAlignment.CENTER),
+            actions=[],
+        )
+        self.page.open(dlg_progress)
+
+        async def callback(pct, msg):
+            p_bar.value = pct / 100.0
+            p_text.value = f"{msg} ({pct:.1f}%)"
+            dlg_progress.update()
+
+        try:
+            # Step 1: Initialize System Data via DataProcessor
+            res = await DataProcessor().initialize_system(progress_callback=callback)
+            self.page.close(dlg_progress)
+            
+            if res:
+                self.show_snack(I18n.get("sys_data_maint") + " " + I18n.get("common_completed"), color=AppColors.SUCCESS)
+                await self._run_health_check()
+            else:
+                self.show_snack(I18n.get("common_check_fail"), color=AppColors.ERROR)
+
         except Exception as ex:
-            self.show_snack(f"{I18n.get('snack_save_fail')}: {str(ex)}")
-            logger.error(f"Failed to save queue size: {ex}")
+            self.page.close(dlg_progress)
+            self.show_snack(str(ex), color=AppColors.ERROR)
+            logger.error(f"System init failed: {ex}")
+
+    def update_theme(self):
+        """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
+        inputs = [
+            self.theme_dropdown, self.concurrency_input, self.log_level_dropdown, 
+            self.queue_size_input, self.io_workers_input, self.cpu_workers_input,
+            self.rate_limit_input, self.no_proxy_input
+        ]
+        for ctrl in inputs:
+            if isinstance(ctrl, (ft.TextField, ft.Dropdown)):
+                ctrl.bgcolor = AppColors.INPUT_BG
+                ctrl.color = AppColors.INPUT_TEXT
+                ctrl.border_color = AppColors.INPUT_BORDER
+
+        # Standard colors (text, bg, borders) auto-update via semantic tokens
+        if self.page:
+            self.update()
 
     async def save_thread_pool_settings(self, e):
         # Async handler to avoid blocking UI during reload

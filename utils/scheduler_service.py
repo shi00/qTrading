@@ -53,7 +53,7 @@ class SchedulerService:
         try:
             self.scheduler.start()
             logger.info("[Scheduler] Started")
-            
+
             # Start Config Watchdog (Every 30s)
             # This ensures we pick up changes from Settings UI without restart
             self.scheduler.add_job(
@@ -71,7 +71,7 @@ class SchedulerService:
         logger.info(f"Stopping scheduler... (running={self.scheduler.running})")
         if self.scheduler.running:
             try:
-                self.scheduler.shutdown(wait=False) 
+                self.scheduler.shutdown(wait=False)
                 logger.info("Scheduler shutdown initiated.")
             except Exception as e:
                 logger.error(f"Error shutting down scheduler: {e}")
@@ -81,24 +81,26 @@ class SchedulerService:
     async def _watch_config_changes(self):
         """Monitor config changes and reload jobs if needed"""
         if not hasattr(self, '_last_known_config'):
-             self._last_known_config = {
-                 'time': ConfigHandler.get_auto_update_time(),
-                 'enabled': ConfigHandler.is_auto_update_enabled()
-             }
-             return
+            self._last_known_config = {
+                'time': ConfigHandler.get_auto_update_time(),
+                'enabled': ConfigHandler.is_auto_update_enabled()
+            }
+            return
 
         current_time = ConfigHandler.get_auto_update_time()
         current_enabled = ConfigHandler.is_auto_update_enabled()
-        
+
         changed = False
         if current_time != self._last_known_config['time']:
-            logger.info(f"[Scheduler] Detected schedule time change: {self._last_known_config['time']} -> {current_time}")
+            logger.info(
+                f"[Scheduler] Detected schedule time change: {self._last_known_config['time']} -> {current_time}")
             changed = True
-            
+
         if current_enabled != self._last_known_config['enabled']:
-            logger.info(f"[Scheduler] Detected enable status change: {self._last_known_config['enabled']} -> {current_enabled}")
+            logger.info(
+                f"[Scheduler] Detected enable status change: {self._last_known_config['enabled']} -> {current_enabled}")
             changed = True
-            
+
         if changed:
             logger.info("[Scheduler] Reloading jobs...")
             self._schedule_jobs()
@@ -109,14 +111,18 @@ class SchedulerService:
 
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
-        self.scheduler.remove_all_jobs()
+        # Only remove business jobs, NOT the config_watchdog
+        for job_id in ['daily_update', 'nightly_prediction']:
+            existing = self.scheduler.get_job(job_id)
+            if existing:
+                existing.remove()
 
         # 1. Daily Data Update Job
         # Get scheduled time from config or default to 16:30
         scheduled_time = ConfigHandler.get_auto_update_time() or "16:30"
         try:
             hour, minute = map(int, scheduled_time.split(':'))
-        except:
+        except (ValueError, AttributeError):
             hour, minute = 16, 30
 
         self.scheduler.add_job(

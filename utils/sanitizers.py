@@ -75,11 +75,12 @@ class DataSanitizer:
         )
 
     # Pre-compile regex patterns for better performance
-    # Matches Windows paths: D:\path\to\file.py or C:\Users\...
-    _PATTERN_WIN_PATH = re.compile(r'[A-Z]:\\[^\'"\s]+')
+    # Matches Windows paths: D:\path\to\file.py, c:\users\... (Case insensitive drive)
+    _PATTERN_WIN_PATH = re.compile(r'[a-zA-Z]:\\[^\'"\s]+')
 
-    # Matches Unix paths: /path/to/file.py
-    _PATTERN_UNIX_PATH = re.compile(r'/[\w/\-\.]+\.py')
+    # Matches Unix paths: /path/to/file (broader match, not just .py)
+    # Match absolute paths starting with /, containing word chars, dots, dashes, slashes
+    _PATTERN_UNIX_PATH = re.compile(r'/(?:[\w\.\-]+/)+[\w\.\-]+')
 
     @staticmethod
     def sanitize_error(exception: Exception, show_traceback: bool = False) -> str:

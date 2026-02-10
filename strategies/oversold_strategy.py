@@ -1,4 +1,5 @@
 import pandas as pd
+import polars as pl
 import logging
 import datetime
 from strategies.base_strategy import BaseStrategy
@@ -24,7 +25,7 @@ class OversoldStrategy(BaseStrategy):
 
     async def filter(self, context):
         """
-        Execute Strategy Filter
+        Execute Strategy Filter (Polars Optimized)
         """
         # 1. Get Base Data (Snapshot) from Context
         snapshot_df = context.get('screening_data')
@@ -39,63 +40,64 @@ class OversoldStrategy(BaseStrategy):
             return pd.DataFrame()
 
         # 2. Prepare Date Range for History (RSI needs at least N+1 days)
-        # We fetch 30 days to be safe for RSI(6)
+        # We fetch 45 days to be safe for RSI(6) and ensure enough data for smoothing
         end_date = await dp.get_latest_trade_date()
         start_date = (datetime.datetime.strptime(end_date, "%Y%m%d") - datetime.timedelta(days=45)).strftime("%Y%m%d")
         
         logger.info(f"[OversoldStrategy] Fetching history from {start_date} to {end_date} for RSI calculation...")
 
-        # 3. Fetch Historical Data (Batch) using DataProcessor/Cache
-        # Optimization: Filter by relevant stocks only
+        # 3. Fetch Historical Data (Pandas format from CacheManager)
         try:
             valid_codes = snapshot_df['ts_code'].tolist()
-            history_df = await dp.cache.get_daily_quotes(start_date=start_date, end_date=end_date, ts_code_list=valid_codes)
+            history_pdf = await dp.cache.get_daily_quotes(start_date=start_date, end_date=end_date, ts_code_list=valid_codes)
             
-            if history_df is None or history_df.empty:
+            if history_pdf is None or history_pdf.empty:
                 logger.warning("[OversoldStrategy] No historical data found.")
                 return pd.DataFrame()
+
+            # 4. Polars Vectorized Calculation
+            # Convert to Polars
+            df = pl.from_pandas(history_pdf)
+            
+            # Helper: Calculate QFQ Close if available
+            # Logic: close_qfq = close * (adj_factor / last_adj_factor)
+            if 'adj_factor' in df.columns:
+                # Calculate QFQ Close per group
+                qfq_expr = (
+                    pl.col('close') * 
+                    (pl.col('adj_factor') / pl.col('adj_factor').last().over('ts_code'))
+                ).alias('qfq_close')
                 
-            # 4. Group by Stock and Calculate RSI
-            # Vectorized approach or GroupBy apply
-            # GroupBy apply is cleaner
+                # Apply QFQ and sorting
+                df = df.lazy().with_columns(qfq_expr)
+            else:
+                df = df.lazy().with_columns(pl.col('close').alias('qfq_close'))
+
+            # Sort and Calculate RSI
+            # We filter only active stocks (though cache fetch already did, strict equality check is good)
+            # Calculate RSI over 'ts_code' window
+            rsi_expr = TechnicalAnalysis.get_rsi_expr(col_name='qfq_close', period=6, alias='rsi_6')
             
-            # Filter to only stocks currently in snapshot (active stocks)
-            valid_codes = set(snapshot_df['ts_code'])
-            history_df = history_df[history_df['ts_code'].isin(valid_codes)]
+            # Execution Pipeline
+            result_df = (
+                df
+                .sort(["ts_code", "trade_date"])
+                .with_columns(rsi_expr.over("ts_code"))
+                .filter(pl.col("trade_date") == end_date) # Take only the latest day's RSI
+                .filter(pl.col("rsi_6") < self.rsi_threshold) # Filter threshold
+                .collect() # Execute
+            )
             
-            results = []
-            
-            # Group by ts_code
-            grouped = history_df.groupby('ts_code')
-            
-            for ts_code, group in grouped:
-                # Sort by date asc
-                group = group.sort_values('trade_date', ascending=True)
-                
-                # Check minimum length
-                if len(group) < 7: # Need at least 7 days for RSI 6
-                    continue
-                    
-                # Calculate RSI
-                rsi_val = TechnicalAnalysis.get_rsi(group, period=6)
-                
-                # Filter
-                if rsi_val < self.rsi_threshold:
-                    results.append({
-                        'ts_code': ts_code,
-                        'rsi_6': round(rsi_val, 2)
-                    })
-            
-            if not results:
+            if result_df.height == 0:
                 logger.info("[OversoldStrategy] No stocks found matching RSI criteria.")
                 return pd.DataFrame()
                 
-            # 5. Merge with Snapshot and Return
-            rsi_df = pd.DataFrame(results)
+            # 5. Join with Snapshot and Return
+            # Convert result back to Pandas for compatibility with UI
+            rsi_pdf = result_df.select(['ts_code', 'rsi_6']).to_pandas()
             
-            # Right join to keep RSI info and attach snapshot data
-            # Inner join guarantees we have snapshot info
-            final_df = pd.merge(snapshot_df, rsi_df, on='ts_code', how='inner')
+            # Merge with snapshot
+            final_df = pd.merge(snapshot_df, rsi_pdf, on='ts_code', how='inner')
             
             # Sort by RSI ascending (Most oversold first)
             final_df = final_df.sort_values('rsi_6', ascending=True)

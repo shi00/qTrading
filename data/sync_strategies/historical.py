@@ -1,4 +1,3 @@
-
 """
 Historical Sync Strategy.
 Handles daily market snapshots, historical backfill, and retry logic.
@@ -6,16 +5,17 @@ Handles daily market snapshots, historical backfill, and retry logic.
 import asyncio
 import datetime
 import logging
-import pandas as pd
-from typing import List, Optional
 
-from data.sync_strategies.base import ISyncStrategy, SyncResult
+import pandas as pd
+
 from data.constants import MAJOR_INDICES
+from data.sync_strategies.base import ISyncStrategy, SyncResult
+from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
-from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
+
 
 class HistoricalSyncStrategy(ISyncStrategy):
     """
@@ -45,7 +45,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         """
         self._shutdown_event.clear()
         result = SyncResult()
-        
+
         try:
             await self._run_historical_sync(days, progress_callback, result)
         except asyncio.CancelledError:
@@ -54,7 +54,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.error(f"[HistoricalError] {e}", exc_info=True)
             result.status = "failed"
             result.errors.append(str(e))
-            
+
         return result
 
     async def _run_historical_sync(self, days, progress_callback, result: SyncResult):
@@ -82,24 +82,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # Breakpoint Resume (Check Cache)
         try:
-             cached_quotes = await self.context.cache.get_cached_trade_dates()
-             cached_inds = await self.context.cache.get_cached_indicator_dates()
-             existing = cached_quotes.intersection(cached_inds)
-             
-             original_count = len(trade_dates)
-             trade_dates = [d for d in trade_dates if d not in existing]
-             skipped = original_count - len(trade_dates)
-             result.updated += skipped
-             
-             if skipped > 0:
-                 logger.info(f"[HistoricalSync] Skipped {skipped} existing dates.")
+            cached_quotes = await self.context.cache.get_cached_trade_dates()
+            cached_inds = await self.context.cache.get_cached_indicator_dates()
+            existing = cached_quotes.intersection(cached_inds)
+
+            original_count = len(trade_dates)
+            trade_dates = [d for d in trade_dates if d not in existing]
+            skipped = original_count - len(trade_dates)
+            result.updated += skipped
+
+            if skipped > 0:
+                logger.info(f"[HistoricalSync] Skipped {skipped} existing dates.")
         except Exception as e:
-             logger.warning(f"Cache check failed: {e}")
+            logger.warning(f"Cache check failed: {e}")
 
         total_days = len(trade_dates)
         concurrency = ConfigHandler.get_sync_concurrency()
-        semaphore = asyncio.Semaphore(max(1, concurrency)) # Use config
-        
+        semaphore = asyncio.Semaphore(max(1, concurrency))  # Use config
+
         # if concurrency > 3:
         #      logger.warning(f"[HistoricalSync] High concurrency {concurrency} detected.")
 
@@ -115,7 +115,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             async with semaphore:
                 if self._shutdown_event.is_set() or abort_sync: return
-                
+
                 # Circuit Breaker Check
                 if len(failed_dates) > CB_THRESHOLD:
                     abort_sync = True
@@ -129,7 +129,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     processed_count += 1
                     result.added += 1
                     if progress_callback:
-                        progress_callback(processed_count, total_days, I18n.get('progress_sync_market').format(date=date))
+                        progress_callback(processed_count, total_days,
+                                          I18n.get('progress_sync_market').format(date=date))
                 except Exception as e:
                     # Specific error handling
                     logger.error(f"[HistoricalSync] Failed to sync {date}: {e}", exc_info=True)
@@ -138,28 +139,28 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):
             if self._shutdown_event.is_set() or abort_sync: break
-            
+
             batch = trade_dates[batch_start:batch_start + BATCH_SIZE]
             tasks = [asyncio.create_task(sync_one_day(d)) for d in batch]
-            
+
             with self._tasks_lock:
                 self._active_tasks.update(tasks)
-            
+
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
             finally:
-                 with self._tasks_lock:
+                with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
 
         # Smart Retry
         if failed_dates and not self._shutdown_event.is_set() and not abort_sync:
             MAX_RETRIES = ConfigHandler.get_sync_retry_count()
             logger.info(f"[HistoricalSync] Retrying {len(failed_dates)} failed dates...")
-            
+
             for retry_round in range(MAX_RETRIES):
                 if not failed_dates or self._shutdown_event.is_set(): break
                 await asyncio.sleep(2)
-                
+
                 current_batch = failed_dates[:]
                 failed_dates = []
                 retry_sem = asyncio.Semaphore(2)
@@ -179,7 +180,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if self._shutdown_event.is_set(): break
                     r_batch = current_batch[r_start:r_start + BATCH_SIZE]
                     r_tasks = [asyncio.create_task(retry_one(d)) for d in r_batch]
-                    
+
                     with self._tasks_lock:
                         self._active_tasks.update(r_tasks)
                     try:
@@ -189,9 +190,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             self._active_tasks.difference_update(r_tasks)
 
         if failed_dates:
-             result.errors.append(f"{len(failed_dates)} dates failed after retries")
-             result.status = "partial"
-        
+            result.errors.append(f"{len(failed_dates)} dates failed after retries")
+            result.status = "partial"
+
         logger.info(f"[HistoricalSync] Complete. Added: {result.added}, Errors: {len(failed_dates)}")
 
     async def sync_daily_market_snapshot(self, trade_date, force=False):
@@ -200,12 +201,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
         """
         # Check cache (Test compatibility & Efficiency)
         if not force:
-             # Fast check using sync status first (if implemented in cache/test)
-             # Fallback to checking data existence (as per test expectation)
-             # Check quotes as proxy for daily data
-             if await self.context.cache.check_data_exists(trade_date):
-                 logger.info(f"[DailySync] Data for {trade_date} already exists.")
-                 return True
+            # Fast check using sync status first (if implemented in cache/test)
+            # Fallback to checking data existence (as per test expectation)
+            # Check quotes as proxy for daily data
+            if await self.context.cache.check_data_exists(trade_date):
+                logger.info(f"[DailySync] Data for {trade_date} already exists.")
+                return True
 
         # Define fetch config
         # (key, func, name)
@@ -229,23 +230,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 return (key, None)
 
         async def fetch_indices():
-             tasks = [ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_index_daily, ts_code=c, trade_date=trade_date) for c in MAJOR_INDICES]
-             results = await asyncio.gather(*tasks, return_exceptions=True)
-             valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
-             if valid:
-                 return ("index", pd.concat(valid, ignore_index=True))
-             return ("index", None)
+            tasks = [ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_index_daily, ts_code=c,
+                                                   trade_date=trade_date) for c in MAJOR_INDICES]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
+            if valid:
+                return ("index", pd.concat(valid, ignore_index=True))
+            return ("index", None)
 
         # Launch
         futures = [fetch_wrapper(*c) for c in task_configs]
         futures.append(fetch_indices())
-        
+
         results_list = await asyncio.gather(*futures)
         data_map = {k: v for k, v in results_list}
 
         # Save Logic
         cache = self.context.cache
-        
+
         async def save_if_ok(key, method):
             df = data_map.get(key)
             if df is not None and not df.empty:
@@ -263,47 +265,48 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await save_if_ok("mf", cache.save_moneyflow)
         await save_if_ok("index", cache.save_index_daily)
         await save_if_ok("index_basic", cache.save_index_dailybasic)
-        
+
         # Northbound special filter
         df_north = data_map.get("north")
         if df_north is not None and not df_north.empty:
-             df_north = df_north[df_north['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
-             if not df_north.empty:
-                 await cache.save_northbound(df_north)
+            df_north = df_north[df_north['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
+            if not df_north.empty:
+                await cache.save_northbound(df_north)
 
         # Update sync status for key tables
+
     async def sync_moneyflow(self, trade_date=None):
         """Sync money flow for a specific date (Standalone)."""
         if trade_date is None:
-             # This requires getting latest date. Strategy doesn't have it easily.
-             # Assume caller provides it or we use context to get it?
-             # For standalone, let's use datetime.now or assume today if not provided
-             # But better to let caller handle default.
-             trade_date = datetime.datetime.now().strftime('%Y%m%d')
+            # This requires getting latest date. Strategy doesn't have it easily.
+            # Assume caller provides it or we use context to get it?
+            # For standalone, let's use datetime.now or assume today if not provided
+            # But better to let caller handle default.
+            trade_date = datetime.datetime.now().strftime('%Y%m%d')
 
         try:
-             df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_moneyflow, trade_date=trade_date)
-             if df is not None and not df.empty:
-                 count = await self.context.cache.save_moneyflow(df)
-                 await self.context.cache.update_sync_status('moneyflow_daily', trade_date, count)
-                 return count
+            df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_moneyflow, trade_date=trade_date)
+            if df is not None and not df.empty:
+                count = await self.context.cache.save_moneyflow(df)
+                await self.context.cache.update_sync_status('moneyflow_daily', trade_date, count)
+                return count
         except Exception as e:
-             logger.warning(f"sync_moneyflow failed: {e}")
+            logger.warning(f"sync_moneyflow failed: {e}")
         return 0
 
     async def sync_northbound(self, trade_date=None):
         """Sync northbound holding for a specific date (Standalone)."""
         if trade_date is None:
-             trade_date = datetime.datetime.now().strftime('%Y%m%d')
+            trade_date = datetime.datetime.now().strftime('%Y%m%d')
 
         try:
-             df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_hk_hold, trade_date=trade_date)
-             if df is not None and not df.empty:
-                 df = df[df['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
-                 if not df.empty:
-                     count = await self.context.cache.save_northbound(df)
-                     await self.context.cache.update_sync_status('northbound_holding', trade_date, count)
-                     return count
+            df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_hk_hold, trade_date=trade_date)
+            if df is not None and not df.empty:
+                df = df[df['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
+                if not df.empty:
+                    count = await self.context.cache.save_northbound(df)
+                    await self.context.cache.update_sync_status('northbound_holding', trade_date, count)
+                    return count
         except Exception as e:
-             logger.warning(f"sync_northbound failed: {e}")
+            logger.warning(f"sync_northbound failed: {e}")
         return 0

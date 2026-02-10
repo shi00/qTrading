@@ -15,6 +15,9 @@ from data.cache_manager import CacheManager
 from utils.thread_pool import ThreadPoolManager, TaskType
 from ui.i18n import I18n
 
+from ui.i18n import I18n
+from utils.log_decorators import log_async_operation
+
 logger = logging.getLogger(__name__)
 
 
@@ -126,93 +129,78 @@ class MarketDataService:
         try:
             await self._fetch_market_data()
         except Exception as e:
-            logger.error(f"[MarketDataService] Error fetching market data: {e}")
+            logger.error(f"[MarketDataService] Error fetching market data: {e}", exc_info=True)
     
+    @log_async_operation(operation_name="fetch_market_data")
     async def _fetch_market_data(self):
         """获取市场概览数据"""
-        logger.debug("[MarketDataService] Fetching market data...")
+        # logger.debug removed as decorator handles start/end logging
         
-        try:
-            now = datetime.datetime.now()
-            today_str = now.strftime('%Y%m%d')
-            start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
-            
-            # 确保交易日历已缓存
-            await self._ensure_trade_cal(today_str)
-            
-            # 获取最近交易日
-            cache_df = await self.cache.get_trade_cal(
-                start_date=start_str, end_date=today_str, is_open=1
-            )
-            date = today_str
-            if cache_df is not None and not cache_df.empty:
-                date = sorted(cache_df['cal_date'].tolist())[-1]
-            
-            # 构建所有任务
-            tasks = [self._get_index(code, key, date) for code, key in self.INDICES_CONFIG]
-            tasks.append(self._get_hsgt(date))
-            tasks.append(NewsFetcher.get_hot_concepts(limit=self.HOT_CONCEPTS_LIMIT))
-            
-            # 并行执行
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # 处理指数结果 (前N个任务)
-            indices = []
-            for i, (code, key) in enumerate(self.INDICES_CONFIG):
-                res = results[i]
-                if isinstance(res, Exception):
-                    logger.warning(f"[MarketDataService] Index {code} fetch failed: {res}")
-                    indices.append(self._get_empty_index_data(key))
-                else:
-                    indices.append(res)
-            
-            # 处理北向资金 (倒数第2个)
-            hsgt_res = results[-2]
-            hsgt = hsgt_res if not isinstance(hsgt_res, Exception) else self._get_empty_hsgt_data()
-            
-            # 处理热门概念 (最后1个)
-            hot_res = results[-1]
-            hot_concepts = hot_res if not isinstance(hot_res, Exception) else []
-            
-            # 更新缓存
-            self._cached_data = {
-                'date': date,
-                'indices': indices,
-                'hsgt': hsgt,
-                'hot_concepts': hot_concepts
-            }
-            
-            logger.debug(f"[MarketDataService] Market data updated for date {date}")
-            
-            # 通知 UI 更新
-            listener_count = len(self._listeners)
-            if listener_count > 0:
-                logger.debug(f"[MarketDataService] Notifying {listener_count} listeners of update")
-                for listener in list(self._listeners):
-                    try:
-                        listener()
-                    except Exception as e:
-                        logger.error(f"[MarketDataService] Listener error: {e}")
-                
-        except Exception as e:
-            logger.error(f"[MarketDataService] Failed to fetch market data: {e}")
+        # No outer try-except needed for logging; decorator handles it.
+        # Logic errors will bubble up to _safe_fetch which is correct.
+        now = datetime.datetime.now()
+        today_str = now.strftime('%Y%m%d')
+        start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
+        
+        # 确保交易日历已缓存
+        await self._ensure_trade_cal(today_str)
+        
+        # 获取最近交易日
+        cache_df = await self.cache.get_trade_cal(
+            start_date=start_str, end_date=today_str, is_open=1
+        )
+        date = today_str
+        if cache_df is not None and not cache_df.empty:
+            date = sorted(cache_df['cal_date'].tolist())[-1]
+        
+        # 构建所有任务
+        tasks = [self._get_index(code, key, date) for code, key in self.INDICES_CONFIG]
+        tasks.append(self._get_hsgt(date))
+        tasks.append(NewsFetcher.get_hot_concepts(limit=self.HOT_CONCEPTS_LIMIT))
+        
+        # 并行执行
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 处理指数结果 (前N个任务)
+        indices = []
+        for i, (code, key) in enumerate(self.INDICES_CONFIG):
+            res = results[i]
+            if isinstance(res, Exception):
+                logger.warning(f"[MarketDataService] Index {code} fetch failed: {res}")
+                indices.append(self._get_empty_index_data(key))
+            else:
+                indices.append(res)
+        
+        # 处理北向资金 (倒数第2个)
+        hsgt_res = results[-2]
+        hsgt = hsgt_res if not isinstance(hsgt_res, Exception) else self._get_empty_hsgt_data()
+        
+        # 处理热门概念 (最后1个)
+        hot_res = results[-1]
+        hot_concepts = hot_res if not isinstance(hot_res, Exception) else []
+        
+        # 更新缓存
+        self._cached_data = {
+            'date': date,
+            'indices': indices,
+            'hsgt': hsgt,
+            'hot_concepts': hot_concepts
+        }
+        
+        # 通知 UI 更新
+        listener_count = len(self._listeners)
+        if listener_count > 0:
+            for listener in list(self._listeners):
+                try:
+                    listener()
+                except Exception as e:
+                    logger.error(f"[MarketDataService] Listener error: {e}")
     
+    @log_async_operation(operation_name="ensure_trade_cal")
     async def _ensure_trade_cal(self, end_date: str):
         """确保交易日历已缓存"""
-        try:
-            cached = await self.cache.get_trade_cal(
-                start_date=(datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%Y%m%d'),
-                end_date=end_date
-            )
-            if cached is None or cached.empty:
-                df = await ThreadPoolManager().run_async(
-                    TaskType.IO, self.api.get_trade_cal,
-                    start_date='20240101', end_date=end_date
-                )
-                if df is not None and not df.empty:
-                    await self.cache.save_trade_cal(df)
-        except Exception as e:
-            logger.warning(f"[MarketDataService] Trade calendar check failed: {e}")
+        from data.data_processor import DataProcessor
+        await DataProcessor().ensure_trade_cal(end_date)
     
     async def _get_index(self, code: str, name_key: str, date: str) -> dict:
         """获取指数数据"""

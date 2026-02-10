@@ -61,7 +61,7 @@ class SettingsView(ft.Container):
         self.content = ft.Column([
             self.header_title,
             tab_bar,
-            ft.Divider(height=1, thickness=1, color=AppColors.BORDER),
+            ft.Divider(height=1, thickness=1), # Color defaults to DIVIDER (Outline Variant) which is correct
             self.tab_body
         ], expand=True)
 
@@ -172,3 +172,14 @@ class SettingsView(ft.Container):
             if self.page: self.update()
         except Exception:
             pass
+
+    def update_theme(self):
+        """Propagate custom color updates to child tabs (INPUT_*, UP/DOWN)."""
+        for tab in self.tab_contents:
+            if hasattr(tab, 'update_theme'):
+                try:
+                    tab.update_theme()
+                except Exception as e:
+                    logger.warning(f"Failed to update theme for tab {type(tab).__name__}: {e}")
+
+        self._safe_update()

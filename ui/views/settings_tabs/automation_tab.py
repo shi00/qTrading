@@ -1,9 +1,7 @@
 import logging
 import weakref
-
 import flet as ft
-
-from data.news_subscription import NewsSubscriptionService
+from ui.components.settings_widgets import DashboardCard, SettingRow
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
@@ -37,7 +35,6 @@ class AutomationTab(ft.Container):
         auto_update_time = ConfigHandler.get_auto_update_time()
 
         self.schedule_enabled = ft.Switch(
-            label=I18n.get("settings_auto_update"),
             value=auto_update_enabled,
             on_change=self.on_schedule_toggle
         )
@@ -70,32 +67,74 @@ class AutomationTab(ft.Container):
 
     def _build_content(self):
         """构建 UI 内容"""
-        self.content = ft.Container(
+        self.txt_title_main = ft.Text(I18n.get("settings_auto_update"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
+                        color=AppColors.TEXT_PRIMARY)
+        self.txt_desc_main = ft.Text(I18n.get("settings_auto_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+        
+        self.row_schedule = SettingRow(
+            icon=ft.Icons.SCHEDULE,
+            title=I18n.get("settings_auto_update"),
+            subtitle=I18n.get("settings_auto_desc"), # Or a more specific status?
+            control=self.schedule_enabled,
+            icon_color=AppColors.PRIMARY
+        )
+        
+        self.row_time = SettingRow(
+            icon=ft.Icons.ACCESS_TIME,
+            title=I18n.get("settings_update_time"),
+            subtitle=I18n.get("settings_trading_days"),
+            control=self.schedule_time,
+            icon_color=AppColors.ACCENT
+        )
+        
+        self.card_main = DashboardCard(
+            content=ft.Column([
+                self.row_schedule,
+                
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+
+                self.row_time,
+
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                
+                ft.Row([
+                    ft.Icon(ft.Icons.INFO_OUTLINE, size=_ICON_SIZE_SMALL, color=AppColors.TEXT_SECONDARY),
+                    self.schedule_status,
+                ]),
+            ])
+        )
+        
+        self.txt_hint_bg = ft.Text(I18n.get("settings_hint_bg_run"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT)
+
+        # Note: Using DashboardCard for consistency instead of manual Container
+        # We replace the outer "Card Style Container" with a simple Column/ListView 
+        # because DashboardCard already provides the card look.
+        # But to preserve existing look (Text outside card?), we keep the structure but make it theme-aware.
+        
+        self.inner_container = ft.Container(
             content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
-                ft.Text(I18n.get("settings_auto_update"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
-                        color=AppColors.TEXT_PRIMARY),
-                ft.Text(I18n.get("settings_auto_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY),
+                self.txt_title_main,
+                self.txt_desc_main,
                 ft.Container(height=_SPACING_SMALL),
-                ft.Container(
-                    content=ft.Column([
-                        ft.Row([self.schedule_enabled]),
-                        ft.Row([
-                            ft.Text(f"{I18n.get('settings_update_time')}:", size=_FONT_SIZE_BODY),
-                            self.schedule_time,
-                            ft.Text(I18n.get("settings_trading_days"), size=_FONT_SIZE_SMALL,
-                                    color=AppColors.TEXT_SECONDARY),
-                        ]),
-                        ft.Row([
-                            ft.Icon(ft.Icons.INFO_OUTLINE, size=_ICON_SIZE_SMALL, color=AppColors.TEXT_SECONDARY),
-                            self.schedule_status,
-                        ]),
-                    ]),
-                    padding=_CARD_PADDING, border=ft.border.all(1, AppColors.BORDER), border_radius=_CARD_BORDER_RADIUS,
-                ),
-                ft.Text(I18n.get("settings_hint_bg_run"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT),
+                self.card_main,
+                self.txt_hint_bg,
             ], spacing=_SPACING_DEFAULT),
             **AppStyles.card()
         )
+        self.content = self.inner_container
+
+    def update_theme(self):
+        """Update styles on theme change — only Layer 2 custom colors."""
+        # Input fields
+        self.schedule_time.bgcolor = AppColors.INPUT_BG
+        self.schedule_time.color = AppColors.INPUT_TEXT
+        self.schedule_time.border_color = AppColors.INPUT_BORDER
+
+        # Status color (custom)
+        enabled = self.schedule_enabled.value
+        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+
+        if self.page: self.update()
 
     def did_mount(self):
         """组件挂载后订阅语言变更"""
@@ -144,7 +183,7 @@ class AutomationTab(ft.Container):
         enabled = self.schedule_enabled.value
         ConfigHandler.save_config({"auto_update_enabled": enabled})
         self.schedule_status.value = self._get_schedule_status_text(enabled)
-        self.schedule_status.color = AppColors.SUCCESS if enabled else AppColors.TEXT_HINT
+        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
         self.update()
         if self.show_snack:
             self.show_snack(I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"))
@@ -198,26 +237,56 @@ class NotificationsTab(ft.Container):
 
     def _build_content(self):
         """构建 UI 内容"""
-        self.content = ft.Container(
+        self.txt_notify_title = ft.Text(I18n.get("settings_notify_title"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
+                        color=AppColors.TEXT_PRIMARY)
+                        
+        self.row_alerts = SettingRow(
+            icon=ft.Icons.NOTIFICATIONS_ACTIVE,
+            title=I18n.get("settings_news_alerts"),
+            subtitle=I18n.get("settings_notify_desc"),
+            control=self.news_alerts_enabled,
+            icon_color=AppColors.WARNING
+        )
+        
+        self.row_interval = SettingRow(
+            icon=ft.Icons.TIMER,
+            title=I18n.get("settings_news_interval"),
+            subtitle=I18n.get("settings_news_interval_desc"), # Key will be returned if missing
+            control=self.news_interval,
+            icon_color=AppColors.INFO
+        )
+        
+        self.card_notify = DashboardCard(
+            content=ft.Column([
+                self.row_alerts,
+
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+
+                self.row_interval,
+            ])
+        )
+        
+        self.txt_notify_desc = ft.Text(I18n.get("settings_notify_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+        
+        self.inner_container = ft.Container(
             content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
-                ft.Text(I18n.get("settings_notify_title"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
-                        color=AppColors.TEXT_PRIMARY),
+                self.txt_notify_title,
                 ft.Container(height=_SPACING_SMALL),
-                ft.Container(
-                    content=ft.Column([
-                        ft.Row([self.news_alerts_enabled]),
-                        ft.Container(height=5),
-                        ft.Row([
-                            ft.Icon(ft.Icons.TIMER, size=_ICON_SIZE_SMALL, color=AppColors.TEXT_SECONDARY),
-                            self.news_interval,
-                        ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
-                    ]),
-                    padding=_CARD_PADDING, border=ft.border.all(1, AppColors.BORDER), border_radius=_CARD_BORDER_RADIUS,
-                ),
-                ft.Text(I18n.get("settings_notify_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
+                self.card_notify,
+                self.txt_notify_desc
             ], spacing=_SPACING_DEFAULT),
             **AppStyles.card()
         )
+        self.content = self.inner_container
+        
+    def update_theme(self):
+        """Update styles on theme change — only Layer 2 custom colors."""
+        # Input fields
+        self.news_interval.bgcolor = AppColors.INPUT_BG
+        self.news_interval.color = AppColors.INPUT_TEXT
+        self.news_interval.border_color = AppColors.INPUT_BORDER
+
+        if self.page: self.update()
 
     def did_mount(self):
         """组件挂载后订阅语言变更"""
