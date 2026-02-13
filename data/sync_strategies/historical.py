@@ -97,7 +97,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.warning(f"Cache check failed: {e}")
 
         total_days = len(trade_dates)
-        concurrency = ConfigHandler.get_sync_concurrency()
+        total_days = len(trade_dates)
+        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(max(1, concurrency))  # Use config
 
         # if concurrency > 3:

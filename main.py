@@ -92,12 +92,20 @@ async def main(page: ft.Page):
             await dp.close()
             logger.info("[Main] DB Writer flushed and closed.")
 
+            logger.info("[Main] Step 5: Shutting down Thread Pools...")
+            from utils.thread_pool import ThreadPoolManager
+            ThreadPoolManager().shutdown(wait=False)
+
         except Exception as ex:
             logger.error(f"[Main] Error during cleanup: {ex}", exc_info=True)
 
-        logger.info("[Main] Resources released. Bye.")
-        # No os._exit(0) here. Flet window dispatch will close process naturally 
-        # now that threads are joined and loops cancelled.
+        logger.info("[Main] All resources released. Exiting process immediately.")
+        
+        # Give logs a split second to flush
+        import time
+        import os
+        time.sleep(0.1)
+        os._exit(0)
 
     page.on_disconnect = cleanup_resources
 

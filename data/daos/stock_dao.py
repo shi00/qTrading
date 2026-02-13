@@ -44,3 +44,87 @@ class StockDao(BaseDao):
             r = await conn.exec_driver_sql("SELECT MIN(cal_date), MAX(cal_date) FROM trade_cal")
             row = r.fetchone()
             return (row[0], row[1]) if row else (None, None)
+
+    # --- Concepts ---
+    async def save_concepts(self, df):
+        if df is None or df.empty: return 0
+        cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
+        
+        df = df.copy()
+        df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Using REPLACE INTO by default in _save_standard handles duplicates on PK (ts_code, concept_id)
+        return await self._save_standard(df, "stock_concepts", cols)
+
+    async def overwrite_concepts(self, df):
+        """
+        Transactional overwrite of concepts.
+        Clears table and inserts new data in a single transaction.
+        """
+        if df is None or df.empty: return 0
+        
+        cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
+        df = df.copy()
+        df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Prepare params outside transaction
+        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
+        
+        sql_insert = f"INSERT INTO stock_concepts ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+
+        try:
+            async with self.engine.begin() as conn:
+                # 1. Clear old data
+                await conn.exec_driver_sql("DELETE FROM stock_concepts")
+                
+                # 2. Insert new data
+                if params:
+                    await conn.exec_driver_sql(sql_insert, params)
+                    
+            return len(params)
+        except Exception as e:
+            logger.error(f"[StockDao] overwrite_concepts failed: {e}")
+            raise e
+
+    async def clear_concepts(self):
+        """
+        Clear all concept data.
+        NOTE: Prefer overwrite_concepts for full refresh to ensure atomicity.
+        """
+        async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("DELETE FROM stock_concepts")
+
+    async def get_concepts(self, ts_codes: list = None):
+        """
+        Get concepts for given stock codes.
+        Returns: Dict[ts_code, List[concept_name]]
+        """
+        sql = "SELECT ts_code, concept_name FROM stock_concepts"
+        params = []
+        
+        if ts_codes:
+            # Handle large list of codes
+            if len(ts_codes) == 1:
+                sql += " WHERE ts_code=?"
+                params.append(ts_codes[0])
+            else:
+                placeholders = ",".join(["?"] * len(ts_codes))
+                sql += f" WHERE ts_code IN ({placeholders})"
+                params.extend(ts_codes)
+                
+        rows = await self._read_db(sql, params)
+        
+        # Transform to dict
+        result = {}
+        # rows is a DataFrame
+        if rows is None or rows.empty:
+            return result
+            
+        for _, r in rows.iterrows():
+            code = r['ts_code']
+            concept = r['concept_name']
+            if code not in result:
+                result[code] = []
+            result[code].append(concept)
+            
+        return result

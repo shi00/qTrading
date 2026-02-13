@@ -159,7 +159,9 @@ class ThreadPoolManager:
 
         if hasattr(self, '_cpu_pool') and self._cpu_pool:
             logger.info("Shutting down CPU Pool...")
-            self._cpu_pool.shutdown(wait=wait)
+            # For CPU-bound tasks (like AI inference), we don't want to block application exit.
+            # Since threads are daemon, we can set wait=False to let the OS cleanup.
+            self._cpu_pool.shutdown(wait=False)
             self._cpu_pool = None
         logger.info("Thread Pools shut down.")
 

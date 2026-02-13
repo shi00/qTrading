@@ -62,6 +62,16 @@ class AISelectionStrategy(BaseStrategy):
         global_context = await NewsFetcher.get_us_major_moves()
         logger.info(f"[AIStrategy] Global Context: {global_context}")
         
+        # Pre-fetch Concepts for all candidates (N+1 Optimization)
+        try:
+            all_ts_codes = candidates['ts_code'].tolist()
+            concepts_map = await dp.cache.get_concepts(all_ts_codes)
+            logger.info(f"[AIStrategy] Pre-fetched concepts for {len(all_ts_codes)} stocks")
+        except Exception as e:
+            logger.warning(f"[AIStrategy] Failed to pre-fetch concepts: {e}")
+            concepts_map = {}
+        
+        
         # Run all analysis in parallel with progress tracking
         logger.info(f"[AIStrategy] Analyzing {len(candidates)} stocks...")
         
@@ -81,9 +91,15 @@ class AISelectionStrategy(BaseStrategy):
         running_tasks = []
         
         # Helper wrapper to return row with result
+        # Helper wrapper to return row with result
+        # Throttle concurrency to avoid DB saturation (SQLite)
+        limit = ConfigHandler.get_ai_max_concurrent_analysis() 
+        sem = asyncio.Semaphore(limit)
+        
         async def analyze_wrapper(row_data):
-            res = await self._analyze_single_stock(row_data, dp, global_context)
-            return res, row_data
+             async with sem:
+                res = await self._analyze_single_stock(row_data, dp, global_context, concepts_map)
+                return res, row_data
 
         for _, row in candidates.iterrows():
              running_tasks.append(asyncio.create_task(analyze_wrapper(row)))
@@ -141,7 +157,7 @@ class AISelectionStrategy(BaseStrategy):
         result_df = pd.DataFrame(final_rows)
         return result_df.sort_values('ai_score', ascending=False)
 
-    async def _analyze_single_stock(self, row, dp, global_context=""):
+    async def _analyze_single_stock(self, row, dp, global_context="", concepts_map=None):
         """
         Helper for analysis
         """
@@ -170,9 +186,23 @@ class AISelectionStrategy(BaseStrategy):
             # 3. Get News
             news = await NewsFetcher.get_stock_news(ts_code, limit=3)
             
+            # 3.5 Get Concepts (Cached)
+            # Use pre-fetched map
+            concepts = []
+            if concepts_map and ts_code in concepts_map:
+                concepts = concepts_map[ts_code]
+            elif not concepts_map:
+                 # Fallback if map missing (unlikely)
+                 start = asyncio.get_event_loop().time() # just for debug
+                 cmap = await dp.cache.get_concepts([ts_code])
+                 concepts = cmap.get(ts_code, [])
+            
             # 4. AI Inference
             # row is a Series, valid info
             stock_info = row.to_dict()
+            
+            # Inject concept into stock_info for AI Service to use
+            stock_info['concepts'] = concepts
             
             ai_result = await self.ai_client.analyze_stock(stock_info, tech_context, news, global_context)
             return ai_result # {score, summary, ...}

@@ -8,13 +8,28 @@ A-Share Quantitative Screener - Unified Theme Configuration
 
 支持三主题 (Dark / Light / Navy)
 """
-from typing import TypedDict, Optional
 import logging
+from typing import TypedDict
+
 import flet as ft
+
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
+
+
+
+# ============================================================================
+# 常量定义
+# ============================================================================
+
+class ThemeName:
+    DARK = "dark"
+    LIGHT = "light"
+    NAVY = "navy"
+    DRACULA = "dracula"
+
 
 # ============================================================================
 # 类型定义
@@ -38,12 +53,34 @@ class DashboardCardStyle(TypedDict):
     border: ft.Border
 
 
+class ThemeColors(TypedDict):
+    """主题配色定义 (必须包含所有业务色 key)"""
+    UP: str
+    DOWN: str
+    SUCCESS: str
+    WARNING: str
+    INFO: str
+    TABLE_HEADER_BG: str
+    TABLE_HEADER_TEXT: str
+    TABLE_ROW_ODD: str
+    TABLE_ROW_EVEN: str
+    TABLE_CELL_TEXT: str
+    TABLE_CELL_NUMERIC: str
+    TABLE_BORDER: str
+    TABLE_GRID: str
+    INPUT_BG: str
+    INPUT_BORDER: str
+    INPUT_TEXT: str
+    LOG_BG: str
+    LOG_TEXT: str
+
+
 # ============================================================================
 # 自定义业务色预设 (仅 Layer 2 的颜色)
 # ============================================================================
 
-CUSTOM_COLOR_PRESETS = {
-    "dark": {
+CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
+    ThemeName.DARK: {
         "UP": "#FF3333",
         "DOWN": "#00E676",
         "SUCCESS": "#00E676",
@@ -63,7 +100,7 @@ CUSTOM_COLOR_PRESETS = {
         "LOG_BG": "#000000",
         "LOG_TEXT": "#CCCCCC",
     },
-    "light": {
+    ThemeName.LIGHT: {
         "UP": "#D32F2F",
         "DOWN": "#388E3C",
         "SUCCESS": "#388E3C",
@@ -83,7 +120,7 @@ CUSTOM_COLOR_PRESETS = {
         "LOG_BG": "#FFFFFF",
         "LOG_TEXT": "#212121",
     },
-    "navy": {
+    ThemeName.NAVY: {
         "UP": "#F87171",
         "DOWN": "#4ADE80",
         "SUCCESS": "#4ADE80",
@@ -92,7 +129,7 @@ CUSTOM_COLOR_PRESETS = {
         "TABLE_HEADER_BG": "#1E293B",
         "TABLE_HEADER_TEXT": "#E2E8F0",
         "TABLE_ROW_ODD": "#1E293B",
-        "TABLE_ROW_EVEN": "#0F172A",
+        "TABLE_ROW_EVEN": "#11192E",
         "TABLE_CELL_TEXT": "#CBD5E1",
         "TABLE_CELL_NUMERIC": "#F8FAFC",
         "TABLE_BORDER": "#334155",
@@ -100,8 +137,28 @@ CUSTOM_COLOR_PRESETS = {
         "INPUT_BG": "#334155",
         "INPUT_BORDER": "#475569",
         "INPUT_TEXT": "#F8FAFC",
-        "LOG_BG": "#0F172A",
+        "LOG_BG": "#11192E",
         "LOG_TEXT": "#CBD5E1",
+    },
+    ThemeName.DRACULA: {
+        "UP": "#FF5555",      # Red
+        "DOWN": "#50FA7B",    # Green
+        "SUCCESS": "#50FA7B",
+        "WARNING": "#FFB86C", # Orange
+        "INFO": "#8BE9FD",    # Cyan
+        "TABLE_HEADER_BG": "#44475A", # Current Line
+        "TABLE_HEADER_TEXT": "#F8F8F2",
+        "TABLE_ROW_ODD": "#282A36",   # Background
+        "TABLE_ROW_EVEN": "#44475A",  # Current Line (Alternating)
+        "TABLE_CELL_TEXT": "#F8F8F2",
+        "TABLE_CELL_NUMERIC": "#BD93F9", # Purple
+        "TABLE_BORDER": "#6272A4",    # Comment (Grey-ish)
+        "TABLE_GRID": "#6272A4",
+        "INPUT_BG": "#44475A",
+        "INPUT_BORDER": "#6272A4",
+        "INPUT_TEXT": "#F8F8F2",
+        "LOG_BG": "#282A36",
+        "LOG_TEXT": "#F8F8F2",
     }
 }
 
@@ -110,7 +167,7 @@ CUSTOM_COLOR_PRESETS = {
 # ============================================================================
 
 THEME_COLOR_SCHEMES = {
-    "dark": ft.ColorScheme(
+    ThemeName.DARK: ft.ColorScheme(
         primary="#2196F3",
         primary_container="#0D47A1",
         secondary="#00BFA5",
@@ -137,7 +194,7 @@ THEME_COLOR_SCHEMES = {
         shadow="#000000",
         scrim="#000000",
     ),
-    "light": ft.ColorScheme(
+    ThemeName.LIGHT: ft.ColorScheme(
         primary="#2196F3",
         primary_container="#BBDEFB",
         secondary="#009688",
@@ -164,7 +221,7 @@ THEME_COLOR_SCHEMES = {
         shadow="#000000",
         scrim="#000000",
     ),
-    "navy": ft.ColorScheme(
+    ThemeName.NAVY: ft.ColorScheme(
         primary="#38BDF8",
         primary_container="#0369A1",
         secondary="#2DD4BF",
@@ -191,13 +248,41 @@ THEME_COLOR_SCHEMES = {
         shadow="#000000",
         scrim="#000000",
     ),
+    ThemeName.DRACULA: ft.ColorScheme(
+        primary="#BD93F9",           # Purple
+        primary_container="#44475A", # Current Line
+        secondary="#FF79C6",         # Pink
+        secondary_container="#44475A",
+        tertiary="#8BE9FD",          # Cyan
+        surface="#282A36",           # Background
+        surface_variant="#44475A",   # Current Line
+        background="#282A36",        # Background
+        error="#FF5555",             # Red
+        error_container="#44475A",
+        on_primary="#282A36",
+        on_primary_container="#BD93F9",
+        on_secondary="#282A36",
+        on_secondary_container="#FF79C6",
+        on_surface="#F8F8F2",        # Foreground
+        on_surface_variant="#6272A4", # Comment
+        on_background="#F8F8F2",
+        on_error="#282A36",
+        outline="#6272A4",
+        outline_variant="#44475A",
+        inverse_primary="#BD93F9",
+        inverse_surface="#F8F8F2",
+        on_inverse_surface="#282A36",
+        shadow="#000000",
+        scrim="#000000",
+    ),
 }
 
 # 主题 → ThemeMode 映射
 THEME_MODE_MAP = {
-    "dark": ft.ThemeMode.DARK,
-    "light": ft.ThemeMode.LIGHT,
-    "navy": ft.ThemeMode.DARK,  # Navy 使用 Dark 模式 + 自定义 ColorScheme
+    ThemeName.DARK: ft.ThemeMode.DARK,
+    ThemeName.LIGHT: ft.ThemeMode.LIGHT,
+    ThemeName.NAVY: ft.ThemeMode.DARK,  # Navy 使用 Dark 模式 + 自定义 ColorScheme
+    ThemeName.DRACULA: ft.ThemeMode.DARK,
 }
 
 
@@ -261,7 +346,8 @@ class AppColors:
 
     # 内部状态
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
-    _CURRENT_THEME_NAME = "dark"
+    _CURRENT_THEME_MODE = ft.ThemeMode.DARK
+    _CURRENT_THEME_NAME = ThemeName.DARK
     _listeners = []
 
     @classmethod
@@ -277,7 +363,7 @@ class AppColors:
             cls._listeners.remove(listener)
 
     @classmethod
-    def load_theme(cls, theme_name: str = "dark"):
+    def load_theme(cls, theme_name: str = ThemeName.DARK):
         """
         加载指定主题的自定义色 (Layer 2)。
         Layer 1 的语义 Token 无需加载——它们在 apply_page_theme 中通过 ColorScheme 生效。
@@ -287,7 +373,14 @@ class AppColors:
         cls._CURRENT_THEME_MODE = THEME_MODE_MAP.get(theme_name, ft.ThemeMode.DARK)
 
         # 加载自定义色
-        preset = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS["dark"])
+        # 使用 TypedDict key 确保完整性 (防止主题缺键导致旧值残留)
+        preset = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK])
+        
+        # 强制遍历 ThemeColors 的所有字段，而不是 preset 的 keys
+        # 这样如果 preset 缺字段， IDE 会首先报错 (mypy)，运行时 getattr 会报错或我们应该提供默认值
+        # 但由于 preset 是 ThemeColors 类型，我们假设它是完整的。
+        # 为了运行时安全，我们遍历 preset.items() 并确保覆盖所有 AppColors 对应属性
+        
         for key, value in preset.items():
             if hasattr(cls, key):
                 setattr(cls, key, value)
@@ -385,7 +478,6 @@ class AppStyles:
             overlay_color=ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY),
         )
 
-
     @staticmethod
     def data_table_row(index: int, is_hovered: bool = False) -> str:
         """表格行颜色 (Layer 2 — 自定义色)"""
@@ -408,8 +500,8 @@ def _build_theme(theme_name: str) -> ft.Theme:
     根据主题名构建 ft.Theme 对象。
     包含 ColorScheme + 全局组件样式（滚动条、分割线、数据表）。
     """
-    color_scheme = THEME_COLOR_SCHEMES.get(theme_name, THEME_COLOR_SCHEMES["dark"])
-    custom = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS["dark"])
+    color_scheme = THEME_COLOR_SCHEMES.get(theme_name, THEME_COLOR_SCHEMES[ThemeName.DARK])
+    custom = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK])
 
     return ft.Theme(
         color_scheme=color_scheme,
@@ -468,17 +560,18 @@ def apply_page_theme(page: ft.Page, theme_name: str = None):
     AppColors.load_theme(theme_name)
 
     # Step 2: 构建主题
-    # 始终设置 Light 和 Dark 主题，以支持 page.theme_mode 切换
-    if theme_name == "light":
-        page.theme = _build_theme("light")
-        page.dark_theme = _build_theme("dark")
-    elif theme_name == "navy":
-        page.theme = _build_theme("light")
-        page.dark_theme = _build_theme("navy")
-    else:  # dark (default)
-        page.theme = _build_theme("light")
-        page.dark_theme = _build_theme("dark")
+    target_mode = THEME_MODE_MAP.get(theme_name, ft.ThemeMode.DARK)
+
+    if target_mode == ft.ThemeMode.LIGHT:
+        # 如果目标是亮色模式 (light)，设置 page.theme
+        page.theme = _build_theme(theme_name)
+        page.dark_theme = _build_theme(ThemeName.DARK)
+    else:
+        # 如果目标是暗色模式 (dark, navy, dracula)，设置 page.dark_theme
+        # page.theme 保持默认 light，以便切换
+        page.theme = _build_theme(ThemeName.LIGHT)
+        page.dark_theme = _build_theme(theme_name)
 
     # Step 3: 设置模式
-    page.theme_mode = AppColors._CURRENT_THEME_MODE
+    page.theme_mode = target_mode
     page.bgcolor = None  # 让 Flet 根据 ColorScheme.background 自动设置

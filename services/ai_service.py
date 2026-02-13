@@ -7,12 +7,9 @@ import httpx
 from openai import AsyncOpenAI
 
 from data.review_manager import ReviewManager
-from data.tushare_client import TushareClient
+from services.local_model_manager import LocalModelManager
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
-from services.local_model_manager import LocalModelManager
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +39,10 @@ class AIService:
         self._setup_client()
         self._semaphore = None  # Lazy creation to avoid cross-event-loop issues
         self._semaphore_loop = None  # Track which loop the semaphore belongs to
-        
+
         # Locks for Local Model
-        self._setup_lock = asyncio.Lock() # Protect auto-init
-        
+        self._setup_lock = asyncio.Lock()  # Protect auto-init
+
         self._initialized = True
 
     def _get_semaphore(self):
@@ -59,7 +56,7 @@ class AIService:
         if self._semaphore is None or self._semaphore_loop != current_loop:
             # Enforce minimum concurrency of 1 to prevent deadlock
             # Default to 5 if config is missing/zero/negative
-            raw_val = ConfigHandler.get_ai_concurrency()
+            raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
             concurrency = max(1, int(raw_val)) if raw_val else 5
             self._semaphore = asyncio.Semaphore(concurrency)
             self._semaphore_loop = current_loop
@@ -109,7 +106,7 @@ class AIService:
         # Force semaphore rebuild with new concurrency
         self._semaphore = None
         self._semaphore_loop = None
-        
+
         # Reset Local Model state to allow hot-swapping model path
         # Use simple assignment as we are in main loop single thread (mostly)
         # But to be safe with async, we just flag it. 
@@ -118,8 +115,8 @@ class AIService:
         # We don't unset _local_llama immediately to avoid crashing running threads
         # It will be overwritten on next _setup_local_model success.
 
-    async def _chat_completion(self, messages: list, model: str = None, provider: str = "cloud", 
-                             temperature: float = 0.3, timeout: float = 30.0, json_mode: bool = True) -> dict:
+    async def _chat_completion(self, messages: list, model: str = None, provider: str = "cloud",
+                               temperature: float = 0.3, timeout: float = 30.0, json_mode: bool = True) -> dict:
         """
         Unified helper for Chat Completions (Cloud or Local).
         Args:
@@ -135,33 +132,34 @@ class AIService:
             Exception: on failure (caller should handle fallback)
         """
         response_content = ""
-        
+
         # --- Local Provider ---
         if provider == "local":
             await self._setup_local_model()
             manager = await LocalModelManager.get_instance()
-            
-            system_prompt = next((m['content'] for m in messages if m['role'] == 'system'), "You are a helpful assistant.")
+
+            system_prompt = next((m['content'] for m in messages if m['role'] == 'system'),
+                                 "You are a helpful assistant.")
             user_prompt = next((m['content'] for m in messages if m['role'] == 'user'), "")
-            
+
             if not manager.get_loaded_model_path():
-                 raise ValueError("Local model not loaded")
+                raise ValueError("Local model not loaded")
 
             response_content = await manager.run_inference(
                 prompt=user_prompt,
-                max_tokens=2048, # config?
+                max_tokens=2048,  # config?
                 temperature=temperature,
                 system_prompt=system_prompt
             )
-            
+
         # --- Cloud Provider ---
         else:
             if not self.client:
                 raise ValueError("Cloud Client not initialized")
-                
+
             model = model or ConfigHandler.get_setting('ai_model_name')
             if not model:
-               raise ValueError("Model not configured")
+                raise ValueError("Model not configured")
 
             async with self._get_semaphore():
                 response = await asyncio.wait_for(
@@ -176,19 +174,39 @@ class AIService:
                 response_content = response.choices[0].message.content
 
         # --- Post-Processing (JSON Parsing) ---
+        # --- Post-Processing (JSON Parsing) ---
         if json_mode:
-            # 1. Cleaner: Try direct parse
             try:
+                # 1. Cleaner: Try direct parse
                 return json.loads(response_content)
             except json.JSONDecodeError:
-                # 2. Dirty JSON extraction (common in LLMs)
+                pass
+
+            # 2. Heuristic Extraction
+            try:
                 start = response_content.find('{')
+                if start != -1:
+                    # Use raw_decode to extract ONLY the first valid JSON object
+                    # ignoring trailing garbage (like "Extra data")
+                    try:
+                        obj, idx = json.JSONDecoder().raw_decode(response_content[start:])
+                        return obj
+                    except json.JSONDecodeError:
+                        pass
+
+                # 3. Fallback: Last Resort (rfind approach, but risky)
                 end = response_content.rfind('}') + 1
-                if start != -1 and end > start:
-                    json_str = response_content[start:end]
-                    return json.loads(json_str)
-                raise ValueError(f"Invalid JSON response: {response_content[:100]}...")
-        
+                if end > start:
+                    try:
+                        json_str = response_content[start:end]
+                        return json.loads(json_str)
+                    except json.JSONDecodeError:
+                        pass
+            except Exception:
+                pass
+
+            raise ValueError(f"Invalid JSON response: {response_content[:100]}...")
+
         return {"content": response_content}
 
     @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=30000)
@@ -212,17 +230,22 @@ class AIService:
         if not news_list:
             news_text = "No recent news found."
 
-        # Fetch Concepts (On-demand)
+        # Fetch Concepts (Used cached if available)
         concepts_str = "None"
         try:
-            ts_code = stock_info.get('ts_code')
-            if ts_code:
-                df_concept = TushareClient().get_concept_detail(ts_code=ts_code)
-                if df_concept is not None and not df_concept.empty:
-                    concepts = df_concept['concept_name'].tolist()[:8]  # Top 8 concepts
-                    concepts_str = ", ".join(concepts)
+            # Check if concepts are already injected by Strategy (Preferred)
+            injected_concepts = stock_info.get('concepts')
+
+            if injected_concepts and isinstance(injected_concepts, list):
+                # Use injected
+                concepts = injected_concepts[:8]
+                concepts_str = ", ".join(concepts)
+            else:
+                # Fallback for legacy support or when data is not fully synced
+                concepts_str = "Data not synced"
+
         except Exception as e:
-            logger.warning(f"[AI] Failed to fetch concepts: {e}")
+            logger.warning(f"[AI] Failed to process concepts: {e}")
 
         # Add concepts to stock_xml
         stock_xml += f"\n  Concepts: {concepts_str}"
@@ -267,7 +290,7 @@ class AIService:
           (Data not available yet, assume neutral)
         </financials>
         """
-        
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -286,30 +309,14 @@ class AIService:
 
     async def _setup_local_model(self):
         """
-        Ensure local model is loaded via Manager.
+        Ensure local model is initialized via Manager.
         """
-        # Optimized: Delegate entirely to LocalModelManager
-        # This prevents double-loading the model (once here, once in Manager)
         manager = await LocalModelManager.get_instance()
-        
-        # We don't need to explicitly call load_model here because 
-        # manager.run_inference() performs auto-loading check.
-        # But calling it here ensures "warm-up" behavior if strictly needed.
-        # For now, let's just ensure the path is set in config (done by UI)
-        # and checking if we need to trigger an initial load?
-        
-        # Actually, let's keep it simple. The Manager handles state.
-        # If we want to pre-load, we can do:
+
+        # Ensure model is verified/loaded using config path
         config_path = ConfigHandler.get_setting('local_model_path')
-        if not config_path:
-             return
-             
-        # Optional: Trigger load if not loaded?
-        # await manager.load_model(config_path) 
-        # But this might be redundant if run_inference does it.
-        # However, to be consistent with method name "_setup", we should try loading.
-        if not manager.get_loaded_model_path():
-             await manager.load_model(config_path)
+        if config_path and not manager.get_loaded_model_path():
+            await manager.load_model(config_path)
 
     def _parse_news_result(self, raw_result: dict) -> dict:
         """
@@ -320,16 +327,14 @@ class AIService:
         l1 = raw_result.get('category_L1', '')
         l2 = raw_result.get('category_L2', '')
         # Prefer L2 if available, or L1-L2 combo
-        # If L2 is present, just use L2 for conciseness as per user preference (or "L1-L2"? User originally wanted concise)
-        # Reverting to my previous logic: "f"{l2}" if l2 else l1"
         final_category = f"{l2}" if l2 else l1
-        
+
         # Store structured data back 
         raw_result['category'] = final_category
         # Ensure emoji/sentiment exist
         if 'emoji' not in raw_result: raw_result['emoji'] = '📰'
         if 'sentiment' not in raw_result: raw_result['sentiment'] = 'Neutral'
-        
+
         return raw_result
 
     @log_async_operation(operation_name="classify_news", performance_threshold_ms=5000)
@@ -346,7 +351,9 @@ class AIService:
         # 1. Try Local Model
         try:
             raw_result = await self._chat_completion(messages, provider="local", json_mode=True)
-            return self._parse_news_result(raw_result)
+            result = self._parse_news_result(raw_result)
+            logger.info(f"[AI] Local classification result: {result.get('category')} ({result.get('sentiment')})")
+            return result
         except Exception as local_e:
             # Local failed (not configured, crash, etc.)
             # Log only if it wasn't just "not configured" (which is common)
@@ -362,7 +369,9 @@ class AIService:
             # Inner cloud call had 30s timeout on client.
             # We will use 30s default.
             raw_result = await self._chat_completion(messages, provider="cloud", json_mode=True)
-            return self._parse_news_result(raw_result)
+            result = self._parse_news_result(raw_result)
+            logger.info(f"[AI] Cloud classification result: {result.get('category')} ({result.get('sentiment')})")
+            return result
         except Exception as e:
             logger.error(f"[AI] Classification failed (All providers): {e}", exc_info=True)
             return None

@@ -6,7 +6,7 @@ import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.i18n import I18n
-from ui.theme import AppColors
+from ui.theme import AppColors, ThemeName
 from utils.config_handler import ConfigHandler
 
 if TYPE_CHECKING:
@@ -15,26 +15,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+
 class SystemTab(ft.Container):
     def __init__(self, show_snack_callback):
         super().__init__()
         self.show_snack = show_snack_callback
 
-        sync_concurrency = ConfigHandler.get_sync_concurrency()
+        sync_concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
 
         # --- Controls ---
 
         # Theme Selector
         self.theme_dropdown = ft.Dropdown(
+            label=I18n.get("settings_theme"),
             value=ConfigHandler.get_theme_name(),
-            width=180,
-            text_size=14,
-            border_radius=8,
-            content_padding=10,
+            width=200,
             options=[
-                ft.dropdown.Option("dark", I18n.get("theme_dark")),
-                ft.dropdown.Option("light", I18n.get("theme_light")),
-                ft.dropdown.Option("navy", I18n.get("theme_navy")),
+                ft.dropdown.Option(ThemeName.DARK, I18n.get("theme_dark")),
+                ft.dropdown.Option(ThemeName.LIGHT, I18n.get("theme_light")),
+                ft.dropdown.Option(ThemeName.NAVY, I18n.get("theme_navy")),
+                ft.dropdown.Option(ThemeName.DRACULA, I18n.get("theme_dracula")),
             ],
             on_change=self.on_theme_change
         )
@@ -152,8 +152,8 @@ class SystemTab(ft.Container):
         self.row_concurrency = SettingRow(
             icon=ft.Icons.SPEED_ROUNDED,
             icon_color=AppColors.ACCENT,
-            title=I18n.get("sys_concurrency"),
-            subtitle=I18n.get("sys_concurrency_hint"),
+            title=I18n.get("sys_sync_heavy"),
+            subtitle=I18n.get("sys_sync_heavy_hint"),
             control=ft.Row([
                 self.concurrency_input,
                 ft.IconButton(
@@ -233,6 +233,30 @@ class SystemTab(ft.Container):
                 )
             ], spacing=5, expand=True) # expand=True for input to take space
         )
+        
+        # 8. Data Maintenance
+        self.row_maint = SettingRow(
+            icon=ft.Icons.CLEANING_SERVICES_ROUNDED,
+            icon_color=AppColors.ERROR,
+            title=I18n.get("sys_data_maint"),
+            subtitle=I18n.get("sys_data_maint_desc"),
+            control=ft.Row([
+                ft.ElevatedButton(
+                    text=I18n.get("sys_btn_init"),
+                    icon=ft.Icons.REFRESH,
+                    style=ft.ButtonStyle(
+                        color=ft.Colors.WHITE,
+                        bgcolor=AppColors.ERROR,
+                    ),
+                    on_click=self.show_init_dialog
+                ),
+                ft.OutlinedButton(
+                    text=I18n.get("sys_btn_health"),
+                    icon=ft.Icons.HEALTH_AND_SAFETY,
+                    on_click=self.on_health_check_click
+                )
+            ], spacing=5)
+        )
 
         self.content = ft.ListView(
             controls=[
@@ -270,34 +294,8 @@ class SystemTab(ft.Container):
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
                         # 8. Data Maintenance (System Init)
-                        ft.Row([
-                            ft.Container(
-                                content=ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, color=AppColors.ERROR, size=24),
-                                padding=10,
-                                bgcolor=ft.Colors.with_opacity(0.1, AppColors.ERROR),
-                                border_radius=10,
-                                data="maint_icon" # Mark for update
-                            ),
-                            ft.Column([
-                                ft.Text(I18n.get("sys_data_maint"), size=16, weight=ft.FontWeight.BOLD,
-                                        color=AppColors.TEXT_PRIMARY, data="maint_title"),
-                                ft.Text(I18n.get("sys_data_maint_desc"), size=12, color=AppColors.TEXT_SECONDARY, data="maint_desc"),
-                            ], expand=True, spacing=2),
-                            ft.ElevatedButton(
-                                text=I18n.get("sys_btn_init"),
-                                icon=ft.Icons.REFRESH,
-                                style=ft.ButtonStyle(
-                                    color=ft.Colors.WHITE,
-                                    bgcolor=AppColors.ERROR,
-                                ),
-                                on_click=self.show_init_dialog
-                            ),
-                            ft.OutlinedButton(
-                                text=I18n.get("sys_btn_health"),
-                                icon=ft.Icons.HEALTH_AND_SAFETY,
-                                on_click=self.on_health_check_click
-                            )
-                        ]),
+                        # 8. Data Maintenance (System Init)
+                        self.row_maint,
 
                     ], spacing=10)
                 )
@@ -335,8 +333,8 @@ class SystemTab(ft.Container):
             if val < 1 or val > 32:
                 self.show_snack(I18n.get("sys_snack_io_range"), color=AppColors.ERROR)
                 return
-            ConfigHandler.set_sync_concurrency(val)
-            self.show_snack(I18n.get("sys_concurrency") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
+            ConfigHandler.set_sync_max_concurrent_heavy(val)
+            self.show_snack(I18n.get("sys_sync_heavy") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 

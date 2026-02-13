@@ -16,7 +16,7 @@ sqlparse>=0.4.4
 tzdata>=2025.3 # Required for APScheduler timezone support on Windows
 
 apscheduler>=3.10.0
-llama-cpp-python>=0.3.2 # Requires Visual Studio Build Tools to compile. Install manually if needed.
+llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Install manually if needed.
 
 polars>=1.38.1
 sqlalchemy>=2.0.46

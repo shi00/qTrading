@@ -80,9 +80,9 @@ class NewsFeed(ft.Container):
         if self.page:
             self.update()
 
-    def _handle_load_more(self, e):
+    async def _handle_load_more(self, e):
         if self.on_load_more_click:
-            self.on_load_more_click(e)
+            await self.on_load_more_click(e)
 
     def set_news(self, news_data: pd.DataFrame, has_more: bool = False):
         """

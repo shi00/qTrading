@@ -114,12 +114,18 @@ COMMON_COLUMNS = {
     "is_open": "col_is_open",
     "status": "col_status",
     "exchange": "col_exchange",
+    "concept_name": "col_concept_name",
+    "concept_id": "col_concept_id",
 }
 
 # Table Definitions with Table-Specific Column Overrides
 TABLE_DEFINITIONS = {
     "stock_basic": {
         "alias": "tab_stock_basic",
+        "columns": {}
+    },
+    "stock_concepts": {
+        "alias": "tab_stock_concepts",
         "columns": {}
     },
     "daily_quotes": {
@@ -142,6 +148,12 @@ TABLE_DEFINITIONS = {
             "p_change_max": "col_p_change_max",
             "net_profit_min": "col_net_profit_min",
             "net_profit_max": "col_net_profit_max",
+        }
+    },
+    "fina_audit": {
+        "alias": "tab_fina_audit",
+        "columns": {
+            "audit_result": "col_audit_result",
         }
     },
     "fina_mainbz": {

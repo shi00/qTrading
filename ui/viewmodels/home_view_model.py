@@ -5,6 +5,7 @@ import pandas as pd
 from data.data_processor import DataProcessor
 from data.market_data_service import MarketDataService
 from data.news_subscription import NewsSubscriptionService
+from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class HomeViewModel:
             
     # --- Data Actions ---
     
+        self._load_generation = 0 # Prevent race conditions
+        
     async def init_data(self):
         """Initialize data processor"""
         await self.processor.init_data()
@@ -93,6 +96,7 @@ class HomeViewModel:
         Full refresh of news (Page 0).
         Returns: (DataFrame, has_more)
         """
+        self._load_generation += 1 # Invalidate pending loads
         self.news_page = 0
         await self._fetch_news_page(0)
         return self.news_data, self.has_more_news
@@ -106,14 +110,27 @@ class HomeViewModel:
             return None, self.has_more_news
             
         self.is_loading_more = True
+        current_gen = self._load_generation
+        
         try:
             next_page = self.news_page + 1
             new_batch = await self._fetch_news_batch(next_page)
             
+            # Check if generation changed (e.g. Refresh clicked while loading)
+            if current_gen != self._load_generation:
+                logger.info("[HomeVM] Load next page aborted due to generation change")
+                return None, False
+            
             if new_batch is not None and not new_batch.empty:
                 # Update State
                 if self.news_data is not None:
-                    self.news_data = pd.concat([self.news_data, new_batch], ignore_index=True)
+                    # Offload concatenation to thread pool to avoid blocking UI
+                    self.news_data = await ThreadPoolManager().run_async(
+                        TaskType.CPU,
+                        pd.concat,
+                        [self.news_data, new_batch],
+                        ignore_index=True
+                    )
                 else:
                     self.news_data = new_batch
                     

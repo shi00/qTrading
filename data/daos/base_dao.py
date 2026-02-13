@@ -56,7 +56,7 @@ class BaseDao:
                     await conn.exec_driver_sql(sql, params)
             
             elapsed = (time.perf_counter() - start_time) * 1000
-            if elapsed > 500:
+            if elapsed > 2000:
                 logger.warning(f"[{self.__class__.__name__}] Slow Write ({elapsed:.1f}ms): {sql[:200]}...")
             else:
                 logger.debug(f"[{self.__class__.__name__}] Write ({elapsed:.1f}ms): {sql[:200]}...")

@@ -14,8 +14,6 @@ from data.news_fetcher import NewsFetcher
 from data.cache_manager import CacheManager
 from utils.thread_pool import ThreadPoolManager, TaskType
 from ui.i18n import I18n
-
-from ui.i18n import I18n
 from utils.log_decorators import log_async_operation
 
 logger = logging.getLogger(__name__)
@@ -134,10 +132,6 @@ class MarketDataService:
     @log_async_operation(operation_name="fetch_market_data")
     async def _fetch_market_data(self):
         """获取市场概览数据"""
-        # logger.debug removed as decorator handles start/end logging
-        
-        # No outer try-except needed for logging; decorator handles it.
-        # Logic errors will bubble up to _safe_fetch which is correct.
         now = datetime.datetime.now()
         today_str = now.strftime('%Y%m%d')
         start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
@@ -161,31 +155,14 @@ class MarketDataService:
         # 并行执行
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 处理指数结果 (前N个任务)
-        indices = []
-        for i, (code, key) in enumerate(self.INDICES_CONFIG):
-            res = results[i]
-            if isinstance(res, Exception):
-                logger.warning(f"[MarketDataService] Index {code} fetch failed: {res}")
-                indices.append(self._get_empty_index_data(key))
-            else:
-                indices.append(res)
-        
-        # 处理北向资金 (倒数第2个)
-        hsgt_res = results[-2]
-        hsgt = hsgt_res if not isinstance(hsgt_res, Exception) else self._get_empty_hsgt_data()
-        
-        # 处理热门概念 (最后1个)
-        hot_res = results[-1]
-        hot_concepts = hot_res if not isinstance(hot_res, Exception) else []
-        
-        # 更新缓存
-        self._cached_data = {
-            'date': date,
-            'indices': indices,
-            'hsgt': hsgt,
-            'hot_concepts': hot_concepts
-        }
+        # 将结果处理逻辑放入线程池，避免阻塞事件循环
+        self._cached_data = await ThreadPoolManager().run_async(
+            TaskType.CPU,
+            self._process_fetch_results,
+            results,
+            date,
+            self.INDICES_CONFIG
+        )
         
         # 通知 UI 更新
         listener_count = len(self._listeners)
@@ -195,6 +172,51 @@ class MarketDataService:
                     listener()
                 except Exception as e:
                     logger.error(f"[MarketDataService] Listener error: {e}")
+
+    @staticmethod
+    def _process_fetch_results(results, date, indices_config):
+        """
+        静态处理方法，可在线程中运行。
+        解析 asyncio.gather 的结果并构建最终数据字典。
+        """
+        # 处理指数结果 (前N个任务)
+        indices = []
+        for i, (code, key) in enumerate(indices_config):
+            res = results[i]
+            if isinstance(res, Exception):
+                logger.warning(f"[MarketDataService] Index {code} fetch failed: {res}")
+                indices.append(MarketDataService._get_empty_index_data_static(key))
+            else:
+                indices.append(res)
+        
+        # 处理北向资金 (倒数第2个)
+        hsgt_res = results[-2]
+        hsgt = hsgt_res if not isinstance(hsgt_res, Exception) else MarketDataService._get_empty_hsgt_data_static()
+        
+        # 处理热门概念 (最后1个)
+        hot_res = results[-1]
+        hot_concepts = hot_res if not isinstance(hot_res, Exception) else []
+        
+        return {
+            'date': date,
+            'indices': indices,
+            'hsgt': hsgt,
+            'hot_concepts': hot_concepts
+        }
+
+    @staticmethod
+    def _get_empty_index_data_static(name_key: str) -> dict:
+        return {'name': I18n.get(name_key), 'value': '-', 'change': '-', 'color': 'grey'}
+
+    def _get_empty_index_data(self, name_key: str) -> dict:
+        return self._get_empty_index_data_static(name_key)
+
+    @staticmethod
+    def _get_empty_hsgt_data_static() -> dict:
+        return {'name': I18n.get('home_northbound'), 'value': '-', 'sub': '-', 'color': 'grey'}
+    
+    def _get_empty_hsgt_data(self) -> dict:
+        return self._get_empty_hsgt_data_static()
     
     @log_async_operation(operation_name="ensure_trade_cal")
     async def _ensure_trade_cal(self, end_date: str):
@@ -209,13 +231,15 @@ class MarketDataService:
         )
         if df is not None and not df.empty:
             row = df.iloc[0]
-            c = row.get('pct_chg', 0) or 0
-            v = row.get('close', 0) or 0
+            c = self._safe_float(row.get('pct_chg'))
+            v = self._safe_float(row.get('close'))
+            
+            color = 'red' if c >= 0 else 'green'
             return {
                 'name': I18n.get(name_key),
                 'value': f"{v:.2f}",
                 'change': f"{c:+.2f}%",
-                'color': 'red' if c >= 0 else 'green'
+                'color': color
             }
         return self._get_empty_index_data(name_key)
 
@@ -228,7 +252,22 @@ class MarketDataService:
             TaskType.IO, self.api.get_moneyflow_hsgt, trade_date=date
         )
         if df is not None and not df.empty:
-            val = float(df.iloc[0]['north_money'] or 0)
+            # Tushare 'north_money' is in million yuan usually, but check specific API docs if unsure.
+            # Here keeping existing logic but making it safe.
+            val = self._safe_float(df.iloc[0].get('north_money'))
+            
+            # Formatter logic: > 100 ? (Assumption: Output is Yuan? Or Ten Thousand?)
+            # If val is huge, use Yi.
+            display_val = f"{val:.0f}"
+            if abs(val) > 10000: # 1 Yi if unit is Wan? Or just heuristic
+                 display_val = f"{val/10000:.2f}{I18n.get('unit_yi')}"
+            else:
+                 display_val = f"{val:.0f}{I18n.get('unit_wanshou')}" # 'Wan'
+            
+            # Reverting to original logic to avoid breaking unit assumptions without testing
+            # Original: result/100 -> Yi, else Wan. Implies unit is Million?
+            # Let's stick to safe float processing only.
+            
             return {
                 'name': I18n.get('home_northbound'),
                 'value': f"{val/100:.2f}{I18n.get('unit_yi')}" if abs(val) > 100 else f"{val:.0f}{I18n.get('unit_wanshou')}",
@@ -239,3 +278,15 @@ class MarketDataService:
 
     def _get_empty_hsgt_data(self) -> dict:
         return {'name': I18n.get('home_northbound'), 'value': '-', 'sub': '-', 'color': 'grey'}
+
+    @staticmethod
+    def _safe_float(val) -> float:
+        """Safely convert value to float, defaulting to 0.0 if None/NaN"""
+        try:
+            if val is None: return 0.0
+            f = float(val)
+            import math
+            if math.isnan(f): return 0.0
+            return f
+        except (ValueError, TypeError):
+            return 0.0

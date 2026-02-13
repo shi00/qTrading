@@ -68,7 +68,10 @@ class ConfigHandler:
         "log_max_mb": 5,
         "log_backup_count": 5,
         "db_queue_size": 1024,
-        "sync_concurrency": 3,
+
+        # Heavy sync tasks (Historical Data, Financial Reports)
+        "sync_max_concurrent_heavy": 3,
+
         "max_batch_rows": 20000,
 
         "no_proxy_domains": [],
@@ -81,7 +84,11 @@ class ConfigHandler:
         "ai_news_prompt": DEFAULT_NEWS_PROMPT,
         "ai_max_candidates": 30,
         "strategy_min_turnover": 2.0,
-        "ai_concurrency": 0,
+
+        # Max parallel AI analysis tasks (Cloud API or Local Threads)
+        # Prevents API Rate Limits (429) or Local Resource exhaustion
+        "ai_max_concurrent_analysis": 5,
+
         "request_max_retries": 3,
         "tushare_timeout": 30,
         "tushare_api_rate_limit": 200,
@@ -95,9 +102,12 @@ class ConfigHandler:
         # Local AI Advanced Settings
         "local_n_threads": 4,
         "local_n_batch": 512,
-        "local_n_ctx": 4096,
+        "local_n_ctx": 2048,
         "local_flash_attn": True,
-        "local_n_gpu_layers": 0
+        "local_n_gpu_layers": 0,
+
+        # Concurrency
+        "sync_concurrency_light": 20
     }
 
     @staticmethod
@@ -379,11 +389,10 @@ class ConfigHandler:
     @staticmethod
     def get_local_ai_config() -> dict:
         """Get local AI configuration"""
-        default_threads = max(1, os.cpu_count() - 1) if os.cpu_count() else 4
         return {
             "local_model_path": ConfigHandler.get_setting("local_model_path", ""),
-            "local_timeout": ConfigHandler.get_setting("local_model_timeout", 90),
-            "n_threads": ConfigHandler.get_setting("local_n_threads", default_threads),
+            "local_model_timeout": ConfigHandler.get_setting("local_model_timeout", 90),
+            "n_threads": ConfigHandler.get_setting("local_n_threads", 4),
             "n_batch": ConfigHandler.get_setting("local_n_batch", 512),
             "n_ctx": ConfigHandler.get_setting("local_n_ctx", 4096),
             "flash_attn": ConfigHandler.get_setting("local_flash_attn", True),
@@ -440,6 +449,16 @@ class ConfigHandler:
         return ConfigHandler.save_config({"ai_max_candidates": int(val)})
 
     @staticmethod
+    def get_sync_max_concurrent_heavy():
+        config = ConfigHandler.load_config()
+        # Default to 3 for heavy tasks
+        return config.get("sync_max_concurrent_heavy", 3)
+
+    @staticmethod
+    def set_sync_max_concurrent_heavy(val):
+        return ConfigHandler.save_config({"sync_max_concurrent_heavy": int(val)})
+
+    @staticmethod
     def get_strategy_min_turnover():
         config = ConfigHandler.load_config()
         l_min_turnover = config.get("strategy_min_turnover", 2.0)
@@ -450,13 +469,24 @@ class ConfigHandler:
         return ConfigHandler.save_config({"strategy_min_turnover": float(val)})
 
     @staticmethod
-    def get_ai_concurrency():
+    def get_ai_max_concurrent_analysis():
         config = ConfigHandler.load_config()
-        return config.get("ai_concurrency", 0)
+        # Direct key access without legacy fallback
+        return int(config.get("ai_max_concurrent_analysis", 5))
 
     @staticmethod
-    def set_ai_concurrency(val):
-        return ConfigHandler.save_config({"ai_concurrency": int(val)})
+    def set_ai_max_concurrent_analysis(val):
+        return ConfigHandler.save_config({"ai_max_concurrent_analysis": int(val)})
+
+    @staticmethod
+    def get_sync_concurrency_light():
+        config = ConfigHandler.load_config()
+        # Default to 20 for lightweight requests (e.g. concepts, list, calendar)
+        return config.get("sync_concurrency_light", 20)
+
+    @staticmethod
+    def set_sync_concurrency_light(val):
+        return ConfigHandler.save_config({"sync_concurrency_light": int(val)})
 
     # === API Robustness Parameters ===
 

@@ -112,7 +112,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         total_stocks = len(all_stocks)
 
         # 2. Concurrency Control
-        concurrency = ConfigHandler.get_sync_concurrency()
+        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(concurrency)
 
         # 3. Data-as-State Resume Logic
@@ -285,7 +285,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             return
 
         total_saved = 0
-        concurrency = ConfigHandler.get_sync_concurrency()
+        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(concurrency)
 
         for day_str in dates_to_sync:
@@ -349,7 +349,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         logger.info(f"[HybridSync] Batch syncing corporate actions for {len(dates)} days...")
 
-        concurrency = ConfigHandler.get_sync_concurrency()
+        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(concurrency)
 
         async def sync_one_date_table(date_str, table_name, table_cfg):

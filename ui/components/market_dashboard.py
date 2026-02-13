@@ -158,7 +158,6 @@ class MarketDashboard(ft.Column):
             self.hsgt_sub.value = str(hsgt.get('sub', '--'))
             
             color_str = hsgt.get('color', 'GREY').upper()
-            # Map common colors to AppColors if possible, or fallback to standard
             if color_str == 'RED': self.hsgt_val.color = AppColors.UP
             elif color_str == 'GREEN': self.hsgt_val.color = AppColors.DOWN
             else: self.hsgt_val.color = AppColors.TEXT_SECONDARY
@@ -167,18 +166,39 @@ class MarketDashboard(ft.Column):
                 self.hsgt_val.update()
                 self.hsgt_sub.update()
 
-        # 3. Update Hot Concepts
+        # 3. Update Hot Concepts (Optimized: Recycle Controls)
         hot_concepts = data.get('hot_concepts', [])
-        new_controls = []
         
-        if hot_concepts:
-            for item in hot_concepts:
-                if item.get('name'):
-                    new_controls.append(self._build_concept_card(item))
-        else:
-            new_controls.append(self.concepts_placeholder)
+        if not hot_concepts:
+            # Empty state
+            if len(self.concepts_row.controls) != 1 or self.concepts_row.controls[0] != self.concepts_placeholder:
+                self.concepts_row.controls = [self.concepts_placeholder]
+                if self.page: self.concepts_row.update()
+            return
+
+        # Ensure we have enough controls, create added ones
+        current_count = len(self.concepts_row.controls)
+        target_count = len(hot_concepts)
+        
+        # If placeholder is showing, clear it first
+        if current_count == 1 and self.concepts_row.controls[0] == self.concepts_placeholder:
+            self.concepts_row.controls.clear()
+            current_count = 0
             
-        self.concepts_row.controls = new_controls
+        # Add missing controls
+        if current_count < target_count:
+            for _ in range(target_count - current_count):
+                self.concepts_row.controls.append(self._build_concept_card_skeleton())
+                
+        # Remove excess controls
+        if current_count > target_count:
+            self.concepts_row.controls = self.concepts_row.controls[:target_count]
+            
+        # Update content of all controls
+        for i, item in enumerate(hot_concepts):
+            if i < len(self.concepts_row.controls):
+                self._update_concept_card(self.concepts_row.controls[i], item)
+                
         if self.page:
             self.concepts_row.update()
 
@@ -201,25 +221,62 @@ class MarketDashboard(ft.Column):
         if chg_ctrl.color != color:
             chg_ctrl.color = color
 
-    def _build_concept_card(self, item):
+    def _build_concept_card_skeleton(self):
+        """Create a blank card structure to be updated later"""
+        # Structure: Container -> Column -> [Text(Name), Row(Icon, Text(Change))]
+        # We assign data tags to find controls easily
+        name_txt = ft.Text("-", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY, no_wrap=True)
+        icon = ft.Icon(ft.Icons.HELP, size=16)
+        change_txt = ft.Text("-", size=16, weight=ft.FontWeight.BOLD)
+        
+        # Internal Row
+        row_stats = ft.Row([icon, change_txt], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        
+        # Main Col
+        col_main = ft.Column([name_txt, row_stats], spacing=5)
+        
+        container = ft.Container(
+            content=col_main,
+            padding=15,
+            bgcolor=AppColors.SURFACE,
+            border_radius=4,
+            border=ft.border.all(1, AppColors.BORDER),
+            col={"xs": 6, "sm": 4, "md": 3, "lg": 2},
+            data={"name": name_txt, "icon": icon, "change": change_txt} # References for fast update
+        )
+        return container
+
+    def _update_concept_card(self, container: ft.Container, item):
+        """Update existing card without rebuilding"""
+        refs = container.data
+        if not refs: return # Should not happen if created by skeleton
+        
         name = item.get('name', '--')
         change = item.get('change', '0.00%')
         color_str = str(item.get('color', ''))
         is_up = 'red' in color_str
         color = AppColors.UP if is_up else AppColors.DOWN
+        
+        # Update Name
+        if refs['name'].value != name:
+            refs['name'].value = name
+            
+        # Update Change Text
+        if refs['change'].value != change:
+            refs['change'].value = change
+        if refs['change'].color != color:
+             refs['change'].color = color
+             
+        # Update Icon
+        target_icon = ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN
+        if refs['icon'].name != target_icon:
+            refs['icon'].name = target_icon
+            refs['icon'].color = color
+        elif refs['icon'].color != color:
+             refs['icon'].color = color
 
-        return ft.Container(
-            content=ft.Column([
-                ft.Text(name, size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY, no_wrap=True),
-                ft.Row([
-                    ft.Icon(ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN,
-                            color=color, size=16),
-                    ft.Text(change, size=16, weight=ft.FontWeight.BOLD, color=color)
-                ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-            ], spacing=5),
-            padding=15,
-            bgcolor=AppColors.SURFACE,
-            border_radius=4,
-            border=ft.border.all(1, AppColors.BORDER),
-            col={"xs": 6, "sm": 4, "md": 3, "lg": 2}
-        )
+    def _build_concept_card(self, item):
+        # Legacy method kept if needed, but we use skeleton + update now
+        c = self._build_concept_card_skeleton()
+        self._update_concept_card(c, item)
+        return c

@@ -53,7 +53,22 @@ class DataSourceTab(ft.Container):
                                  bgcolor=AppColors.ERROR),
             visible=False,
             on_click=self.repair_data,
-            height=36
+            height=40,
+            width=180
+        )
+
+        # Health Check Button (extracted for consistency)
+        # Fix vertical alignment for height=40
+        style_health = AppStyles.primary_button()
+        style_health.padding = ft.padding.symmetric(horizontal=15, vertical=0)
+
+        self.btn_check_health = ft.ElevatedButton(
+            text=I18n.get("settings_check_health"),
+            icon=ft.Icons.REFRESH,
+            on_click=self.refresh_health_status,
+            style=style_health,
+            height=40,
+            width=180
         )
 
         self.health_dashboard = DashboardCard(
@@ -66,12 +81,7 @@ class DataSourceTab(ft.Container):
                             tooltip=I18n.get("health_report_title"),
                             on_click=self.show_health_report_dialog
                         ),
-                        ft.ElevatedButton(
-                            text=I18n.get("settings_check_health"),
-                            icon=ft.Icons.REFRESH,
-                            on_click=self.refresh_health_status,
-                            style=AppStyles.primary_button(),
-                        )
+                        self.btn_check_health
                     ])
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
@@ -85,7 +95,7 @@ class DataSourceTab(ft.Container):
                 ft.Container(height=10),
                 self.health_detail_text,
                 ft.Container(height=5),
-                self.btn_repair
+                ft.Row([self.btn_repair], alignment=ft.MainAxisAlignment.END) # Right-align repair button too
             ])
         )
 
@@ -125,35 +135,41 @@ class DataSourceTab(ft.Container):
         )
 
         # 3. Connection Settings
+        # 3. Connection Settings
         self.token_input = ft.TextField(
             label=I18n.get("settings_token"),
             password=True,
             can_reveal_password=True,
             value=current_token,
-            # width=400, # Handled by SettingRow layout
             expand=True,
+            height=40,
+            content_padding=10,
+            text_size=14,
             on_submit=self.save_and_verify_tushare
         )
+        # Fix vertical alignment for height=40
+        style_save = AppStyles.primary_button()
+        style_save.padding = ft.padding.symmetric(horizontal=15, vertical=0)
+        
         self.btn_save_token = ft.ElevatedButton(
-            text=I18n.get("settings_save_token"),
+            text=I18n.get("common_save"),
             icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
             on_click=self.save_and_verify_tushare,
-            style=AppStyles.primary_button(),
-            # width=400
+            style=style_save,
+            height=40,
+            width=180, # Match width of sync_button
         )
-        self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT)
-        self.status_text = ft.Text(I18n.get("settings_verify_failed"), color=AppColors.TEXT_HINT)
+        self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT, size=12)
+        self.status_text = ft.Text(I18n.get("settings_verify_failed"), color=AppColors.TEXT_HINT, size=12)
 
-        # Refactored Connection Card using SettingRow
-        # Refactored Connection Card using SettingRow
         self.row_token = SettingRow(
             icon=ft.Icons.KEY_ROUNDED,
             title=I18n.get("settings_token"),
             subtitle=I18n.get("settings_token_desc"),
             control=ft.Column([
-                ft.Row([self.token_input, self.btn_save_token]),
-                ft.Row([self.status_icon, self.status_text])
-            ], spacing=5, expand=True), # Control takes remaining space
+                ft.Row([self.token_input, self.btn_save_token], alignment=ft.MainAxisAlignment.END, spacing=10),
+                ft.Row([self.status_icon, self.status_text], spacing=5, alignment=ft.MainAxisAlignment.END) # Aligned end for consistency
+            ], spacing=5, alignment=ft.MainAxisAlignment.CENTER, expand=True), 
             icon_color=AppColors.ACCENT
         )
         self.connection_card = DashboardCard(
@@ -165,32 +181,34 @@ class DataSourceTab(ft.Container):
         )
 
         # 4. Historical Data
-        self.progress_bar = ft.ProgressBar(width=400, visible=False)
+        self.progress_bar = ft.ProgressBar(width=None, visible=False, expand=True) 
         self.progress_text = ft.Text("", size=12, color=AppColors.INFO)
+        # Fix vertical alignment for height=40 (Init Data)
+        style_init = AppStyles.primary_button()
+        style_init.padding = ft.padding.symmetric(horizontal=15, vertical=0)
+
         self.sync_button = ft.ElevatedButton(
             text=I18n.get("settings_init_data"),
             icon=ft.Icons.CLOUD_DOWNLOAD,
             on_click=self.init_historical_data,
             tooltip=I18n.get("settings_init_desc"),
-            style=AppStyles.primary_button(),
-            # width=400
+            style=style_init,
+            height=40,
+            width=180, 
         )
 
         # Refactored Historical Card using SettingRow
+        # Uses identical structure to row_token for consistent alignment
         self.row_init = SettingRow(
             icon=ft.Icons.HISTORY_ROUNDED,
             title=I18n.get("settings_init_data"),
             subtitle=I18n.get("settings_hint_first_run"),
             control=ft.Column([
-                self.sync_button,
-                ft.Container(
-                    content=ft.Column([
-                        self.progress_bar,
-                        self.progress_text,
-                    ]),
-                    padding=ft.padding.only(top=5),
-                ),
-            ], horizontal_alignment=ft.CrossAxisAlignment.END), # Button aligned to right
+                ft.Row([self.sync_button], alignment=ft.MainAxisAlignment.END),
+                ft.Row([
+                    ft.Column([self.progress_bar, self.progress_text], spacing=2, expand=True)
+                ], alignment=ft.MainAxisAlignment.END) # Container row
+            ], spacing=5, alignment=ft.MainAxisAlignment.CENTER, expand=True),
             icon_color=ft.Colors.PURPLE
         )
         self.historical_card = DashboardCard(
@@ -244,7 +262,7 @@ class DataSourceTab(ft.Container):
         # Update text labels here... simplified for brevity, in real impl should match SettingsView
         # We can implement a minimal set for now
         self.token_input.label = I18n.get("settings_token")
-        self.btn_save_token.text = I18n.get("settings_save_token")
+        self.btn_save_token.text = I18n.get("common_save")
         self._safe_update()
 
     # --- Logic Methods (Migrated from SettingsView) ---
@@ -252,6 +270,10 @@ class DataSourceTab(ft.Container):
     def refresh_health_status(self, e):
         if not self.page:
             return
+        
+        # Disable button to indicate processing
+        self.btn_check_health.disabled = True
+        
         self.metric_health.set_value(I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, AppColors.INFO)
         self.metric_storage.set_value(I18n.get("ds_status_calc"), ft.Icons.HOURGLASS_TOP, AppColors.TEXT_HINT)
         self.health_detail_text.value = I18n.get("health_checking")
@@ -302,11 +324,13 @@ class DataSourceTab(ft.Container):
                 self.btn_repair.visible = False
             self.btn_repair.update()
 
-            self._safe_update()
         except Exception as e:
             self.metric_health.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR,
                                          AppColors.ERROR)
             self.health_detail_text.value = str(e)
+            
+        finally:
+            self.btn_check_health.disabled = False
             self._safe_update()
 
     def repair_data(self, e):
@@ -583,17 +607,36 @@ class DataSourceTab(ft.Container):
         self.is_syncing = is_busy
         if not self.page: return
 
-        controls = [self.action_update_today, self.action_full_sync, self.action_clear_cache, self.sync_button]
+        # Include btn_repair in the managed controls
+        controls = [self.action_update_today, self.action_full_sync, self.action_clear_cache, self.sync_button, self.btn_repair]
+        
         for ctrl in controls:
-            if is_busy:
-                ctrl.disabled = True
-                if isinstance(ctrl, ActionChip): ctrl.opacity = 0.5
-
-                if ctrl == self.sync_button and active_btn == self.sync_button:
+            # Case 1: Active Button (The one clicked)
+            if active_btn == ctrl:
+                if isinstance(ctrl, ActionChip):
+                    # ActionChips handle their own disabled state when loading
+                    ctrl.set_loading(is_busy) 
+                
+                elif ctrl == self.sync_button:
+                    # Sync button supports 'Cancel' action, so it must remain enabled
                     ctrl.disabled = False
+                    
+                else:
+                    # Other standard buttons (e.g. Repair) that don't support cancellation
+                    # should be disabled to prevent double-setup
+                    ctrl.disabled = is_busy
+            
+            # Case 2: Inactive Buttons (Others)
             else:
-                ctrl.disabled = False
-                if isinstance(ctrl, ActionChip): ctrl.opacity = 1.0
+                if is_busy:
+                    ctrl.disabled = True
+                    if isinstance(ctrl, ActionChip): 
+                        ctrl.opacity = 0.5 # Strong dim
+                else:
+                    ctrl.disabled = False
+                    if isinstance(ctrl, ActionChip): 
+                        ctrl.set_loading(False) # Reset state
+                        ctrl.opacity = 1.0
 
         # Batch update via parent container to ensure consistency
         self.update()

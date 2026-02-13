@@ -57,7 +57,7 @@ class AIBrainTab(ft.Container):
         ai_cfg = ConfigHandler.get_ai_config()
         current_max_candidates = ConfigHandler.get_ai_max_candidates()
         current_min_turnover = ConfigHandler.get_strategy_min_turnover()
-        current_ai_concurrency = ConfigHandler.get_ai_concurrency()
+        current_ai_concurrency = ConfigHandler.get_ai_max_concurrent_analysis()
         
         # --- Connection Controls ---
         self.ai_api_key_input = ft.TextField(
@@ -599,7 +599,7 @@ class AIBrainTab(ft.Container):
                 concurrency = int(concurrency_str)
                 if not (_CONCURRENCY_MIN <= concurrency <= _CONCURRENCY_MAX):
                     raise ValueError("Range")
-                ConfigHandler.set_ai_concurrency(concurrency)
+                ConfigHandler.set_ai_max_concurrent_analysis(concurrency)
             except ValueError:
                 self.show_snack(
                     I18n.get("ai_snack_invalid_range").format(

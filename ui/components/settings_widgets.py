@@ -1,4 +1,5 @@
 import flet as ft
+
 from ui.theme import AppColors, AppStyles
 
 
@@ -7,6 +8,7 @@ class DashboardCard(ft.Container):
     Base card component for the dashboard.
     Uses semantic tokens — auto-updates with theme.
     """
+
     def __init__(self, content, padding=20, expand=False):
         style = AppStyles.card()
         super().__init__(
@@ -25,6 +27,7 @@ class MetricCard(ft.Container):
     Display a single key metric with label, value, and status icon.
     Standard colors use semantic tokens. UP/DOWN colors are custom (Layer 2).
     """
+
     def __init__(self, label, value, icon=None, status_color=None, trend=None, trend_up=True):
         super().__init__()
         self.expand = True
@@ -91,6 +94,7 @@ class ActionChip(ft.Container):
     Interactive chip for quick actions.
     Uses semantic tokens — auto-updates with theme.
     """
+
     def __init__(self, icon, title, subtitle, on_click, is_primary=False):
         super().__init__(
             on_click=on_click,
@@ -105,26 +109,26 @@ class ActionChip(ft.Container):
         self.is_primary = is_primary
 
         # Colors resolve automatically via tokens
-        if is_primary:
+        self.content = self._build_content()
+
+    def _build_content(self):
+        # Colors resolve automatically via tokens
+        if self.is_primary:
             text_color = ft.Colors.ON_PRIMARY
             self.bgcolor = ft.Colors.PRIMARY
-            self.shadow = ft.BoxShadow(
-                blur_radius=8,
-                color=ft.Colors.with_opacity(0.3, ft.Colors.PRIMARY),
-                offset=ft.Offset(0, 4)
-            )
+            # Shadow already set in init but can be dynamic
         else:
             text_color = ft.Colors.ON_SURFACE
             self.bgcolor = ft.Colors.SURFACE
-            self.border = ft.border.all(1, ft.Colors.OUTLINE)
 
         sub_color = ft.Colors.with_opacity(0.8, text_color)
 
-        self.content = ft.Row([
+        return ft.Row([
             ft.Container(
                 content=ft.Icon(self.icon_name, color=text_color, size=24),
                 padding=10,
-                bgcolor=ft.Colors.with_opacity(0.1 if is_primary else 0.05, text_color if is_primary else ft.Colors.SHADOW),
+                bgcolor=ft.Colors.with_opacity(0.1 if self.is_primary else 0.05,
+                                               text_color if self.is_primary else ft.Colors.SHADOW),
                 border_radius=10,
             ),
             ft.Column([
@@ -134,18 +138,37 @@ class ActionChip(ft.Container):
             ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16)
         ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
+    def set_loading(self, is_loading: bool):
+        """Visual update for loading state"""
+        if is_loading:
+            # Show Spinner
+            color = ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.PRIMARY
+            self.content.controls[-1] = ft.ProgressRing(width=16, height=16, stroke_width=2, color=color)
+            self.disabled = True
+            self.opacity = 0.8  # Slight dim but clearer than disabled
+        else:
+            # Restore Icon
+            sub_color = ft.Colors.with_opacity(0.8, ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.ON_SURFACE)
+            self.content.controls[-1] = ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16)
+            self.disabled = False
+            self.opacity = 1.0
+
+        self.update()
+
 
 class StatusBadge(ft.Container):
     """
     Small pill-shaped badge for status (Connected, Syncing, etc).
     """
+
     def __init__(self, text, color, icon=None):
         super().__init__()
         content_row = [ft.Text(text, size=10, color=color, weight=ft.FontWeight.BOLD)]
         if icon:
             content_row.insert(0, ft.Icon(icon, size=10, color=color))
 
-        self.content = ft.Row(content_row, spacing=4, alignment=ft.MainAxisAlignment.CENTER, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        self.content = ft.Row(content_row, spacing=4, alignment=ft.MainAxisAlignment.CENTER,
+                              vertical_alignment=ft.CrossAxisAlignment.CENTER)
         self.padding = ft.padding.symmetric(horizontal=8, vertical=4)
         self.bgcolor = ft.Colors.with_opacity(0.1, color)
         self.border_radius = 20
@@ -157,6 +180,7 @@ class SectionHeader(ft.Row):
     Professional section header with left border accent.
     Uses semantic tokens — auto-updates with theme.
     """
+
     def __init__(self, title, action=None):
         super().__init__()
         self.alignment = ft.MainAxisAlignment.SPACE_BETWEEN
@@ -177,6 +201,7 @@ class SettingRow(ft.Row):
     Standard setting row with icon, title, subtitle, and control.
     Uses semantic tokens — auto-updates with theme.
     """
+
     def __init__(self, icon, title, subtitle, control, icon_color=None):
         super().__init__()
         self.vertical_alignment = ft.CrossAxisAlignment.CENTER

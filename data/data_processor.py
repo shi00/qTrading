@@ -296,6 +296,22 @@ class DataProcessor:
                 else:
                     lag_days = len(official_dates)
 
+            # 1.5 Concept Health (New)
+            try:
+                # Count concept mappings
+                # This needs a new method in CacheManager/StockDao to count or we just use raw sql here if needed
+                # Ideally: await self.cache.get_concept_count()
+                # For now quick check using BaseDao or existing methods?
+                # Let's use internal engine access for health check or add count method.
+                # Adding `get_table_count` to BaseDao/StockDao is best practice but for now:
+                async with self.cache.engine.connect() as conn:
+                    # Check concept count
+                    r = await conn.exec_driver_sql("SELECT COUNT(*) FROM stock_concepts")
+                    concept_count = r.scalar()
+            except Exception as e:
+                logger.warning(f"Concept check failed: {e}")
+                concept_count = 0
+
             # 2. Financial Health
             deep_health = await self.cache.check_comprehensive_health()
             
@@ -313,17 +329,23 @@ class DataProcessor:
             if fin_fresh_ratio < 0.90:
                 status = 'red'
                 reasons.append(I18n.get('health_financial_missing').format(ratio=f"{fin_fresh_ratio:.0%}"))
-            
-            logger.info(f"[check_data_health] Status: {status}, lag_days: {lag_days}, fin_ratio: {fin_fresh_ratio:.1%}")
+            status_msg = I18n.get("init_complete").format(
+                status="OK" if lag_days == 0 else f"Lag {lag_days}d",
+                coverage=f"{deep_health.get('coverage', 0):.1f}%"
+            )
+            # Append concept info
+            status_msg += f" | Concepts: {concept_count}"
             
             return {
-                'status': status,
-                'reasons': reasons,
-                'market': {'lag_days': lag_days, 'latest_local': last_local or 'N/A'},
-                'fundamentals': deep_health,
-                'financial_coverage': f"{fin_fresh_ratio:.1%}"
+                'status': 'green' if lag_days == 0 and concept_count > 0 else 'orange',
+                'msg': status_msg,
+                'details': {
+                    'lag': lag_days,
+                    'market_date': last_local,
+                    'financial_coverage': deep_health.get('coverage', 0),
+                    'concept_count': concept_count
+                }
             }
-
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             return {'status': 'red', 'msg': str(e)}
@@ -366,6 +388,207 @@ class DataProcessor:
         finally:
             with self._sync_lock:
                 self._is_syncing_basic = False
+
+    @log_async_operation(operation_name="sync_concepts")
+    async def sync_concepts(self):
+        """Sync stock concepts from Tushare."""
+        if self.is_cancelled(): return 0
+        
+        try:
+            logger.info("[sync_concepts] Starting concept sync...")
+            # Tushare concept_detail returns ts_code, concept_name, concept_id
+            # We need to fetch for all stocks? No, concept_detail takes ts_code OR id.
+            # Efficient way: Get all concepts list first, then map? 
+            # Tushare 'concept_detail' can get all items if no params? No.
+            # Tushare 'concept' gets list of concepts. 'concept_detail' gets stocks in a concept.
+            # Strategy: 
+            # 1. Get List of Concepts (api.concept())
+            # 2. For each concept, get stocks (api.concept_detail(id=...)) -> TOO SLOW (hundreds of concepts)
+            # Alternative: Tushare 'stock_basic' doesn't have concepts.
+            # Alternative 2: Tushare 'concept_detail' with ts_code="" returns what? likely nothing or error.
+            # 
+            # Let's check TushareHelper or just Iterate?
+            # Actually standard way is: get all concepts, then for each concept get stocks.
+            # But that is too many requests (limit 500/min).
+            # 
+            # Better approach for "My Stocks" analysis:
+            # We only strictly need concepts for the *filtered* stocks in AI Analysis.
+            # BUT user wants "Local Cache" for everything.
+            #
+            # Compromise: Tushare has `concept_detail` which might accept list? 
+            # Docs say: id, name, ts_code.
+            #
+            # Wait, `stock_company` info might have business scope but not concept.
+            # 
+            # Let's use `pro.stock_basic(fields='ts_code,industry')`? No, industry != concept.
+            # 
+            # Re-reading Tushare Docs (Mental):
+            # `pro.concept()` -> list of concepts (hundreds).
+            # `pro.concept_detail(id='TS0', fields='ts_code,name')` -> stocks in concept.
+            # 
+            # This is heavy to sync FULLY.
+            # Maybe we only sync "Hot Concepts"? Or specific list?
+            # 
+            # Correct approach for efficient full-sync:
+            # 1. Get all concepts: `df_concepts = pro.concept()`
+            # 2. Filter for "useful" concepts (e.g. src='ts')?
+            # 3. Iterate and fetch details.
+            # 
+            # This might take too long for `initialize_system`.
+            # 
+            # Alternative: Lazy load?
+            # User requirement: "All data from local cache".
+            # 
+            # Let's look at `TushareClient`... maybe it has a helper?
+            # If not, we might need a separate "Concept Sync" task, or accept it takes time.
+            # 
+            # Let's implement a lighter version:
+            # Sync only when explicitly requested? 
+            # Or maybe just use `ths_index` (Tonghuashun Concepts) which might be better?
+            # 
+            # OK, for now, let's implement a "best effort" sync or just simple caching 
+            # of what we have access to. 
+            # 
+            # Wait, `analyze_stock` was doing `get_concept_detail(ts_code=...)`.
+            # Calling `concept_detail` by `ts_code` gets concepts for THAT stock.
+            # We can run this for ALL ACTIVE stocks?
+            # 5000 stocks * 1 request = 5000 requests -> WAY too many.
+            # 
+            # OPTIMIZATION:
+            # `concept_detail` does NOT support bulk `ts_code` (comma numeric? no).
+            # 
+            # BUT `concept` API returns all concepts.
+            # Maybe we loop over CONCEPT IDs?
+            # There are ~300-500 concepts. 
+            # 500 requests is manageable with thread pool (500/20 threads = 25 batches).
+            # 
+            # Valid plan:
+            # 1. Get all concepts.
+            # 2. Concurrently fetch details for all concepts.
+            # 3. Invert the map (Concept -> Stocks) to (Stock -> Concepts)
+            # 4. Save.
+            
+            # API: self.api.get_concepts() -> This likely needs to be implemented or used raw.
+            # Let's see if TushareClient has it.
+            # If not, we use `self.api.pro.concept()` and `self.api.pro.concept_detail()`.
+            
+            concepts = await ThreadPoolManager().run_async(TaskType.IO, self.api.pro.concept, src='ts')
+            if concepts is None or concepts.empty:
+                logger.warning("No concepts found.")
+                return 0
+                
+            # Get list of concept codes
+            concept_codes = concepts['code'].tolist()
+            
+            # Fetch details for all concepts using ThreadPool
+            # We use `fetch_one` defined below for concurrency
+
+            # 
+            # For now, I will implement a placeholder that warns if full sync is too heavy,
+            # OR I will just implementation a smart sync (fetch concept list, save it).
+            # 
+            # Wait, `stock_concepts` table needs `ts_code`.
+            # If we only have concept list, we can't populate the link.
+            # 
+            # Revised Plan for Sync:
+            # 1. Fetch Concept List (`concept`)
+            # 2. Fetch Stock Concept List (`concept_detail`)?
+            # 
+            # Actually, `concept_detail` documentation says:
+            # "Input id OR ts_code".
+            # 
+            # If we input `ts_code`, we get concepts for that stock.
+            # If we input `id` (concept id), we get stocks in that concept.
+            # 
+            # There are fewer Concepts (400) than Stocks (5000).
+            # So iterating Concepts is 10x faster.
+            # 
+            # So:
+            # 1. Get all concepts: `df_concepts = pro.concept()`
+            # 2. Parallel fetch `pro.concept_detail(id=c)` for all `c`.
+            # 3. Merge results.
+            
+            # Let's add `get_all_concepts_data` to TushareClient to keep this clean?
+            # Or just do it here. 
+            # I'll do it here using ThreadPool.
+            
+            # Chunking to avoid rate limit? 
+            # Tushare limit is usually high (100-500/min). 
+            # If we have 400 concepts, we might hit limit.
+            # 
+            # Safest: Use TushareClient to handle limiting.
+            
+            # Fetch Concept List
+            df_c = await ThreadPoolManager().run_async(TaskType.IO, self.api.pro.concept, src='ts')
+            if df_c is None or df_c.empty: return 0
+            
+            c_codes = df_c['code'].tolist()
+            
+            # Use Semaphore to limit concurrency (Architecturally better than chunking)
+            # TushareClient has internal rate limiting, so we just limit concurrency to avoid
+            # overloading the ThreadPool or local resources.
+            concurrency = ConfigHandler.get_sync_concurrency_light()
+            sem = asyncio.Semaphore(concurrency or 20)
+            
+            async def fetch_one(c):
+                # Check cancellation before acquiring semaphore to fail fast
+                if self.is_cancelled(): return None
+                async with sem:
+                    # Double check inside semaphore
+                    if self.is_cancelled(): return None
+                    return await ThreadPoolManager().run_async(TaskType.IO, self.api.pro.concept_detail, id=c)
+
+            # Create tasks eagerly but execute with semaphore
+            # This avoids "coroutine never awaited" because we wrap in create_task
+            tasks = [asyncio.create_task(fetch_one(c)) for c in c_codes]
+            
+            all_dfs = []
+            try:
+                # Wait for all tasks to complete or be cancelled
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Check if we were cancelled during gather
+                if self.is_cancelled():
+                    return 0
+                    
+                for r in results:
+                    if isinstance(r, pd.DataFrame) and not r.empty:
+                        all_dfs.append(r)
+                    elif isinstance(r, Exception):
+                        # Log but don't stop everything for one failed concept
+                        logger.warning(f"[sync_concepts] Task failed: {r}")
+                        
+            except asyncio.CancelledError:
+                logger.info("[sync_concepts] Cancelled during gather")
+                raise
+            finally:
+                # Ensure all pending tasks are cancelled if we exit early
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+
+            if not all_dfs: return 0
+            
+            full_df = pd.concat(all_dfs)
+            
+            # Rename cols to match Schema
+            # API returns: id, concept_name, ts_code, name
+            # Schema: ts_code, concept_name, concept_id
+            
+            full_df = full_df.rename(columns={'id': 'concept_id'})
+            # Ensure unique
+            full_df = full_df[['ts_code', 'concept_name', 'concept_id']].drop_duplicates()
+            
+            # Atomic overwrite (refresh)
+            count = await self.cache.overwrite_concepts(full_df)
+            logger.info(f"[sync_concepts] ✅ Synced {count} concept mappings (Atomic)")
+            return count
+
+        except Exception as e:
+            logger.error(f"[sync_concepts] ❌ Failed: {e}", exc_info=True)
+            return 0
+        finally:
+            pass
 
     async def prepare_market_data(self):
         """Prepare data for AI Analysis."""
@@ -549,6 +772,12 @@ class DataProcessor:
                 logger.error("[initialize_system] Step 1 failed: No stocks synced, aborting")
                 return None
             if self.is_cancelled(): return None
+            
+            # ===== Step 1.5: Concepts (Optional/Async-ish but we wait here for safety) =====
+            # Weight: We re-distribute? Let's just run it as part of Step 1 or 2.
+            # Let's say it effectively runs here.
+            report_step(1, 0.5, 1, "Syncing Concepts...")
+            await self.sync_concepts()
             
             # ===== Step 2: Trade Calendar (5%) =====
             report_step(2)

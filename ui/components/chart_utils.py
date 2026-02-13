@@ -19,7 +19,9 @@ def create_kline_chart(df, title="", theme_mode=None):
 
     # Auto-detect theme if not provided
     if theme_mode is None:
-        theme_mode = "dark" if AppColors._CURRENT_THEME_MODE == ft.ThemeMode.DARK else "light"
+        is_dark = AppColors._CURRENT_THEME_MODE == ft.ThemeMode.DARK
+    else:
+        is_dark = theme_mode == 'dark'
 
     # Ensure date is string format (YYYY-MM-DD) for maximum compatibility
     dates = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d').tolist()
@@ -50,7 +52,7 @@ def create_kline_chart(df, title="", theme_mode=None):
     fig = go.Figure(data=[candlestick, ma5, ma10, ma20])
     
     # Layout styling matching App Theme
-    is_dark = theme_mode == 'dark'
+    # is_dark is already calculated above
     bg_color = AppColors.BACKGROUND if is_dark else '#FFFFFF' # AppColors might be hex, plotly handles it
     paper_color = AppColors.SURFACE if is_dark else '#FFFFFF'
     grid_color = '#333333' if is_dark else '#EEEEEE'

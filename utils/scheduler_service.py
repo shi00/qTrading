@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from data.data_processor import DataProcessor
 from data.review_manager import ReviewManager
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +79,28 @@ class SchedulerService:
         else:
             logger.info("Scheduler was not running.")
 
+    def _check_config_sync(self) -> dict:
+        """Synchronously check config (runs in thread pool)"""
+        return {
+            'time': ConfigHandler.get_auto_update_time(),
+            'enabled': ConfigHandler.is_auto_update_enabled()
+        }
+
     async def _watch_config_changes(self):
         """Monitor config changes and reload jobs if needed"""
-        if not hasattr(self, '_last_known_config'):
-            self._last_known_config = {
-                'time': ConfigHandler.get_auto_update_time(),
-                'enabled': ConfigHandler.is_auto_update_enabled()
-            }
+        # Run sync config check in thread pool to avoid blocking event loop
+        try:
+            current_config = await ThreadPoolManager().run_async(TaskType.IO, self._check_config_sync)
+        except Exception as e:
+            logger.error(f"[Scheduler] Config check failed: {e}")
             return
 
-        current_time = ConfigHandler.get_auto_update_time()
-        current_enabled = ConfigHandler.is_auto_update_enabled()
+        if not hasattr(self, '_last_known_config'):
+            self._last_known_config = current_config
+            return
+
+        current_time = current_config['time']
+        current_enabled = current_config['enabled']
 
         changed = False
         if current_time != self._last_known_config['time']:
@@ -104,10 +116,7 @@ class SchedulerService:
         if changed:
             logger.info("[Scheduler] Reloading jobs...")
             self._schedule_jobs()
-            self._last_known_config = {
-                'time': current_time,
-                'enabled': current_enabled
-            }
+            self._last_known_config = current_config
 
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
@@ -200,14 +209,13 @@ class SchedulerService:
         if self._last_pred_date == today:
             return
 
-        # Simple verification that update ran (optional but good for safety)
-        # if self._last_update_date != today: ...
+
 
         logger.info(f"[Scheduler] Running Nightly Prediction for {today}...")
 
         try:
             from strategies.ai_strategy import AISelectionStrategy
-            from data.review_manager import ReviewManager
+
 
             processor = DataProcessor()
             await processor.init_data()

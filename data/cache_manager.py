@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import config
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import ThreadPoolManager, TaskType
 from data.constants import HEALTH_CHECK_TABLES
 # DAOs
 from data.daos.base_dao import BaseDao  # Expose static helpers via BaseDao if needed, or keeping usage internal
@@ -133,17 +134,19 @@ class CacheManager:
                 logger.error("Schema file not found!")
                 return
 
-            with open(schema_path, 'r', encoding='utf-8') as f:
-                msg = f.read()
+            # Offload file read
+            def read_schema():
+                with open(schema_path, 'r', encoding='utf-8') as f:
+                    return f.read()
 
             try:
+                msg = await ThreadPoolManager().run_async(TaskType.IO, read_schema)
+
                 # Split by ; and execute statements individually
-                # This avoids driver-specific executescript calls and works better with SQLAlchemy async engine
                 statements = [s.strip() for s in msg.split(';') if s.strip()]
 
                 async with self.engine.begin() as conn:
                     for stmt in statements:
-
                         await conn.execute(text(stmt))
 
                 self._schema_initialized = True
@@ -159,16 +162,20 @@ class CacheManager:
             await self.engine.dispose()
             await asyncio.sleep(0.5)
 
-            for ext in ['', '-shm', '-wal']:
-                f = self.db_path + ext
-                if os.path.exists(f):
-                    try:
-                        os.remove(f)
-                    except Exception as e:
-                        logger.warning(f"Failed to remove {f}: {e}")
+            def remove_db_files(base_path):
+                for ext in ['', '-shm', '-wal']:
+                    f = base_path + ext
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                            logger.info(f"Removed {f}")
+                        except Exception as e:
+                            logger.warning(f"Failed to remove {f}: {e}")
 
-            # Recreate Engine (File deleted, engine needs fresh start? apply same engine obj usually works if file gone)
-            # Actually, just init_db will create file.
+            # Offload file deletion
+            await ThreadPoolManager().run_async(TaskType.IO, remove_db_files, self.db_path)
+
+            # Recreate Engine
             self._schema_initialized = False
             await self.init_db(force=True)
 
@@ -203,6 +210,24 @@ class CacheManager:
 
     async def get_stock_basic(self):
         return await self.stock_dao.get_stock_basic()
+
+    async def get_stock_basic(self):
+        return await self.stock_dao.get_stock_basic()
+
+    # --- Concepts ---
+    async def save_concepts(self, df):
+        return await self.stock_dao.save_concepts(df)
+
+    async def overwrite_concepts(self, df):
+        return await self.stock_dao.overwrite_concepts(df)
+
+
+    async def get_concepts(self, ts_codes=None):
+        """
+        Get concepts for stock list.
+        Returns: Dict[ts_code, List[concept_name]]
+        """
+        return await self.stock_dao.get_concepts(ts_codes)
 
     # --- Daily Quotes ---
     async def save_daily_quotes(self, df, priority=None):

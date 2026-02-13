@@ -36,7 +36,7 @@ class TestDataProcessor(unittest.TestCase):
         # Patch ConfigHandler
         self.patcher_config = patch('data.data_processor.ConfigHandler')
         self.mock_config = self.patcher_config.start()
-        self.mock_config.get_sync_concurrency.return_value = 5 # Configure ConfigHandler return value
+        self.mock_config.get_sync_max_concurrent_heavy.return_value = 5 # Configure ConfigHandler return value
 
         # Reset Singleton State
         DataProcessor._instance = None
@@ -75,7 +75,7 @@ class TestDataProcessor(unittest.TestCase):
 
         
         # Configure ConfigHandler return value
-        self.mock_config.get_sync_concurrency.return_value = 5
+        self.mock_config.get_sync_max_concurrent_heavy.return_value = 5
         self.mock_config.get_sync_request_delay.return_value = 0  # Zero delay for tests
         
         # Configure check_comprehensive_health default for mocks
