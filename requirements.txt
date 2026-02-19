@@ -21,3 +21,6 @@ llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Instal
 polars>=1.38.1
 sqlalchemy>=2.0.46
 async-lru>=2.1.0
+
+urllib3>=2.6.3 # Fix Brotli decode error; must be >= 2.6.2
+brotlicffi>=1.1.0.0 # Brotli compression support for urllib3 (optional dep, must be explicit)

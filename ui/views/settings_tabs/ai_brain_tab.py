@@ -27,7 +27,6 @@ _INPUT_WIDTH_MEDIUM = 200
 _INPUT_WIDTH_SMALL = 190
 _FONT_SIZE_HINT = 11
 _FONT_SIZE_BODY = 12
-_DEBOUNCE_MS = 500
 
 # Validation bounds
 _MAX_CANDIDATES_MIN = 1
@@ -48,8 +47,12 @@ class AIBrainTab(ft.Container):
         self._locale_subscription_id = None
         
         # Build UI
-        self._build_controls()
-        self._build_content()
+        try:
+            self._build_controls()
+            self._build_content()
+        except Exception as e:
+            logger.error(f"[AIBrainTab] Initialization failed: {e}", exc_info=True)
+            self.content = ft.Text(f"Error loading AI Tab: {e}", color=ft.Colors.RED)
         
     def _build_controls(self):
         """创建所有控件实例（使用当前语言环境）"""
@@ -92,7 +95,7 @@ class AIBrainTab(ft.Container):
         self.local_model_path_input = ft.TextField(
             label=I18n.get("settings_local_model_path"),
             value=local_cfg.get('local_model_path', ''),
-            width=_INPUT_WIDTH_LARGE,
+            expand=True,
             hint_text="C:/path/to/model.gguf",
             read_only=False 
         )
@@ -120,11 +123,24 @@ class AIBrainTab(ft.Container):
             value=local_cfg.get('n_threads', 4),
             label="{value}"
         )
+        
+        # GPU Layers: Switch for -1 (Auto/All), Slider for partial
+        current_gpu_layers = local_cfg.get('n_gpu_layers', 0)
+        is_gpu_auto = (current_gpu_layers == -1)
+        
+        self.local_gpu_auto_switch = ft.Switch(
+            label=I18n.get("settings_local_gpu_auto"),
+            value=is_gpu_auto,
+            on_change=self._on_gpu_auto_change
+        )
+        
         self.local_gpu_layers_input = ft.Slider(
             min=0, max=100, divisions=100, 
-            value=local_cfg.get('n_gpu_layers', 0),
-            label="{value}"
+            value=current_gpu_layers if not is_gpu_auto else 0,
+            label="{value}",
+            disabled=is_gpu_auto
         )
+        
         self.local_batch_input = ft.Dropdown(
             label=I18n.get("settings_local_batch"),
             value=str(local_cfg.get('n_batch', 512)),
@@ -230,6 +246,11 @@ class AIBrainTab(ft.Container):
             self.local_model_path_input.value = file_path
             self._safe_update()
 
+    def _on_gpu_auto_change(self, e):
+        """Toggle slider enablement based on auto switch"""
+        self.local_gpu_layers_input.disabled = self.local_gpu_auto_switch.value
+        self._safe_update()
+
 
     def _build_content(self):
         """组装 UI 布局"""
@@ -267,14 +288,16 @@ class AIBrainTab(ft.Container):
                 self.txt_local_desc,
                 ft.Container(height=10),
                 ft.ResponsiveRow([
-                    ft.Column([self.local_model_path_input], col={"sm": 12, "md": 5}),
                     ft.Column([
-                        ft.Container(
-                            content=self.btn_select_model,
-                            alignment=ft.alignment.center
-                        )
-                    ], col={"sm": 6, "md": 2}),
-                    ft.Column([self.local_timeout_input], col={"sm": 6, "md": 3}),
+                        ft.Row([
+                            self.local_model_path_input,
+                            self.btn_select_model
+                        ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.END)
+                    ], col={"sm": 12, "md": 7}),
+                    
+                    ft.Column([], col={"sm": 0, "md": 1}), # Spacer
+                    
+                    ft.Column([self.local_timeout_input], col={"sm": 12, "md": 4}),
                 ], run_spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 
                 # Advanced Settings Expansion
@@ -291,6 +314,7 @@ class AIBrainTab(ft.Container):
                             
                             ft.Column([
                                 ft.Text(I18n.get("settings_local_gpu_layers"), size=_FONT_SIZE_BODY),
+                                self.local_gpu_auto_switch,
                                 self.local_gpu_layers_input
                             ], col={"sm": 12, "md": 6}),
                             
@@ -373,16 +397,21 @@ class AIBrainTab(ft.Container):
         )
 
         # Assembly
-        self.content = ft.ListView(controls=[
-            self.card_connection,
-            self.card_local_ai,
-            self.card_tuning,
-            self.card_prompt,
-            ft.Container(
-                content=ft.Row([self.btn_save_ai], alignment=ft.MainAxisAlignment.END), 
-                padding=ft.padding.only(top=10, bottom=30, right=20)
-            )
-        ], spacing=15, padding=ft.padding.only(bottom=50))
+        self.content = ft.Column(
+            controls=[
+                self.card_connection,
+                self.card_local_ai,
+                self.card_tuning,
+                self.card_prompt,
+                ft.Container(
+                    content=ft.Row([self.btn_save_ai], alignment=ft.MainAxisAlignment.END), 
+                    padding=ft.padding.only(top=10, bottom=30, right=20)
+                )
+            ], 
+            spacing=15, 
+            scroll=ft.ScrollMode.AUTO,
+            expand=True
+        )
         
     def update_theme(self):
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
@@ -457,6 +486,7 @@ class AIBrainTab(ft.Container):
                 # New advanced local settings
                 'local_threads': self.local_threads_input.value,
                 'local_gpu': self.local_gpu_layers_input.value,
+                'local_gpu_auto': self.local_gpu_auto_switch.value,
                 'local_batch': self.local_batch_input.value,
                 'local_ctx': self.local_ctx_input.value,
                 'local_flash': self.local_flash_attn_switch.value,
@@ -488,7 +518,21 @@ class AIBrainTab(ft.Container):
                 
             # Restore new settings
             self.local_threads_input.value = saved_values.get('local_threads', 4)
+            
+            # Restore GPU
+            # Restore GPU
+            
+            # Check if we saved the switch state explicitly? No, we saved inputs.
+            # Wait, saved_values reads from INPUTS not config. 
+            # In _on_locale_change:
+            # 'local_gpu': self.local_gpu_layers_input.value
+            # We need to capture switch state too.
+            
+            # Actually, let's fix the saved_values collection first.
+            self.local_gpu_auto_switch.value = saved_values.get('local_gpu_auto', False)
             self.local_gpu_layers_input.value = saved_values.get('local_gpu', 0)
+            self.local_gpu_layers_input.disabled = self.local_gpu_auto_switch.value
+
             self.local_batch_input.value = saved_values.get('local_batch', "512")
             self.local_ctx_input.value = saved_values.get('local_ctx', "4096")
             self.local_flash_attn_switch.value = saved_values.get('local_flash', True)
@@ -614,6 +658,8 @@ class AIBrainTab(ft.Container):
             ConfigHandler.save_ai_config(ai_key, ai_base, ai_model)
             
             # Save Local Model Configs
+            gpu_layers_to_save = -1 if self.local_gpu_auto_switch.value else int(self.local_gpu_layers_input.value)
+            
             ConfigHandler.save_local_ai_config(
                 model_path=local_path,
                 timeout=local_timeout,
@@ -621,7 +667,7 @@ class AIBrainTab(ft.Container):
                 n_batch=int(self.local_batch_input.value),
                 n_ctx=int(self.local_ctx_input.value),
                 flash_attn=self.local_flash_attn_switch.value,
-                n_gpu_layers=int(self.local_gpu_layers_input.value)
+                n_gpu_layers=gpu_layers_to_save
             )
             
             ConfigHandler.save_ai_system_prompt(ai_prompt)

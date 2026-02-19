@@ -1,11 +1,11 @@
 import logging
 import pandas as pd
 import datetime
-import aiosqlite
 from data.cache_manager import CacheManager
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
+from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +92,17 @@ class ReviewManager:
                     
                     index_pct = 0.0
                     try:
-                        # Tushare index_daily
-                        df_idx = await self.api.get_index_daily(ts_code=index_code, start_date=t1_row['trade_date'], end_date=t1_row['trade_date'])
-                        if not df_idx.empty:
+                        # get_index_daily is synchronous — must run in thread pool
+                        df_idx = await ThreadPoolManager().run_async(
+                            TaskType.IO, self.api.get_index_daily,
+                            ts_code=index_code,
+                            start_date=t1_row['trade_date'],
+                            end_date=t1_row['trade_date']
+                        )
+                        if df_idx is not None and not df_idx.empty:
                             index_pct = float(df_idx.iloc[0]['pct_chg'])
                     except Exception:
-                        pass # Network fail, assume 0 benchmark
+                        pass  # Network fail, assume 0 benchmark
                     
                     # Alpha Calculation
                     alpha = t1_pct - index_pct
@@ -142,14 +147,10 @@ class ReviewManager:
                 ORDER BY trade_date DESC
             '''
             
-            async with aiosqlite.connect(self.cache.db_path) as db:
-                async with db.execute(sql, (date_threshold,)) as cursor:
-                    rows = await cursor.fetchall()
-                    if not rows:
-                        return pd.DataFrame()
-                    
-                    cols = ['id', 'trade_date', 'ts_code', 'ai_score', 'ai_reason']
-                    return pd.DataFrame(rows, columns=cols)
+            df = await self.cache._read_db(sql, (date_threshold,))
+            if df is None or df.empty:
+                return pd.DataFrame()
+            return df
                     
         except Exception as e:
             logger.error(f"[Review] Error fetching pending predictions: {e}")
@@ -186,30 +187,27 @@ class ReviewManager:
                 LIMIT ?
             '''
             
-            async with aiosqlite.connect(self.cache.db_path) as db:
-                # Fetch wins
-                async with db.execute(sql_wins, (limit,)) as cursor:
-                    rows = await cursor.fetchall()
-                    for row in rows:
-                        wins.append({
-                            'code': row[0],
-                            'name': row[1],
-                            'pct': row[2],
-                            'score': row[3],
-                            'reason': row[4][:50] if row[4] else ''
-                        })
-                
-                # Fetch losses
-                async with db.execute(sql_losses, (limit,)) as cursor:
-                    rows = await cursor.fetchall()
-                    for row in rows:
-                        losses.append({
-                            'code': row[0],
-                            'name': row[1],
-                            'pct': row[2],
-                            'score': row[3],
-                            'reason': row[4][:50] if row[4] else ''
-                        })
+            df_wins = await self.cache._read_db(sql_wins, (limit,))
+            if df_wins is not None and not df_wins.empty:
+                for _, row in df_wins.iterrows():
+                    wins.append({
+                        'code': row['ts_code'],
+                        'name': row['name'],
+                        'pct': row['t1_pct'],
+                        'score': row['ai_score'],
+                        'reason': str(row['ai_reason'])[:50] if row['ai_reason'] else ''
+                    })
+
+            df_losses = await self.cache._read_db(sql_losses, (limit,))
+            if df_losses is not None and not df_losses.empty:
+                for _, row in df_losses.iterrows():
+                    losses.append({
+                        'code': row['ts_code'],
+                        'name': row['name'],
+                        'pct': row['t1_pct'],
+                        'score': row['ai_score'],
+                        'reason': str(row['ai_reason'])[:50] if row['ai_reason'] else ''
+                    })
                         
         except Exception as e:
             logger.warning(f"[Review] Error fetching learning context: {e}")
@@ -225,8 +223,8 @@ class ReviewManager:
                 
         if losses:
             xml += "  [Mistakes to Avoid - Do NOT repeat]\n"
-            for l in losses:
-                xml += f"  - {l['code']} ({l['name']}): Predicted score {l['score']}, actual {l['pct']:.1f}%\n"
+            for loss in losses:
+                xml += f"  - {loss['code']} ({loss['name']}): Predicted score {loss['score']}, actual {loss['pct']:.1f}%\n"
         
         if not wins and not losses:
             xml += "  No historical data available yet.\n"
@@ -235,11 +233,8 @@ class ReviewManager:
         return xml
 
     async def _update_result(self, record_id, pct, label, index_pct=0.0):
-        """Update DB with result"""
-        # We could store index_pct if schema supported it, for now just use it for logging above
-        sql = "UPDATE screening_history SET t1_pct=?, prediction_result=? WHERE id=?"
-        # Use _write_db instead of deprecated _enqueue
-        # Wrap params in list for is_many=True just to be safe/consistent or use is_many=False
+        """Update DB with result. index_pct reserved for future alpha storage."""
+        sql = 'UPDATE screening_history SET "t1_pct"=?, "prediction_result"=? WHERE "id"=?'
         await self.cache._write_db(sql, (pct, label, record_id), is_many=False)
 
     async def save_results(self, strategy_name, df):
@@ -285,12 +280,13 @@ class ReviewManager:
             return
 
         sql = '''
-            INSERT OR REPLACE INTO screening_history 
-            (trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
+            INSERT INTO screening_history 
+            ("trade_date","strategy_name","ts_code","name","close","pct_chg","ai_score","ai_reason")
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT("trade_date","strategy_name","ts_code") DO UPDATE SET
+            "name"=excluded."name","close"=excluded."close","pct_chg"=excluded."pct_chg",
+            "ai_score"=excluded."ai_score","ai_reason"=excluded."ai_reason"
         '''
         
-        # We need to access CacheManager execution directly
-        # CacheManager queue items: (sql, params, is_many)
         await self.cache._write_db(sql, records, is_many=True)
         logger.info(f"[Review] Saved {len(records)} predictions for {strategy_name}")

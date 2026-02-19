@@ -6,6 +6,12 @@ Centralized constants for data processing module.
 # Market Configuration
 MARKET_CLOSE_HOUR = 16
 
+# Health Check Thresholds
+HEALTH_THRESHOLD_FINANCIAL_COVERAGE = 0.90  # Minimum acceptable (Yellow/Green boundary)
+HEALTH_THRESHOLD_FINANCIAL_EXCELLENT = 0.98 # Excellent quality (Green)
+HEALTH_THRESHOLD_MARKET_LAG_DAYS = 3
+HEALTH_CHECK_DEFAULT_TIMEOUT = 30 # Seconds
+
 # Financial Report Schema Columns (Unified for Income, Balance, Cashflow, Indicator)
 FINANCIAL_REPORT_SCHEMA_COLS = [
     'ts_code', 'end_date', 'ann_date', 'report_type', 
@@ -79,5 +85,55 @@ FINANCIAL_STOCK_TABLES = {
     }
 }
 
+# Group C: Core Data Tables (Essential for Analysis)
+CORE_DATA_TABLES = {
+    'financial_reports': {'desc': '财务报表(主表)'},
+    'daily_indicators': {'desc': '每日指标(PE/PB)'},
+    'moneyflow_daily': {'desc': '日资金流'},
+    'margin_daily': {'desc': '融资融券'},
+    'suspend_d': {'desc': '停复牌信息'}
+}
+
+# Group D: Step 5 AI Alpha Data (New Check)
+AI_DATA_TABLES = {
+    'stk_holdernumber': {'desc': '股东户数'},
+    'top10_holders': {'desc': '前十大股东'},
+    'adj_factor': {'desc': '复权因子'},
+    'macro_economy': {'desc': '宏观经济', 'type': 'global'},
+    'shibor_daily': {'desc': 'Shibor利率', 'type': 'global'},
+    'moneyflow_hsgt': {'desc': '北向资金流', 'type': 'global'}
+}
+
 # Combined Dictionary for Health Check Iteration
-HEALTH_CHECK_TABLES = {**FINANCIAL_BATCH_TABLES, **FINANCIAL_STOCK_TABLES}
+HEALTH_CHECK_TABLES = {
+    **FINANCIAL_BATCH_TABLES, 
+    **FINANCIAL_STOCK_TABLES, 
+    **CORE_DATA_TABLES,
+    **AI_DATA_TABLES
+}
+
+# UI Display Order (must cover ALL keys in HEALTH_CHECK_TABLES)
+HEALTH_REPORT_ORDER = [
+    # Core
+    'financial_reports', 
+    'fina_forecast', 
+    'daily_indicators',
+    'adj_factor',
+    # Global (AI)
+    'macro_economy',
+    'shibor_daily',
+    'moneyflow_hsgt',
+    # Stock (AI)
+    'stk_holdernumber',
+    'top10_holders',
+    # Market
+    'moneyflow_daily',
+    'margin_daily', 
+    'pledge_stat', 
+    'suspend_d',
+    'dividend',
+    'repurchase',
+    # Financial Stock
+    'fina_mainbz',
+    'fina_audit',
+]

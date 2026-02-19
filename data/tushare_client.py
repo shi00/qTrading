@@ -14,6 +14,7 @@ from utils.rate_limiter import TokenBucket
 logger = logging.getLogger(__name__)
 
 
+
 class TushareClient:
     """
     Enhanced Tushare API client with timeout, retry, trade calendar support, and TokenBucket Rate Limiting.
@@ -82,6 +83,8 @@ class TushareClient:
 
     def _handle_api_call(self, func, **kwargs):
         """Helper to handle rate limits, retries, and errors with jittered backoff"""
+        api_name = getattr(func, '__name__', str(func))
+        
         for i in range(self.max_retries):
             if self._rate_limiter:
                 self._rate_limiter.consume(1)
@@ -103,21 +106,21 @@ class TushareClient:
                 if is_rate_limit:
                     sleep_time = (2 ** i) + random.uniform(0, 1)
                     # Log rate limit backoff
-                    logger.warning(
-                        f"[tushare_api] RATE_LIMITED: backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})")
+                    logger.debug(
+                        f"[tushare_api] RATE_LIMITED ({api_name}): backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
 
                 if is_network_error:
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
                     logger.warning(
-                        f"[tushare_api] CONNECTION_ERROR: {type(e).__name__} - retry in {sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})")
+                        f"[tushare_api] CONNECTION_ERROR ({api_name}): {type(e).__name__} - retry in {sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})")
                     time.sleep(sleep_time)
                     continue
 
                 # Other errors
                 if i == self.max_retries - 1:
-                    logger.error(f"[tushare_api] RETRY_EXHAUSTED: {error_msg}")
+                    logger.error(f"[tushare_api] RETRY_EXHAUSTED ({api_name}): {error_msg}")
                     raise e
 
                 time.sleep(1)
@@ -372,14 +375,6 @@ class TushareClient:
             trade_date=trade_date
         )
 
-    def get_stk_holdernumber(self, ts_code=None, end_date=None):
-        """Shareholder number"""
-
-        return self._handle_api_call(
-            self.pro.stk_holdernumber,
-            ts_code=ts_code,
-            end_date=end_date
-        )
 
     def get_fina_indicator(self, ts_code=None, period=None, start_date=None, end_date=None):
         """
@@ -408,6 +403,23 @@ class TushareClient:
             self.pro.disclosure_date,
             actual_date=date,
             fields='ts_code,ann_date,end_date,actual_date'
+        )
+
+    def get_concept_list(self, src='ts'):
+        """Get all concept categories"""
+        return self._handle_api_call(
+            self.pro.concept,
+            src=src
+        )
+
+    def get_concept_detail_by_id(self, concept_id):
+        """
+        Get all stocks in a specific concept group by concept ID.
+        Unlike get_concept_detail(ts_code), this fetches members of a concept.
+        """
+        return self._handle_api_call(
+            self.pro.concept_detail,
+            id=concept_id
         )
 
     def get_concept_detail(self, ts_code):
@@ -552,3 +564,60 @@ class TushareClient:
             end_date=end_date
             # Tushare dividend has diverse params, ann_date is key for batch
         )
+
+    # ========== Policy-Driven AI Extensions ==========
+
+    # Whitelist of allowed macro API names to prevent arbitrary API injection
+    _MACRO_API_WHITELIST = {'cn_m', 'cn_cpi', 'cn_ppi', 'cn_gdp'}
+
+    def get_macro_data(self, api_name, start_m=None, end_m=None):
+        """
+        Getter for macro data (cn_m, cn_cpi, cn_ppi).
+        api_name must be in _MACRO_API_WHITELIST.
+        """
+        if api_name not in self._MACRO_API_WHITELIST:
+            logger.error(f"[API] Rejected macro API: {api_name} (not in whitelist)")
+            return None
+
+        func = getattr(self.pro, api_name, None)
+        if not func:
+            logger.error(f"[API] Macro API not found: {api_name}")
+            return None
+            
+        return self._handle_api_call(func, start_m=start_m, end_m=end_m)
+
+    def get_shibor(self, start_date=None, end_date=None):
+        """Get Shibor rates"""
+        return self._handle_api_call(
+            self.pro.shibor,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+    def get_top10_holders(self, ts_code=None, end_date=None):
+        """Get Top 10 Holders"""
+        return self._handle_api_call(
+            self.pro.top10_holders,
+            ts_code=ts_code,
+            end_date=end_date
+        )
+
+    def get_index_weight(self, index_code=None, trade_date=None, start_date=None, end_date=None):
+        """Get Index Component Weights"""
+        return self._handle_api_call(
+            self.pro.index_weight,
+            index_code=index_code,
+            trade_date=trade_date,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+    def get_stk_holdernumber(self, ts_code=None, end_date=None, start_date=None):
+        """Get Stock Holder Number (Chip Concentration)"""
+        return self._handle_api_call(
+            self.pro.stk_holdernumber,
+            ts_code=ts_code,
+            end_date=end_date,
+            start_date=start_date
+        )
+

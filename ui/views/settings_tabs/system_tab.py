@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
+from ui.components.health_report_dialog import HealthReportDialog
 from ui.i18n import I18n
 from ui.theme import AppColors, ThemeName
 from utils.config_handler import ConfigHandler
+from data.data_processor import DataProcessor
 
 if TYPE_CHECKING:
     from data.data_processor import DataProcessor
@@ -67,9 +69,9 @@ class SystemTab(ft.Container):
             on_change=self.on_log_level_change
         )
 
-        # DB Buffer
-        self.queue_size_input = ft.TextField(
-            value=str(ConfigHandler.get_db_queue_size()),
+        # DB Connection Pool Size
+        self.pool_size_input = ft.TextField(
+            value=str(ConfigHandler.get_db_connection_pool_size()),
             width=100,
             text_size=14,
             content_padding=10,
@@ -183,19 +185,19 @@ class SystemTab(ft.Container):
             ], spacing=5)
         )
 
-        # 5. DB Buffer Item
-        self.row_buffer = SettingRow(
+        # 5. DB Connection Pool
+        self.row_pool = SettingRow(
             icon=ft.Icons.STORAGE_ROUNDED,
             icon_color=ft.Colors.ORANGE,
-            title=I18n.get("settings_db_buffer"),
-            subtitle=I18n.get("settings_buffer_desc"),
+            title=I18n.get("settings_db_pool"),
+            subtitle=I18n.get("settings_pool_desc"),
             control=ft.Row([
-                self.queue_size_input,
+                self.pool_size_input,
                 ft.IconButton(
                     icon=ft.Icons.SAVE_ROUNDED,
                     icon_color=AppColors.PRIMARY,
                     tooltip=I18n.get("settings_save_config"),
-                    on_click=self.save_queue_size
+                    on_click=self.save_pool_size
                 )
             ], spacing=5)
         )
@@ -281,7 +283,7 @@ class SystemTab(ft.Container):
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        self.row_buffer,
+                        self.row_pool,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
@@ -331,22 +333,22 @@ class SystemTab(ft.Container):
         try:
             val = int(self.concurrency_input.value)
             if val < 1 or val > 32:
-                self.show_snack(I18n.get("sys_snack_io_range"), color=AppColors.ERROR)
+                self.show_snack(I18n.get("sys_snack_concurrency_range"), color=AppColors.ERROR)
                 return
             ConfigHandler.set_sync_max_concurrent_heavy(val)
             self.show_snack(I18n.get("sys_sync_heavy") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
-    def save_queue_size(self, e):
-        """Save DB buffer size"""
+    def save_pool_size(self, e):
+        """Save DB connection pool size"""
         try:
-            val = int(self.queue_size_input.value)
-            if val < 100 or val > 10000:
-                self.show_snack(I18n.get("sys_snack_io_range"), color=AppColors.ERROR)
+            val = int(self.pool_size_input.value)
+            if val < 1 or val > 50:
+                self.show_snack(I18n.get("sys_snack_pool_range"), color=AppColors.ERROR)
                 return
-            ConfigHandler.set_db_queue_size(val)
-            self.show_snack(I18n.get("settings_db_buffer") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
+            ConfigHandler.set_db_connection_pool_size(val)
+            self.show_snack(I18n.get("settings_db_pool") + " " + I18n.get("common_saved"), color=AppColors.SUCCESS)
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
@@ -383,9 +385,13 @@ class SystemTab(ft.Container):
         )
         self.page.open(dlg_progress)
 
-        async def callback(pct, msg):
-            p_bar.value = pct / 100.0
-            p_text.value = f"{msg} ({pct:.1f}%)"
+        def callback(current, total, msg):
+            if total > 0:
+                p_bar.value = current / total
+                p_text.value = f"{msg} ({current:.1f}%)"
+            else:
+                p_bar.value = 0
+                p_text.value = msg
             dlg_progress.update()
 
         try:
@@ -408,7 +414,7 @@ class SystemTab(ft.Container):
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
         inputs = [
             self.theme_dropdown, self.concurrency_input, self.log_level_dropdown, 
-            self.queue_size_input, self.io_workers_input, self.cpu_workers_input,
+            self.pool_size_input, self.io_workers_input, self.cpu_workers_input,
             self.rate_limit_input, self.no_proxy_input
         ]
         for ctrl in inputs:
@@ -522,8 +528,6 @@ class SystemTab(ft.Container):
         self.page.run_task(self._run_health_check)
 
     async def _run_health_check(self):
-        from data.data_processor import DataProcessor
-
         # Loading Dialog
         dlg_loading = ft.AlertDialog(
             modal=True,
@@ -536,8 +540,14 @@ class SystemTab(ft.Container):
         self.page.open(dlg_loading)
 
         try:
+            # Use context manager or ensure close if DataProcessor supports it, 
+            # but DataProcessor doesn't support async context manager yet.
+            # We'll init, run, and close.
             dp = DataProcessor()
-            report = await dp.check_data_health()
+            try:
+                report = await dp.check_data_health()
+            finally:
+                 await dp.close() # Ensure resources are freed
 
             self.page.close(dlg_loading)
             self._show_health_report(report)
@@ -548,6 +558,5 @@ class SystemTab(ft.Container):
 
     def _show_health_report(self, report):
         """Display the health check report dialog"""
-        from ui.components.health_report_dialog import HealthReportDialog
         dlg = HealthReportDialog(self.page, report)
         self.page.open(dlg)

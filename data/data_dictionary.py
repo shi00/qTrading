@@ -41,6 +41,7 @@ COMMON_COLUMNS = {
     "amount": "col_amount",
     "turnover_rate": "col_turnover_rate",
     "turnover_rate_f": "col_turnover_rate_f",
+    "volume_ratio": "col_volume_ratio",
     "adj_factor": "col_adj_factor",
     
     # Adjusted Prices
@@ -134,14 +135,25 @@ TABLE_DEFINITIONS = {
     },
     "financial_reports": {
         "alias": "tab_financial_reports",
+        "desc": "财务报表(主表)",
+        "sync_config": {"strategy": "specialized_financial"},
+        "quality_config": {"tier": 3, "monitor": True, "critical": True},
         "columns": {}
     },
     "daily_indicators": {
         "alias": "tab_daily_indicators",
+        "desc": "每日指标(PE/PB)",
+        "quality_config": {"tier": 3, "monitor": True, "critical": True},
         "columns": {}
     },
     "fina_forecast": {
         "alias": "tab_fina_forecast",
+        "desc": "业绩预告",
+        "sync_config": {
+            "strategy": "batch", "api": "get_forecast", 
+            "date_col": "ann_date", "keys": ["ts_code", "end_date", "ann_date"]
+        },
+        "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "type": "col_type",
             "p_change_min": "col_p_change_min",
@@ -152,12 +164,24 @@ TABLE_DEFINITIONS = {
     },
     "fina_audit": {
         "alias": "tab_fina_audit",
+        "desc": "审计意见",
+        "sync_config": {
+            "strategy": "stock", "api": "get_fina_audit", 
+            "date_col": "end_date", "keys": ["ts_code", "end_date"]
+        },
+        "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "audit_result": "col_audit_result",
         }
     },
     "fina_mainbz": {
         "alias": "tab_fina_mainbz",
+        "desc": "主营业务",
+        "sync_config": {
+            "strategy": "stock", "api": "get_fina_mainbz", 
+            "date_col": "end_date", "keys": ["ts_code", "end_date"]
+        },
+        "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "bz_item": "col_bz_item",
             "bz_sales": "col_bz_sales",
@@ -168,6 +192,12 @@ TABLE_DEFINITIONS = {
     },
     "dividend": {
         "alias": "tab_dividend",
+        "desc": "分红送转",
+        "sync_config": {
+            "strategy": "batch", "api": "get_dividend", 
+            "date_col": "ann_date", "keys": ["ts_code", "ann_date"]
+        },
+        "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "div_proc": "col_div_proc",
             "stk_div": "col_stk_div",
@@ -200,6 +230,8 @@ TABLE_DEFINITIONS = {
     },
     "moneyflow_daily": {
         "alias": "tab_moneyflow_daily",
+        "desc": "日资金流",
+        "quality_config": {"tier": 2, "monitor": True, "critical": True},
         "columns": {}
     },
     "index_daily": {
@@ -219,6 +251,9 @@ TABLE_DEFINITIONS = {
     },
     "margin_daily": {
         "alias": "tab_margin_daily",
+        "desc": "融资融券",
+        "quality_config": {"tier": 1, "monitor": True},
+        "type": "global",
         "columns": {
             "rzye": "col_rzye",
             "rqye": "col_rqye",
@@ -229,6 +264,12 @@ TABLE_DEFINITIONS = {
     },
     "pledge_stat": {
         "alias": "tab_pledge_stat",
+        "desc": "股权质押",
+        "sync_config": {
+            "strategy": "stock", "api": "get_pledge_stat", 
+            "date_col": "end_date", "keys": ["ts_code", "end_date"]
+        },
+        "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "pledge_count": "col_pledge_count",
             "unrest_pledge": "col_unrest_pledge",
@@ -238,6 +279,12 @@ TABLE_DEFINITIONS = {
     },
     "repurchase": {
         "alias": "tab_repurchase",
+        "desc": "股票回购",
+        "sync_config": {
+            "strategy": "batch", "api": "get_repurchase", 
+            "date_col": "ann_date", "keys": ["ts_code", "ann_date"]
+        },
+        "quality_config": {"tier": 1, "monitor": True},
         "columns": {
              "proc": "col_proc",
              "high_limit": "col_high_limit",
@@ -260,6 +307,9 @@ TABLE_DEFINITIONS = {
     },
     "suspend_d": {
         "alias": "tab_suspend_d",
+        "desc": "停复牌信息",
+        "quality_config": {"tier": 1, "monitor": True},
+        "type": "global",
         "columns": {
             "suspend_timing": "col_suspend_timing",
             "suspend_type_name": "col_suspend_type_name",
@@ -301,5 +351,96 @@ TABLE_DEFINITIONS = {
             "step4_completed_at": "col_step4_completed_at",
             "sync_version": "col_sync_version",
         }
-    }
+    },
+
+    # --- Phase 3: Policy-Driven AI Architecture ---
+    "macro_economy": {
+        "alias": "tab_macro_economy",
+        "desc": "宏观经济",
+        "sync_config": {"strategy": "macro", "type": "economic"},
+        "quality_config": {"tier": 2, "monitor": True},
+        "type": "global",
+        "columns": {
+            "period": "col_end_date",
+            "m2": "col_m2",
+            "m2_yoy": "col_m2_yoy",
+            "m1": "col_m1",
+            "m1_yoy": "col_m1_yoy",
+            "m0": "col_m0",
+            "m0_yoy": "col_m0_yoy",
+            "cpi": "col_cpi",
+            "ppi": "col_ppi",
+        }
+    },
+    "shibor_daily": {
+        "alias": "tab_shibor_daily",
+        "desc": "Shibor利率",
+        "sync_config": {"strategy": "macro", "type": "shibor"},
+        "quality_config": {"tier": 2, "monitor": True},
+        "type": "global",
+        "columns": {
+            "date": "col_trade_date",
+            "on": "col_on",
+            "1w": "col_1w",
+            "2w": "col_2w",
+            "1m": "col_1m",
+            "3m": "col_3m",
+            "6m": "col_6m",
+            "9m": "col_9m",
+            "1y": "col_1y",
+        }
+    },
+    "adj_factor": {
+        "alias": "tab_adj_factor",
+        "desc": "复权因子",
+        "quality_config": {"tier": 1, "monitor": True},
+        "columns": {
+            "adj_factor": "col_adj_factor",
+        }
+    },
+    "stk_holdernumber": {
+        "alias": "tab_stk_holdernumber",
+        "desc": "股东户数",
+        "quality_config": {"tier": 1, "monitor": True},
+        "columns": {
+            "holder_num": "col_holder_num",
+            "holder_num_change": "col_holder_num_change",
+            "holder_num_ratio": "col_holder_num_ratio",
+        }
+    },
+    "top10_holders": {
+        "alias": "tab_top10_holders",
+        "desc": "前十大股东",
+        "quality_config": {"tier": 1, "monitor": True},
+        "columns": {
+            "holder_name": "col_holder_name",
+            "hold_amount": "col_hold_amount",
+            "hold_ratio": "col_hold_ratio",
+            "hold_change": "col_hold_change",
+            "holder_type": "col_holder_type",
+        }
+    },
+    "index_weight": {
+        "alias": "tab_index_weight",
+        "columns": {
+            "index_code": "col_index_code",
+            "con_code": "col_ts_code",
+            "weight": "col_weight",
+        }
+    },
+    "moneyflow_hsgt": {
+        "alias": "tab_moneyflow_hsgt",
+        "desc": "北向资金流",
+        "sync_config": {"strategy": "market", "api": "moneyflow_hsgt"},
+        "quality_config": {"tier": 2, "monitor": True},
+        "type": "global",
+        "columns": {
+            "ggt_ss": "col_south_money",
+            "ggt_sz": "col_south_money",
+            "hgt": "col_hgt_north_money",
+            "sgt": "col_sgt_north_money",
+            "north_money": "col_north_money",
+            "south_money": "col_south_money",
+        }
+    },
 }

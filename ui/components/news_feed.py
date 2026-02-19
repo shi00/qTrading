@@ -31,7 +31,6 @@ class NewsFeed(ft.Container):
         
         # I18n Refs
         self.empty_text = ft.Text(I18n.get("home_news_empty"), color=AppColors.TEXT_HINT)
-        self.load_more_text = ft.Text(I18n.get("news_load_more"), color=AppColors.PRIMARY_LIGHT)
 
         self.empty_state = ft.Container(
             content=ft.Column([
@@ -44,12 +43,17 @@ class NewsFeed(ft.Container):
         
         self.load_more_btn = ft.Container(
             content=ft.ElevatedButton(
-                content=self.load_more_text, 
+                content=ft.Text(I18n.get("news_load_more"), color=ft.Colors.WHITE),
+                style=ft.ButtonStyle(
+                    bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                ),
                 on_click=self._handle_load_more,
-                style=AppStyles.outline_button()
+                height=40,
+                width=120
             ),
             alignment=ft.alignment.center,
-            padding=10
+            padding=ft.padding.only(top=10, bottom=10)
         )
         
         # Initial Content
@@ -61,7 +65,7 @@ class NewsFeed(ft.Container):
     def update_locale(self):
         """Update static text when locale changes"""
         self.empty_text.value = I18n.get("home_news_empty")
-        self.load_more_text.value = I18n.get("news_load_more")
+        self.load_more_btn.content.content.value = I18n.get("news_load_more")
         self.update()
 
     def update_theme(self):

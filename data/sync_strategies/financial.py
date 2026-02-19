@@ -524,7 +524,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             progress_callback(period_idx * len(ts_codes) + idx, len(periods) * len(ts_codes),
                                               I18n.get("status_repairing", period=period, code=ts_code))
                     except Exception as e:
-                        pass
+                        logger.debug(f"[Repair] Failed for {ts_code} period={period}: {e}")
 
             for i, ts_code in enumerate(ts_codes):
                 tasks.append(asyncio.create_task(repair_one(ts_code, i)))

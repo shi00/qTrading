@@ -218,7 +218,6 @@ class MarketDataService:
     def _get_empty_hsgt_data(self) -> dict:
         return self._get_empty_hsgt_data_static()
     
-    @log_async_operation(operation_name="ensure_trade_cal")
     async def _ensure_trade_cal(self, end_date: str):
         """确保交易日历已缓存"""
         from data.data_processor import DataProcessor

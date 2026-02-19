@@ -5,6 +5,7 @@ import datetime
 from strategies.base_strategy import BaseStrategy
 from utils.technical_analysis import TechnicalAnalysis
 from utils.config_handler import ConfigHandler
+from data.quality_gate import require_quality, QualityTier, QualityGateError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class OversoldStrategy(BaseStrategy):
         # RSI Threshold could be configurable in future
         self.rsi_threshold = 20
 
+    @require_quality(QualityTier.SILVER)
     async def filter(self, context):
         """
         Execute Strategy Filter (Polars Optimized)
@@ -105,6 +107,8 @@ class OversoldStrategy(BaseStrategy):
             logger.info(f"[OversoldStrategy] Found {len(final_df)} oversold stocks.")
             return final_df
             
+        except QualityGateError:
+            raise # Re-raise for UI to handle
         except Exception as e:
             logger.error(f"[OversoldStrategy] Error during execution: {e}")
             import traceback

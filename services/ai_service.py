@@ -147,7 +147,7 @@ class AIService:
 
             response_content = await manager.run_inference(
                 prompt=user_prompt,
-                max_tokens=2048,  # config?
+                max_tokens=256,  # News classification only needs a small JSON (~60 tokens)
                 temperature=temperature,
                 system_prompt=system_prompt
             )
@@ -173,7 +173,6 @@ class AIService:
                 )
                 response_content = response.choices[0].message.content
 
-        # --- Post-Processing (JSON Parsing) ---
         # --- Post-Processing (JSON Parsing) ---
         if json_mode:
             try:

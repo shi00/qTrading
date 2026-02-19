@@ -292,33 +292,44 @@ class DataSourceTab(ft.Container):
             else:
                 self.metric_health.set_value(I18n.get("ds_health_ok"), ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS)
 
-            latest = result.get('latest_local')
+            # Fix parsing of nested structure
+            market_info = result.get('market', {})
+            details = result.get('details', {})
+            
+            latest = market_info.get('latest_local')
             if not latest or str(latest) == 'None':
                 display_date = I18n.get("ds_never_sync")
             else:
                 display_date = str(latest)
             self.metric_sync.set_value(display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
-            self.metric_coverage.set_value(f"{result.get('coverage', '0%')}", ft.Icons.DATA_USAGE, AppColors.INFO)
+            
+            cov_val = details.get('financial_coverage', 0)
+            if isinstance(cov_val, (int, float)):
+                cov_str = f"{cov_val:.1f}%"
+            else:
+                cov_str = str(cov_val)
+                
+            self.metric_coverage.set_value(cov_str, ft.Icons.DATA_USAGE, AppColors.INFO)
             self.metric_storage.set_value(I18n.get("common_normal"), ft.Icons.STORAGE, AppColors.SUCCESS)
 
-            fin_cov = result.get('financial_coverage', 'N/A')
-            recent_cov = result.get('financial_recent_coverage', fin_cov)
-            stale_count = result.get('financial_stale_count', 0)
-            self.health_detail_text.value = I18n.get("ds_text_cov_detail").format(cov=result.get('coverage', 'N/A'),
+            # Map from details/fundamentals
+            fin_cov = cov_str
+            recent_cov = "N/A" # Not currently calculated
+            stale_count = 0 
+            
+            # Use safe get for lag
+            lag = market_info.get('lag_days', 0)
+            self.health_detail_text.value = I18n.get("ds_text_cov_detail").format(cov=cov_str,
                                                                                   fin_cov=fin_cov, recent=recent_cov,
-                                                                                  lag=result.get('lag_days', 0))
+                                                                                  lag=lag)
 
-            # Show Repair Button if needed (now includes stale data)
-            missing_fin = result.get('financial_missing_count', 0)
+            # Show Repair Button if needed (Requires backend support for missing_codes)
+            # Currently disabled/hidden as backend only provides counts
+            missing_fin = 0 
             total_need_repair = missing_fin + stale_count
             if total_need_repair > 0:
-                self.missing_fin_codes = result.get('financial_missing_codes', [])
-                if stale_count > 0 and missing_fin > 0:
-                    self.btn_repair.text = I18n.get("ds_btn_repair_fmt").format(missing=missing_fin, stale=stale_count)
-                elif stale_count > 0:
-                    self.btn_repair.text = I18n.get("ds_btn_repair_fmt").format(missing=0, stale=stale_count)
-                else:
-                    self.btn_repair.text = I18n.get("ds_btn_repair_fmt").format(missing=missing_fin, stale=0)
+                self.missing_fin_codes = []
+                # ... (Logic valid but condition won't be met)
                 self.btn_repair.visible = True
             else:
                 self.btn_repair.visible = False

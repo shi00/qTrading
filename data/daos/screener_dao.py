@@ -56,13 +56,13 @@ class ScreenerDao(BaseDao):
         async with self.engine.connect() as conn:
             # Wins
             r = await conn.exec_driver_sql(
-                f"SELECT * FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT {limit}")
+                "SELECT * FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT ?", (limit,))
             rows = r.fetchall()
             wins = pd.DataFrame(rows, columns=list(r.keys()))
 
             # Losses
             r = await conn.exec_driver_sql(
-                f"SELECT * FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT {limit}")
+                "SELECT * FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT ?", (limit,))
             rows = r.fetchall()
             losses = pd.DataFrame(rows, columns=list(r.keys()))
 

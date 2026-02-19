@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import config
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
-from data.constants import HEALTH_CHECK_TABLES
+from data.data_dictionary import TABLE_DEFINITIONS
 # DAOs
 from data.daos.base_dao import BaseDao  # Expose static helpers via BaseDao if needed, or keeping usage internal
 from data.daos.financial_dao import FinancialDao
@@ -18,6 +18,8 @@ from data.daos.quote_dao import QuoteDao
 from data.daos.screener_dao import ScreenerDao
 from data.daos.stock_dao import StockDao
 from data.daos.sync_dao import SyncDao
+from data.daos.macro_dao import MacroDao
+from data.daos.holder_dao import HolderDao
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +55,13 @@ class CacheManager:
         connection_string = f"sqlite+aiosqlite:///{self.db_path}"
 
         # Load pool settings from config
-        db_pool_size = ConfigHandler.get_db_queue_size()
+        db_pool_size = ConfigHandler.get_db_connection_pool_size()
         
         self.engine = create_async_engine(
             connection_string,
             echo=False,
             # Pool settings for high concurrency
-            pool_size=db_pool_size,  # Configurable (default 1024)
+            pool_size=db_pool_size,  # Configurable (default 5)
             max_overflow=max(30, int(db_pool_size * 0.1)),  # Allow 10% overflow or at least 30
             pool_timeout=60,  # Wait up to 60s for connection
             future=True
@@ -76,6 +78,8 @@ class CacheManager:
         self.sync_dao = SyncDao(self.engine)
         self.market_dao = MarketDao(self.engine)
         self.screener_dao = ScreenerDao(self.engine)
+        self.macro_dao = MacroDao(self.engine)
+        self.holder_dao = HolderDao(self.engine)
 
         self._initialized = True
         self._schema_initialized = False
@@ -125,6 +129,14 @@ class CacheManager:
     async def init_db(self, force=False):
         """Initialize Tables"""
         async with self._init_lock:
+            # Explicit truncation on startup (P0 fix for 800MB WAL)
+            try:
+                 async with self.engine.begin() as conn:
+                     await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                     logger.info("[CacheManager] WAL file truncated/cleaned.")
+            except Exception as e:
+                logger.warning(f"[CacheManager] Failed to truncate WAL: {e}")
+
             if self._schema_initialized and not force:
                 return
 
@@ -155,6 +167,23 @@ class CacheManager:
             except Exception as e:
                 logger.error(f"[CacheManager] Init DB Failed: {e}", exc_info=True)
 
+        # Run auto-migration check
+        await self._check_and_update_schema()
+
+    async def _check_and_update_schema(self):
+        """Auto-migrate schema for known missing columns."""
+        try:
+            async with self.engine.begin() as conn:
+                # Check daily_indicators.volume_ratio
+                try:
+                    await conn.execute(text("ALTER TABLE daily_indicators ADD COLUMN volume_ratio REAL"))
+                    logger.info("[Schema] Added volume_ratio to daily_indicators")
+                except Exception as e:
+                    # Likely "duplicate column name" or table missing. Ignore.
+                    pass
+        except Exception as e:
+             logger.warning(f"[Schema] Auto-migration check failed: {e}")
+
     async def hard_reset(self):
         """Delete DB and Re-init"""
         self._maintenance_event.clear()
@@ -183,18 +212,20 @@ class CacheManager:
             self._maintenance_event.set()
 
     async def clear_all_cache(self):
-        """Drop tables approach"""
+        """Drop all user tables and re-initialize schema."""
         self._maintenance_event.clear()
         try:
-            tables = ["daily_quotes", "daily_indicators", "financial_reports", "moneyflow_daily",
-                      "northbound_holding", "sync_status", "screening_history", "top_list", "block_trade",
-                      "market_news", "trade_cal", "stock_basic"]
-
-            # Using BaseDao for ad-hoc execution
-            dao = BaseDao(self.engine)
+            # Dynamically query all user tables from sqlite_master
+            # so we never miss newly added tables
             async with self.engine.begin() as conn:
+                r = await conn.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+                tables = [row[0] for row in r.fetchall()]
+
                 for t in tables:
                     await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {t}")
+                logger.info(f"[CacheManager] Dropped {len(tables)} tables: {tables}")
 
             self._schema_initialized = False
             await self.init_db(force=True)
@@ -230,8 +261,8 @@ class CacheManager:
         return await self.stock_dao.get_concepts(ts_codes)
 
     # --- Daily Quotes ---
-    async def save_daily_quotes(self, df, priority=None):
-        return await self.quote_dao.save_daily_quotes(df, priority)
+    async def save_daily_quotes(self, df, priority=None, suppress_errors=True):
+        return await self.quote_dao.save_daily_quotes(df, priority, suppress_errors=suppress_errors)
 
     async def check_data_exists(self, trade_date: str) -> bool:
         await self.wait_for_maintenance()
@@ -239,6 +270,20 @@ class CacheManager:
 
     async def get_daily_quotes(self, ts_code=None, start_date=None, end_date=None, ts_code_list=None):
         return await self.quote_dao.get_daily_quotes(ts_code, start_date, end_date, ts_code_list)
+
+    # --- Daily Indicators ---
+    async def save_daily_indicators(self, df, suppress_errors=True):
+        return await self.market_dao.save_daily_indicators(df, suppress_errors=suppress_errors)
+
+    async def get_daily_indicators(self, ts_code=None, start_date=None, end_date=None, limit=None):
+        return await self.market_dao.get_daily_indicators(ts_code, start_date, end_date, limit)
+
+    # --- Adj Factor ---
+    async def save_adj_factors(self, df, suppress_errors=True):
+        return await self.market_dao.save_adj_factors(df, suppress_errors=suppress_errors)
+
+    async def get_adj_factors(self, ts_code, start_date=None, end_date=None):
+        return await self.market_dao.get_adj_factors(ts_code, start_date, end_date)
 
     async def get_latest_trade_date(self):
         await self.wait_for_maintenance()
@@ -249,8 +294,6 @@ class CacheManager:
         return await self.quote_dao.get_cached_trade_dates()
 
     # --- Indicators ---
-    async def save_daily_indicators(self, df, priority=None):
-        return await self.financial_dao.save_daily_indicators(df, priority)
 
     async def get_latest_indicators(self, trade_date=None):
         return await self.financial_dao.get_latest_indicators(trade_date)
@@ -294,24 +337,113 @@ class CacheManager:
         return await self.sync_dao.get_sync_status(table_name)
 
     async def check_comprehensive_health(self):
-        # This was simplified in plan, but keeping original logic structure via direct SQL is easiest for now
-        # Or move to new HealthDao?
-        # Let's keep it here but clean it up using helper
+        """Check coverage and freshness of all HEALTH_CHECK_TABLES."""
         await self.wait_for_maintenance()
         results = {}
+        
+        logger.info("[Health] Starting comprehensive data check...")
 
         async with self.engine.connect() as conn:
             # Total Stocks
-            r = await conn.exec_driver_sql("SELECT count(*) FROM stock_basic WHERE list_status='L'")
-            total_stocks = r.fetchone()[0] or 1
+            total_stocks = await self.stock_dao.get_active_stock_count()
+            total_stocks = total_stocks or 1
+            logger.info(f"[Health] Total Active Stocks: {total_stocks}")
 
-            # Tables
-            for table in HEALTH_CHECK_TABLES:
-                r = await conn.exec_driver_sql(f"SELECT count(DISTINCT ts_code) FROM {table}")
-                cnt = r.fetchone()[0] or 0
-                results[table] = {'covered': cnt, 'ratio': cnt / total_stocks}
+            # Tables Check (Dynamic iteration based on registry)
+            # Filter for quality monitored tables
+            monitored_tables = {k: v for k, v in TABLE_DEFINITIONS.items() 
+                               if v.get('quality_config', {}).get('monitor')}
+
+            for table, meta in monitored_tables.items():
+                try:
+                    # Determine check type from explicit metadata field
+                    # Default to 'stock' if not specified
+                    table_type = meta.get('type', 'stock')
+                    is_stock_table = (table_type != 'global')
+
+                    if not is_stock_table:
+                        # Global Check: Just ensure data exists (>0 rows)
+                        r = await conn.exec_driver_sql(f"SELECT count(*) FROM {table}")
+                        cnt = r.fetchone()[0] or 0
+                        ratio = 1.0 if cnt > 0 else 0.0
+                        fresh_ratio = ratio  # Global: presence = fresh
+                    else:
+                        # Stock Coverage Check: Distinct Codes / Total Stocks
+                        cols = meta.get('columns', {})
+                        keys = meta.get('sync_config', {}).get('keys', [])
+                        code_col = 'con_code' if 'con_code' in cols or 'con_code' in keys else 'ts_code'
+                        
+                        r = await conn.exec_driver_sql(f"SELECT count(DISTINCT {code_col}) FROM {table}")
+                        cnt = r.fetchone()[0] or 0
+                        ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
+                        
+                        # Freshness Check: How recent is the latest data?
+                        fresh_ratio = 0.0
+                        # Try sync_config.date_col first, then common date columns
+                        date_col_candidates = []
+                        configured_col = meta.get('sync_config', {}).get('date_col')
+                        if configured_col:
+                            date_col_candidates.append(configured_col)
+                        date_col_candidates.extend(['trade_date', 'end_date', 'ann_date'])
+                        try:
+                            max_date = None
+                            for dc in date_col_candidates:
+                                try:
+                                    r2 = await conn.exec_driver_sql(f"SELECT MAX({dc}) FROM {table}")
+                                    val = r2.fetchone()[0]
+                                    if val:
+                                        max_date = val
+                                        break
+                                except Exception:
+                                    continue
+                            if max_date:
+                                max_dt = datetime.datetime.strptime(str(max_date)[:8], '%Y%m%d')
+                                age_days = (datetime.datetime.now() - max_dt).days
+                                    # Fresh if within 7 days, decay linearly to 30 days
+                                if age_days <= 7:
+                                    fresh_ratio = 1.0
+                                elif age_days <= 30:
+                                    fresh_ratio = max(0.0, 1.0 - (age_days - 7) / 23.0)
+                                # else: 0.0 (stale)
+                            
+                            # Penalize freshness if coverage is trivial (< 1%)
+                            # This prevents "100% Fresh" when only 1 stock has data.
+                            if ratio < 0.01:
+                                fresh_ratio = 0.0
+                        except Exception:
+                            pass  # Column may not exist, fresh_ratio stays 0
+                    
+                    table_type = 'stock' if is_stock_table else 'global'
+                    results[table] = {'covered': cnt, 'ratio': ratio, 'fresh_ratio': fresh_ratio, 'type': table_type}
+                    
+                    if ratio < 0.1:
+                        if is_stock_table:
+                            logger.warning(f"[Health] Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})")
+                        else:
+                            logger.warning(f"[Health] Table {table} (global) CRITICAL: {cnt} records")
+                    else:
+                        if is_stock_table:
+                            logger.debug(f"[Health] Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}")
+                        else:
+                            logger.debug(f"[Health] Table {table} (global): {cnt} records")
+                except Exception as e:
+                    if "no such table" in str(e):
+                        logger.warning(f"[Health] Table {table} missing/not created yet.")
+                    else:
+                        logger.error(f"[Health] Failed to check table {table}: {e}")
+                    results[table] = {'covered': 0, 'ratio': 0, 'fresh_ratio': 0, 'type': meta.get('type', 'stock')}
 
         return {'total_stocks': total_stocks, 'tables': results}
+
+    async def get_concept_count(self):
+        """Get total count of stock concept mappings."""
+        try:
+            async with self.engine.connect() as conn:
+                r = await conn.exec_driver_sql("SELECT COUNT(*) FROM stock_concepts")
+                return r.scalar() or 0
+        except Exception as e:
+            # logger.warning(f"Failed to count concepts: {e}")
+            return 0
 
     # --- Extra Savers (Boilerplate) ---
     async def save_fina_forecast(self, df):
@@ -407,3 +539,39 @@ class CacheManager:
 
     async def get_latest_northbound(self):
         return await self.quote_dao.get_latest_northbound()
+
+    # --- Policy-Driven AI Extensions ---
+
+    # Macro
+    async def save_macro_economy(self, df):
+        return await self.macro_dao.save_macro_economy(df)
+
+    async def save_shibor_daily(self, df):
+        return await self.macro_dao.save_shibor_daily(df)
+
+    # Holders
+    async def save_holder_number(self, df):
+        return await self.holder_dao.save_holder_number(df)
+
+    async def save_top10_holders(self, df):
+        return await self.holder_dao.save_top10_holders(df)
+
+    async def get_holder_data_coverage(self, ts_codes):
+        return await self.holder_dao.check_holder_data_coverage(ts_codes)
+
+    # Extended Market (Adj Factor, Index Weight via MarketDao)
+
+    async def save_index_weights(self, df):
+        return await self.market_dao.save_index_weights(df)
+
+    async def get_index_weights(self, index_code, trade_date):
+        return await self.market_dao.get_index_weights(index_code, trade_date)
+
+    async def get_latest_index_weight_date(self):
+        return await self.market_dao.get_latest_index_weight_date()
+
+    async def save_moneyflow_hsgt(self, df):
+        return await self.market_dao.save_moneyflow_hsgt(df)
+
+    async def get_moneyflow_hsgt(self, trade_date=None, limit=None):
+        return await self.market_dao.get_moneyflow_hsgt(trade_date, limit)

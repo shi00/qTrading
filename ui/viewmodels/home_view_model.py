@@ -33,6 +33,9 @@ class HomeViewModel:
         self.on_news_update = None
         self.on_market_update = None
         
+        # Concurrency Control
+        self._load_generation = 0 # Prevent race conditions
+        
     def init(self, on_news_update, on_market_update):
         """Initialize subscriptions and bind callbacks"""
         self.on_news_update = on_news_update
@@ -59,10 +62,9 @@ class HomeViewModel:
         if self.on_market_update:
             self.on_market_update()
             
+    
     # --- Data Actions ---
     
-        self._load_generation = 0 # Prevent race conditions
-        
     async def init_data(self):
         """Initialize data processor"""
         await self.processor.init_data()

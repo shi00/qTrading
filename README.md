@@ -1,82 +1,79 @@
-# AStockScreener (QTrading) - 智能A股 AI 交易员
+# AStockScreener (QTrading) - 智能 A 股 AI 交易员
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]() [![Python](https://img.shields.io/badge/python-3.11+-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]() [![Python](https://img.shields.io/badge/python-3.11+-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]() [![AI Engine](https://img.shields.io/badge/AI-Local%20%2B%20Cloud-blueviolet)]()
 
-**AStockScreener** 不仅仅是一个选股器，它已经进化为一个具备 **"透明思考、实时反馈、自进化"** 能力的 AI 智能交易员。
+**AStockScreener** 是一个本地优先、隐私安全的智能量化分析平台。它结合了 **传统量化因子** 与 **大语言模型 (LLM)** 的能力，为您提供像人类研究员一样的深度投研分析。
 
-利用 **DeepSeek/OpenAI** 大模型能力，它能像人类研究员一样，实时阅读新闻、财报和盘面数据，并 **实时(Streaming)** 展示其完整的思考推理过程。系统内置 **PVC (预测-验证-修正)** 闭环，能从历史盈亏中自动学习进化。
-
-> **注意**：本项目需配合 [Tushare Pro](https://tushare.pro/) Token 使用 (建议 2000 积分以上)。
+> **核心进化**：v2.0 版本现已全面支持 **本地 AI 模型 (Llama.cpp + Vulkan)**，利用您的 GPU (NVIDIA/AMD/Intel) 实现零成本、离线的深度推理。
 
 ---
 
 ## 🚀 核心特性 (Key Features)
 
-### 1. 🧠 透明化 AI 决策 (Visible Thinking)
-*   **白盒推理**: 告别 AI "黑盒"。每一只股票的评分，你都能看到 AI 的完整 **思维链 (Chain of Thought)**。
-*   **多维分析**: 综合 **政策面(Policy)**、**全球映射(Global)**、**资金流(Capital)**、**技术面(Tech)**、**基本面(Fundamental)** 五维打分。
+### 1. 🧠 双引擎 AI 决策 (Dual-Engine AI)
+*   **本地私有模型 (Local Privaty)**: 内置 `llama-cpp-python`支持，针对 Intel iGPU/NVIDIA GPU 深度优化。无需联网，数据不出内网，由 **Qwen 2.5** 等开源模型提供极速新闻分类与情感分析。
+    *   *优化特性*: 针对 1.5B/7B 模型调优，支持 Vulkan 硬件加速，推理速度提升 5-10 倍。
+*   **云端深度推理 (Cloud Reasoning)**: 兼容 OpenAI/DeepSeek API，处理复杂的 "长链条推理" 和 "宏观经济映射"。
 
-### 2. ⚡ 流式急速体验 (Streaming Experience)
-*   **实时反馈**: 采用 `Asyncio` 流式并发架构，AI 分析完一只股票 **立即显示**，无需漫长等待。
-*   **可视化进度**: 实时进度条与状态日志，让复杂的量化分析过程清晰可见。
+### 2. ⚡ 极速流式体验 (Streaming & Async)
+*   **全异步架构**: 基于 Python `asyncio` + `ThreadPool`，UI 永不卡顿。
+*   **实时反馈**: AI 思考过程实时上屏 (Streaming)，拒绝 "黑盒" 等待。可以看到 AI 如何阅读新闻、分析财报并得出结论。
 
-### 3. 🔄 自进化闭环 (PVC Loop)
-系统拥有自我学习能力：
-*   **Prediction**: 记录 AI 预测快照。
-*   **Verification**: T+1 日 17:00 自动复盘，计算超额收益 (Alpha)。
-*   **Correction**: 自动提取 "成功经验" 和 "失败教训"，动态注入到下一次 Prompt 中，实现 **越用越聪明**。
+### 3. 🎨 现代可视化界面
+*   **多主题支持**: 内置 **Dracula (暗色)**、**Nordic Navy (深蓝)**、**Professional Light (亮色)** 等多套精美主题。
+*   **Flet 驱动**: 基于 Flutter 的高性能跨平台 UI，支持高 DPI 缩放与流畅动画。
 
-### 4. 🛡️ 企业级安全与鲁棒性
-*   **Token 加密**: 本地 Tushare Token 采用 **AES-GCM** 军工级加密存储。
-*   **断点续传**: 数据同步支持断点续传，并在断网/报错时自动重试。
-*   **国际化 (I18n)**: 支持中/英双语界面。
+### 4. 🛡️ 企业级数据安全
+*   **加密存储**: Tushare Token 与 API Key 采用 **AES-GCM** 军工级算法本地加密存储。
+*   **原子化配置**: 配置文件读写具备原子性保护，防止断电导致配置丢失。
 
 ---
 
 ## 🛠️ 快速开始 (Quick Start)
 
-### 1. 准备工作
-*   Python 3.11+
-*   Tushare Token (注册 [Tushare](https://tushare.pro/))
-*   DeepSeek API Key (或 OpenAI 兼容 Key)
+### 1. 环境准备
+*   **OS**: Windows 10/11 (推荐)
+*   **Python**: 3.10 - 3.12
+*   **数据源**: [Tushare Pro](https://tushare.pro/) Token (需 2000+ 积分以获取完整数据)
+*   **硬件加速 (可选)**: 安装 [Vulkan SDK](https://vulkan.lunarg.com/) 以启用本地 AI 加速。
 
-### 2. 安装与运行
+### 2. 安装
 ```bash
-# 克隆仓库
+# 1. 克隆项目
 git clone https://github.com/shi00/qTrading.git
 cd qTrading
 
-# 安装依赖
+# 2. 安装依赖
+# 注意：如需 GPU 加速，建议先手动安装编译好的 llama-cpp-python
 pip install -r requirements.txt
 
-# 运行 (自动进入向导模式)
+# 3. 运行
 python main.py
 ```
 
-### 3. 首次配置
-1.  在向导中输入 Tushare Token 和 API Key。
-2.  点击 **"开始同步"** (Sync Data)，系统将拉取历史行情与财务数据。
-3.  进入 **"设置" (Settings)** 页，开启 "自动每日更新"。
-
-### 4. 使用 AI 选股
-1.  进入 **"选股器" (Screener)**。
-2.  选择策略 **"AI 深度精选 (Beta)"**。
-3.  点击 **"执行筛选"**。
-4.  观察 **"AI 思考过程日志"** 区域，看着 AI 逐个分析股票。
-5.  点击任意股票 **"详情"**，展开 **"查看 AI 思考过程"** 阅读完整研报。
+### 3. 本地 AI 模型设置 (推荐)
+1.  下载 GGUF 模型文件 (推荐 `Qwen/Qwen2.5-1.5B-Instruct-GGUF`)。
+2.  将模型放入 `models/` 目录。
+3.  在软件 **"设置 -> 本地 AI"** 中选择模型路径。
+4.  根据显卡显存大小，调整 **GPU Layers** (推荐 -1 自动加载所有层) 和 **Context Length** (推荐 2048-4096)。
 
 ---
 
 ## 🏗️ 架构概览
 
-详见 [系统架构设计文档](architecture_design.md)。
-
-*   **UI**: Flet (Flutter based)
-*   **Data**: Tushare Pro + Asyncio Crawler
-*   **AI**: OpenAI Protocol (DeepSeek V3/R1 Recommended)
-*   **Storage**: AioSQLite + AES Encryption
+*   **Frontend**: Flet (Flutter) - 响应式 UI，MVVM 模式。
+*   **Core**: Python Asyncio - 事件循环驱动。
+*   **Data Layer**:
+    *   **Source**: Tushare Pro / AkShare
+    *   **Storage**: AioSQLite (异步 DB) + CacheManager (LRU 缓存)
+*   **AI Layer**:
+    *   **Inference**: Llama.cpp (Local) + OpenAI SDK (Cloud)
+    *   **Proxy**: 智能代理池，自动处理网络抖动。
 
 ---
 
-## 📄 开源协议
-MIT License
+## 📄 许可证
+MIT License.
+
+---
+*Built with ❤️ by Quantitative Trading Team*

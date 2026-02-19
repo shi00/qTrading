@@ -9,10 +9,20 @@ import threading
 from data.cache_manager import CacheManager
 from data.news_fetcher import NewsFetcher
 from data.tushare_client import TushareClient
-from data.constants import MAJOR_INDICES, MARKET_CLOSE_HOUR
+from data.constants import (
+    MAJOR_INDICES, 
+    MARKET_CLOSE_HOUR, 
+    HEALTH_THRESHOLD_FINANCIAL_COVERAGE, 
+    HEALTH_THRESHOLD_MARKET_LAG_DAYS,
+    HEALTH_CHECK_DEFAULT_TIMEOUT
+)
+from data.data_dictionary import TABLE_DEFINITIONS
+from data.data_quality import DataQualityService
 from data.sync_strategies.base import SyncContext
 from data.sync_strategies.financial import FinancialSyncStrategy
 from data.sync_strategies.historical import HistoricalSyncStrategy
+from data.sync_strategies.macro import MacroSyncStrategy
+from data.sync_strategies.holder import HolderSyncStrategy
 
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation, track_performance
@@ -52,22 +62,27 @@ class DataProcessor:
             if self.__class__._is_initialized:
                 return
 
+            self._health_cache = {'time': 0, 'data': None}
+
             token = ConfigHandler.get_token()
             self._current_token = token
             self.api = TushareClient(token=token)
             self.cache = CacheManager()
             self._first_news_sync = True
             self._cancel_event = asyncio.Event()  # Unified cancellation event
+            self._quality_tier = 0 # 0=Unknown/Critical, 1=Bronze, 2=Silver, 3=Gold
 
             # Initialize Context & Strategies
             self.context = SyncContext(api=self.api, cache=self.cache, config=ConfigHandler)
             self.strategies = {
                 'financial': FinancialSyncStrategy(self.context),
-                'historical': HistoricalSyncStrategy(self.context)
+                'historical': HistoricalSyncStrategy(self.context),
+                'macro': MacroSyncStrategy(self.context),
+                'holder': HolderSyncStrategy(self.context)
             }
 
             # Memory Cache for high-frequency small data
-            self._trade_cal_cache = None  # Cache structure: {'start': str, 'end': str, 'df': DataFrame}
+            self._trade_cal_cache = {}  # Cache structure: {'start': str, 'end': str, 'df': DataFrame}
 
             # Concurrency Control (Cross-Loop safe) - kept for basic locking if needed
             self._sync_lock = threading.Lock()
@@ -82,6 +97,7 @@ class DataProcessor:
         """
         logger.info("[DataProcessor] Cancel requested")
         self._cancel_event.set()
+        self._quality_tier = 0 # 0=Unknown/Critical, 1=Bronze, 2=Silver, 3=Gold
         
         # Propagate to all strategies
         for name, strategy in self.strategies.items():
@@ -267,47 +283,44 @@ class DataProcessor:
 
     @log_async_operation(operation_name="check_data_health", log_result=True)
     async def check_data_health(self):
-        """Check data health status."""
-        if self.is_cancelled():
-            return {'status': 'unknown', 'msg': 'Operation cancelled'}
+        """Check data health status. Read-only diagnostic — immune to sync cancellation."""
+        import time
+        now = time.time()
+        # 10s cache to prevent double-tap on startup
+        if self._health_cache.get('data') and (now - self._health_cache.get('time', 0) < 10):
+            return self._health_cache['data']
 
         await self.cache.init_db()
 
         try:
-            from ui.i18n import I18n
-            
             end_date = await self.get_latest_trade_date()
-            start_date = (datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
+            # Generate start date 3 years ago
+            start_date_obj = datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=365 * 3)
+            start_date = start_date_obj.strftime('%Y%m%d')
+            
             official_dates = await self.get_trade_dates(start_date, end_date)
 
             if not official_dates:
-                return {'status': 'red', 'msg': 'Cannot get official calendar'}
+                return {'status': 'red', 'msg': I18n.get('health_err_calendar')}
 
             local_dates = await self.cache.get_cached_trade_dates()
             
             # 1. Market Health
-            official_set = set(official_dates)
             last_local = sorted(list(local_dates))[-1] if local_dates else None
             
             lag_days = 0
-            if official_dates[-1] not in local_dates:
+            # If latest official date is not in local cache, calculate lag
+            if official_dates and (not local_dates or official_dates[-1] > last_local):
                 if local_dates and last_local:
+                    # Count business days lag
                     lag_days = len([d for d in official_dates if d > last_local])
                 else:
+                    # No local data, lag is total days
                     lag_days = len(official_dates)
 
-            # 1.5 Concept Health (New)
+            # 1.5 Concept Health
             try:
-                # Count concept mappings
-                # This needs a new method in CacheManager/StockDao to count or we just use raw sql here if needed
-                # Ideally: await self.cache.get_concept_count()
-                # For now quick check using BaseDao or existing methods?
-                # Let's use internal engine access for health check or add count method.
-                # Adding `get_table_count` to BaseDao/StockDao is best practice but for now:
-                async with self.cache.engine.connect() as conn:
-                    # Check concept count
-                    r = await conn.exec_driver_sql("SELECT COUNT(*) FROM stock_concepts")
-                    concept_count = r.scalar()
+                concept_count = await self.cache.get_concept_count()
             except Exception as e:
                 logger.warning(f"Concept check failed: {e}")
                 concept_count = 0
@@ -315,40 +328,189 @@ class DataProcessor:
             # 2. Financial Health
             deep_health = await self.cache.check_comprehensive_health()
             
-            # Scorecard
+            # Scorecard construction
             status = 'green'
             reasons = []
 
             if lag_days > 0:
                 status = 'yellow'
                 reasons.append(I18n.get('health_market_lag').format(days=lag_days))
-            if lag_days > 3:
+            if lag_days > HEALTH_THRESHOLD_MARKET_LAG_DAYS:
                 status = 'red'
 
-            fin_fresh_ratio = deep_health['tables'].get('financial_reports', {}).get('fresh_ratio', 0)
-            if fin_fresh_ratio < 0.90:
-                status = 'red'
+            # 2.2 Comprehensive Data Coverage Check
+            tables = deep_health.get('tables', {})
+            fin_fresh_ratio = tables.get('financial_reports', {}).get('ratio', 0)
+            
+            # Identify missing critical tables dynamically from data dictionary
+            critical_tables = [
+                name for name, meta in TABLE_DEFINITIONS.items()
+                if meta.get('quality_config', {}).get('critical')
+            ]
+            missing_critical = [
+                t for t in critical_tables
+                if tables.get(t, {}).get('ratio', 0) < 0.1
+            ]
+            
+            # Count all missing stock tables
+            all_missing = [t for t, v in tables.items() if v.get('type') != 'global' and v.get('ratio', 0) < 0.1]
+            
+            # Determine Data Status
+            data_status = 'green'
+            if missing_critical:
+                data_status = 'red'
+                reasons.append(f"{len(missing_critical)} Critical Tables Missing")
+            elif len(all_missing) > 3:
+                data_status = 'yellow'
+                reasons.append(f"{len(all_missing)} Tables Missing Data")
+            elif fin_fresh_ratio < HEALTH_THRESHOLD_FINANCIAL_COVERAGE:
+                data_status = 'yellow'
                 reasons.append(I18n.get('health_financial_missing').format(ratio=f"{fin_fresh_ratio:.0%}"))
+
+            # Log Metrics
+            logger.info(f"Health Metrics: Lag={lag_days}d, FinCoverage={fin_fresh_ratio:.1%}, Missing={len(all_missing)}")
+            
+            # Final Status Aggregation
+            if status == 'red' or data_status == 'red':
+                status = 'red'
+            elif status == 'yellow' or data_status == 'yellow':
+                status = 'yellow'
+            
+            if status != 'green':
+                logger.warning(f"Health Check Abnormal: Status={status}, Reasons={reasons}")
+
+            # Update Tier State (At least Tier 1 if not red)
+            if status != 'red':
+                self._quality_tier = max(self._quality_tier, 1)
+            else:
+                self._quality_tier = 0
+            
+            # Calculate overall system coverage (using financial as main proxy)
+            sys_coverage = fin_fresh_ratio * 100
+
+            if lag_days == 0:
+                status_desc = I18n.get("health_status_ok_short")
+            else:
+                status_desc = I18n.get("health_status_lag_short", days=lag_days)
+
             status_msg = I18n.get("init_complete").format(
-                status="OK" if lag_days == 0 else f"Lag {lag_days}d",
-                coverage=f"{deep_health.get('coverage', 0):.1f}%"
+                status=status_desc,
+                coverage=f"{sys_coverage:.1f}%"
             )
             # Append concept info
-            status_msg += f" | Concepts: {concept_count}"
+            status_msg += f" | {I18n.get('health_concepts_count', count=concept_count)}"
             
-            return {
-                'status': 'green' if lag_days == 0 and concept_count > 0 else 'orange',
+            # Construction of Market Info with None safety
+            latest_official = official_dates[-1] if official_dates else "N/A"
+            market_info = {
+                'latest_local': last_local if last_local else "N/A",
+                'latest_official': latest_official,
+                'lag_days': lag_days
+            }
+            
+            result_dict = {
+                'status': status,
                 'msg': status_msg,
+                'reasons': reasons,
+                'market': market_info,
+                'fundamentals': deep_health,
                 'details': {
                     'lag': lag_days,
-                    'market_date': last_local,
-                    'financial_coverage': deep_health.get('coverage', 0),
+                    'market_date': last_local if last_local else "N/A",
+                    'financial_coverage': sys_coverage,
                     'concept_count': concept_count
                 }
             }
+            self._health_cache = {'time': now, 'data': result_dict}
+            return result_dict
         except Exception as e:
-            logger.error(f"Health check failed: {e}")
-            return {'status': 'red', 'msg': str(e)}
+            logger.error(f"Health check failed: {e}", exc_info=True)
+            return {'status': 'red', 'msg': f"Check failed: {str(e)}"}
+
+    @log_async_operation(operation_name="run_quality_scan")
+    async def run_quality_scan(self, sample_size=50, progress_callback=None):
+        """
+        Tier 2/Tier 3 Deep Health Scan.
+        Samples stocks and runs DataQualityService checks.
+        
+        Args:
+            sample_size: Number of stocks to sample (default 50).
+            progress_callback: Callback(current, total, msg).
+        """
+        import random
+        
+        if progress_callback: progress_callback(0, 100, I18n.get("scan_step_init"))
+        
+        try:
+            # 1. Select Sample
+            basics = await self.cache.get_stock_basic()
+            if basics is None or basics.empty:
+                return {'score': 0, 'tier': 0, 'details': {}}
+                
+            active_stocks = basics[basics['list_status'] == 'L']['ts_code'].tolist()
+            sample = random.sample(active_stocks, min(sample_size, len(active_stocks)))
+            
+            logger.info(f"[QualityScan] Starting scan on {len(sample)} stocks.")
+            
+            # 2. Prepare Context
+            scan_results = {'continuity': [], 'recency': [], 'nulls': []}
+            trade_cal_df = await self.cache.get_trade_cal()
+            
+            # 3. Iterate Sample (with Timeout protection)
+            # We use a simplified loop. In production, could be parallelized.
+            total_steps = len(sample)
+            
+            for idx, ts_code in enumerate(sample):
+                if self.is_cancelled(): break
+                
+                # Update Progress
+                pct = int((idx / total_steps) * 100)
+                if progress_callback: 
+                    progress_callback(pct, 100, I18n.get("scan_scanning", code=ts_code))
+                
+                # Fetch Data (Daily Quotes for Tier 2 Check)
+                df_daily = await self.cache.get_daily_quotes(ts_code=ts_code, limit=250)
+                
+                if df_daily is not None and not df_daily.empty:
+                    # Check Continuity
+                    cont_res = DataQualityService.check_continuity(df_daily, 'trade_date', trade_cal_df)
+                    scan_results['continuity'].append(cont_res['coverage_ratio'])
+                    
+                    # Check Recency (vs today)
+                    rec_res = DataQualityService.check_recency(df_daily, 'trade_date', datetime.datetime.now().strftime('%Y%m%d'))
+                    scan_results['recency'].append(rec_res['lag_days'])
+                    
+                    # Check Nulls (Close price)
+                    null_res = DataQualityService.check_nulls(df_daily, ['close', 'vol'])
+                    scan_results['nulls'].append(null_res.get('close', 0.0))
+            
+            # 4. Aggregate
+            avg_continuity = sum(scan_results['continuity']) / len(scan_results['continuity']) if scan_results['continuity'] else 0
+            avg_recency = sum(scan_results['recency']) / len(scan_results['recency']) if scan_results['recency'] else 99
+            
+            tier = 1
+            if avg_continuity > 0.95 and avg_recency < 5:
+                tier = 2
+            if avg_continuity > 0.99 and avg_recency < 3:
+                tier = 3 # Placeholder logic for Tier 3
+                
+            self._quality_tier = tier
+            logger.info(f"[QualityScan] Scan Complete. Tier={tier}, Score={int(avg_continuity*100)}")
+
+            result = {
+                'score': int(avg_continuity * 100),
+                'tier': tier,
+                'sample_size': len(sample),
+                'avg_continuity': avg_continuity,
+                'avg_lag': avg_recency
+            }
+            
+            if progress_callback: progress_callback(100, 100, I18n.get("scan_complete"))
+            return result
+            
+        except Exception as e:
+            logger.error(f"[QualityScan] Failed: {e}", exc_info=True)
+            return {'score': 0, 'tier': 0, 'error': str(e)}
 
     # ... Other simple sync/get methods ...
 
@@ -396,130 +558,14 @@ class DataProcessor:
         
         try:
             logger.info("[sync_concepts] Starting concept sync...")
-            # Tushare concept_detail returns ts_code, concept_name, concept_id
-            # We need to fetch for all stocks? No, concept_detail takes ts_code OR id.
-            # Efficient way: Get all concepts list first, then map? 
-            # Tushare 'concept_detail' can get all items if no params? No.
-            # Tushare 'concept' gets list of concepts. 'concept_detail' gets stocks in a concept.
-            # Strategy: 
-            # 1. Get List of Concepts (api.concept())
-            # 2. For each concept, get stocks (api.concept_detail(id=...)) -> TOO SLOW (hundreds of concepts)
-            # Alternative: Tushare 'stock_basic' doesn't have concepts.
-            # Alternative 2: Tushare 'concept_detail' with ts_code="" returns what? likely nothing or error.
-            # 
-            # Let's check TushareHelper or just Iterate?
-            # Actually standard way is: get all concepts, then for each concept get stocks.
-            # But that is too many requests (limit 500/min).
-            # 
-            # Better approach for "My Stocks" analysis:
-            # We only strictly need concepts for the *filtered* stocks in AI Analysis.
-            # BUT user wants "Local Cache" for everything.
-            #
-            # Compromise: Tushare has `concept_detail` which might accept list? 
-            # Docs say: id, name, ts_code.
-            #
-            # Wait, `stock_company` info might have business scope but not concept.
-            # 
-            # Let's use `pro.stock_basic(fields='ts_code,industry')`? No, industry != concept.
-            # 
-            # Re-reading Tushare Docs (Mental):
-            # `pro.concept()` -> list of concepts (hundreds).
-            # `pro.concept_detail(id='TS0', fields='ts_code,name')` -> stocks in concept.
-            # 
-            # This is heavy to sync FULLY.
-            # Maybe we only sync "Hot Concepts"? Or specific list?
-            # 
-            # Correct approach for efficient full-sync:
+            # Strategy:
             # 1. Get all concepts: `df_concepts = pro.concept()`
-            # 2. Filter for "useful" concepts (e.g. src='ts')?
-            # 3. Iterate and fetch details.
-            # 
-            # This might take too long for `initialize_system`.
-            # 
-            # Alternative: Lazy load?
-            # User requirement: "All data from local cache".
-            # 
-            # Let's look at `TushareClient`... maybe it has a helper?
-            # If not, we might need a separate "Concept Sync" task, or accept it takes time.
-            # 
-            # Let's implement a lighter version:
-            # Sync only when explicitly requested? 
-            # Or maybe just use `ths_index` (Tonghuashun Concepts) which might be better?
-            # 
-            # OK, for now, let's implement a "best effort" sync or just simple caching 
-            # of what we have access to. 
-            # 
-            # Wait, `analyze_stock` was doing `get_concept_detail(ts_code=...)`.
-            # Calling `concept_detail` by `ts_code` gets concepts for THAT stock.
-            # We can run this for ALL ACTIVE stocks?
-            # 5000 stocks * 1 request = 5000 requests -> WAY too many.
-            # 
-            # OPTIMIZATION:
-            # `concept_detail` does NOT support bulk `ts_code` (comma numeric? no).
-            # 
-            # BUT `concept` API returns all concepts.
-            # Maybe we loop over CONCEPT IDs?
-            # There are ~300-500 concepts. 
-            # 500 requests is manageable with thread pool (500/20 threads = 25 batches).
-            # 
-            # Valid plan:
-            # 1. Get all concepts.
-            # 2. Concurrently fetch details for all concepts.
-            # 3. Invert the map (Concept -> Stocks) to (Stock -> Concepts)
-            # 4. Save.
-            
-            # API: self.api.get_concepts() -> This likely needs to be implemented or used raw.
-            # Let's see if TushareClient has it.
-            # If not, we use `self.api.pro.concept()` and `self.api.pro.concept_detail()`.
-            
-            concepts = await ThreadPoolManager().run_async(TaskType.IO, self.api.pro.concept, src='ts')
-            if concepts is None or concepts.empty:
-                logger.warning("No concepts found.")
-                return 0
-                
-            # Get list of concept codes
-            concept_codes = concepts['code'].tolist()
-            
-            # Fetch details for all concepts using ThreadPool
-            # We use `fetch_one` defined below for concurrency
-
-            # 
-            # For now, I will implement a placeholder that warns if full sync is too heavy,
-            # OR I will just implementation a smart sync (fetch concept list, save it).
-            # 
-            # Wait, `stock_concepts` table needs `ts_code`.
-            # If we only have concept list, we can't populate the link.
-            # 
-            # Revised Plan for Sync:
-            # 1. Fetch Concept List (`concept`)
-            # 2. Fetch Stock Concept List (`concept_detail`)?
-            # 
-            # Actually, `concept_detail` documentation says:
-            # "Input id OR ts_code".
-            # 
-            # If we input `ts_code`, we get concepts for that stock.
-            # If we input `id` (concept id), we get stocks in that concept.
-            # 
-            # There are fewer Concepts (400) than Stocks (5000).
-            # So iterating Concepts is 10x faster.
-            # 
-            # So:
-            # 1. Get all concepts: `df_concepts = pro.concept()`
-            # 2. Parallel fetch `pro.concept_detail(id=c)` for all `c`.
-            # 3. Merge results.
-            
-            # Let's add `get_all_concepts_data` to TushareClient to keep this clean?
-            # Or just do it here. 
-            # I'll do it here using ThreadPool.
-            
-            # Chunking to avoid rate limit? 
-            # Tushare limit is usually high (100-500/min). 
-            # If we have 400 concepts, we might hit limit.
-            # 
-            # Safest: Use TushareClient to handle limiting.
+            # 2. Parallel fetch `pro.concept_detail(id=c)` for all `c` using ThreadPool and Semaphore.
+            # 3. Merge results and save atomically.
             
             # Fetch Concept List
-            df_c = await ThreadPoolManager().run_async(TaskType.IO, self.api.pro.concept, src='ts')
+            # Fetch Concept List (uses _handle_api_call for rate limiting)
+            df_c = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_concept_list)
             if df_c is None or df_c.empty: return 0
             
             c_codes = df_c['code'].tolist()
@@ -536,7 +582,7 @@ class DataProcessor:
                 async with sem:
                     # Double check inside semaphore
                     if self.is_cancelled(): return None
-                    return await ThreadPoolManager().run_async(TaskType.IO, self.api.pro.concept_detail, id=c)
+                    return await ThreadPoolManager().run_async(TaskType.IO, self.api.get_concept_detail_by_id, c)
 
             # Create tasks eagerly but execute with semaphore
             # This avoids "coroutine never awaited" because we wrap in create_task
@@ -614,6 +660,24 @@ class DataProcessor:
     async def ensure_trade_cal(self, end_date, required_start_date=None):
         """
         Ensure trade calendar covers [required_start_date, end_date].
+        Includes memory caching to avoid frequent DB/API checks (and log spam).
+        """
+        # Optimized path for frequent checks (e.g. Home Screen polling)
+        # Only cache if using default start date (required_start_date is None)
+        if required_start_date is None and self._trade_cal_cache.get('date') == end_date:
+            return True
+
+        success = await self._ensure_trade_cal_impl(end_date, required_start_date)
+        
+        if success and required_start_date is None:
+            self._trade_cal_cache = {'date': end_date}
+            
+        return success
+
+    @log_async_operation(operation_name="ensure_trade_cal_impl")
+    async def _ensure_trade_cal_impl(self, end_date, required_start_date=None):
+        """
+        Ensure trade calendar covers [required_start_date, end_date].
         """
         try:
             min_db, max_db = await self.cache.get_trade_cal_range()
@@ -666,10 +730,8 @@ class DataProcessor:
             today_str = now.strftime('%Y%m%d')
             start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
 
-            # Calendar Check (with Memory Cache)
-            if not self._trade_cal_cache or self._trade_cal_cache.get('date') != today_str:
-                await self.ensure_trade_cal(today_str)
-                self._trade_cal_cache = {'date': today_str}
+            # Calendar Check (Cached inside ensure_trade_cal)
+            await self.ensure_trade_cal(today_str)
             
             # Find latest valid date
             cache_df = await self.cache.get_trade_cal(start_date=start_str, end_date=today_str, is_open=1)
@@ -678,8 +740,9 @@ class DataProcessor:
                  date = sorted(cache_df['cal_date'].tolist())[-1]
             
             # Parallel Fetch
-            async def get_idx(code, name):
+            async def get_idx(code, name_key):
                 df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_index_daily, ts_code=code, trade_date=date)
+                name = I18n.get(name_key)
                 if df is not None and not df.empty:
                     row = df.iloc[0]
                     c = row.get('pct_chg', 0)
@@ -689,17 +752,20 @@ class DataProcessor:
 
             async def get_hsgt():
                 df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_moneyflow_hsgt, trade_date=date)
+                name = I18n.get('home_northbound')
                 if df is not None and not df.empty:
                     val = float(df.iloc[0]['north_money'])
-                    return {'name': '北向资金', 'value': f"{val/100:.2f}亿" if abs(val)>100 else f"{val:.0f}万", 'sub': "流入" if val>0 else "流出"}
-                return {'name': '北向资金', 'value': '-', 'sub': '-'}
+                    val_str = f"{val/100:.2f}{I18n.get('unit_yi')}" if abs(val)>100 else f"{val:.0f}{I18n.get('unit_wan')}"
+                    sub_str = I18n.get('home_inflow') if val>0 else I18n.get('home_outflow')
+                    return {'name': name, 'value': val_str, 'sub': sub_str}
+                return {'name': name, 'value': '-', 'sub': '-'}
 
             hot_concepts_task = NewsFetcher.get_hot_concepts(limit=8)
 
             results = await asyncio.gather(
-                get_idx('000001.SH', '上证指数'),
-                get_idx('399001.SZ', '深证成指'),
-                get_idx('399006.SZ', '创业板指'),
+                get_idx('000001.SH', 'home_index_sh'),
+                get_idx('399001.SZ', 'home_index_sz'),
+                get_idx('399006.SZ', 'home_index_cyb'),
                 get_hsgt(),
                 hot_concepts_task
             )
@@ -742,7 +808,8 @@ class DataProcessor:
         
         # Step weights (must sum to 100)
         # Optimized based on user feedback (Steps 1 & 2 represent 2% total)
-        STEP_WEIGHTS = [1, 1, 50, 43, 5]
+        # Added Step 5 (AI Data) -> 10%
+        STEP_WEIGHTS = [1, 1, 45, 38, 10, 5]
         current_step = 0
         
         def report_step(step_num, sub_progress=0, sub_total=1, sub_msg=""):
@@ -773,10 +840,8 @@ class DataProcessor:
                 return None
             if self.is_cancelled(): return None
             
-            # ===== Step 1.5: Concepts (Optional/Async-ish but we wait here for safety) =====
-            # Weight: We re-distribute? Let's just run it as part of Step 1 or 2.
-            # Let's say it effectively runs here.
-            report_step(1, 0.5, 1, "Syncing Concepts...")
+            # ===== Step 1.5: Concepts (runs as part of Step 1) =====
+            report_step(1, 0.5, 1, I18n.get("init_sync_concepts"))
             await self.sync_concepts()
             
             # ===== Step 2: Trade Calendar (5%) =====
@@ -813,9 +878,22 @@ class DataProcessor:
                 logger.error(f"[initialize_system] Step 4 failed: {financial_result.errors}")
                 return None
             if self.is_cancelled(): return None
-            
-            # ===== Step 5: Health Check (5%) =====
+
+            # ===== Step 5: AI Alpha Data (10%) =====
             report_step(5)
+            
+            macro_res = await self.strategies['macro'].run()
+            if macro_res.status == "failed":
+                logger.warning(f"[initialize_system] Macro sync failed: {macro_res.errors}")
+            
+            holder_res = await self.strategies['holder'].run()
+            if holder_res.status == "failed":
+                logger.warning(f"[initialize_system] Holder sync failed: {holder_res.errors}")
+            
+            if self.is_cancelled(): return None
+
+            # ===== Step 6: Health Check (5%) =====
+            report_step(6)
             result = await self.check_data_health()
             
             # Report completion
@@ -829,9 +907,7 @@ class DataProcessor:
             logger.error(f"[initialize_system] ❌ Failed at {step_label}: {e}")
             raise  # Re-raise so UI can catch and display
 
-    # Proxy methods for backward compatibility
-    # (Removed unused sync_daily_quotes_for_date and sync_daily_indicators_for_date)
-    # (Removed unused sync_moneyflow, sync_northbound, sync_market_news)
+
 
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365):
@@ -855,22 +931,22 @@ class DataProcessor:
         
         # 2. Auxiliary Data
         # Northbound
-        nb = await self.context.cache.get_northbound(trade_date=trade_date)
+        nb = await self.cache.get_northbound(trade_date=trade_date)
         if nb is not None:
             context['northbound_data'] = nb
             
         # Moneyflow
-        mf = await self.context.cache.get_moneyflow(trade_date=trade_date)
+        mf = await self.cache.get_moneyflow(trade_date=trade_date)
         if mf is not None:
             context['moneyflow_data'] = mf
         
         # Top List (LHB)
-        lhb = await self.context.cache.get_top_list(trade_date=trade_date)
+        lhb = await self.cache.get_top_list(trade_date=trade_date)
         if lhb is not None:
             context['top_list'] = lhb
             
         # Block Trade
-        blk = await self.context.cache.get_block_trade(trade_date=trade_date)
+        blk = await self.cache.get_block_trade(trade_date=trade_date)
         if blk is not None:
             context['block_trade'] = blk
             

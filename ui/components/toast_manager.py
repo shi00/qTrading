@@ -4,6 +4,7 @@ import threading
 
 import flet as ft
 from ui.theme import AppColors
+from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class ToastManager:
     - All _active_tasks operations protected by _lock
     - Safe to call show() from any thread
     """
+    MAX_TOAST_COUNT = 5
 
     def __init__(self, page: ft.Page):
         self.page = page
@@ -37,7 +39,7 @@ class ToastManager:
             content=self.toasts_stack,
             right=20,
             bottom=20,
-            width=320,
+            width=360,
             bgcolor=ft.Colors.TRANSPARENT,
         )
 
@@ -92,7 +94,7 @@ class ToastManager:
             self.toasts_stack.controls.append(toast_card)
 
             # Limit max toasts (remove oldest)
-            while len(self.toasts_stack.controls) > 5:
+            while len(self.toasts_stack.controls) > self.MAX_TOAST_COUNT:
                 removed = self.toasts_stack.controls.pop(0)
                 if isinstance(removed, ToastCard):
                     removed.cancel_timer()
@@ -165,21 +167,58 @@ class ToastCard(ft.Container):
     Individual toast notification card with animation and timer.
     Uses semantic tokens for standard colors — auto-updates with theme.
     """
+    LONG_TEXT_THRESHOLD = 80
+    COLLAPSED_MAX_LINES = 3
 
     def __init__(self, message, icon, color, duration, on_dismiss):
         super().__init__()
+        self.message = message
         self.duration = duration
         self.on_dismiss = on_dismiss
         self.is_hovered = False
+        self.is_expanded = False # State for expansion
         self.remaining = duration
         self._is_cancelled = False
 
-        # UI — uses semantic tokens for text/bg
+        # Threshold for "Long Text"
+        self.is_long_text = len(message) > self.LONG_TEXT_THRESHOLD
+        
+        # Text Component
+        self.text_control = ft.Text(
+            message, 
+            size=14, 
+            color=ft.Colors.ON_SURFACE, 
+            width=270, 
+            max_lines=self.COLLAPSED_MAX_LINES,
+            overflow=ft.TextOverflow.ELLIPSIS, 
+            tooltip=I18n.get("toast_expand_hint") if self.is_long_text else None
+        )
+
+        # Expand Button (only if long text)
+        self.expand_btn = None
+        if self.is_long_text:
+            self.expand_btn = ft.IconButton(
+                icon=ft.Icons.KEYBOARD_ARROW_DOWN,
+                icon_size=16,
+                icon_color=ft.Colors.PRIMARY,
+                tooltip=I18n.get("common_expand"),
+                on_click=self._toggle_expand,
+                style=ft.ButtonStyle(padding=0)
+            )
+
+        # Layout Construction
+        self.content_col = ft.Column([
+            self.text_control,
+        ], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
+
+        if self.expand_btn:
+            self.content_col.controls.append(
+                ft.Row([ft.Container(expand=True), self.expand_btn], alignment=ft.MainAxisAlignment.END, height=20)
+            )
+
         self.content = ft.Row([
             ft.Icon(icon, color=color, size=24),
-            ft.Column([
-                ft.Text(message, size=14, color=ft.Colors.ON_SURFACE, width=230, no_wrap=False),
-            ], spacing=2, alignment=ft.MainAxisAlignment.CENTER),
+            self.content_col,
             ft.IconButton(
                 ft.Icons.CLOSE,
                 icon_size=16,
@@ -199,15 +238,28 @@ class ToastCard(ft.Container):
             offset=ft.Offset(0, 4)
         )
         # Animation
-        self.offset = ft.Offset(1.1, 0)  # Start off-screen right
+        self.offset = ft.Offset(1.1, 0)
         self.animate_offset = ft.Animation(300, ft.AnimationCurve.EASE_OUT_CUBIC)
         self.animate_opacity = ft.Animation(300, ft.AnimationCurve.EASE_IN)
         self.opacity = 0
-
         self.on_hover = self._on_hover
 
+    def _toggle_expand(self, e):
+        self.is_expanded = not self.is_expanded
+        
+        if self.is_expanded:
+            self.text_control.max_lines = None # Show all
+            self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_UP
+            self.expand_btn.tooltip = I18n.get("common_collapse")
+            # Timer logic handled in start_timer loop
+        else:
+            self.text_control.max_lines = self.COLLAPSED_MAX_LINES
+            self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN
+            self.expand_btn.tooltip = I18n.get("common_expand")
+            
+        self.update()
+
     def did_mount(self):
-        # Trigger enter animation
         self.offset = ft.Offset(0, 0)
         self.opacity = 1
         self.update()
@@ -217,23 +269,25 @@ class ToastCard(ft.Container):
 
     async def start_timer(self):
         try:
-            # Wait for enter animation
             await asyncio.sleep(0.3)
 
             while self.remaining > 0:
                 if self._is_cancelled:
                     return
                 if not self.page:
-                    return  # Page closed
-                if not self.is_hovered:
+                    return
+                
+                # Logic: Don't countdown if hovered OR EXPANDED
+                if not self.is_hovered and not self.is_expanded:
                     self.remaining -= 0.1
+                
                 await asyncio.sleep(0.1)
 
             if not self._is_cancelled:
                 await self.dismiss()
         except asyncio.CancelledError:
             pass
-        except Exception as e:
+        except Exception:
             pass
 
     def _on_hover(self, e):
@@ -243,10 +297,8 @@ class ToastCard(ft.Container):
         await self.dismiss()
 
     async def dismiss(self):
-        """Animate out and notify manager to remove this toast."""
         if not self.page:
             return
-
         self.opacity = 0
         self.offset = ft.Offset(1.1, 0)
         self.update()

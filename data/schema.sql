@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS daily_indicators
     REAL,
     turnover_rate_f
     REAL,
+    volume_ratio
+    REAL,
     PRIMARY
     KEY
 (
@@ -872,3 +874,180 @@ CREATE INDEX IF NOT EXISTS idx_mainbz_code ON fina_mainbz(ts_code);
 CREATE INDEX IF NOT EXISTS idx_pledge_code ON pledge_stat(ts_code);
 CREATE INDEX IF NOT EXISTS idx_repurchase_code ON repurchase(ts_code);
 CREATE INDEX IF NOT EXISTS idx_dividend_code ON dividend(ts_code);
+
+-- ==========================================
+-- Phase 3: Policy-Driven AI Architecture Extensions
+-- ==========================================
+
+-- 24. Macro Economy (M2/CPI/PPI) - Monthly
+CREATE TABLE IF NOT EXISTS macro_economy
+(
+    period
+    TEXT
+    PRIMARY
+    KEY,
+    m2
+    REAL,
+    m2_yoy
+    REAL,
+    m1
+    REAL,
+    m1_yoy
+    REAL,
+    m0
+    REAL,
+    m0_yoy
+    REAL,
+    cpi
+    REAL,
+    ppi
+    REAL,
+    created_at
+    TEXT
+);
+
+-- 25. Shibor Rates (Interbank) - Daily
+-- Tushare shibor API fields: date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y
+CREATE TABLE IF NOT EXISTS shibor_daily
+(
+    date TEXT PRIMARY KEY,
+    "on" REAL,
+    "1w" REAL,
+    "2w" REAL,
+    "1m" REAL,
+    "3m" REAL,
+    "6m" REAL,
+    "9m" REAL,
+    "1y" REAL
+);
+
+-- 26. Adjustment Factors (Independent Table)
+CREATE TABLE IF NOT EXISTS adj_factor
+(
+    ts_code
+    TEXT
+    NOT
+    NULL,
+    trade_date
+    TEXT
+    NOT
+    NULL,
+    adj_factor
+    REAL,
+    PRIMARY
+    KEY
+    (
+        ts_code,
+        trade_date
+    )
+);
+
+-- 27. Stock Holder Numbers (Chip Concentration)
+CREATE TABLE IF NOT EXISTS stk_holdernumber
+(
+    ts_code
+    TEXT
+    NOT
+    NULL,
+    end_date
+    TEXT
+    NOT
+    NULL,
+    ann_date
+    TEXT,
+    holder_num
+    INTEGER,
+    holder_num_change
+    REAL,
+    holder_num_ratio
+    REAL,
+    PRIMARY
+    KEY
+    (
+        ts_code,
+        end_date
+    )
+);
+
+-- 28. Top 10 Holders (Institutional Holdings)
+CREATE TABLE IF NOT EXISTS top10_holders
+(
+    ts_code
+    TEXT
+    NOT
+    NULL,
+    end_date
+    TEXT
+    NOT
+    NULL,
+    ann_date
+    TEXT,
+    holder_name
+    TEXT,
+    hold_amount
+    REAL,
+    hold_ratio
+    REAL,
+    holder_type
+    TEXT,
+    PRIMARY
+    KEY
+    (
+        ts_code,
+        end_date,
+        holder_name
+    )
+);
+
+-- 29. Index Components Weight (Survivorship Bias Free)
+CREATE TABLE IF NOT EXISTS index_weight
+(
+    index_code
+    TEXT
+    NOT
+    NULL,
+    con_code
+    TEXT
+    NOT
+    NULL,
+    trade_date
+    TEXT
+    NOT
+    NULL,
+    weight
+    REAL,
+    PRIMARY
+    KEY
+    (
+        index_code,
+        con_code,
+        trade_date
+    )
+);
+
+-- 30. Northbound Moneyflow History (Smart Money)
+CREATE TABLE IF NOT EXISTS moneyflow_hsgt
+(
+    trade_date
+    TEXT
+    PRIMARY
+    KEY,
+    ggt_ss
+    REAL,
+    ggt_sz
+    REAL,
+    hgt
+    REAL,
+    sgt
+    REAL,
+    north_money
+    REAL,
+    south_money
+    REAL
+);
+
+-- Indexes for AI Extensions
+CREATE INDEX IF NOT EXISTS idx_adj_code_date ON adj_factor(ts_code, trade_date);
+CREATE INDEX IF NOT EXISTS idx_holder_code_date ON stk_holdernumber(ts_code, end_date);
+CREATE INDEX IF NOT EXISTS idx_top10_holder ON top10_holders(holder_name);
+CREATE INDEX IF NOT EXISTS idx_index_weight_date ON index_weight(trade_date);

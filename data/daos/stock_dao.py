@@ -14,10 +14,16 @@ class StockDao(BaseDao):
 
         df = df.copy()
         df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        return await self._save_standard(df, "stock_basic", cols)
+        return await self._save_upsert(df, "stock_basic", cols, pk_columns=['ts_code'])
 
     async def get_stock_basic(self):
         return await self._read_db("SELECT * FROM stock_basic")
+
+    async def get_active_stock_count(self):
+        """Count stocks with list_status='L'"""
+        async with self.engine.connect() as conn:
+            r = await conn.exec_driver_sql("SELECT count(*) FROM stock_basic WHERE list_status='L'")
+            return r.fetchone()[0] or 0
 
     # --- Trade Calendar ---
     async def save_trade_cal(self, df):
@@ -27,7 +33,7 @@ class StockDao(BaseDao):
         if 'is_open' in df.columns:
             df['is_open'] = df['is_open'].astype(int)
         
-        return await self._save_standard(df, "trade_cal", cols)
+        return await self._save_upsert(df, "trade_cal", cols, pk_columns=['cal_date'])
 
     async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
         sql = "SELECT * FROM trade_cal WHERE 1=1"
@@ -53,8 +59,7 @@ class StockDao(BaseDao):
         df = df.copy()
         df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Using REPLACE INTO by default in _save_standard handles duplicates on PK (ts_code, concept_id)
-        return await self._save_standard(df, "stock_concepts", cols)
+        return await self._save_upsert(df, "stock_concepts", cols, pk_columns=['ts_code', 'concept_id'])
 
     async def overwrite_concepts(self, df):
         """
@@ -70,7 +75,8 @@ class StockDao(BaseDao):
         # Prepare params outside transaction
         params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         
-        sql_insert = f"INSERT INTO stock_concepts ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+        col_str = self._quote_columns(cols)
+        sql_insert = f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join(['?']*len(cols))})"
 
         try:
             async with self.engine.begin() as conn:

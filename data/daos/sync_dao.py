@@ -9,7 +9,11 @@ class SyncDao(BaseDao):
     # --- Sync Stats ---
     async def update_sync_status(self, table_name, last_data_date, record_count, status='success'):
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        sql = "INSERT OR REPLACE INTO sync_status (table_name, last_sync_date, last_data_date, record_count, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+        sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") 
+               VALUES (?, ?, ?, ?, ?, ?) 
+               ON CONFLICT("table_name") DO UPDATE SET 
+               "last_sync_date"=excluded."last_sync_date","last_data_date"=excluded."last_data_date", 
+               "record_count"=excluded."record_count","status"=excluded."status","updated_at"=excluded."updated_at"'''
         await self._write_db(sql, (table_name, now, last_data_date, record_count, status, now))
 
     async def get_sync_status(self, table_name=None):
@@ -35,8 +39,12 @@ class SyncDao(BaseDao):
 
     async def mark_stock_step4_completed(self, ts_code, sync_version=1):
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        sql = "INSERT OR REPLACE INTO stock_sync_status (ts_code, step4_completed_at, sync_version) VALUES (?, ?, ?)"
+        sql = '''INSERT INTO stock_sync_status ("ts_code","step4_completed_at","sync_version") 
+               VALUES (?, ?, ?) 
+               ON CONFLICT("ts_code") DO UPDATE SET 
+               "step4_completed_at"=excluded."step4_completed_at","sync_version"=excluded."sync_version"'''
         await self._write_db(sql, [(ts_code, now, sync_version)], is_many=True)
 
     async def clear_step4_sync_status(self):
-        await self._write_db("DELETE FROM stock_sync_status")
+        async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("DELETE FROM stock_sync_status")

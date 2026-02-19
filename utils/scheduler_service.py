@@ -35,6 +35,7 @@ class SchedulerService:
             return
 
         # Initialize AsyncIOScheduler with explicit timezone
+        # Initialize AsyncIOScheduler with explicit timezone
         # 'apscheduler.job_defaults.max_instances': 1 ensures we don't overlap runs
         # timezone='Asia/Shanghai' ensures consistent scheduling regardless of server location
         self.scheduler = AsyncIOScheduler(job_defaults={'max_instances': 1}, timezone='Asia/Shanghai')
@@ -51,6 +52,10 @@ class SchedulerService:
         # Schedule jobs based on config
         self._schedule_jobs()
 
+        # Add listener for missed jobs
+        from apscheduler.events import EVENT_JOB_MISSED
+        self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
+
         try:
             self.scheduler.start()
             logger.info("[Scheduler] Started")
@@ -66,6 +71,12 @@ class SchedulerService:
             )
         except Exception as e:
             logger.error(f"[Scheduler] Failed to start: {e}")
+
+    def _on_job_missed(self, event):
+        """Handle missed job events with clear logging"""
+        job_id = event.job_id
+        run_time = event.scheduled_run_time
+        logger.warning(f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})")
 
     def stop(self):
         """Stop the scheduler"""
@@ -185,7 +196,8 @@ class SchedulerService:
 
             # Sync today's data
             result = await processor.sync_daily_market_snapshot()
-            logger.info(f"[Scheduler] Data update complete. Rows: {result if isinstance(result, int) else 'N/A'}")
+            added = getattr(result, 'added', result) if result else 0
+            logger.info(f"[Scheduler] Data update complete. Rows: {added}")
 
             # Sync Financial Reports
             await processor.sync_financial_reports()

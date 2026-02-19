@@ -163,7 +163,7 @@ class LocalModelManager:
             verbose=False
         )
 
-    async def run_inference(self, prompt: str, max_tokens: int = 512, temperature: float = 0.7,
+    async def run_inference(self, prompt: str, max_tokens: int = 150, temperature: float = 0.7,
                             system_prompt: str = "You are a helpful assistant.") -> str:
         """
         Run inference on the loaded model.
@@ -238,7 +238,8 @@ class LocalModelManager:
         response = self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
-            temperature=temperature
+            temperature=temperature,
+            stop=["\nUser:", "User:", "```", "\n\n"]  # Prevent loops; do NOT stop on "}" as it truncates JSON
         )
 
         return response['choices'][0]['message']['content']

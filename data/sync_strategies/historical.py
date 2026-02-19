@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import logging
 
+import inspect
 import pandas as pd
 
 from data.constants import MAJOR_INDICES
@@ -13,6 +14,7 @@ from data.sync_strategies.base import ISyncStrategy, SyncResult
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.log_decorators import log_async_operation
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
+    @log_async_operation(operation_name="HistoricalSyncStrategy.run")
     async def run(self, days: int = 365, progress_callback=None, **kwargs) -> SyncResult:
         """
         Main entry point for historical sync.
@@ -96,7 +99,6 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except Exception as e:
             logger.warning(f"Cache check failed: {e}")
 
-        total_days = len(trade_dates)
         total_days = len(trade_dates)
         concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(max(1, concurrency))  # Use config
@@ -219,6 +221,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             ("margin", self.context.api.get_margin_detail, "Margin Detail"),
             ("mf", self.context.api.get_moneyflow, "Money Flow"),
             ("north", self.context.api.get_hk_hold, "Northbound"),
+            ("hsgt_flow", self.context.api.get_moneyflow_hsgt, "HSGT Flow"),
             ("lhb", self.context.api.get_top_list, "Dragon Tiger"),
             ("block", self.context.api.get_block_trade, "Block Trade"),
             ("index_basic", self.context.api.get_index_dailybasic, "Index Indicators")
@@ -226,55 +229,114 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def fetch_wrapper(key, func, name):
             try:
-                return (key, await ThreadPoolManager().run_async(TaskType.IO, func, trade_date=trade_date))
-            except Exception:
-                return (key, None)
+                # Return (key, data, error)
+                return (key, await ThreadPoolManager().run_async(TaskType.IO, func, trade_date=trade_date), None)
+            except Exception as e:
+                logger.warning(f"[DailySync] Fetch {name} failed for {trade_date}: {e}")
+                return (key, None, e)
 
         async def fetch_indices():
-            tasks = [ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_index_daily, ts_code=c,
-                                                   trade_date=trade_date) for c in MAJOR_INDICES]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
-            if valid:
-                return ("index", pd.concat(valid, ignore_index=True))
-            return ("index", None)
+            try:
+                tasks = [ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_index_daily, ts_code=c,
+                                                       trade_date=trade_date) for c in MAJOR_INDICES]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
+                if valid:
+                    return ("index", pd.concat(valid, ignore_index=True), None)
+                return ("index", None, None)
+            except Exception as e:
+                return ("index", None, e)
 
         # Launch
         futures = [fetch_wrapper(*c) for c in task_configs]
         futures.append(fetch_indices())
 
         results_list = await asyncio.gather(*futures)
-        data_map = {k: v for k, v in results_list}
+        # Parse results: Map key -> (data, error)
+        data_map = {k: v for k, v, e in results_list}
+        error_map = {k: e for k, v, e in results_list if e is not None}
+
+        # CRITICAL CHECK: If Quotes or Basic failed, we MUST raise exception to trigger retry
+        if 'quotes' in error_map:
+            raise error_map['quotes']
+        if 'basic' in error_map:
+            raise error_map['basic']
 
         # Save Logic
         cache = self.context.cache
 
-        async def save_if_ok(key, method):
+        async def save_if_ok(key, method, critical=False):
             df = data_map.get(key)
             if df is not None and not df.empty:
-                await method(df)
-                return True
+                # Introspect method to see if it accepts 'suppress_errors'
+                target_func = method
+                while hasattr(target_func, '__wrapped__'):
+                    target_func = target_func.__wrapped__
+
+                try:
+                    sig = inspect.signature(target_func)
+                    
+                    if 'suppress_errors' in sig.parameters:
+                        # For critical tables, suppress_errors=False (allow bubble up)
+                        # For non-critical, suppress_errors=True (suppress)
+                        await method(df, suppress_errors=not critical)
+                    else:
+                        await method(df)
+                    return True
+                except Exception as e:
+                    if critical:
+                        logger.error(f"[HistoricalSync] Critical save failed for {key}: {e}")
+                        raise e 
+                    else:
+                        logger.warning(f"[HistoricalSync] Non-critical save failed for {key}: {e}")
             return False
 
-        await save_if_ok("quotes", cache.save_daily_quotes)
-        await save_if_ok("basic", cache.save_daily_indicators)
+        # 1. Quotes (Critical)
+        await save_if_ok("quotes", cache.save_daily_quotes, critical=True)
+        
+        # 2. Adj Factor (Critical, derived from quotes)
+        # Note: adj_factor is inside quotes dataframe, so we handle it explicitly
+        df_quotes = data_map.get("quotes")
+        if df_quotes is not None and not df_quotes.empty and 'adj_factor' in df_quotes.columns:
+            try:
+                # We know save_adj_factors supports suppress_errors=False
+                await cache.save_adj_factors(df_quotes[['ts_code', 'trade_date', 'adj_factor']], suppress_errors=False)
+            except Exception as e:
+                logger.error(f"[HistoricalSync] Critical save failed for adj_factor: {e}")
+                raise e
+
+        # 3. Basic / Daily Indicators (Critical)
+        await save_if_ok("basic", cache.save_daily_indicators, critical=True)
+
+        # 4. Others (Non-critical, can fail silently or log)
         await save_if_ok("limit", cache.save_limit_list)
         await save_if_ok("suspend", cache.save_suspend_d)
         await save_if_ok("margin", cache.save_margin_daily)
         await save_if_ok("lhb", cache.save_top_list)
         await save_if_ok("block", cache.save_block_trade)
         await save_if_ok("mf", cache.save_moneyflow)
+        await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
         await save_if_ok("index", cache.save_index_daily)
         await save_if_ok("index_basic", cache.save_index_dailybasic)
 
         # Northbound special filter
-        df_north = data_map.get("north")
-        if df_north is not None and not df_north.empty:
-            df_north = df_north[df_north['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
-            if not df_north.empty:
-                await cache.save_northbound(df_north)
+        try:
+            df_north = data_map.get("north")
+            if df_north is not None and not df_north.empty:
+                df_north = df_north[df_north['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
+                if not df_north.empty:
+                    await cache.save_northbound(df_north)
+        except Exception as e:
+            logger.warning(f"[DailySync] Northbound save failed (non-critical): {e}")
 
         # Update sync status for key tables
+        saved_quotes = data_map.get("quotes")
+        if saved_quotes is not None and not saved_quotes.empty:
+            await cache.update_sync_status('daily_quotes', trade_date, len(saved_quotes))
+
+        saved_basic = data_map.get("basic")
+        if saved_basic is not None and not saved_basic.empty:
+            await cache.update_sync_status('daily_indicators', trade_date, len(saved_basic))
 
     async def sync_moneyflow(self, trade_date=None):
         """Sync money flow for a specific date (Standalone)."""

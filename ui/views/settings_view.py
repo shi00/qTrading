@@ -74,17 +74,9 @@ class SettingsView(ft.Container):
         return self.page
 
     def _on_mount(self):
-        import time as _time
-        _t0 = _time.perf_counter()
-        logger.debug("[PERF] >>> SettingsView._on_mount START")
         I18n.subscribe(self.refresh_locale)
-        logger.debug(f"[PERF] <<< SettingsView._on_mount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def _on_unmount(self):
-        import time as _time
-        _t0 = _time.perf_counter()
-        logger.debug("[PERF] >>> SettingsView._on_unmount START")
-        
         I18n.unsubscribe(self.refresh_locale)
         # Cascade cleanup to child tabs
         for tab in self.tab_contents:
@@ -93,8 +85,6 @@ class SettingsView(ft.Container):
                     tab._on_unmount()
                 except Exception as e:
                     logger.warning(f"Tab {type(tab).__name__} cleanup error: {e}")
-                    
-        logger.debug(f"[PERF] <<< SettingsView._on_unmount END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
 
     def refresh_locale(self):
         self.header_title.value = I18n.get("settings_title")
@@ -104,8 +94,8 @@ class SettingsView(ft.Container):
                 self.tab_buttons[i].text = I18n.get(key)
         try:
             if self.page: self.update()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[SettingsView] Locale refresh update skipped: {e}")
 
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:
         """Centralized tab button style factory."""
@@ -140,6 +130,7 @@ class SettingsView(ft.Container):
             logger.warning(f"Tab index out of range: {idx}")
             return
 
+        logger.debug(f"[SettingsView] Switching to tab index: {idx}")
         self.current_tab_index = idx
         self.tab_body.content = self.tab_contents[idx]
 
@@ -170,8 +161,9 @@ class SettingsView(ft.Container):
     def _safe_update(self):
         try:
             if self.page: self.update()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[SettingsView] Update failed: {e}")
+
 
     def update_theme(self):
         """Propagate custom color updates to child tabs (INPUT_*, UP/DOWN)."""
