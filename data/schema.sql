@@ -856,24 +856,30 @@ CREATE TABLE IF NOT EXISTS fina_audit
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date);
-CREATE INDEX IF NOT EXISTS idx_quotes_code ON daily_quotes(ts_code);
+-- idx_quotes_code is redundant due to PRIMARY KEY(ts_code, trade_date)
 CREATE INDEX IF NOT EXISTS idx_indicators_date ON daily_indicators(trade_date);
 CREATE INDEX IF NOT EXISTS idx_fina_enddate ON financial_reports(end_date);
-CREATE INDEX IF NOT EXISTS idx_fina_code_date ON financial_reports(ts_code, end_date);
+-- idx_fina_code_date is redundant due to PRIMARY KEY
 CREATE INDEX IF NOT EXISTS idx_mf_date ON moneyflow_daily(trade_date);
 CREATE INDEX IF NOT EXISTS idx_north_date ON northbound_holding(trade_date);
-CREATE INDEX IF NOT EXISTS idx_history_date ON screening_history(trade_date);
-CREATE INDEX IF NOT EXISTS idx_cal_date ON trade_cal(cal_date);
+-- idx_history_date is redundant due to UNIQUE(trade_date, ...)
+-- idx_cal_date is redundant due to PRIMARY KEY(cal_date)
 CREATE INDEX IF NOT EXISTS idx_stock_list_date ON stock_basic(list_date);
 CREATE INDEX IF NOT EXISTS idx_index_date ON index_daily(trade_date);
 CREATE INDEX IF NOT EXISTS idx_margin_date ON margin_daily(trade_date);
 CREATE INDEX IF NOT EXISTS idx_suspend_date ON suspend_d(trade_date);
-CREATE INDEX IF NOT EXISTS idx_limit_date ON limit_list(trade_date);
-CREATE INDEX IF NOT EXISTS idx_forecast_code ON fina_forecast(ts_code);
-CREATE INDEX IF NOT EXISTS idx_mainbz_code ON fina_mainbz(ts_code);
-CREATE INDEX IF NOT EXISTS idx_pledge_code ON pledge_stat(ts_code);
-CREATE INDEX IF NOT EXISTS idx_repurchase_code ON repurchase(ts_code);
-CREATE INDEX IF NOT EXISTS idx_dividend_code ON dividend(ts_code);
+
+-- limit_list and top_list have PRIMARY KEY(trade_date, ts_code)
+-- so trade_date is covered, but we need index on ts_code for single-stock queries
+CREATE INDEX IF NOT EXISTS idx_limit_code ON limit_list(ts_code);
+CREATE INDEX IF NOT EXISTS idx_top_list_code ON top_list(ts_code);
+
+-- Auxiliary tables have PRIMARY KEY(ts_code, ...), so code indexes are redundant.
+-- We add date indexes to speed up batch queries by date
+CREATE INDEX IF NOT EXISTS idx_forecast_date ON fina_forecast(ann_date);
+CREATE INDEX IF NOT EXISTS idx_mainbz_date ON fina_mainbz(end_date);
+CREATE INDEX IF NOT EXISTS idx_repurchase_date ON repurchase(ann_date);
+CREATE INDEX IF NOT EXISTS idx_dividend_date ON dividend(ann_date);
 
 -- ==========================================
 -- Phase 3: Policy-Driven AI Architecture Extensions
@@ -1047,7 +1053,13 @@ CREATE TABLE IF NOT EXISTS moneyflow_hsgt
 );
 
 -- Indexes for AI Extensions
-CREATE INDEX IF NOT EXISTS idx_adj_code_date ON adj_factor(ts_code, trade_date);
-CREATE INDEX IF NOT EXISTS idx_holder_code_date ON stk_holdernumber(ts_code, end_date);
+-- For adj_factor(ts_code, trade_date), ts_code is covered by PK
+CREATE INDEX IF NOT EXISTS idx_adj_date ON adj_factor(trade_date);
+
+-- For stk_holdernumber(ts_code, end_date), ts_code is covered by PK
+CREATE INDEX IF NOT EXISTS idx_holder_date ON stk_holdernumber(end_date);
+
 CREATE INDEX IF NOT EXISTS idx_top10_holder ON top10_holders(holder_name);
+
+-- For index_weight(index_code, con_code, trade_date), index_code is covered
 CREATE INDEX IF NOT EXISTS idx_index_weight_date ON index_weight(trade_date);

@@ -7,7 +7,7 @@ import flet as ft
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.components.health_report_dialog import HealthReportDialog
 from ui.i18n import I18n
-from ui.theme import AppColors, ThemeName
+from ui.theme import AppColors, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
 from data.data_processor import DataProcessor
 
@@ -31,7 +31,10 @@ class SystemTab(ft.Container):
         self.theme_dropdown = ft.Dropdown(
             label=I18n.get("settings_theme"),
             value=ConfigHandler.get_theme_name(),
-            width=200,
+            width=AppStyles.CONTROL_WIDTH_MD,
+            text_size=14,
+            border_radius=8,
+            content_padding=10,
             options=[
                 ft.dropdown.Option(ThemeName.DARK, I18n.get("theme_dark")),
                 ft.dropdown.Option(ThemeName.LIGHT, I18n.get("theme_light")),
@@ -44,7 +47,7 @@ class SystemTab(ft.Container):
         # Concurrency
         self.concurrency_input = ft.TextField(
             value=str(sync_concurrency),
-            width=100,
+            width=AppStyles.CONTROL_WIDTH_SM,
             text_size=14,
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
@@ -56,7 +59,7 @@ class SystemTab(ft.Container):
         # Log Level
         self.log_level_dropdown = ft.Dropdown(
             value=ConfigHandler.get_log_level(),
-            width=180,
+            width=AppStyles.CONTROL_WIDTH_MD,
             text_size=14,
             border_radius=8,
             content_padding=10,
@@ -72,7 +75,7 @@ class SystemTab(ft.Container):
         # DB Connection Pool Size
         self.pool_size_input = ft.TextField(
             value=str(ConfigHandler.get_db_connection_pool_size()),
-            width=100,
+            width=AppStyles.CONTROL_WIDTH_SM,
             text_size=14,
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
@@ -84,7 +87,7 @@ class SystemTab(ft.Container):
         # Thread Pool Controls
         self.io_workers_input = ft.TextField(
             value=str(ConfigHandler.get_max_io_workers()),
-            width=100,
+            width=AppStyles.CONTROL_WIDTH_SM,
             text_size=14,
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
@@ -96,7 +99,7 @@ class SystemTab(ft.Container):
 
         self.cpu_workers_input = ft.TextField(
             value=str(ConfigHandler.get_max_cpu_workers()),
-            width=100,
+            width=AppStyles.CONTROL_WIDTH_SM,
             text_size=14,
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
@@ -110,7 +113,7 @@ class SystemTab(ft.Container):
         val = ConfigHandler.get_tushare_api_limit()
         self.rate_limit_input = ft.TextField(
             value=str(val) if val and val > 0 else "",
-            width=100,
+            width=AppStyles.CONTROL_WIDTH_SM,
             text_size=14,
             content_padding=10,
             keyboard_type=ft.KeyboardType.NUMBER,
@@ -168,7 +171,7 @@ class SystemTab(ft.Container):
         )
 
         # 4. Thread Pool Settings (Advanced)
-        self.row_pool = SettingRow(
+        self.row_thread_pool = SettingRow(
             icon=ft.Icons.MEMORY_ROUNDED,
             icon_color=ft.Colors.INDIGO,
             title=I18n.get("sys_thread_pool_title"),
@@ -186,7 +189,7 @@ class SystemTab(ft.Container):
         )
 
         # 5. DB Connection Pool
-        self.row_pool = SettingRow(
+        self.row_db_pool = SettingRow(
             icon=ft.Icons.STORAGE_ROUNDED,
             icon_color=ft.Colors.ORANGE,
             title=I18n.get("settings_db_pool"),
@@ -279,11 +282,11 @@ class SystemTab(ft.Container):
 
                         ft.Container(height=10),
 
-                        self.row_pool,
+                        self.row_thread_pool,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
-                        self.row_pool,
+                        self.row_db_pool,
 
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 
 from datetime import datetime
 from utils.config_handler import ConfigHandler
@@ -14,11 +15,14 @@ class NewsSubscriptionService:
     Background service to poll real-time news.
     """
     _instance = None
+    _lock = threading.Lock()  # Thread-safe singleton
     
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
     
     def __init__(self):
@@ -31,8 +35,9 @@ class NewsSubscriptionService:
         self._last_news_time = None
         self._last_news_content = None
         
-        # Async Queue for background AI processing
-        self.processing_queue = asyncio.Queue()
+        # Async Queue — created lazily in start() to avoid cross-event-loop issues
+        # (asyncio.Queue binds to the running loop at creation time in Python < 3.10)
+        self.processing_queue = None
         
         # Observer Pattern: List of callbacks
         # Format: set of callables
@@ -78,6 +83,10 @@ class NewsSubscriptionService:
 
         # 始终启动服务进行数据同步（enable_news_alerts 只控制弹窗推送）
         self._running = True
+
+        # BUG-05 fix: Create Queue lazily here (within the running event loop)
+        # to avoid binding to the wrong loop when singleton is created before loop starts.
+        self.processing_queue = asyncio.Queue()
 
         # Use weak ref to task if needed, or just fire and forget since we have _running flag
         asyncio.create_task(self._poll_loop())
@@ -225,13 +234,31 @@ class NewsSubscriptionService:
 
     def _notify_listeners(self, listeners=None):
         target = listeners if listeners else self._listeners
-        if not target: return
+        if not target:
+            return
         
+        # CC-05: Track listener errors to prevent log flooding
+        if not hasattr(self, '_listener_errors'):
+            self._listener_errors = {}
+
         for listener in list(target):
             try:
                 listener()
+                # Reset error count on success
+                if listener in self._listener_errors:
+                    del self._listener_errors[listener]
             except Exception as e:
-                logger.error(f"[NewsService] Listener error: {e}")
+                count = self._listener_errors.get(listener, 0) + 1
+                self._listener_errors[listener] = count
+                
+                if count >= 3:
+                    logger.error(f"[NewsService] Listener {listener} failed {count} times. Removing. Last error: {e}")
+                    if listener in self._listeners:
+                        self._listeners.remove(listener)
+                    if listener in self._listener_errors:
+                        del self._listener_errors[listener]
+                else:
+                    logger.warning(f"[NewsService] Listener error ({count}/3): {e}")
 
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""

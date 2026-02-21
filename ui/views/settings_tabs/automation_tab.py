@@ -16,7 +16,7 @@ _FONT_SIZE_BODY = 14
 _FONT_SIZE_SMALL = 12
 _FONT_SIZE_HINT = 11
 _ICON_SIZE_SMALL = 16
-_DROPDOWN_WIDTH = 150
+_DROPDOWN_WIDTH = AppStyles.CONTROL_WIDTH_MD
 _CARD_PADDING = 15
 _CARD_BORDER_RADIUS = 8
 _SPACING_DEFAULT = 20
@@ -43,7 +43,8 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=auto_update_time,
             options=self._build_time_options(),
-            on_change=self.on_schedule_time_change
+            on_change=self.on_schedule_time_change,
+            disabled=not auto_update_enabled
         )
 
         self.schedule_status = ft.Text(
@@ -74,7 +75,7 @@ class AutomationTab(ft.Container):
         self.row_schedule = SettingRow(
             icon=ft.Icons.SCHEDULE,
             title=I18n.get("settings_auto_update"),
-            subtitle=I18n.get("settings_auto_desc"), # Or a more specific status?
+            subtitle=I18n.get("settings_auto_desc"),
             control=self.schedule_enabled,
             icon_color=AppColors.PRIMARY
         )
@@ -105,11 +106,6 @@ class AutomationTab(ft.Container):
         )
         
         self.txt_hint_bg = ft.Text(I18n.get("settings_hint_bg_run"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT)
-
-        # Note: Using DashboardCard for consistency instead of manual Container
-        # We replace the outer "Card Style Container" with a simple Column/ListView 
-        # because DashboardCard already provides the card look.
-        # But to preserve existing look (Text outside card?), we keep the structure but make it theme-aware.
         
         self.inner_container = ft.Container(
             content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
@@ -184,6 +180,7 @@ class AutomationTab(ft.Container):
         ConfigHandler.save_config({"auto_update_enabled": enabled})
         self.schedule_status.value = self._get_schedule_status_text(enabled)
         self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        self.schedule_time.disabled = not enabled
         self.update()
         if self.show_snack:
             self.show_snack(I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"))
@@ -218,11 +215,11 @@ class NotificationsTab(ft.Container):
         
         self.news_interval = ft.Dropdown(
             label=I18n.get("settings_news_interval"),
-            width=200,
+            width=AppStyles.CONTROL_WIDTH_MD,
             value=str(news_interval),
             options=self._build_interval_options(),
             on_change=self.on_interval_change,
-            visible=enable_news
+            disabled=not enable_news
         )
 
         self._build_content()
@@ -251,7 +248,7 @@ class NotificationsTab(ft.Container):
         self.row_interval = SettingRow(
             icon=ft.Icons.TIMER,
             title=I18n.get("settings_news_interval"),
-            subtitle=I18n.get("settings_news_interval_desc"), # Key will be returned if missing
+            subtitle=I18n.get("settings_news_interval_desc"),
             control=self.news_interval,
             icon_color=AppColors.INFO
         )
@@ -327,13 +324,10 @@ class NotificationsTab(ft.Container):
         enabled = self.news_alerts_enabled.value
         ConfigHandler.save_config({"enable_news_alerts": enabled})
         
-        # Update visibility
-        self.news_interval.visible = enabled
+        # Update visibility -> disabled state for UI consistency
+        self.news_interval.disabled = not enabled
         self.update()
 
-        # Note: We do NOT stop/start the service here.
-        # The service runs globally and checks 'enable_news_alerts' dynamically.
-        # Stopping it would break data sync for HomeView.
         if enabled:
             if self.show_snack:
                 self.show_snack(I18n.get("settings_snack_news_on"))

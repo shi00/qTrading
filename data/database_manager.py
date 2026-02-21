@@ -1,11 +1,10 @@
 import sqlite3
 import pandas as pd
 import logging
-import config
-from contextlib import contextmanager
-import config
-from contextlib import contextmanager
 import re
+from contextlib import contextmanager
+
+import config
 import sqlparse
 from sqlparse.sql import Statement
 from sqlparse import tokens as T
@@ -53,6 +52,7 @@ class DatabaseManager:
             list[dict]: List of column info {'name': 'col_name', 'type': 'TEXT'}
         """
         try:
+            self._validate_table_name(table_name)
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 # Use PRAGMA table_info to safely get schema
@@ -79,6 +79,7 @@ class DatabaseManager:
                             Example: [('ts_code', '=', '000001.SZ')]
         """
         try:
+            self._validate_table_name(table_name)
             query = f"SELECT COUNT(*) FROM {table_name}"
             params = []
             

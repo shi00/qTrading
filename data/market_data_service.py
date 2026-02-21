@@ -7,6 +7,8 @@ UI 只从内存缓存读取，类似 NewsSubscriptionService 架构。
 import asyncio
 import datetime
 import logging
+import math
+import threading
 
 from utils.config_handler import ConfigHandler
 from data.tushare_client import TushareClient
@@ -25,6 +27,7 @@ class MarketDataService:
     单例模式，确保全局只有一个实例。
     """
     _instance = None
+    _lock = threading.Lock()  # Thread-safe singleton
     
     # 刷新间隔（秒）
     # 指数配置：代码 -> I18n Key
@@ -38,8 +41,10 @@ class MarketDataService:
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
     
     def __init__(self):
@@ -204,17 +209,10 @@ class MarketDataService:
             'hot_concepts': hot_concepts
         }
 
-    @staticmethod
-    def _get_empty_index_data_static(name_key: str) -> dict:
-        return {'name': I18n.get(name_key), 'value': '-', 'change': '-', 'color': 'grey'}
-
+    # Instance methods forwarding to static equivalents
     def _get_empty_index_data(self, name_key: str) -> dict:
         return self._get_empty_index_data_static(name_key)
 
-    @staticmethod
-    def _get_empty_hsgt_data_static() -> dict:
-        return {'name': I18n.get('home_northbound'), 'value': '-', 'sub': '-', 'color': 'grey'}
-    
     def _get_empty_hsgt_data(self) -> dict:
         return self._get_empty_hsgt_data_static()
     
@@ -251,25 +249,11 @@ class MarketDataService:
             TaskType.IO, self.api.get_moneyflow_hsgt, trade_date=date
         )
         if df is not None and not df.empty:
-            # Tushare 'north_money' is in million yuan usually, but check specific API docs if unsure.
-            # Here keeping existing logic but making it safe.
             val = self._safe_float(df.iloc[0].get('north_money'))
-            
-            # Formatter logic: > 100 ? (Assumption: Output is Yuan? Or Ten Thousand?)
-            # If val is huge, use Yi.
-            display_val = f"{val:.0f}"
-            if abs(val) > 10000: # 1 Yi if unit is Wan? Or just heuristic
-                 display_val = f"{val/10000:.2f}{I18n.get('unit_yi')}"
-            else:
-                 display_val = f"{val:.0f}{I18n.get('unit_wanshou')}" # 'Wan'
-            
-            # Reverting to original logic to avoid breaking unit assumptions without testing
-            # Original: result/100 -> Yi, else Wan. Implies unit is Million?
-            # Let's stick to safe float processing only.
-            
+            # north_money unit: 万元 (10K CNY). >100万 -> 亿 display.
             return {
                 'name': I18n.get('home_northbound'),
-                'value': f"{val/100:.2f}{I18n.get('unit_yi')}" if abs(val) > 100 else f"{val:.0f}{I18n.get('unit_wanshou')}",
+                'value': f"{val/100:.2f}{I18n.get('unit_yi')}" if abs(val) > 100 else f"{val:.0f}{I18n.get('unit_wan')}",
                 'sub': I18n.get('home_inflow') if val > 0 else I18n.get('home_outflow'),
                 'color': 'red' if val > 0 else 'green' if val < 0 else 'grey'
             }
@@ -282,10 +266,11 @@ class MarketDataService:
     def _safe_float(val) -> float:
         """Safely convert value to float, defaulting to 0.0 if None/NaN"""
         try:
-            if val is None: return 0.0
+            if val is None:
+                return 0.0
             f = float(val)
-            import math
-            if math.isnan(f): return 0.0
+            if math.isnan(f):
+                return 0.0
             return f
         except (ValueError, TypeError):
             return 0.0

@@ -33,7 +33,9 @@ class ScreenerDao(BaseDao):
     async def get_screening_history(self, strategy_name=None, limit=100):
         sql = "SELECT * FROM screening_history WHERE 1=1"
         p = []
-        if strategy_name: sql += " AND strategy_name=?"; p.append(strategy_name)
+        if strategy_name:
+            sql += " AND strategy_name=?"
+            p.append(strategy_name)
         sql += " ORDER BY trade_date DESC LIMIT ?"
         p.append(limit)
         return await self._read_db(sql, p)
@@ -47,7 +49,8 @@ class ScreenerDao(BaseDao):
 
     async def update_screening_performance(self, updates):
         # updates = list of tuples (t1_price, t1_pct, t5_price, t5_pct, id)
-        if not updates: return
+        if not updates:
+            return
         sql = "UPDATE screening_history SET t1_price = ?, t1_pct = ?, t5_price = ?, t5_pct = ? WHERE id = ?"
         await self._write_db(sql, updates, is_many=True)
 

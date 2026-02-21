@@ -129,8 +129,7 @@ class CoverageDetailTable(ft.Column):
     L3 Visual Hierarchy: Detailed list, grouped by type (Global vs Stock).
     """
     def __init__(self, tables: dict):
-        super().__init__()
-        self.spacing = 10
+        controls = []
         
         # Split tables into groups based on 'type' field
         global_tables = []
@@ -151,17 +150,19 @@ class CoverageDetailTable(ft.Column):
                 
         # 1. Global Section
         if global_tables:
-            self.controls.append(self._build_section_header("health_section_global"))
+            controls.append(self._build_section_header("health_section_global"))
             for k in global_tables:
-                self.controls.append(self._create_row(k, tables[k]))
+                controls.append(self._create_row(k, tables[k]))
                 
         # 2. Stock Section
         if stock_tables:
             if global_tables:
-                self.controls.append(ft.Divider(height=20, color=ft.Colors.TRANSPARENT))
-            self.controls.append(self._build_section_header("health_section_stock"))
+                controls.append(ft.Divider(height=20, color=ft.Colors.TRANSPARENT))
+            controls.append(self._build_section_header("health_section_stock"))
             for k in stock_tables:
-                self.controls.append(self._create_row(k, tables[k]))
+                controls.append(self._create_row(k, tables[k]))
+
+        super().__init__(controls=controls, spacing=10)
 
     def _build_section_header(self, i18n_key):
         return ft.Container(
@@ -279,10 +280,17 @@ class HealthReportDialog(ft.AlertDialog):
             shape=ft.RoundedRectangleBorder(radius=8),
         )
 
-    def close_dialog(self, e):
-        self.open = False
-        if self.page_ref:
-            self.page_ref.update()
+    def close_dialog(self, e=None):
+        try:
+            if hasattr(self.page_ref, 'close'):
+                self.page_ref.close(self)
+            else:
+                self.open = False
+                if self.page_ref:
+                    self.page_ref.update()
+        except Exception as ex:
+            logger.error(f"Error closing dialog: {ex}")
+            
         if self.on_dismiss_callback:
             self.on_dismiss_callback()
 
@@ -342,10 +350,16 @@ class HealthReportDialog(ft.AlertDialog):
     async def run_deep_scan(self, e):
         """Open Deep Scan Dialog"""
         self.close_dialog(e)
+        
         dialog = HealthScanDialog(self.page_ref)
-        self.page_ref.dialog = dialog
-        dialog.open = True
-        self.page_ref.update()
+        if hasattr(self.page_ref, 'open'):
+            self.page_ref.open(dialog)
+        else:
+            self.page_ref.dialog = dialog
+            dialog.open = True
+            self.page_ref.update()
+            
+        # Run backend scan without blocking UI thread indefinitely.
         await dialog.start_scan()
 
 
@@ -379,9 +393,12 @@ class HealthScanDialog(ft.AlertDialog):
             actions_padding=10,
         )
 
-    def close_dialog(self, e):
-        self.open = False
-        self.page_ref.update()
+    def close_dialog(self, e=None):
+        if hasattr(self.page_ref, 'close'):
+            self.page_ref.close(self)
+        else:
+            self.open = False
+            self.page_ref.update()
 
     async def start_scan(self):
         """Start async scan"""

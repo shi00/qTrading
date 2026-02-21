@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import os
+import threading
 
 from sqlalchemy import text, event, Engine
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -37,10 +38,13 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 class CacheManager:
     _instance = None
     _initialized = False
+    _lock = threading.Lock()  # Thread-safe singleton
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
@@ -67,9 +71,8 @@ class CacheManager:
             future=True
         )
 
-        self._maintenance_event = asyncio.Event()
-        self._maintenance_event.set()
-        self._init_lock = asyncio.Lock()
+        self._maintenance_event_lazy = None  # ST-01: Lazy init
+        self._init_lock_lazy = None  # Lazy init to avoid cross-loop binding
 
         # Initialize DAOs
         self.stock_dao = StockDao(self.engine)
@@ -84,6 +87,38 @@ class CacheManager:
         self._initialized = True
         self._schema_initialized = False
         logger.info(f"[CacheManager] Initialized with SQLAlchemy AsyncEngine: {self.db_path}")
+
+    @property
+    def _maintenance_event(self):
+        """Get or create maintenance event dynamically per event loop."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.Event()  # Dummy fallback if no loop
+
+        if not hasattr(current_loop, '_cache_maint_event'):
+            evt = asyncio.Event()
+            evt.set()  # Default to Set (Not in maintenance)
+            setattr(current_loop, '_cache_maint_event', evt)
+            
+        return getattr(current_loop, '_cache_maint_event')
+
+    @property
+    def _init_lock(self):
+        """Get or create initialization lock dynamically per event loop to avoid cross-loop binding deadlocks."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[CacheManager] No running event loop for _init_lock. Using dummy lock.")
+            class DummyLock:
+                async def __aenter__(self): return
+                async def __aexit__(self, *args): return
+            return DummyLock()
+
+        if not hasattr(current_loop, '_cache_init_lock'):
+            setattr(current_loop, '_cache_init_lock', asyncio.Lock())
+            
+        return getattr(current_loop, '_cache_init_lock')
 
     async def close(self):
         """Dispose the engine"""
@@ -131,9 +166,10 @@ class CacheManager:
         async with self._init_lock:
             # Explicit truncation on startup (P0 fix for 800MB WAL)
             try:
-                 async with self.engine.begin() as conn:
-                     await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-                     logger.info("[CacheManager] WAL file truncated/cleaned.")
+                async with self.engine.connect() as raw_conn:
+                    conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
+                    await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                    logger.info("[CacheManager] WAL file truncated/cleaned.")
             except Exception as e:
                 logger.warning(f"[CacheManager] Failed to truncate WAL: {e}")
 
@@ -224,7 +260,7 @@ class CacheManager:
                 tables = [row[0] for row in r.fetchall()]
 
                 for t in tables:
-                    await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {t}")
+                    await conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{t}"')
                 logger.info(f"[CacheManager] Dropped {len(tables)} tables: {tables}")
 
             self._schema_initialized = False
@@ -242,9 +278,8 @@ class CacheManager:
     async def get_stock_basic(self):
         return await self.stock_dao.get_stock_basic()
 
-    async def get_stock_basic(self):
-        return await self.stock_dao.get_stock_basic()
-
+    async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
+        return await self.stock_dao.get_trade_cal(start_date, end_date, is_open)
     # --- Concepts ---
     async def save_concepts(self, df):
         return await self.stock_dao.save_concepts(df)

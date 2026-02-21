@@ -4,6 +4,7 @@ Runs as a background task within the Flet application using APScheduler.
 """
 import datetime
 import logging
+import threading
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -23,11 +24,14 @@ class SchedulerService:
     """
 
     _instance = None
+    _lock = threading.Lock()  # Thread-safe singleton
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
 
     def __init__(self):
@@ -175,16 +179,19 @@ class SchedulerService:
             logger.info("[Scheduler] Update skipped (Already updated today)")
             return
 
-        # Check Trading Day (Lazy Import)
+        # Check Trading Day — must run in thread pool to avoid blocking the event loop
         from data.tushare_client import TushareClient
         try:
-            if not TushareClient().is_trading_day(today):
+            client = TushareClient()
+            is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)
+            if not is_trading:
                 logger.info(f"[Scheduler] Update skipped ({today} is not a trading day)")
                 return
         except Exception as e:
             logger.warning(f"[Scheduler] Trade calendar check failed: {e}")
             if datetime.datetime.now().weekday() >= 5:  # Weekend fallback
                 return
+
 
         logger.info(f"[Scheduler] Running Scheduled Update for {today}...")
 
@@ -221,7 +228,17 @@ class SchedulerService:
         if self._last_pred_date == today:
             return
 
-
+        # QA-03 fix: Skip on non-trading days (same check as _run_daily_update)
+        try:
+            client = TushareClient()
+            is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)
+            if not is_trading:
+                logger.info(f"[Scheduler] Prediction skipped ({today} is not a trading day)")
+                return
+        except Exception as e:
+            logger.warning(f"[Scheduler] Trade calendar check failed for prediction: {e}")
+            if datetime.datetime.now().weekday() >= 5:
+                return
 
         logger.info(f"[Scheduler] Running Nightly Prediction for {today}...")
 

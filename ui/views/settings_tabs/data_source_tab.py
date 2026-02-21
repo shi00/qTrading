@@ -5,10 +5,8 @@ from ui.components.settings_widgets import DashboardCard, MetricCard, ActionChip
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
-from utils.thread_pool import ThreadPoolManager, TaskType
 from data.data_processor import DataProcessor
 from data.cache_manager import CacheManager
-from data.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +52,9 @@ class DataSourceTab(ft.Container):
             visible=False,
             on_click=self.repair_data,
             height=40,
-            width=180
+            width=AppStyles.CONTROL_WIDTH_MD
         )
 
-        # Health Check Button (extracted for consistency)
-        # Fix vertical alignment for height=40
         style_health = AppStyles.primary_button()
         style_health.padding = ft.padding.symmetric(horizontal=15, vertical=0)
 
@@ -68,7 +64,7 @@ class DataSourceTab(ft.Container):
             on_click=self.refresh_health_status,
             style=style_health,
             height=40,
-            width=180
+            width=AppStyles.CONTROL_WIDTH_MD
         )
 
         self.health_dashboard = DashboardCard(
@@ -95,7 +91,7 @@ class DataSourceTab(ft.Container):
                 ft.Container(height=10),
                 self.health_detail_text,
                 ft.Container(height=5),
-                ft.Row([self.btn_repair], alignment=ft.MainAxisAlignment.END) # Right-align repair button too
+                ft.Row([self.btn_repair], alignment=ft.MainAxisAlignment.END)
             ])
         )
 
@@ -135,7 +131,6 @@ class DataSourceTab(ft.Container):
         )
 
         # 3. Connection Settings
-        # 3. Connection Settings
         self.token_input = ft.TextField(
             label=I18n.get("settings_token"),
             password=True,
@@ -147,7 +142,6 @@ class DataSourceTab(ft.Container):
             text_size=14,
             on_submit=self.save_and_verify_tushare
         )
-        # Fix vertical alignment for height=40
         style_save = AppStyles.primary_button()
         style_save.padding = ft.padding.symmetric(horizontal=15, vertical=0)
         
@@ -157,7 +151,7 @@ class DataSourceTab(ft.Container):
             on_click=self.save_and_verify_tushare,
             style=style_save,
             height=40,
-            width=180, # Match width of sync_button
+            width=AppStyles.CONTROL_WIDTH_MD, # Match width of sync_button
         )
         self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT, size=12)
         self.status_text = ft.Text(I18n.get("settings_verify_failed"), color=AppColors.TEXT_HINT, size=12)
@@ -168,7 +162,7 @@ class DataSourceTab(ft.Container):
             subtitle=I18n.get("settings_token_desc"),
             control=ft.Column([
                 ft.Row([self.token_input, self.btn_save_token], alignment=ft.MainAxisAlignment.END, spacing=10),
-                ft.Row([self.status_icon, self.status_text], spacing=5, alignment=ft.MainAxisAlignment.END) # Aligned end for consistency
+                ft.Row([self.status_icon, self.status_text], spacing=5, alignment=ft.MainAxisAlignment.END)
             ], spacing=5, alignment=ft.MainAxisAlignment.CENTER, expand=True), 
             icon_color=AppColors.ACCENT
         )
@@ -183,7 +177,7 @@ class DataSourceTab(ft.Container):
         # 4. Historical Data
         self.progress_bar = ft.ProgressBar(width=None, visible=False, expand=True) 
         self.progress_text = ft.Text("", size=12, color=AppColors.INFO)
-        # Fix vertical alignment for height=40 (Init Data)
+
         style_init = AppStyles.primary_button()
         style_init.padding = ft.padding.symmetric(horizontal=15, vertical=0)
 
@@ -194,7 +188,7 @@ class DataSourceTab(ft.Container):
             tooltip=I18n.get("settings_init_desc"),
             style=style_init,
             height=40,
-            width=180, 
+            width=AppStyles.CONTROL_WIDTH_MD, 
         )
 
         # Refactored Historical Card using SettingRow

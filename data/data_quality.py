@@ -34,19 +34,21 @@ class DataQualityService:
         if df.empty:
             return {'missing_count': 0, 'missing_dates': [], 'coverage_ratio': 0.0}
             
-        # Ensure dates are datetime
-        if not np.issubdtype(df[date_col].dtype, np.datetime64):
-            df[date_col] = pd.to_datetime(df[date_col])
+        # CR-05 fix: avoid modifying caller's DataFrame in-place.
+        # Work only with a local series of date strings.
+        if pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            date_series = df[date_col]
+        else:
+            date_series = pd.to_datetime(df[date_col], errors='coerce')
+
+        start_date = date_series.min()
+        end_date = date_series.max()
         
-        start_date = df[date_col].min()
-        end_date = df[date_col].max()
-        
-        # Filter trade calendar for range & open days
-        # Assuming trade_cal has 'cal_date' as datetime or string YYYYMMDD
-        # We need to standardize format.
+        if pd.isna(start_date) or pd.isna(end_date):
+            return {'missing_count': 0, 'missing_dates': [], 'coverage_ratio': 0.0}
         
         # Helper to convert to standardized string YYYYMMDD for comparison
-        target_dates = set(df[date_col].dt.strftime('%Y%m%d'))
+        target_dates = set(date_series.dt.strftime('%Y%m%d'))
         
         # Process trade_cal
         # Assuming trade_cal['cal_date'] is string YYYYMMDD and is_open=1
@@ -61,7 +63,7 @@ class DataQualityService:
         
         total_expected = len(expected_dates)
         if total_expected == 0:
-            ratio = 1.0 # No expected dates means perfect coverage locally?
+            ratio = 1.0  # No expected trading dates in range — treat as fully covered
         else:
             ratio = 1.0 - (len(missing) / total_expected)
             
@@ -77,14 +79,18 @@ class DataQualityService:
         Tier 2: Check data freshness against a reference date (usually latest trading day).
         """
         if df.empty:
-            return {'lag_days': cls.LAG_DEFAULT, 'latest_date': None}
+            return {'lag_days': cls.LAG_DEFAULT, 'latest_data_date': None}
             
         # Get latest date in DF
+        max_date = df[date_col].max()
+        if pd.isna(max_date):
+            return {'lag_days': cls.LAG_ERROR, 'latest_data_date': None}
+
         # Handle string vs datetime
         if pd.api.types.is_datetime64_any_dtype(df[date_col]):
-            latest = df[date_col].max().strftime('%Y%m%d')
+            latest = max_date.strftime('%Y%m%d')
         else:
-            latest = str(df[date_col].max())
+            latest = str(max_date)
             
         # Calculate lag
         try:
@@ -134,13 +140,35 @@ class DataQualityService:
         Using `eval` on user strings is risky, so we implement specific named checks.
         """
         issues = []
+        if df is None or df.empty:
+            return issues
+
+        for name, expr, tolerance in rules:
+            try:
+                # CC-06: Implement actual cross-validation logic
+                # Calculate difference based on expression
+                diff = df.eval(expr)
+                
+                # Check absolute difference against tolerance
+                # Using fillna(0) to handle potential NaNs in calculation safely
+                failures = diff.abs().fillna(0) > tolerance
+                fail_count = failures.sum()
+                
+                if fail_count > 0:
+                    sample = df[failures].index[0]
+                    issues.append(f"Rule '{name}' failed: {fail_count} rows exceed tolerance {tolerance} (e.g. index {sample})")
+            except Exception as e:
+                issues.append(f"Rule '{name}' execution error: {str(e)}")
+                
         return issues
         
     @staticmethod
     def check_price_vs_factor(df_price: pd.DataFrame, df_adj: pd.DataFrame) -> Dict[str, Any]:
         """
-        Tier 3 Example: Check if Price * Factor ~= AdjPrice (Logic placeholder)
-        Currently we don't have a table with both Pre-Adj and Adj prices in same row easily 
-        unless linked. 
+        Tier 3: Verify Price * AdjFactor consistency.
+        Requires a joined view of raw and adjusted prices.
+        
+        Returns:
+            Empty dict (not yet implemented — requires adj_factor join in reporting pipeline).
         """
-        pass
+        return {}

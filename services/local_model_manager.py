@@ -40,7 +40,24 @@ class LocalModelManager:
     _model_md5: str = ""  # MD5 hash of loaded model file
     _model_stat: tuple = (0, 0)  # (mtime, size)
     _is_loading: bool = False
-    _load_lock = asyncio.Lock()
+    _load_lock = None  # Lazy init to avoid cross-event-loop binding
+
+    @classmethod
+    def _get_load_lock(cls):
+        """Get or create load lock dynamically per event loop to avoid cross-loop binding deadlocks."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[LocalModel] No running event loop for load lock. Using dummy lock.")
+            class DummyLock:
+                async def __aenter__(self): return
+                async def __aexit__(self, *args): return
+            return DummyLock()
+
+        if not hasattr(current_loop, '_local_load_lock'):
+            setattr(current_loop, '_local_load_lock', asyncio.Lock())
+            
+        return getattr(current_loop, '_local_load_lock')
 
     @classmethod
     async def get_instance(cls):
@@ -92,7 +109,7 @@ class LocalModelManager:
         if config is None:
             config = ConfigHandler.get_local_ai_config()
 
-        async with self._load_lock:
+        async with self._get_load_lock():
             # OPTIMIZATION: Check path equality AND file modification/size to avoid expensive MD5.
             try:
                 stat = os.stat(model_path)
@@ -199,7 +216,7 @@ class LocalModelManager:
         start_time = asyncio.get_event_loop().time()
 
         # Serialize inference to prevent native crash (Llama instance is not thread-safe)
-        async with self._load_lock:
+        async with self._get_load_lock():
             try:
                 # Run in thread pool with timeout
                 output = await asyncio.wait_for(
@@ -216,8 +233,21 @@ class LocalModelManager:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.info(f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}")
                 return output
+            except asyncio.TimeoutError as te:
+                logger.error(f"[LocalModel] Inference timed out after {timeout_val}s.", exc_info=False)
+                # FATAL: The underlying thread is still running _generate_sync synchronously!
+                # We MUST destroy the model instance to free memory and forcefully crash the C++ generation loop,
+                # otherwise we leak a fully-loaded CPU thread that will spin until it finishes.
+                self.unload_model()
+                self._model_path = ""
+                self._model_stat = (0, 0)
+                raise RuntimeError(f"Local inference timed out ({timeout_val}s). Memory freed.") from te
             except Exception as e:
                 logger.error(f"[LocalModel] Inference error: {e}", exc_info=True)
+                # Cleanup on unexpected errors as well just to be safe
+                self.unload_model()
+                self._model_path = ""
+                self._model_stat = (0, 0)
                 raise RuntimeError(f"Inference execution failed: {e}") from e
 
     def _generate_sync(self, prompt: str, max_tokens: int, temperature: float, system_prompt: str) -> str:
@@ -238,8 +268,9 @@ class LocalModelManager:
         response = self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
-            temperature=temperature,
-            stop=["\nUser:", "User:", "```", "\n\n"]  # Prevent loops; do NOT stop on "}" as it truncates JSON
+            temperature=temperature
+            # Removed dangerous custom stop words (like "```" or "\n\n") 
+            # which caused valid JSON truncation and len=0 outputs.
         )
 
         return response['choices'][0]['message']['content']

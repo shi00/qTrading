@@ -93,7 +93,8 @@ class SettingsView(ft.Container):
             if i < len(self.tab_buttons):
                 self.tab_buttons[i].text = I18n.get(key)
         try:
-            if self.page: self.update()
+            if self.page:
+                self.update()
         except Exception as e:
             logger.debug(f"[SettingsView] Locale refresh update skipped: {e}")
 

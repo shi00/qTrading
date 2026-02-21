@@ -183,23 +183,27 @@ class SectionHeader(ft.Row):
 
     def __init__(self, title, action=None):
         super().__init__()
-        self.alignment = ft.MainAxisAlignment.SPACE_BETWEEN
-        self.vertical_alignment = ft.CrossAxisAlignment.CENTER
-
-        self.controls = [
+        controls = [
             ft.Row([
                 ft.Container(width=4, height=18, bgcolor=ft.Colors.SECONDARY, border_radius=2),
                 ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE)
             ], spacing=10),
         ]
         if action:
-            self.controls.append(action)
+            controls.append(action)
+
+        super().__init__(
+            controls=controls,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER
+        )
 
 
-class SettingRow(ft.Row):
+class SettingRow(ft.ResponsiveRow):
     """
     Standard setting row with icon, title, subtitle, and control.
-    Uses semantic tokens — auto-updates with theme.
+    Uses responsive layout: aligns strictly on desktop via grids, 
+    and gracefully wraps to next line on mobile.
     """
 
     def __init__(self, icon, title, subtitle, control, icon_color=None):
@@ -221,13 +225,24 @@ class SettingRow(ft.Row):
         self.subtitle_view = ft.Text(subtitle, size=12,
                                      color=ft.Colors.ON_SURFACE_VARIANT)
 
-        self.controls = [
+        # --- Left Side (Icon + Text) ---
+        left_side = ft.Row([
             self.icon_container,
             ft.Container(width=10),
             ft.Column([
                 self.title_view,
                 self.subtitle_view
-            ], spacing=2, expand=True),
-            ft.Container(width=10),
+            ], spacing=2, expand=True) # Text wraps or expands
+        ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        
+        # --- Right Side (Control) ---
+        # On mobile (xs): wrap to next line, take full width. 
+        # On desktop (sm/md): stay on same line, align right, take strict grid width.
+        right_side = ft.Row([
             control
+        ], alignment=ft.MainAxisAlignment.END, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        self.controls = [
+            ft.Container(content=left_side, col={"xs": 12, "sm": 7, "md": 7}),
+            ft.Container(content=right_side, col={"xs": 12, "sm": 5, "md": 5})
         ]

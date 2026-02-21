@@ -33,7 +33,8 @@ class I18n:
             "home_live_news": "实时市场快讯",
             "home_news_empty": "暂无新闻",
             "news_load_more": "加载更多",
-
+            "news_no_title": "无标题",
+            # ---------- Global Operations ----------
             "screener_title": "智能选股",
             "screener_strategies": "选股策略",
             "screener_run": "执行选股",
@@ -554,7 +555,8 @@ class I18n:
             "health_avg_recency": "平均时效",
             "health_days": "天",
             "health_sample_size": "样本数量",
-
+            "scan_title": "深度扫描进度",
+            "ai_progress_skipped": "已跳过 {name}",
             # --- Settings: Data Source Tab ---
             "ds_last_update": "最后更新",
             "ds_data_coverage": "数据覆盖",
@@ -809,6 +811,8 @@ class I18n:
             "col_market": "市场",
             "col_list_status": "上市状态",
             "col_audit_result": "审计意见",
+            "col_audit_fees": "审计费用(元)",
+            "col_audit_agency": "审计机构",
             "col_report_type": "报表类型",
             "col_comp_type": "公司类型",
             "col_content": "内容",
@@ -868,6 +872,8 @@ class I18n:
             "col_index_code": "指数代码",
             "col_north_money": "北向资金(百万元)",
             "col_south_money": "南向资金(百万元)",
+            "col_ggt_ss": "港股通(沪)",
+            "col_ggt_sz": "港股通(深)",
             "col_hgt_north_money": "沪股通(百万元)",
             "col_sgt_north_money": "深股通(百万元)",
             "col_l_amount": "成交总额",
@@ -927,9 +933,11 @@ class I18n:
             "home_welcome": "Welcome to A-Share Intelligent Screener",
             "home_market_status": "Market Status",
             "home_indices": "Key Indices",
+            # ---------- News Tab ----------
             "home_live_news": "Live Market News",
             "news_load_more": "Load More",
-
+            "news_no_title": "No Title",
+            # --------------------- Error Messages ---------------------
             "screener_title": "Smart Screener",
             "screener_strategies": "Strategies",
             "screener_run": "Run Strategy",
@@ -1478,6 +1486,12 @@ class I18n:
             "quality_tier_1": "Bronze (Tier 1)",
             "quality_tier_2": "Silver (Tier 2)",
             "quality_tier_3": "Gold (Tier 3)",
+            "health_continuity": "Continuity",
+            "health_avg_recency": "Avg Recency",
+            "health_days": "Days",
+            "health_sample_size": "Sample Size",
+            "scan_title": "Deep Scan Progress",
+            "ai_progress_skipped": "Skipped {name}",
             "health_coverage": "Coverage & Freshness",
             "health_section_stock": "Stock Coverage",
             "health_section_global": "Global Data",
@@ -1633,6 +1647,8 @@ class I18n:
             "col_index_code": "Index Code",
             "col_north_money": "Northbound",
             "col_south_money": "Southbound",
+            "col_ggt_ss": "GGT-SH",
+            "col_ggt_sz": "GGT-SZ",
             "col_hgt_north_money": "SH-North",
             "col_sgt_north_money": "SZ-North",
 
@@ -1645,6 +1661,8 @@ class I18n:
             "col_ann_date": "Ann Date",
             "col_area": "Area",
             "col_audit_result": "Audit Result",
+            "col_audit_fees": "Audit Fees",
+            "col_audit_agency": "Audit Agency",
             "col_buy_elg_amount": "Buy Elg Amount",
             "col_buy_elg_vol": "Buy Elg Vol",
             "col_buy_lg_amount": "Buy Lg Amount",
@@ -1818,12 +1836,13 @@ class I18n:
         logger.info(f"[I18n] Initialized with locale: {cls._locale}")
 
     @classmethod
-    def get(cls, key, **kwargs):
+    def get(cls, key, default=None, **kwargs):
         """
         Get translated string by key with optional formatting.
         
         Args:
             key: Translation key
+            default: Optional fallback string if key is not found
             **kwargs: Optional format arguments (e.g., error="...", count=5)
         
         Returns:
@@ -1836,7 +1855,21 @@ class I18n:
         if not cls._initialized:
             cls.initialize()
 
-        template = cls.STRINGS.get(cls._locale, {}).get(key, key)
+        # I18-01: Log warning on missing keys (deduplicated)
+        if not hasattr(cls, '_missing_keys'):
+            cls._missing_keys = set()
+
+        locale_map = cls.STRINGS.get(cls._locale, {})
+        if key not in locale_map:
+            if key not in cls._missing_keys:
+                if default is not None:
+                    logger.debug(f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {cls._locale})")
+                else:
+                    logger.warning(f"[I18n] Missing translation for key: '{key}' (Locale: {cls._locale})")
+                cls._missing_keys.add(key)
+            return default if default is not None else key
+
+        template = locale_map[key]
 
         if kwargs:
             try:

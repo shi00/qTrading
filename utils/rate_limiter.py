@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,10 @@ class TokenBucket:
         self.rate = float(rate)
 
         # Validation to prevent logic errors
-        if self.capacity <= 0: self.capacity = 1.0
-        if self.rate <= 0: self.rate = 1.0  # Avoid division by zero
+        if self.capacity <= 0:
+            self.capacity = 1.0
+        if self.rate <= 0:
+            self.rate = 1.0  # Avoid division by zero
 
         self.tokens = float(start_tokens)
 
@@ -28,35 +31,37 @@ class TokenBucket:
         self.last_update = time.monotonic()
         self.lock = threading.Lock()
 
-    def consume(self, tokens=1):
-        """
-        Consume tokens from the bucket. Blocks if insufficient tokens.
-        
-        Args:
-            tokens (int): Number of tokens to consume.
-        """
-        wait_time = 0
+    def _consume_reserve(self, tokens):
+        """Internal method to calculate wait time and update tokens under lock"""
         with self.lock:
             now = time.monotonic()
-            # Add tokens based on time elapsed
             elapsed = max(0, now - self.last_update)
             self.last_update = now
 
-            # Refill tokens, clamped to capacity
+            # Refill tokens
             new_tokens = self.tokens + elapsed * self.rate
             self.tokens = min(self.capacity, new_tokens)
 
+            wait_time = 0
             if self.tokens < tokens:
-                # Not enough tokens. We "borrow" from the future (Reservation checking).
-                # Allows negative tokens (debt).
-                deficit = tokens - self.tokens
-                wait_time = deficit / self.rate
-                self.tokens -= tokens
-            else:
-                # Enough tokens
-                self.tokens -= tokens
+                wait_time = (tokens - self.tokens) / self.rate
+            
+            self.tokens -= tokens
+            return wait_time
 
-        # Sleep outside the lock to avoid blocking other threads/starvation
-        # and to avoid dangerous lock release/acquire dances.
+    def consume(self, tokens=1):
+        """
+        Consume tokens from the bucket. Blocks thread if insufficient tokens.
+        """
+        wait_time = self._consume_reserve(tokens)
         if wait_time > 0:
             time.sleep(wait_time)
+
+    async def consume_async(self, tokens=1):
+        """
+        Consume tokens from the bucket. Suspends coroutine if insufficient tokens.
+        ST-04: Non-blocking equivalent of consume.
+        """
+        wait_time = self._consume_reserve(tokens)
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)

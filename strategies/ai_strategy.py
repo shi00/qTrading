@@ -86,32 +86,31 @@ class AISelectionStrategy(BaseStrategy):
         if on_progress:
             on_progress(0, total_tasks, I18n.get("ai_progress_init"))
 
-        # tasks = []
         # Explicitly create tasks to allow cancellation
         running_tasks = []
-        
-        # Helper wrapper to return row with result
-        # Helper wrapper to return row with result
+
         # Throttle concurrency to avoid DB saturation (SQLite)
-        limit = ConfigHandler.get_ai_max_concurrent_analysis() 
+        limit = ConfigHandler.get_ai_max_concurrent_analysis()
         sem = asyncio.Semaphore(limit)
-        
-        async def analyze_wrapper(row_data):
-             async with sem:
+
+        async def analyze_wrapper(row_data: dict):
+            async with sem:
                 res = await self._analyze_single_stock(row_data, dp, global_context, concepts_map)
                 return res, row_data
 
-        for _, row in candidates.iterrows():
-             running_tasks.append(asyncio.create_task(analyze_wrapper(row)))
+        # PERF-03: itertuples is 5-10x faster than iterrows; convert to dict for downstream compat.
+        for row in candidates.itertuples(index=False):
+            running_tasks.append(asyncio.create_task(analyze_wrapper(row._asdict())))
 
         final_rows = []
-        
+
         for future in asyncio.as_completed(running_tasks):
             # Check Cancellation
             if dp and dp.is_cancelled():
                 logger.info("[AIStrategy] Cancellation detected. Stopping remaining tasks...")
                 for t in running_tasks:
-                    if not t.done(): t.cancel()
+                    if not t.done():
+                        t.cancel()
                 break
 
             try:
@@ -122,11 +121,12 @@ class AISelectionStrategy(BaseStrategy):
                 stock_name = row['name']
                 
                 if isinstance(res, Exception) or res is None or res.get('score', 0) == 0:
-                     if on_progress: on_progress(completed_count, total_tasks, I18n.get("ai_progress_skipped", name=stock_name))
-                     continue
+                    if on_progress:
+                        on_progress(completed_count, total_tasks, I18n.get("ai_progress_skipped", name=stock_name))
+                    continue
                 
                 # Valid Result
-                row_dict = row.to_dict()
+                row_dict = dict(row)
                 row_dict['ai_score'] = res.get('score', 0)
                 row_dict['ai_reason'] = res.get('summary', '')
                 row_dict['thinking'] = res.get('thinking', '') # Pass thinking to UI
@@ -159,54 +159,44 @@ class AISelectionStrategy(BaseStrategy):
 
     async def _analyze_single_stock(self, row, dp, global_context="", concepts_map=None):
         """
-        Helper for analysis
+        Analyze a single stock (row is a dict from itertuples._asdict()).
         """
         try:
             ts_code = row['ts_code']
-            
-            # 1. Get History (Last 100 days)
-            # data_processor.get_stock_history is async? No, it uses cache/tushare sync mostly but wrapped?
-            # Let's check data_processor signature.
-            # get_stock_history calls tushare/cache sync methods usually, but let's check.
-            # It was 'async def get_stock_history'.
+
+            # 1. Get History (last 60 trading days)
             history_df = await dp.get_stock_history(ts_code, days=60)
-            
-            # 2. Calc Tech indicators
-            # macd_signal, k, d, j
+
+            # 2. Calculate technical indicators
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
             kdj_signal, k, d, j = TechnicalAnalysis.get_kdj(history_df)
-            
+
             tech_context = {
                 "macd_signal": trend_signal,
                 "kdj_signal": kdj_signal,
                 "k": round(k, 1),
                 "j": round(j, 1)
             }
-            
+
             # 3. Get News
             news = await NewsFetcher.get_stock_news(ts_code, limit=3)
-            
-            # 3.5 Get Concepts (Cached)
-            # Use pre-fetched map
+
+            # 3.5 Get Concepts (use pre-fetched map when available)
             concepts = []
             if concepts_map and ts_code in concepts_map:
                 concepts = concepts_map[ts_code]
             elif not concepts_map:
-                 # Fallback if map missing (unlikely)
-                 start = asyncio.get_event_loop().time() # just for debug
-                 cmap = await dp.cache.get_concepts([ts_code])
-                 concepts = cmap.get(ts_code, [])
-            
-            # 4. AI Inference
-            # row is a Series, valid info
-            stock_info = row.to_dict()
-            
-            # Inject concept into stock_info for AI Service to use
+                # Fallback if map missing (unlikely)
+                cmap = await dp.cache.get_concepts([ts_code])
+                concepts = cmap.get(ts_code, [])
+
+            # 4. AI Inference — row is already a dict (from itertuples._asdict())
+            stock_info = dict(row)
             stock_info['concepts'] = concepts
-            
+
             ai_result = await self.ai_client.analyze_stock(stock_info, tech_context, news, global_context)
-            return ai_result # {score, summary, ...}
-            
+            return ai_result  # {score, summary, ...}
+
         except Exception as e:
             logger.error(f"Single stock analysis failed for {row['ts_code']}: {e}")
             return None

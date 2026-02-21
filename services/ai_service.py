@@ -40,28 +40,31 @@ class AIService:
         self._semaphore = None  # Lazy creation to avoid cross-event-loop issues
         self._semaphore_loop = None  # Track which loop the semaphore belongs to
 
-        # Locks for Local Model
-        self._setup_lock = asyncio.Lock()  # Protect auto-init
+        # _setup_lock: lazy-initialized in property to avoid binding to wrong event loop
+        self._setup_lock = None
 
         self._initialized = True
 
-    def _get_semaphore(self):
+    async def _get_semaphore(self):
         """Get or create semaphore for current event loop"""
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            return None
+            logger.warning("[AIService] No running event loop for semaphore. Using dummy lock.")
+            class DummySemaphore:
+                async def __aenter__(self): return
+                async def __aexit__(self, *args): return
+            return DummySemaphore()
 
-        # Create new semaphore if none exists or loop changed
-        if self._semaphore is None or self._semaphore_loop != current_loop:
+        # Create new semaphore if none exists on the current loop
+        if not hasattr(current_loop, '_ai_semaphore'):
             # Enforce minimum concurrency of 1 to prevent deadlock
-            # Default to 5 if config is missing/zero/negative
             raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
             concurrency = max(1, int(raw_val)) if raw_val else 5
-            self._semaphore = asyncio.Semaphore(concurrency)
-            self._semaphore_loop = current_loop
+            setattr(current_loop, '_ai_semaphore', asyncio.Semaphore(concurrency))
+            
+        return getattr(current_loop, '_ai_semaphore')
 
-        return self._semaphore
 
     def _setup_client(self):
         """
@@ -161,15 +164,13 @@ class AIService:
             if not model:
                 raise ValueError("Model not configured")
 
-            async with self._get_semaphore():
-                response = await asyncio.wait_for(
-                    self.client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        response_format={"type": "json_object"} if json_mode else None,
-                        temperature=temperature
-                    ),
-                    timeout=timeout
+            async with await self._get_semaphore():
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    response_format={"type": "json_object"} if json_mode else None,
+                    temperature=temperature,
+                    timeout=timeout  # Let the SDK handle timeout natively so retries work
                 )
                 response_content = response.choices[0].message.content
 
@@ -259,8 +260,8 @@ class AIService:
         except Exception as e:
             logger.warning(f"[AI] Failed to fetch learning context: {e}")
 
-        # Load System Prompt from Config (User Must Configure or ConfigHandler provides logic)
-        system_prompt = self.config.get_ai_system_prompt()
+        # Load System Prompt from Config
+        system_prompt = ConfigHandler.get_ai_system_prompt()
 
         user_prompt = f"""
         <stock_info>
@@ -306,16 +307,34 @@ class AIService:
             logger.error(f"[AI] Analysis failed: {e}", exc_info=True)
             return {"error": str(e), "score": 0}
 
+    async def _get_setup_lock(self):
+        """Lazy-initialize the async lock dynamically per event loop to avoid cross-loop binding deadlocks."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[AIService] No running event loop for setup block. Using dummy lock.")
+            class DummyLock:
+                async def __aenter__(self): return
+                async def __aexit__(self, *args): return
+            return DummyLock()
+
+        if not hasattr(current_loop, '_ai_setup_lock'):
+            setattr(current_loop, '_ai_setup_lock', asyncio.Lock())
+            
+        return getattr(current_loop, '_ai_setup_lock')
+
     async def _setup_local_model(self):
         """
         Ensure local model is initialized via Manager.
         """
-        manager = await LocalModelManager.get_instance()
+        lock = await self._get_setup_lock()
+        async with lock:
+            manager = await LocalModelManager.get_instance()
 
-        # Ensure model is verified/loaded using config path
-        config_path = ConfigHandler.get_setting('local_model_path')
-        if config_path and not manager.get_loaded_model_path():
-            await manager.load_model(config_path)
+            # Ensure model is verified/loaded using config path
+            config_path = ConfigHandler.get_setting('local_model_path')
+            if config_path and not manager.get_loaded_model_path():
+                await manager.load_model(config_path)
 
     def _parse_news_result(self, raw_result: dict) -> dict:
         """

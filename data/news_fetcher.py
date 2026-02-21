@@ -7,6 +7,7 @@ import akshare as ak
 import pandas as pd
 
 from utils.thread_pool import ThreadPoolManager, TaskType
+from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,6 @@ class NewsFetcher:
         Get major financial news (CCTV / Major Portals)
         """
         try:
-            loop = asyncio.get_running_loop()
 
             def _fetch():
                 # ProxyManager already whitelists domestic domains via NO_PROXY at startup
@@ -96,7 +96,7 @@ class NewsFetcher:
                     final_time = str(final_time)
 
                 news_list.append({
-                    'title': row.get('标题') or row.get('title', '无标题'),
+                    'title': row.get('标题') or row.get('title', I18n.get('news_no_title')),
                     'content': row.get('内容') or row.get('content', ''),
                     'time': final_time
                 })
@@ -116,7 +116,6 @@ class NewsFetcher:
         Uses Sina Finance Custom Sort API (Verified Working).
         """
         try:
-            loop = asyncio.get_running_loop()
 
             def _fetch():
                 # Direct call to Sina US API
@@ -196,7 +195,6 @@ class NewsFetcher:
         Uses Sina Finance (verified working, not blocked).
         """
         try:
-            loop = asyncio.get_running_loop()
 
             def _fetch():
                 # Sina Finance - Concept Boards
@@ -220,7 +218,8 @@ class NewsFetcher:
             results = []
             for _, row in df.head(limit).iterrows():
                 name = row.get('板块', '')
-                if not name: continue
+                if not name:
+                    continue
 
                 try:
                     raw_val = row.get('涨跌幅', 0)

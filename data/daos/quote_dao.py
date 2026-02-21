@@ -94,8 +94,12 @@ class QuoteDao(BaseDao):
     async def get_index_daily(self, ts_code=None, trade_date=None):
         sql = "SELECT * FROM index_daily WHERE 1=1"
         p = []
-        if ts_code: sql += " AND ts_code=?"; p.append(ts_code)
-        if trade_date: sql += " AND trade_date=?"; p.append(trade_date)
+        if ts_code:
+            sql += " AND ts_code=?"
+            p.append(ts_code)
+        if trade_date:
+            sql += " AND trade_date=?"
+            p.append(trade_date)
         sql += " ORDER BY trade_date DESC"
         return await self._read_db(sql, p)
     
@@ -109,7 +113,9 @@ class QuoteDao(BaseDao):
     async def get_block_trade(self, trade_date=None):
         sql = "SELECT * FROM block_trade WHERE 1=1"
         p = []
-        if trade_date: sql += " AND trade_date=?"; p.append(trade_date)
+        if trade_date:
+            sql += " AND trade_date=?"
+            p.append(trade_date)
         return await self._read_db(sql, p)
 
     # --- Limit List ---
@@ -128,7 +134,9 @@ class QuoteDao(BaseDao):
     async def get_top_list(self, trade_date=None):
         sql = "SELECT * FROM top_list WHERE 1=1"
         p = []
-        if trade_date: sql += " AND trade_date=?"; p.append(trade_date)
+        if trade_date:
+            sql += " AND trade_date=?"
+            p.append(trade_date)
         return await self._read_db(sql, p)
 
     # --- Margin ---
@@ -151,8 +159,12 @@ class QuoteDao(BaseDao):
     async def get_moneyflow(self, trade_date=None, ts_code=None):
         sql = "SELECT * FROM moneyflow_daily WHERE 1=1"
         p = []
-        if trade_date: sql += " AND trade_date=?"; p.append(trade_date)
-        if ts_code: sql += " AND ts_code=?"; p.append(ts_code)
+        if trade_date:
+            sql += " AND trade_date=?"
+            p.append(trade_date)
+        if ts_code:
+            sql += " AND ts_code=?"
+            p.append(ts_code)
         return await self._read_db(sql, p)
 
     # --- Northbound ---
@@ -163,13 +175,19 @@ class QuoteDao(BaseDao):
     async def get_northbound(self, trade_date=None, ts_code=None):
         sql = "SELECT * FROM northbound_holding WHERE 1=1"
         p = []
-        if trade_date: sql += " AND trade_date=?"; p.append(trade_date)
-        if ts_code: sql += " AND ts_code=?"; p.append(ts_code)
+        if trade_date:
+            sql += " AND trade_date=?"
+            p.append(trade_date)
+        if ts_code:
+            sql += " AND ts_code=?"
+            p.append(ts_code)
         return await self._read_db(sql, p)
 
     async def get_latest_northbound(self):
         async with self.engine.connect() as conn:
             r = await conn.exec_driver_sql("SELECT MAX(trade_date) FROM northbound_holding")
-            td = r.fetchone()[0]
-            if not td: return pd.DataFrame()
+            row = r.fetchone()
+            td = row[0] if row else None
+            if not td:
+                return pd.DataFrame()
         return await self.get_northbound(trade_date=td)

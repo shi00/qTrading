@@ -5,6 +5,7 @@ Handles comprehensive fundamentals, incremental updates, and data repair.
 import asyncio
 import datetime
 import logging
+import threading
 from typing import List
 
 import pandas as pd
@@ -25,11 +26,22 @@ class FinancialSyncStrategy(ISyncStrategy):
 
     def __init__(self, context):
         super().__init__(context)
-        self._shutdown_event = asyncio.Event()
-        # Concurrency control lock for internal task tracking if needed
-        import threading
+        self._lazy_event = None  # ST-01: Lazy init
         self._tasks_lock = threading.Lock()
         self._active_tasks = set()
+
+    @property
+    def _shutdown_event(self):
+        """Get or create shutdown event dynamically per event loop."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.Event()
+
+        if not hasattr(current_loop, '_fina_shutdown_evt'):
+            setattr(current_loop, '_fina_shutdown_evt', asyncio.Event())
+            
+        return getattr(current_loop, '_fina_shutdown_evt')
 
     async def cancel(self):
         """Signal cancellation."""
@@ -90,7 +102,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         ignores it and fetches EVERYTHING for active stocks.
         We will stick to the robust 'sync_comprehensive_fundamentals' logic.
         """
-        if self._shutdown_event.is_set(): return
+        if self._shutdown_event.is_set():
+            return
 
         logger.info(f"[FinancialSyncStrategy] Starting Comprehensive Fundamentals Sync (force={force})...")
 
@@ -297,7 +310,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                 continue
 
             target_list = df_disclosure[['ts_code', 'end_date']].drop_duplicates().to_dict('records')
-            if not target_list: continue
+            if not target_list:
+                continue
 
             tasks = []
 
@@ -489,9 +503,9 @@ class FinancialSyncStrategy(ISyncStrategy):
         Targeted repair for specific stocks.
         Fixes ALL tables defined in constants.
         """
-        if not ts_codes: return 0
+        if not ts_codes:
+            return 0
 
-        # ... (Period generation logic remains same) ...
         now = datetime.datetime.now()
         current_year = now.year
         p_cands = []
@@ -504,32 +518,33 @@ class FinancialSyncStrategy(ISyncStrategy):
         semaphore = asyncio.Semaphore(1)
         total_saved = 0
 
-        # Specific concurrent repair
+        # BUG FIX: Define repair_one OUTSIDE the for loop and pass period/period_idx as
+        # default-argument parameters. Python closures capture variable names, not values,
+        # so defining async def inside the loop causes every task to see the last iteration's
+        # period once all tasks are scheduled and asyncio.gather begins executing them.
+        async def repair_one(ts_code: str, idx: int, period: str, p_idx: int):
+            nonlocal total_saved
+            async with semaphore:
+                try:
+                    await asyncio.sleep(ConfigHandler.get_sync_request_delay(is_heavy=True))
+                    await self._fetch_comprehensive_financial_data(ts_code, period=period)
+                    total_saved += 1
+
+                    if progress_callback and idx % 10 == 0:
+                        progress_callback(
+                            p_idx * len(ts_codes) + idx,
+                            len(periods) * len(ts_codes),
+                            I18n.get("status_repairing", period=period, code=ts_code)
+                        )
+                except Exception as e:
+                    logger.debug(f"[Repair] Failed for {ts_code} period={period}: {e}")
+
         tasks = []
         for period_idx, period in enumerate(periods):
-            async def repair_one(ts_code, idx):
-                nonlocal total_saved
-                async with semaphore:
-                    try:
-                        # Rate limit internal
-                        await asyncio.sleep(ConfigHandler.get_sync_request_delay(is_heavy=True))
-
-                        # Call the COMPREHENSIVE fetcher instead of just fina_indicator
-                        # This automatically fixes Income, Balance, MainBz, Audit, etc.
-                        # Note: Start/End date are None, relying on 'period'
-                        await self._fetch_comprehensive_financial_data(ts_code, period=period)
-                        total_saved += 1  # Rough count
-
-                        if progress_callback and idx % 10 == 0:
-                            progress_callback(period_idx * len(ts_codes) + idx, len(periods) * len(ts_codes),
-                                              I18n.get("status_repairing", period=period, code=ts_code))
-                    except Exception as e:
-                        logger.debug(f"[Repair] Failed for {ts_code} period={period}: {e}")
-
             for i, ts_code in enumerate(ts_codes):
-                tasks.append(asyncio.create_task(repair_one(ts_code, i)))
+                # Pass period and period_idx explicitly so each task captures its own values
+                tasks.append(asyncio.create_task(repair_one(ts_code, i, period, period_idx)))
 
-        # Run all tasks (semaphore controls concurrency)
         if tasks:
             await asyncio.gather(*tasks)
 

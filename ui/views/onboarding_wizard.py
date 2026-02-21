@@ -1,11 +1,11 @@
 import asyncio
 import logging
-import traceback
 
 import flet as ft
 
 from data.data_processor import DataProcessor
 from ui.i18n import I18n
+from ui.theme import AppStyles
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class OnboardingWizard(ft.Container):
             label=I18n.get("wizard_token_label"),
             password=True,
             can_reveal_password=True,
-            width=400,
+            width=AppStyles.CONTROL_WIDTH_LG,
             hint_text=I18n.get("wizard_token_hint"),
             on_submit=self._verify_token,
             border_color=AppColors.PRIMARY,
@@ -55,7 +55,7 @@ class OnboardingWizard(ft.Container):
             label=I18n.get("wizard_ai_key_label"),
             password=True,
             can_reveal_password=True,
-            width=400,
+            width=AppStyles.CONTROL_WIDTH_LG,
             hint_text="sk-...",
             border_color=AppColors.PRIMARY,
             label_style=ft.TextStyle(color=AppColors.PRIMARY)
@@ -63,14 +63,14 @@ class OnboardingWizard(ft.Container):
         self.ai_base_url_input = ft.TextField(
             label=I18n.get("settings_ai_base_url_label"),
             value="https://api.deepseek.com",
-            width=400,
+            width=AppStyles.CONTROL_WIDTH_LG,
             border_color=AppColors.PRIMARY,
             label_style=ft.TextStyle(color=AppColors.PRIMARY)
         )
         self.ai_model_dropdown = ft.Dropdown(
             label=I18n.get("wizard_ai_model_label"),
             value="deepseek-chat",
-            width=200,
+            width=AppStyles.CONTROL_WIDTH_MD,
             border_color=AppColors.PRIMARY,
             label_style=ft.TextStyle(color=AppColors.PRIMARY),
             options=[
@@ -98,7 +98,7 @@ class OnboardingWizard(ft.Container):
         self.ai_status = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
 
         # Step 3: Sync progress
-        self.sync_progress = ft.ProgressBar(width=400, value=0, color=AppColors.ACCENT, bgcolor=AppColors.BORDER)
+        self.sync_progress = ft.ProgressBar(width=AppStyles.CONTROL_WIDTH_LG, value=0, color=AppColors.ACCENT, bgcolor=AppColors.BORDER)
         self.sync_status = ft.Text(I18n.get("wizard_status_ready"), size=12, color=AppColors.TEXT_SECONDARY)
 
         # Step 4: Schedule options
@@ -227,8 +227,6 @@ class OnboardingWizard(ft.Container):
         I18n.unsubscribe(self._on_locale_change)
 
     def _on_locale_change(self):
-        """Handle locale change - rebuild UI text"""
-        # Wizard is typically single-use, minimal refresh needed
         self._safe_update()
 
     def _safe_update(self):

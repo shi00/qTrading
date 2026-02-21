@@ -252,7 +252,8 @@ class ReviewManager:
         records = []
         for _, row in df.iterrows():
             ts_code = row.get('ts_code')
-            if not ts_code: continue
+            if not ts_code:
+                continue
             
             # Extract AI fields if available
             ai_score = row.get('ai_score', 0)
@@ -263,7 +264,8 @@ class ReviewManager:
                 ai_score = 0
                 
             ai_reason = row.get('ai_reason', '')
-            if pd.isnull(ai_reason): ai_reason = ''
+            if pd.isnull(ai_reason):
+                ai_reason = ''
             
             records.append((
                 current_date, 

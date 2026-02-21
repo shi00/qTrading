@@ -2,6 +2,7 @@ import base64
 import logging
 import os
 import secrets
+import shutil
 import subprocess
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -9,8 +10,6 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from config import APP_ROOT
 
 logger = logging.getLogger(__name__)
-
-import shutil
 
 
 class DecryptionError(Exception):

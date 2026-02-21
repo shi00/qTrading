@@ -9,7 +9,8 @@ class FinancialDao(BaseDao):
 
     # --- Financial Reports ---
     async def save_financial_reports(self, df):
-        if df is None or df.empty: return 0
+        if df is None or df.empty:
+            return 0
         cols = ['ts_code', 'end_date', 'ann_date', 'report_type', 'total_revenue', 'revenue',
                 'n_income', 'n_income_attr_p', 'total_assets', 'total_liab',
                 'total_hldr_eqy_exc_min_int', 'roe', 'roe_dt', 'grossprofit_margin',
@@ -77,7 +78,8 @@ class FinancialDao(BaseDao):
                 row = r.fetchone()
                 with_date = row[0] if row else None
 
-        if not with_date: return pd.DataFrame()
+        if not with_date:
+            return pd.DataFrame()
         return await self._read_db("SELECT * FROM daily_indicators WHERE trade_date = ?", (with_date,))
 
     async def get_cached_indicator_dates(self):

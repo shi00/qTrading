@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import keyring
 
 from readerwriterlock import rwlock
 
@@ -10,6 +11,8 @@ from utils.security_utils import SecurityManager, DecryptionError
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
+KEYRING_SERVICE_NAME = "AStockScreener"
+
 
 DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 你是一个专业的金融量化分析助手，专注于A股市场分析。
@@ -17,33 +20,25 @@ DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 输出格式要求清晰、结构化，关键指标请高亮显示。
 """
 
-DEFAULT_NEWS_PROMPT = """你是拥有20年经验的金融量化分析师。任务是对新闻进行**金融交易导向分类**。
+DEFAULT_NEWS_PROMPT = """你是金融量化分析师。请对新闻进行分类。
+**MUST output valid JSON ONLY. NO markdown (no ```json). NO reasoning. NEVER output an empty string.**
 
-# Taxonomy (分类体系)
-1. **金融核心** (直接交易标的): A股市场/港美股/期货市场/贵金属/外汇市场/宏观政策
-2. **宏观经济** (基本面): 宏观数据/财政政策/国际宏观
-3. **国际地缘** (避险): 冲突与博弈/能源格局
-4. **行业产业** (板块): 科技/消费/能源/金融
-5. **其他人文** (无影响): 纯民生/娱乐
+# 分类体系 (L1 -> L2)
+- 金融核心 -> A股市场, 港美股, 期货市场, 贵金属, 外汇市场, 宏观政策
+- 宏观经济 -> 宏观数据, 财政政策, 国际宏观
+- 国际地缘 -> 冲突与博弈, 能源格局
+- 行业产业 -> 科技板块, 消费板块, 能源板块, 金融板块
+- 其他人文 -> 纯民生, 娱乐
 
-# Rules
-- 黄金/白银 -> [金融核心-贵金属] (优先)
-- 铜/原油 -> [金融核心-期货市场] (优先)
-- 央行/证监会 -> [金融核心-宏观政策]
+# JSON 格式要求
+{"category_L1": "L1类别", "category_L2": "L2具体类别", "sentiment": "Positive/Neutral/Negative", "emoji": "相关Emoji"}
 
-# Output Format (JSON Only)
-Strictly output a JSON object. Do NOT output Markdown code blocks (```json). Do NOT output reasoning or explanations.
-Structure: {"category_L1": "String", "category_L2": "String", "sentiment": "Positive/Neutral/Negative", "emoji": "Symbol"}
-
-# Examples (Few-Shot)
-User: 紫金矿业在南美发现巨型高品位金矿，预计储量增加50吨。
+# 示例
+User: 紫金矿业发现金矿
 Assistant: {"category_L1": "金融核心", "category_L2": "贵金属", "sentiment": "Positive", "emoji": "🥇"}
 
-User: 美联储宣布加息25个基点，并在会议纪要中暗示通胀顽固。
-Assistant: {"category_L1": "金融核心", "category_L2": "宏观政策", "sentiment": "Negative", "emoji": "🦅"}
-
-User: 乘联会发布数据，上月新能源车零售渗透率突破50%。
-Assistant: {"category_L1": "行业产业", "category_L2": "科技制造", "sentiment": "Positive", "emoji": "🚗"}"""
+User: 某明星去旅游了
+Assistant: {"category_L1": "其他人文", "category_L2": "娱乐", "sentiment": "Neutral", "emoji": "🍉"}"""
 
 
 # I will assume DEFAULT_AI_PROMPT is unchanged and skip re-pasting it in thought trace.
@@ -137,7 +132,7 @@ class ConfigHandler:
             # Save if any changes
             if dirty:
                 ConfigHandler.save_config(current_config, replace=True)
-                logger.info("Configuration (defaults & cleanup) synchronized to user_settings.json")
+                logger.info(f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}")
 
         except Exception as e:
             logger.error(f"Failed to ensure default config: {e}")
@@ -230,14 +225,33 @@ class ConfigHandler:
 
     @staticmethod
     def get_token():
+        # First try keyring
+        kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
+        if kr_token:
+            return kr_token
+
+        # Fallback to legacy config
         config = ConfigHandler.load_config()
         token = config.get("ts_token", "")
         return ConfigHandler._try_decrypt(token)
 
     @staticmethod
     def save_token(token):
-        encrypted = SecurityManager.encrypt_data(token)
-        return ConfigHandler.save_config({"ts_token": encrypted})
+        if not token:
+            try:
+                keyring.delete_password(KEYRING_SERVICE_NAME, "ts_token")
+            except Exception:
+                pass
+            return ConfigHandler.save_config({"ts_token": ""})
+
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", token)
+            # Clear legacy setting from JSON
+            return ConfigHandler.save_config({"ts_token": ""})
+        except Exception as e:
+            logger.warning(f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager.")
+            encrypted = SecurityManager.encrypt_data(token)
+            return ConfigHandler.save_config({"ts_token": encrypted})
 
     @staticmethod
     def is_onboarding_complete():
@@ -288,13 +302,13 @@ class ConfigHandler:
 
     @staticmethod
     def get_sync_concurrency():
-        config = ConfigHandler.load_config()
-        # Default changed from 6 to 3 for stability
-        return config.get("sync_concurrency", 3)
+        """Alias for get_sync_max_concurrent_heavy() for backward compatibility."""
+        return ConfigHandler.get_sync_max_concurrent_heavy()
 
     @staticmethod
     def set_sync_concurrency(concurrency):
-        return ConfigHandler.save_config({"sync_concurrency": int(concurrency)})
+        """Alias for set_sync_max_concurrent_heavy() for backward compatibility."""
+        return ConfigHandler.set_sync_max_concurrent_heavy(int(concurrency))
 
     @staticmethod
     def get_max_batch_rows():
@@ -340,10 +354,14 @@ class ConfigHandler:
     def get_ai_config():
         """Get all AI related clean config"""
         config = ConfigHandler.load_config()
-        encrypted_key = config.get("ai_api_key", "")
-
-        # Use helper
-        api_key = ConfigHandler._try_decrypt(encrypted_key)
+        
+        # Try keyring first
+        api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+        
+        # Legacy fallback
+        if not api_key:
+            encrypted_key = config.get("ai_api_key", "")
+            api_key = ConfigHandler._try_decrypt(encrypted_key)
 
         return {
             "ai_api_key": api_key,
@@ -353,11 +371,21 @@ class ConfigHandler:
 
     @staticmethod
     def save_ai_config(api_key, base_url, model_name):
-        """Save AI settings (API Key Encrypted)"""
-        encrypted_key = ""
+        """Save AI settings (API Key Encrypted via Keyring)"""
         if api_key:
-            encrypted_key = SecurityManager.encrypt_data(api_key)
-
+            try:
+                keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
+                encrypted_key = "" # Clear from plain json
+            except Exception as e:
+                logger.warning(f"Keyring save failed: {e}. Falling back to SecurityManager.")
+                encrypted_key = SecurityManager.encrypt_data(api_key)
+        else:
+            try:
+                keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
+            except Exception:
+                pass
+            encrypted_key = ""
+        
         return ConfigHandler.save_config({
             "ai_api_key": encrypted_key,
             "ai_base_url": base_url,
@@ -451,12 +479,14 @@ class ConfigHandler:
     @staticmethod
     def get_sync_max_concurrent_heavy():
         config = ConfigHandler.load_config()
-        # Default to 3 for heavy tasks
-        return config.get("sync_max_concurrent_heavy", 3)
+        # Enforce bounds [1, 10]
+        val = int(config.get("sync_max_concurrent_heavy", 3))
+        return max(1, min(val, 10))
 
     @staticmethod
     def set_sync_max_concurrent_heavy(val):
-        return ConfigHandler.save_config({"sync_max_concurrent_heavy": int(val)})
+        safe_val = max(1, min(int(val), 10))
+        return ConfigHandler.save_config({"sync_max_concurrent_heavy": safe_val})
 
     @staticmethod
     def get_strategy_min_turnover():

@@ -5,6 +5,7 @@ Handles daily market snapshots, historical backfill, and retry logic.
 import asyncio
 import datetime
 import logging
+import threading
 
 import inspect
 import pandas as pd
@@ -26,10 +27,22 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
     def __init__(self, context):
         super().__init__(context)
-        self._shutdown_event = asyncio.Event()
-        import threading
+        self._lazy_event = None  # ST-01: Lazy init
         self._tasks_lock = threading.Lock()
         self._active_tasks = set()
+
+    @property
+    def _shutdown_event(self):
+        """Get or create shutdown event dynamically per event loop."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.Event()
+
+        if not hasattr(current_loop, '_hist_shutdown_evt'):
+            setattr(current_loop, '_hist_shutdown_evt', asyncio.Event())
+            
+        return getattr(current_loop, '_hist_shutdown_evt')
 
     async def cancel(self):
         """Signal cancellation."""
@@ -114,7 +127,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def sync_one_day(date):
             nonlocal abort_sync, processed_count
-            if self._shutdown_event.is_set() or abort_sync: return
+            if self._shutdown_event.is_set() or abort_sync:
+                return
 
             async with semaphore:
                 if self._shutdown_event.is_set() or abort_sync: return
@@ -141,7 +155,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):
-            if self._shutdown_event.is_set() or abort_sync: break
+            if self._shutdown_event.is_set() or abort_sync:
+                break
 
             batch = trade_dates[batch_start:batch_start + BATCH_SIZE]
             tasks = [asyncio.create_task(sync_one_day(d)) for d in batch]
@@ -161,7 +176,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.info(f"[HistoricalSync] Retrying {len(failed_dates)} failed dates...")
 
             for retry_round in range(MAX_RETRIES):
-                if not failed_dates or self._shutdown_event.is_set(): break
+                if not failed_dates or self._shutdown_event.is_set():
+                    break
                 await asyncio.sleep(2)
 
                 current_batch = failed_dates[:]

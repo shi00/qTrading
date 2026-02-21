@@ -30,7 +30,7 @@ class ScreenerView(ft.Container):
             label=I18n.get("select_strategy"),
             options=[],
             on_change=self._on_strategy_change,
-            width=300,
+            width=AppStyles.CONTROL_WIDTH_MD,
             text_size=14,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,
@@ -41,10 +41,7 @@ class ScreenerView(ft.Container):
             "",
             size=12,
             color=AppColors.TEXT_SECONDARY,
-            # italic removed for readability
             no_wrap=False,
-            # max_lines removed for dynamic length
-            # width removed to allowing resizing
         )
 
         self.run_btn = ft.ElevatedButton(
@@ -188,17 +185,21 @@ class ScreenerView(ft.Container):
             ], alignment=ft.MainAxisAlignment.CENTER)
         ], expand=2)  # Take 2/3 space
 
+        # Extract these as instance variables so update_theme can access them directly without fragile indexing
+        self.log_title_text = ft.Text(I18n.get("screener_log_title"), weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY)
+        self.log_view_container = ft.Container(
+            content=self.log_view,
+            border=ft.border.all(1, AppColors.BORDER),
+            border_radius=4,
+            bgcolor=AppColors.BACKGROUND,
+            padding=5,
+            expand=True
+        )
+
         log_area = ft.Container(
             content=ft.Column([
-                ft.Text(I18n.get("screener_log_title"), weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                ft.Container(
-                    content=self.log_view,
-                    border=ft.border.all(1, AppColors.BORDER),
-                    border_radius=4,
-                    bgcolor=AppColors.BACKGROUND,  # Darker bg for logs
-                    padding=5,
-                    expand=True
-                )
+                self.log_title_text,
+                self.log_view_container
             ]),
             expand=1,  # Take 1/3 space
             padding=ft.padding.only(left=10)
@@ -387,23 +388,13 @@ class ScreenerView(ft.Container):
         self.log_view.bgcolor = AppColors.LOG_BG
         self.log_view.border = ft.border.all(1, AppColors.BORDER)
 
-        # Log container theming logic
+        # Directly update extracted properties safely without indexing
         try:
-            # Structure: Column -> [Toolbar, Divider, Row]
-            # Row -> [result_area(Col), log_area(Container)]
-            main_row = self.content.controls[2]
-            if isinstance(main_row, ft.Row) and len(main_row.controls) > 1:
-                log_area = main_row.controls[1]
-                if isinstance(log_area, ft.Container):
-                    # Inner container
-                    inner_col = log_area.content
-                    if isinstance(inner_col, ft.Column) and len(inner_col.controls) > 1:
-                        # Log Title
-                        inner_col.controls[0].color = AppColors.TEXT_PRIMARY
-                        # Log View Container
-                        log_view_container = inner_col.controls[1]
-                        log_view_container.border = ft.border.all(1, AppColors.BORDER)
-                        log_view_container.bgcolor = AppColors.BACKGROUND
+            if hasattr(self, 'log_title_text'):
+                self.log_title_text.color = AppColors.TEXT_PRIMARY
+            if hasattr(self, 'log_view_container'):
+                self.log_view_container.border = ft.border.all(1, AppColors.BORDER)
+                self.log_view_container.bgcolor = AppColors.BACKGROUND
         except Exception as e:
             logger.warning(f"Failed to update log area theme: {e}")
 

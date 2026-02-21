@@ -9,7 +9,8 @@ class StockDao(BaseDao):
     
     # --- Stock Basic ---
     async def save_stock_basic(self, df, priority=None):
-        if df is None or df.empty: return 0
+        if df is None or df.empty:
+            return 0
         cols = ['ts_code', 'symbol', 'name', 'area', 'industry', 'market', 'list_date', 'list_status', 'updated_at']
 
         df = df.copy()
@@ -38,9 +39,15 @@ class StockDao(BaseDao):
     async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
         sql = "SELECT * FROM trade_cal WHERE 1=1"
         p = []
-        if start_date: sql += " AND cal_date>=?"; p.append(start_date)
-        if end_date: sql += " AND cal_date<=?"; p.append(end_date)
-        if is_open is not None: sql += " AND is_open=?"; p.append(is_open)
+        if start_date:
+            sql += " AND cal_date>=?"
+            p.append(start_date)
+        if end_date:
+            sql += " AND cal_date<=?"
+            p.append(end_date)
+        if is_open is not None:
+            sql += " AND is_open=?"
+            p.append(is_open)
         sql += " ORDER BY cal_date ASC"
         return await self._read_db(sql, p)
 
@@ -53,7 +60,8 @@ class StockDao(BaseDao):
 
     # --- Concepts ---
     async def save_concepts(self, df):
-        if df is None or df.empty: return 0
+        if df is None or df.empty:
+            return 0
         cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
         
         df = df.copy()
@@ -66,7 +74,8 @@ class StockDao(BaseDao):
         Transactional overwrite of concepts.
         Clears table and inserts new data in a single transaction.
         """
-        if df is None or df.empty: return 0
+        if df is None or df.empty:
+            return 0
         
         cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
         df = df.copy()
@@ -122,15 +131,11 @@ class StockDao(BaseDao):
         
         # Transform to dict
         result = {}
-        # rows is a DataFrame
         if rows is None or rows.empty:
             return result
-            
-        for _, r in rows.iterrows():
-            code = r['ts_code']
-            concept = r['concept_name']
-            if code not in result:
-                result[code] = []
-            result[code].append(concept)
-            
+
+        # P3-2: Use groupby instead of iterrows for better performance
+        for code, group in rows.groupby('ts_code'):
+            result[code] = group['concept_name'].tolist()
+
         return result

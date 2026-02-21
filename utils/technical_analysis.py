@@ -86,9 +86,9 @@ class TechnicalAnalysis:
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
         low_list = df_calc['low'].rolling(window=n, min_periods=n).min()
-        low_list.fillna(value=df_calc['low'].expanding().min(), inplace=True)
+        low_list = low_list.fillna(value=df_calc['low'].expanding().min())
         high_list = df_calc['high'].rolling(window=n, min_periods=n).max()
-        high_list.fillna(value=df_calc['high'].expanding().max(), inplace=True)
+        high_list = high_list.fillna(value=df_calc['high'].expanding().max())
 
         rsv = (df_calc['close'] - low_list) / (high_list - low_list) * 100
 

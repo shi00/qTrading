@@ -2,6 +2,8 @@
 import asyncio
 import datetime
 import logging
+import time
+
 import pandas as pd
 import aiosqlite
 import threading
@@ -69,7 +71,7 @@ class DataProcessor:
             self.api = TushareClient(token=token)
             self.cache = CacheManager()
             self._first_news_sync = True
-            self._cancel_event = asyncio.Event()  # Unified cancellation event
+            self._cancel_event = None  # ST-01: Lazy initialization to avoid loop binding issues
             self._quality_tier = 0 # 0=Unknown/Critical, 1=Bronze, 2=Silver, 3=Gold
 
             # Initialize Context & Strategies
@@ -90,13 +92,25 @@ class DataProcessor:
 
             self.__class__._is_initialized = True
 
+    def _get_cancel_event(self):
+        """Get or create cancel event dynamically per event loop."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.Event()
+
+        if not hasattr(current_loop, '_processor_cancel_evt'):
+            setattr(current_loop, '_processor_cancel_evt', asyncio.Event())
+            
+        return getattr(current_loop, '_processor_cancel_evt')
+
     async def request_cancel(self):
         """
         Request cancellation of current operation.
         Called by UI when user clicks cancel or closes window.
         """
         logger.info("[DataProcessor] Cancel requested")
-        self._cancel_event.set()
+        self._get_cancel_event().set()
         self._quality_tier = 0 # 0=Unknown/Critical, 1=Bronze, 2=Silver, 3=Gold
         
         # Propagate to all strategies
@@ -109,16 +123,19 @@ class DataProcessor:
     
     def is_cancelled(self):
         """Check if cancellation has been requested."""
+        if self._cancel_event is None:
+            return False
         return self._cancel_event.is_set()
     
     def clear_cancel(self):
         """Clear cancel state before starting new operation."""
-        self._cancel_event.clear()
+        if self._cancel_event is not None:
+            self._cancel_event.clear()
 
     async def stop(self):
         """Signal all running tasks to stop. Async to ensure proper cleanup."""
         logger.info("[DataProcessor] Global stop signal received.")
-        self._cancel_event.set()
+        self._get_cancel_event().set()
             
         # Delegate cancellation to strategies
         try:
@@ -190,6 +207,12 @@ class DataProcessor:
             trade_date = await self.get_latest_trade_date()
         
         await self.strategies['historical'].sync_daily_market_snapshot(trade_date, force=force)
+        
+        # Clear caches to ensure fresh data visibility
+        if hasattr(self, '_trade_date_cache'):
+            self._trade_date_cache = {'ts': 0, 'val': None}
+        self.get_trade_dates.cache_clear()
+        
         # For compatibility with some callers expecting data, we fetch it back from cache
         return await self.get_screening_data(trade_date)
 
@@ -199,10 +222,19 @@ class DataProcessor:
 
 
 
-    @alru_cache(maxsize=1)
+    # CR-02: Use manual TTL cache (5 min) instead of infinite alru_cache
+    # @alru_cache(maxsize=1) 
     @log_async_operation(operation_name="get_latest_trade_date", log_exceptions=True)
     async def get_latest_trade_date(self):
         """Get absolute latest trading date (today or previous trading day)."""
+        # Initialize cache if missing (guard for edge-case hot paths)
+        if not hasattr(self, '_trade_date_cache'):
+            self._trade_date_cache = {'ts': 0, 'val': None}
+
+        now_ts = time.time()
+        if self._trade_date_cache['val'] and (now_ts - self._trade_date_cache['ts'] < 300):
+            return self._trade_date_cache['val']
+
         now = datetime.datetime.now()
         if now.hour < MARKET_CLOSE_HOUR:
             end_dt = now - datetime.timedelta(days=1)
@@ -215,7 +247,10 @@ class DataProcessor:
         try:
             dates = await self.get_trade_dates(start_str, end_str)
             if dates:
-                return dates[-1]
+                result = dates[-1]
+                # Update cache
+                self._trade_date_cache = {'ts': now_ts, 'val': result}
+                return result
         except Exception as e:
             logger.warning(f"[DataProcessor] Failed to get latest trade date: {e}")
 
@@ -223,11 +258,12 @@ class DataProcessor:
         dt = end_dt
         while dt.weekday() >= 5:
             dt -= datetime.timedelta(days=1)
-        return dt.strftime('%Y%m%d')
+        fallback_res = dt.strftime('%Y%m%d')
+        return fallback_res
 
-    @alru_cache(maxsize=32)
+    @log_async_operation(operation_name="get_trade_dates", log_exceptions=True)
     async def get_trade_dates(self, start_date, end_date):
-        """Get list of actual trade dates using Persistent DB Cache."""
+        """Get list of trade dates between start and end."""
         try:
             await self.ensure_trade_cal(end_date, required_start_date=start_date)
             # Use strict type check for safety with generic read
@@ -290,7 +326,8 @@ class DataProcessor:
         if self._health_cache.get('data') and (now - self._health_cache.get('time', 0) < 10):
             return self._health_cache['data']
 
-        await self.cache.init_db()
+        # PF-01: Removed redundant init_db call. Database is initialized at startup.
+        # await self.cache.init_db()
 
         try:
             end_date = await self.get_latest_trade_date()
@@ -439,7 +476,11 @@ class DataProcessor:
         """
         import random
         
-        if progress_callback: progress_callback(0, 100, I18n.get("scan_step_init"))
+        # Reset cancel event (prevents immediate skipped scan if previous op was cancelled)
+        self.clear_cancel()
+        
+        if progress_callback:
+            progress_callback(0, 100, I18n.get("scan_step_init"))
         
         try:
             # 1. Select Sample
@@ -454,27 +495,46 @@ class DataProcessor:
             
             # 2. Prepare Context
             scan_results = {'continuity': [], 'recency': [], 'nulls': []}
-            trade_cal_df = await self.cache.get_trade_cal()
             
-            # 3. Iterate Sample (with Timeout protection)
+            # --- Architecture Optimization: One-Pass Batch Fetch ---
+            # Fetch 1 year of data for all sampled stocks at once to avoid N+1 queries 
+            # and over-fetching entire 20-year history for single stocks.
+            start_date_str = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y%m%d')
+            
+            # Only fetch open trading days within scan window (halves data vs full calendar)
+            trade_cal_df = await self.cache.get_trade_cal(start_date=start_date_str, is_open=1)
+            if trade_cal_df is None or trade_cal_df.empty:
+                logger.warning("[QualityScan] Trade calendar empty/unavailable - continuity check will be skipped.")
+            
+            batch_df = await self.cache.get_daily_quotes(ts_code_list=sample, start_date=start_date_str)
+            
+            # 3. Iterate Sample (DataFrame Slicing in Memory)
             # We use a simplified loop. In production, could be parallelized.
             total_steps = len(sample)
             
             for idx, ts_code in enumerate(sample):
-                if self.is_cancelled(): break
+                if self.is_cancelled():
+                    break
                 
                 # Update Progress
                 pct = int((idx / total_steps) * 100)
                 if progress_callback: 
                     progress_callback(pct, 100, I18n.get("scan_scanning", code=ts_code))
                 
-                # Fetch Data (Daily Quotes for Tier 2 Check)
-                df_daily = await self.cache.get_daily_quotes(ts_code=ts_code, limit=250)
+                # Fetch Data via Batch Slice (No DB hit)
+                if batch_df is not None and not batch_df.empty:
+                    df_daily = batch_df[batch_df['ts_code'] == ts_code]
+                else:
+                    df_daily = None
                 
                 if df_daily is not None and not df_daily.empty:
-                    # Check Continuity
-                    cont_res = DataQualityService.check_continuity(df_daily, 'trade_date', trade_cal_df)
-                    scan_results['continuity'].append(cont_res['coverage_ratio'])
+                    # Sort explicitly to guarantee recency check safety
+                    df_daily = df_daily.sort_values('trade_date', ascending=False)
+                    
+                    # Check Continuity (only if trade_cal is available)
+                    if trade_cal_df is not None and not trade_cal_df.empty:
+                        cont_res = DataQualityService.check_continuity(df_daily, 'trade_date', trade_cal_df)
+                        scan_results['continuity'].append(cont_res['coverage_ratio'])
                     
                     # Check Recency (vs today)
                     rec_res = DataQualityService.check_recency(df_daily, 'trade_date', datetime.datetime.now().strftime('%Y%m%d'))
@@ -505,19 +565,23 @@ class DataProcessor:
                 'avg_lag': avg_recency
             }
             
-            if progress_callback: progress_callback(100, 100, I18n.get("scan_complete"))
+            if progress_callback:
+                progress_callback(100, 100, I18n.get("scan_complete"))
             return result
             
         except Exception as e:
             logger.error(f"[QualityScan] Failed: {e}", exc_info=True)
             return {'score': 0, 'tier': 0, 'error': str(e)}
+        finally:
+            # Ensure cancel state doesn't leak into subsequent operations
+            self.clear_cancel()
 
     # ... Other simple sync/get methods ...
 
     @log_async_operation(operation_name="sync_stock_basic")
     async def sync_stock_basic(self):
         """Sync stock basic info (Step 1 of initialization)."""
-        if self.is_cancelled(): 
+        if self.is_cancelled():
             return 0
         
         # Deduplication Lock - prevent concurrent runs
@@ -527,7 +591,7 @@ class DataProcessor:
                 self._is_syncing_basic = True
                 should_run = True
         
-        if not should_run: 
+        if not should_run:
             logger.debug("[sync_stock_basic] Already running, skipping")
             return 0
 
@@ -554,7 +618,8 @@ class DataProcessor:
     @log_async_operation(operation_name="sync_concepts")
     async def sync_concepts(self):
         """Sync stock concepts from Tushare."""
-        if self.is_cancelled(): return 0
+        if self.is_cancelled():
+            return 0
         
         try:
             logger.info("[sync_concepts] Starting concept sync...")
@@ -566,7 +631,8 @@ class DataProcessor:
             # Fetch Concept List
             # Fetch Concept List (uses _handle_api_call for rate limiting)
             df_c = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_concept_list)
-            if df_c is None or df_c.empty: return 0
+            if df_c is None or df_c.empty:
+                return 0
             
             c_codes = df_c['code'].tolist()
             
@@ -613,7 +679,8 @@ class DataProcessor:
                     if not t.done():
                         t.cancel()
 
-            if not all_dfs: return 0
+            if not all_dfs:
+                return 0
             
             full_df = pd.concat(all_dfs)
             
@@ -786,14 +853,15 @@ class DataProcessor:
     
     async def initialize_system(self, progress_callback=None):
         """
-        Orchestrate system initialization with 5 distinct steps.
+        Orchestrate system initialization with 6 distinct steps.
         
         Steps and weights:
-        - Step 1 (5%):  Sync stock list
-        - Step 2 (5%):  Sync trade calendar
-        - Step 3 (50%): Sync historical data
-        - Step 4 (35%): Sync financial data
-        - Step 5 (5%):  Health check
+        - Step 1 (1%):  Sync stock list
+        - Step 2 (1%):  Sync trade calendar
+        - Step 3 (45%): Sync historical data
+        - Step 4 (38%): Sync financial data
+        - Step 5 (10%): Sync AI core data (macro/holders)
+        - Step 6 (5%):  Health check
         
         Returns:
             dict: Health check result on success
@@ -802,6 +870,10 @@ class DataProcessor:
         Note: Call request_cancel() to cancel this operation.
         """
         from ui.i18n import I18n
+        from data.data_dictionary import validate_schema_definitions
+        
+        # Run schema validation (DD-01)
+        validate_schema_definitions()
         
         # Clear any previous cancel state
         self.clear_cancel()

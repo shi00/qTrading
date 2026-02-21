@@ -172,6 +172,8 @@ TABLE_DEFINITIONS = {
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "audit_result": "col_audit_result",
+            "audit_fees": "col_audit_fees",
+            "audit_agency": "col_audit_agency",
         }
     },
     "fina_mainbz": {
@@ -403,6 +405,7 @@ TABLE_DEFINITIONS = {
         "desc": "股东户数",
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
+            "ann_date": "col_ann_date",
             "holder_num": "col_holder_num",
             "holder_num_change": "col_holder_num_change",
             "holder_num_ratio": "col_holder_num_ratio",
@@ -435,8 +438,8 @@ TABLE_DEFINITIONS = {
         "quality_config": {"tier": 2, "monitor": True},
         "type": "global",
         "columns": {
-            "ggt_ss": "col_south_money",
-            "ggt_sz": "col_south_money",
+            "ggt_ss": "col_ggt_ss",
+            "ggt_sz": "col_ggt_sz",
             "hgt": "col_hgt_north_money",
             "sgt": "col_sgt_north_money",
             "north_money": "col_north_money",
@@ -444,3 +447,51 @@ TABLE_DEFINITIONS = {
         }
     },
 }
+
+def validate_schema_definitions():
+    """
+    Validates that all tables defined in schema.sql have a corresponding entry in TABLE_DEFINITIONS.
+    Logs warnings for any missing definitions to help maintain data dictionary consistency.
+    """
+    import os
+    import re
+    import logging
+
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Locate schema.sql relative to this file
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        schema_path = os.path.join(current_dir, 'schema.sql')
+        
+        if not os.path.exists(schema_path):
+            logger.warning(f"[DataDict] schema.sql not found at {schema_path}, skipping validation.")
+            return
+
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            sql_content = f.read()
+
+        # Extract table names: CREATE TABLE [IF NOT EXISTS] table_name
+        # Case insensitive for SQL keywords, consistent for table names
+        pattern = re.compile(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)', re.IGNORECASE)
+        matches = pattern.findall(sql_content)
+        
+        db_tables = set(matches)
+        defined_tables = set(TABLE_DEFINITIONS.keys())
+        
+        # Tables in schema but not in dictionary
+        missing_defs = db_tables - defined_tables
+        
+        # Known internal tables to ignore
+        IGNORED_TABLES = {'sqlite_sequence', 'stock_sync_status', 'screening_history'}
+        
+        missing_defs = missing_defs - IGNORED_TABLES
+        
+        if missing_defs:
+            logger.warning(f"[DataDict] The following tables are in schema.sql but missing from TABLE_DEFINITIONS: {missing_defs}")
+            logger.warning("[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.")
+        else:
+            logger.info(f"[DataDict] Schema validation passed. {len(db_tables)} tables verified.")
+            
+    except Exception as e:
+        logger.error(f"[DataDict] Validation failed: {e}")

@@ -176,18 +176,18 @@ class NewsFeed(ft.Container):
 
     def _build_news_item(self, row):
         raw_tag = row.get('tags', '') or ''
-        tag_key = f"tag_{raw_tag.lower()}"
-        translated_tag = I18n.get(tag_key)
         
-        # Fallback tag logic
-        if translated_tag == tag_key:
-            tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
-            translated_parts = []
-            for t in tags:
-                tk = f"tag_{t.lower()}"
-                tv = I18n.get(tk)
-                translated_parts.append(tv if tv != tk else t)
-            translated_tag = ",".join(translated_parts) if translated_parts else raw_tag
+        # We first split multiple tags. E.g "Stock, Policy" -> ["Stock", "Policy"]
+        tags = [t.strip() for t in raw_tag.split(',') if t.strip()]
+        translated_parts = []
+        for t in tags:
+            # Only use I18n if it's a known short code (e.g. stock, policy),
+            # Otherwise we pass the raw tag itself as the default fallback to prevent noisy "Missing translation" warnings
+            tk = f"tag_{t.lower()}"
+            tv = I18n.get(tk, default=t)
+            translated_parts.append(tv)
+            
+        translated_tag = ",".join(translated_parts) if translated_parts else raw_tag
 
         content = str(row.get('content', '') or '')
         time_str = str(row.get('publish_time', '') or '')

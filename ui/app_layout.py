@@ -6,8 +6,6 @@ from typing import Dict
 
 import flet as ft
 
-# Removed MarketDataService import
-# Removed NewsSubscriptionService import
 from ui.i18n import I18n
 from ui.theme import AppColors, apply_page_theme
 from ui.views.data_view import DataExplorerView
@@ -205,11 +203,6 @@ class AppLayout(ft.Container):
         logger.info("[AppLayout] Updating theme...")
 
         # 1. Apply new theme to page (sets page.theme, page.dark_theme, page.theme_mode)
-        # REMOVED: apply_page_theme(self.page, AppColors._CURRENT_THEME_NAME)
-        # Reason: apply_page_theme calls AppColors.load_theme, which triggers this listener.
-        # Calling it here creates an infinite recursion loop.
-        # The initiator (e.g., SystemTab or main) is responsible for calling apply_page_theme.
-
         # 2. Propagate custom color updates to ALL views that have update_theme
         #    (Tables, charts, settings inputs — anything with Layer 2 colors)
         for tab_index, view in self._view_cache.items():
