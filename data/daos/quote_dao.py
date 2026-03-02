@@ -1,8 +1,11 @@
 import logging
+
 import pandas as pd
+
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
+
 
 class QuoteDao(BaseDao):
 
@@ -10,8 +13,9 @@ class QuoteDao(BaseDao):
     async def save_daily_quotes(self, df, priority=None, suppress_errors=True):
         cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'pre_close', 'change', 'pct_chg', 'vol',
                 'amount', 'adj_factor']
-        return await self._save_upsert(df, "daily_quotes", cols, pk_columns=['ts_code', 'trade_date'], suppress_errors=suppress_errors)
-    
+        return await self._save_upsert(df, "daily_quotes", cols, pk_columns=['ts_code', 'trade_date'],
+                                       suppress_errors=suppress_errors)
+
     async def check_data_exists(self, trade_date: str) -> bool:
         try:
             async with self.engine.connect() as conn:
@@ -42,25 +46,25 @@ class QuoteDao(BaseDao):
                 all_results = []
                 # Remove ts_code_list from params for safe recursion or loop
                 # Actually, easier to loop here.
-                
+
                 # Base SQL without the IN clause
-                base_sql = sql 
+                base_sql = sql
                 base_params = params.copy()
-                
+
                 for i in range(0, len(ts_code_list), chunk_size):
-                    chunk = ts_code_list[i : i + chunk_size]
+                    chunk = ts_code_list[i: i + chunk_size]
                     placeholders = ','.join(['?'] * len(chunk))
                     chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
                     chunk_params = base_params + chunk
-                    
+
                     df_chunk = await self._read_db(chunk_sql, chunk_params)
                     if not df_chunk.empty:
                         all_results.append(df_chunk)
-                
+
                 if all_results:
-                     return pd.concat(all_results, ignore_index=True)
+                    return pd.concat(all_results, ignore_index=True)
                 else:
-                     return pd.DataFrame()
+                    return pd.DataFrame()
             else:
                 placeholders = ','.join(['?'] * len(ts_code_list))
                 sql += f" AND ts_code IN ({placeholders})"
@@ -102,7 +106,7 @@ class QuoteDao(BaseDao):
             p.append(trade_date)
         sql += " ORDER BY trade_date DESC"
         return await self._read_db(sql, p)
-    
+
     # --- Block Trade ---
     async def save_block_trade(self, df):
         cols = ['trade_date', 'ts_code', 'price', 'volume', 'amount', 'buyer', 'seller']
@@ -166,6 +170,10 @@ class QuoteDao(BaseDao):
             sql += " AND ts_code=?"
             p.append(ts_code)
         return await self._read_db(sql, p)
+
+    async def save_moneyflow_hsgt(self, df):
+        cols = ['trade_date', 'ggt_ss', 'ggt_sz', 'hgt', 'sgt', 'north_money', 'south_money']
+        return await self._save_upsert(df, "moneyflow_hsgt", cols, pk_columns=['trade_date'])
 
     # --- Northbound ---
     async def save_northbound(self, df):

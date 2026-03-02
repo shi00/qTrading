@@ -7,6 +7,7 @@ from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from data.data_processor import DataProcessor
 from data.cache_manager import CacheManager
+from services.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,13 @@ class DataSourceTab(ft.Container):
         self.metric_storage = MetricCard(I18n.get("ds_storage_usage"), I18n.get("ds_status_calc"), ft.Icons.STORAGE,
                                          AppColors.TEXT_HINT)
 
-        self.health_detail_text = ft.Text(I18n.get("settings_check_health"), size=12, color=AppColors.TEXT_SECONDARY)
-
+        self.health_summary_container = ft.Container(
+            content=ft.Text(I18n.get("settings_check_health"), size=12, color=AppColors.TEXT_SECONDARY),
+            padding=ft.padding.symmetric(vertical=10, horizontal=15),
+            bgcolor=AppColors.SURFACE_VARIANT,
+            border_radius=8,
+            border=ft.border.all(1, AppColors.DIVIDER)
+        )
         # Repair UI
         self.missing_fin_codes = []
         self.btn_repair = ft.ElevatedButton(
@@ -89,7 +95,8 @@ class DataSourceTab(ft.Container):
                 ]),
                 ft.Container(height=10),
                 ft.Container(height=10),
-                self.health_detail_text,
+                ft.Container(height=10),
+                self.health_summary_container,
                 ft.Container(height=5),
                 ft.Row([self.btn_repair], alignment=ft.MainAxisAlignment.END)
             ])
@@ -270,73 +277,120 @@ class DataSourceTab(ft.Container):
         
         self.metric_health.set_value(I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, AppColors.INFO)
         self.metric_storage.set_value(I18n.get("ds_status_calc"), ft.Icons.HOURGLASS_TOP, AppColors.TEXT_HINT)
-        self.health_detail_text.value = I18n.get("health_checking")
+        self.health_summary_container.content = ft.Text(I18n.get("health_checking"), size=12, color=AppColors.TEXT_SECONDARY)
         self.update()
-        self.page.run_task(self.check_health_async)
+        
+        async def _run_health_check(task_id: str, **kwargs):
+             try:
+                 TaskManager().update_progress(task_id, 0.2, I18n.get("task_progress_checking"))
+                 result = await self._processor.check_data_health()
+                 
+                 # Local UI Updates
+                 status = result.get('status', 'red')
+                 
+                 TaskManager().update_progress(task_id, 0.9, I18n.get("task_progress_analyzing"))
 
-    async def check_health_async(self):
-        try:
-            result = await self._processor.check_data_health()
-            status = result.get('status', 'red')
+                 if status == 'yellow':
+                     self.metric_health.set_value(I18n.get("ds_health_lag"), ft.Icons.WARNING, AppColors.WARNING)
+                 elif status == 'red':
+                     self.metric_health.set_value(I18n.get("ds_health_error"), ft.Icons.ERROR, AppColors.ERROR)
+                 else:
+                     self.metric_health.set_value(I18n.get("ds_health_ok"), ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS)
 
-            if status == 'yellow':
-                self.metric_health.set_value(I18n.get("ds_health_lag"), ft.Icons.WARNING, AppColors.WARNING)
-            elif status == 'red':
-                self.metric_health.set_value(I18n.get("ds_health_error"), ft.Icons.ERROR, AppColors.ERROR)
-            else:
-                self.metric_health.set_value(I18n.get("ds_health_ok"), ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS)
+                 market_info = result.get('market', {})
+                 details = result.get('details', {})
+                 
+                 latest = market_info.get('latest_local')
+                 if not latest or str(latest) == 'None':
+                     display_date = I18n.get("ds_never_sync")
+                 else:
+                     display_date = str(latest)
+                 self.metric_sync.set_value(display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
+                 
+                 cov_val = details.get('financial_coverage', 0)
+                 if isinstance(cov_val, (int, float)):
+                     cov_str = f"{cov_val:.1f}%"
+                 else:
+                     cov_str = str(cov_val)
+                     
+                 self.metric_coverage.set_value(cov_str, ft.Icons.DATA_USAGE, AppColors.INFO)
+                 self.metric_storage.set_value(I18n.get("common_normal"), ft.Icons.STORAGE, AppColors.SUCCESS)
 
-            # Fix parsing of nested structure
-            market_info = result.get('market', {})
-            details = result.get('details', {})
-            
-            latest = market_info.get('latest_local')
-            if not latest or str(latest) == 'None':
-                display_date = I18n.get("ds_never_sync")
-            else:
-                display_date = str(latest)
-            self.metric_sync.set_value(display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
-            
-            cov_val = details.get('financial_coverage', 0)
-            if isinstance(cov_val, (int, float)):
-                cov_str = f"{cov_val:.1f}%"
-            else:
-                cov_str = str(cov_val)
-                
-            self.metric_coverage.set_value(cov_str, ft.Icons.DATA_USAGE, AppColors.INFO)
-            self.metric_storage.set_value(I18n.get("common_normal"), ft.Icons.STORAGE, AppColors.SUCCESS)
+                 miss_critical = details.get('missing_critical', 0)
+                 miss_depth = details.get('missing_depth', 0)
+                 miss_breadth = details.get('missing_breadth', 0)
+                 lag = market_info.get('lag_days', 0)
 
-            # Map from details/fundamentals
-            fin_cov = cov_str
-            recent_cov = "N/A" # Not currently calculated
-            stale_count = 0 
-            
-            # Use safe get for lag
-            lag = market_info.get('lag_days', 0)
-            self.health_detail_text.value = I18n.get("ds_text_cov_detail").format(cov=cov_str,
-                                                                                  fin_cov=fin_cov, recent=recent_cov,
-                                                                                  lag=lag)
+                 sys_text = I18n.get("ds_health_summary_sys").format(cov=cov_str, lag=lag)
+                 
+                 if miss_critical > 0:
+                     core_text = I18n.get("ds_health_summary_core").format(miss=miss_critical)
+                     core_color = AppColors.ERROR
+                     core_icon = ft.Icons.WARNING_AMBER_ROUNDED
+                 else:
+                     core_text = I18n.get("ds_health_summary_core_ok")
+                     core_color = AppColors.SUCCESS
+                     core_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
 
-            # Show Repair Button if needed (Requires backend support for missing_codes)
-            # Currently disabled/hidden as backend only provides counts
-            missing_fin = 0 
-            total_need_repair = missing_fin + stale_count
-            if total_need_repair > 0:
-                self.missing_fin_codes = []
-                # ... (Logic valid but condition won't be met)
-                self.btn_repair.visible = True
-            else:
-                self.btn_repair.visible = False
-            self.btn_repair.update()
+                 # Build Integrity Row
+                 integrity_items = [
+                     ft.Icon(core_icon, size=14, color=core_color),
+                     ft.Text(core_text, size=12, color=core_color)
+                 ]
+                 
+                 if miss_depth > 0:
+                     integrity_items.extend([
+                         ft.Text("|", size=12, color=AppColors.DIVIDER),
+                         ft.Text(I18n.get("ds_health_summary_depth").format(miss=miss_depth), 
+                                 size=12, color=AppColors.WARNING)
+                     ])
+                 if miss_breadth > 0:
+                     integrity_items.extend([
+                         ft.Text("|", size=12, color=AppColors.DIVIDER),
+                         ft.Text(I18n.get("ds_health_summary_breadth").format(miss=miss_breadth), 
+                                 size=12, color=AppColors.WARNING)
+                     ])
 
-        except Exception as e:
-            self.metric_health.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR,
-                                         AppColors.ERROR)
-            self.health_detail_text.value = str(e)
-            
-        finally:
-            self.btn_check_health.disabled = False
-            self._safe_update()
+                 self.health_summary_container.content = ft.Column([
+                     ft.Row([
+                         ft.Icon(ft.Icons.ANALYTICS, size=14, color=AppColors.INFO),
+                         ft.Text(sys_text, size=12, color=AppColors.TEXT_PRIMARY)
+                     ], spacing=5, alignment=ft.MainAxisAlignment.START),
+                     ft.Row(integrity_items, spacing=5, alignment=ft.MainAxisAlignment.START, wrap=True)
+                 ], spacing=6)
+
+                 stale_count = 0
+                 missing_fin = 0 
+                 total_need_repair = missing_fin + stale_count
+                 if total_need_repair > 0:
+                     self.missing_fin_codes = []
+                     self.btn_repair.visible = True
+                 else:
+                     self.btn_repair.visible = False
+                 self._safe_update()
+                 
+                 return I18n.get("task_result_health_done")
+
+             except Exception as e:
+                 logger.error(f"Health check error: {e}", exc_info=True)
+                 self.metric_health.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR,
+                                              AppColors.ERROR)
+                 self.health_summary_container.content = ft.Text(I18n.get("ds_health_check_error"), size=12, color=AppColors.ERROR)
+                 raise
+                 
+             finally:
+                 try:
+                     self.btn_check_health.disabled = False
+                     self._safe_update()
+                 except Exception:
+                     pass  # View may have been unmounted
+                 
+        TaskManager().submit_task(
+             name=I18n.get("task_name_health_check"),
+             task_type=I18n.get("task_type_sys_check"),
+             coroutine_factory=_run_health_check,
+             cancellable=True
+        )
 
     def repair_data(self, e):
         if self.is_syncing: return
@@ -384,6 +438,15 @@ class DataSourceTab(ft.Container):
 
     def full_daily_sync(self, e):
         if self.is_syncing: return
+        self._show_confirm_dialog(
+            title_key="dialog_confirm_full_sync_title",
+            content_key="dialog_confirm_full_sync_content",
+            confirm_btn_key="btn_confirm_sync",
+            on_confirm_callback=self._do_full_daily_sync,
+            is_destructive=False
+        )
+
+    def _do_full_daily_sync(self):
         self.show_snack(I18n.get("snack_full_sync_start"))
         self._set_sync_busy(True, self.action_full_sync)
         self.page.run_task(self.full_daily_sync_async)
@@ -401,7 +464,7 @@ class DataSourceTab(ft.Container):
         finally:
             self._set_sync_busy(False)
 
-    def confirm_clear_cache(self, e):
+    def _show_confirm_dialog(self, title_key, content_key, confirm_btn_key, on_confirm_callback, is_destructive=False):
         try:
             if not self.page:
                 logger.error("Page is not attached")
@@ -416,37 +479,48 @@ class DataSourceTab(ft.Container):
                 self._dialog_open = False
                 self.page.close(dialog)
 
-            def confirm_clear(e):
+            def confirm_action(e):
                 self._dialog_open = False
                 self.page.close(dialog)
-                self.page.run_task(self.clear_cache_async)
+                if asyncio.iscoroutinefunction(on_confirm_callback):
+                    self.page.run_task(on_confirm_callback)
+                else:
+                    on_confirm_callback()
+
+            btn_style = ft.ButtonStyle(color=AppColors.ERROR) if is_destructive else ft.ButtonStyle(color=AppColors.PRIMARY)
 
             dialog = ft.AlertDialog(
                 modal=True,
-                title=ft.Text(I18n.get("dialog_confirm_clear_title")),
-                content=ft.Text(I18n.get("dialog_confirm_clear_content")),
+                title=ft.Text(I18n.get(title_key)),
+                content=ft.Text(I18n.get(content_key)),
                 actions=[
                     ft.TextButton(I18n.get("common_cancel"), on_click=close_dialog),
-                    ft.TextButton(I18n.get("btn_confirm_clear"), on_click=confirm_clear,
-                                  style=ft.ButtonStyle(color=AppColors.ERROR)),
+                    ft.TextButton(I18n.get(confirm_btn_key), on_click=confirm_action, style=btn_style),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
                 on_dismiss=lambda e: setattr(self, '_dialog_open', False)
-                # Handle click outside if not modal (though it is modal)
             )
             self.page.open(dialog)
-            logger.info("Confirmation dialog opened")
         except Exception as ex:
             self._dialog_open = False
             logger.error(f"Error opening dialog: {ex}")
             self.show_snack(I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR)
 
+    def confirm_clear_cache(self, e):
+        self._show_confirm_dialog(
+            title_key="dialog_confirm_clear_title",
+            content_key="dialog_confirm_clear_content",
+            confirm_btn_key="btn_confirm_clear",
+            on_confirm_callback=self.clear_cache_async,
+            is_destructive=True
+        )
+
     async def clear_cache_async(self):
         if self.is_syncing: return
         self._set_sync_busy(True, self.action_clear_cache)
         try:
-            # init_db is handled inside hard_reset.
-            await self._cache.hard_reset()
+            # init_db is handled inside clear_all_cache.
+            await self._cache.clear_all_cache()
             self.show_snack(I18n.get("ds_cache_cleared"))
             self.page.pubsub.send_all("cache_cleared")
         except Exception as ex:
@@ -516,7 +590,7 @@ class DataSourceTab(ft.Container):
             self._safe_update()
 
     def init_historical_data(self, e):
-        if self.is_syncing and self.sync_button.text.startswith(I18n.get("common_cancel")):
+        if self.is_syncing and getattr(self.sync_button, "text", "").startswith(I18n.get("common_cancel")):
             # Request cancellation via DataProcessor
             self.page.run_task(self._processor.request_cancel)
             self.sync_button.text = I18n.get("sys_init_cancel_wait")
@@ -525,6 +599,17 @@ class DataSourceTab(ft.Container):
             return
 
         if self.is_syncing: return
+        
+        # Prevent accidental trigger, show confirm dialog
+        self._show_confirm_dialog(
+            title_key="dialog_confirm_init_title",
+            content_key="dialog_confirm_init_content",
+            confirm_btn_key="btn_confirm_init",
+            on_confirm_callback=self._do_init_historical_data,
+            is_destructive=False
+        )
+
+    def _do_init_historical_data(self):
         self._set_sync_busy(True, self.sync_button)
 
         # Change button to cancel
@@ -537,13 +622,106 @@ class DataSourceTab(ft.Container):
         self.progress_bar.value = 0
         self.update()
 
-        self.page.run_task(self.init_historical_async)
+        async def _run_initial_sync(task_id: str, **kwargs):
+            try:
+                self.progress_text.value = I18n.get("wizard_status_init")
+                self.progress_bar.value = 0
+                self._safe_update()
+                
+                def _combined_progress(c, t, m):
+                     self.update_progress(c, t, m) # UI update
+                     TaskManager().update_progress(task_id, c / t if t > 0 else 0, f"[{c}/{t}] {m}")
+
+                report = await self._processor.initialize_system(
+                    progress_callback=_combined_progress
+                )
+
+                if self._processor.is_cancelled(): raise asyncio.CancelledError()
+
+                if report is None:
+                    raise Exception(I18n.get("ds_init_fail_generic"))
+
+                self.progress_text.value = f"✅ {I18n.get('sys_init_success')}"
+                self.progress_bar.value = 1
+                self.show_snack(I18n.get("settings_init_done"), color=AppColors.SUCCESS)
+                
+                # Back to original button state
+                self.sync_button.text = I18n.get("settings_init_data")
+                self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
+                self.sync_button.style = AppStyles.primary_button()
+                self._set_sync_busy(False)
+                self._safe_update()
+                
+                if isinstance(report, dict):
+                    self.refresh_health_status(None)
+                    
+                return I18n.get("sys_init_success")
+
+            except asyncio.CancelledError:
+                msg = I18n.get("settings_msg_sync_cancelled")
+                self.show_snack(msg, color=AppColors.WARNING)
+                self.progress_text.value = I18n.get("ds_progress_cancelled_fmt", msg=msg)
+                
+                # Revert UI on cancel
+                self.sync_button.text = I18n.get("settings_init_data")
+                self.sync_button.style = AppStyles.primary_button()
+                self.sync_button.disabled = False
+                
+                # Use call_soon_threadsafe to ensure UI resets happen safely
+                def _safe_revert():
+                    try:
+                        self._set_sync_busy(False)
+                        self._safe_update()
+                    except Exception as ex:
+                        logger.error(f"Error reverting UI on cancel: {ex}")
+                
+                if self.page and self.page.loop:
+                    self.page.loop.call_soon_threadsafe(_safe_revert)
+                else:
+                    _safe_revert()
+                    
+                raise
+            except Exception as e:
+                error_str = str(e)
+                if error_str == I18n.get("ds_init_fail_generic"):
+                    msg = error_str
+                else:
+                    msg = I18n.get("ds_init_fail_fmt", error="内部系统错误，请检查系统日志。")
+                
+                self.show_snack(msg, color=AppColors.ERROR)
+                self.progress_text.value = I18n.get("ds_progress_failed_fmt", msg=msg)
+                logger.error(f"Sync error: {e}", exc_info=True)
+                
+                # Revert UI
+                self.sync_button.text = I18n.get("settings_init_data")
+                self.sync_button.style = AppStyles.primary_button()
+                self.sync_button.disabled = False
+                
+                def _safe_revert_err():
+                    try:
+                        self._set_sync_busy(False)
+                        self._safe_update()
+                    except Exception as ex:
+                        logger.error(f"Error reverting UI on exception: {ex}")
+                
+                if self.page and self.page.loop:
+                    self.page.loop.call_soon_threadsafe(_safe_revert_err)
+                else:
+                    _safe_revert_err()
+                    
+                raise RuntimeError(msg)
+
+        TaskManager().submit_task(
+            name=I18n.get("task_name_init_sync"),
+            task_type=I18n.get("task_type_data_sync"),
+            coroutine_factory=_run_initial_sync,
+            cancellable=True
+        )
 
     def update_progress(self, current, total, message):
         if not self.page: return
 
         # Throttle updates to prevent freezing UI
-        # Only update every 0.1s or if complete
         import time
         now = time.time()
         should_update = (current == total) or (not hasattr(self, '_last_ui_update') or now - self._last_ui_update > 0.1)
@@ -551,62 +729,9 @@ class DataSourceTab(ft.Container):
         if should_update:
             progress = current / total if total > 0 else 0
             self.progress_bar.value = progress
-            self.progress_text.value = f"{int(current)}/{int(total)} ({int(progress * 100)}%) - {message}"
+            self.progress_text.value = f"{progress * 100:.1f}% - {message}"
             self._safe_update()
             self._last_ui_update = now
-
-    async def init_historical_async(self):
-        try:
-
-            # Unified Initialization Logic (v2.0)
-            # This handles all 5 steps: List, Calendar, Quotes, Financials, Health Check
-            # and provides weighted progress reporting.
-
-            self.progress_text.value = I18n.get("wizard_status_init")
-            self.progress_bar.value = 0
-            self._safe_update()
-
-            report = await self._processor.initialize_system(
-                progress_callback=lambda c, t, m: self.update_progress(c, t, m)
-            )
-
-            if self._processor.is_cancelled(): raise asyncio.CancelledError()
-
-            if report is None:
-                raise Exception(I18n.get("ds_init_fail_generic"))
-
-            self.progress_text.value = f"✅ {I18n.get('sys_init_success')}"
-            self.progress_bar.value = 1
-            self.show_snack(I18n.get("settings_init_done"), color=AppColors.SUCCESS)
-
-            # Auto refresh health dashboard if report available
-            if isinstance(report, dict):
-                self.refresh_health_status(None)
-
-        except asyncio.CancelledError:
-            msg = I18n.get("settings_msg_sync_cancelled")
-            self.show_snack(msg, color=AppColors.WARNING)
-            self.progress_text.value = I18n.get("ds_progress_cancelled_fmt", msg=msg)
-        except Exception as e:
-            error_str = str(e)
-            # Avoid double prefixing if it's our own localized message
-            if error_str == I18n.get("ds_init_fail_generic"):
-                msg = error_str
-            else:
-                msg = I18n.get("ds_init_fail_fmt", error=error_str[:30])
-            
-            self.show_snack(msg, color=AppColors.ERROR)
-            self.progress_text.value = I18n.get("ds_progress_failed_fmt", msg=msg)
-            logger.error(f"Sync error: {e}")
-        finally:
-            self.is_syncing = False
-            self.sync_button.text = I18n.get("settings_init_data")
-            self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
-            self.sync_button.style = AppStyles.primary_button()
-            self.sync_button.disabled = False
-            self.progress_bar.visible = False
-            self._set_sync_busy(False)
-            self._safe_update()
 
     def _set_sync_busy(self, is_busy: bool, active_btn: ft.Control = None):
         self.is_syncing = is_busy
@@ -638,13 +763,19 @@ class DataSourceTab(ft.Container):
                     if isinstance(ctrl, ActionChip): 
                         ctrl.opacity = 0.5 # Strong dim
                 else:
-                    ctrl.disabled = False
-                    if isinstance(ctrl, ActionChip): 
-                        ctrl.set_loading(False) # Reset state
-                        ctrl.opacity = 1.0
+                    try:
+                        ctrl.disabled = False
+                        if isinstance(ctrl, ActionChip): 
+                            ctrl.set_loading(False) # Reset state
+                            ctrl.opacity = 1.0
+                    except Exception as e:
+                        logger.error(f"Failed to reset ctrl state ({ctrl}): {e}")
 
         # Batch update via parent container to ensure consistency
-        self.update()
+        try:
+            self.update()
+        except:
+            pass
 
     def show_health_report_dialog(self, e):
         """Show full health report dialog"""

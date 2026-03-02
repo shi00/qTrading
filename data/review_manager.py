@@ -240,24 +240,37 @@ class ReviewManager:
     async def save_results(self, strategy_name, df):
         """
         Save screening results to history for future review.
+        Persists the full strategy execution snapshot including financial indicators and AI thinking.
         """
         if df is None or df.empty:
             return
 
         current_date = datetime.datetime.now().strftime('%Y%m%d')
         
-        # Prepare data for bulk insert
-        # Schema: trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason
-        
+        # Helpers to safely extract fields
+        def _f(row_data, key, default=None):
+            v = row_data.get(key, default)
+            if pd.isnull(v):
+                return default
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return default
+
+        def _s(row_data, key, default=''):
+            v = row_data.get(key, default)
+            if pd.isnull(v):
+                return default
+            return str(v)
+
         records = []
         for _, row in df.iterrows():
             ts_code = row.get('ts_code')
             if not ts_code:
                 continue
             
-            # Extract AI fields if available
+            # Extract AI fields with NaN safety
             ai_score = row.get('ai_score', 0)
-            # Handle NaN/None for Score
             try:
                 ai_score = int(ai_score) if pd.notnull(ai_score) else 0
             except (ValueError, TypeError):
@@ -267,15 +280,39 @@ class ReviewManager:
             if pd.isnull(ai_reason):
                 ai_reason = ''
             
+            thinking = row.get('thinking', '')
+            if pd.isnull(thinking):
+                thinking = ''
+
             records.append((
-                current_date, 
-                strategy_name, 
+                current_date,
+                strategy_name,
                 ts_code,
-                row.get('name', ''),
-                row.get('close', 0),
-                row.get('pct_chg', 0),
+                _s(row, 'name'),
+                _f(row, 'close'),
+                _f(row, 'pct_chg'),
+                # Market data snapshot
+                _s(row, 'industry'),
+                _f(row, 'vol'),
+                _f(row, 'amount'),
+                _f(row, 'turnover_rate'),
+                # Valuation snapshot
+                _f(row, 'pe_ttm'),
+                _f(row, 'pb'),
+                _f(row, 'ps_ttm'),
+                _f(row, 'dv_ttm'),
+                _f(row, 'total_mv'),
+                _f(row, 'circ_mv'),
+                # Financial snapshot
+                _f(row, 'roe'),
+                _f(row, 'grossprofit_margin'),
+                _f(row, 'debt_to_assets'),
+                _f(row, 'or_yoy'),
+                _f(row, 'netprofit_yoy'),
+                # AI analysis
                 ai_score,
-                str(ai_reason)
+                str(ai_reason),
+                str(thinking)
             ))
             
         if not records:
@@ -283,12 +320,25 @@ class ReviewManager:
 
         sql = '''
             INSERT INTO screening_history 
-            ("trade_date","strategy_name","ts_code","name","close","pct_chg","ai_score","ai_reason")
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ("trade_date","strategy_name","ts_code","name","close","pct_chg",
+             "industry","vol","amount","turnover_rate",
+             "pe_ttm","pb","ps_ttm","dv_ttm","total_mv","circ_mv",
+             "roe","grossprofit_margin","debt_to_assets","or_yoy","netprofit_yoy",
+             "ai_score","ai_reason","thinking")
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT("trade_date","strategy_name","ts_code") DO UPDATE SET
             "name"=excluded."name","close"=excluded."close","pct_chg"=excluded."pct_chg",
-            "ai_score"=excluded."ai_score","ai_reason"=excluded."ai_reason"
+            "industry"=excluded."industry","vol"=excluded."vol","amount"=excluded."amount",
+            "turnover_rate"=excluded."turnover_rate",
+            "pe_ttm"=excluded."pe_ttm","pb"=excluded."pb","ps_ttm"=excluded."ps_ttm",
+            "dv_ttm"=excluded."dv_ttm","total_mv"=excluded."total_mv","circ_mv"=excluded."circ_mv",
+            "roe"=excluded."roe","grossprofit_margin"=excluded."grossprofit_margin",
+            "debt_to_assets"=excluded."debt_to_assets","or_yoy"=excluded."or_yoy",
+            "netprofit_yoy"=excluded."netprofit_yoy",
+            "ai_score"=excluded."ai_score","ai_reason"=excluded."ai_reason",
+            "thinking"=excluded."thinking"
         '''
         
         await self.cache._write_db(sql, records, is_many=True)
         logger.info(f"[Review] Saved {len(records)} predictions for {strategy_name}")
+

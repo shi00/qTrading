@@ -1,202 +1,64 @@
-from strategies.base_strategy import BaseStrategy
+from strategies.base_strategy import BaseStrategy, register_strategy
+from strategies.ai_mixin import AIStrategyMixin
 import pandas as pd
-import asyncio
 import logging
-import json
-from data.news_fetcher import NewsFetcher
 from services.ai_service import AIService
-from utils.technical_analysis import TechnicalAnalysis
 from utils.config_handler import ConfigHandler
-from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
-class AISelectionStrategy(BaseStrategy):
+
+@register_strategy("ai_active")
+class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
+    # ai_mixin._mixin_analyze_single fetches 60 days of history
+    required_history_days = 60
+
     def __init__(self):
-        # Description clearly states it uses 30 candidates
-        # Description clearly states it uses Top N candidates
         super().__init__("strategy_ai_active_name", "strategy_ai_active_desc")
-        self.ai_client = AIService()
         self.limit = ConfigHandler.get_ai_max_candidates()
-        
+
     async def filter(self, context):
         if context is None:
             return pd.DataFrame()
-        
+
         # Support both keys (test uses screening_data, legacy uses data)
         df = context.get('screening_data')
         if df is None:
             df = context.get('data')
 
-        dp = context.get('data_processor')
-        
-        # Fail fast if API not configured (Check specifically for test scenario)
-        # In real app, AIService might handle this, but for test_ai_core compliance:
-        if hasattr(self.ai_client, 'client') and self.ai_client.client is None:
-             raise ValueError("API Key missing or client not initialized")
-        
+        # Fail fast if API not configured (test_ai_core compliance)
+        ai_client = AIService()
+        if hasattr(ai_client, 'client') and ai_client.client is None:
+            raise ValueError("API Key missing or client not initialized")
+
         if df is None or df.empty:
             logger.warning("[AIStrategy] No data provided in context")
             return pd.DataFrame()
 
         # --- Step 1: Pre-Filter (The Sieve) ---
-        # Logic: We want "Trade-able" stocks.
+        # Rule: Listed, Profitable (PE>0), Active (Turnover > min)
         min_turnover = ConfigHandler.get_strategy_min_turnover()
-        
-        # Rule: Listed, Not ST, Price > 2, Turnover > X% (Active), MA Trend Up?
-        # choosing: Top N by 'turnover_rate' where 'pe_ttm' > 0 (profitable)
-        
-        # Filter profitable and active
+
         mask = (df['pe_ttm'] > 0) & (df['turnover_rate'] > min_turnover) & (df['list_status'] == 'L')
         candidates = df[mask].copy()
-        
-        # Sort by turnover_rate desc (Most active)
+
+        # Sort by turnover_rate desc (Most active), cap at limit
         candidates = candidates.sort_values('turnover_rate', ascending=False).head(self.limit)
-        
+
         if candidates.empty:
             return pd.DataFrame()
 
-        # --- Step 2: Parallel Analysis (The Feature Enrichment) ---
-        
-        # Fetch Global Context ONCE (Shadow Strategy)
-        global_context = await NewsFetcher.get_us_major_moves()
-        logger.info(f"[AIStrategy] Global Context: {global_context}")
-        
-        # Pre-fetch Concepts for all candidates (N+1 Optimization)
-        try:
-            all_ts_codes = candidates['ts_code'].tolist()
-            concepts_map = await dp.cache.get_concepts(all_ts_codes)
-            logger.info(f"[AIStrategy] Pre-fetched concepts for {len(all_ts_codes)} stocks")
-        except Exception as e:
-            logger.warning(f"[AIStrategy] Failed to pre-fetch concepts: {e}")
-            concepts_map = {}
-        
-        
-        # Run all analysis in parallel with progress tracking
-        logger.info(f"[AIStrategy] Analyzing {len(candidates)} stocks...")
-        
-        # Callbacks
-        on_progress = context.get('on_progress')
-        on_result = context.get('on_stream_result') or context.get('on_result')
-        
-        total_tasks = len(candidates)
-        completed_count = 0
-        
-        # Initial Progress
-        if on_progress:
-            on_progress(0, total_tasks, I18n.get("ai_progress_init"))
+        # --- Step 2: AI Analysis via Mixin (with full data enrichment) ---
+        return await self.run_ai_analysis(candidates, context)
 
-        # Explicitly create tasks to allow cancellation
-        running_tasks = []
-
-        # Throttle concurrency to avoid DB saturation (SQLite)
-        limit = ConfigHandler.get_ai_max_concurrent_analysis()
-        sem = asyncio.Semaphore(limit)
-
-        async def analyze_wrapper(row_data: dict):
-            async with sem:
-                res = await self._analyze_single_stock(row_data, dp, global_context, concepts_map)
-                return res, row_data
-
-        # PERF-03: itertuples is 5-10x faster than iterrows; convert to dict for downstream compat.
-        for row in candidates.itertuples(index=False):
-            running_tasks.append(asyncio.create_task(analyze_wrapper(row._asdict())))
-
-        final_rows = []
-
-        for future in asyncio.as_completed(running_tasks):
-            # Check Cancellation
-            if dp and dp.is_cancelled():
-                logger.info("[AIStrategy] Cancellation detected. Stopping remaining tasks...")
-                for t in running_tasks:
-                    if not t.done():
-                        t.cancel()
-                break
-
-            try:
-                res, row = await future
-                completed_count += 1
-                
-                # Default "Thinking..." message or stock name
-                stock_name = row['name']
-                
-                if isinstance(res, Exception) or res is None or res.get('score', 0) == 0:
-                    if on_progress:
-                        on_progress(completed_count, total_tasks, I18n.get("ai_progress_skipped", name=stock_name))
-                    continue
-                
-                # Valid Result
-                row_dict = dict(row)
-                row_dict['ai_score'] = res.get('score', 0)
-                row_dict['ai_reason'] = res.get('summary', '')
-                row_dict['thinking'] = res.get('thinking', '') # Pass thinking to UI
-                
-                final_rows.append(row_dict)
-                
-                # Trigger Stream Callback
-                if on_result:
-                    on_result(row_dict)
-                    
-                # Update Progress
-                if on_progress:
-                    on_progress(completed_count, total_tasks, I18n.get("ai_progress_analyzed", name=stock_name, score=row_dict['ai_score']))
-
-            except asyncio.CancelledError:
-                logger.info("[AIStrategy] Task cancelled.")
-                break # Stop processing loop
-            except Exception as e:
-                logger.error(f"Task error: {e}", exc_info=True)
-                completed_count += 1
-        
-        logger.info(f"[AIStrategy] Analysis complete. Processed {completed_count}/{total_tasks} stocks. Results: {len(final_rows)}")
-
-        # Reconstruct DataFrame (redundant if streamed, but required for return)
-        if not final_rows:
-            return pd.DataFrame()
-            
-        result_df = pd.DataFrame(final_rows)
-        return result_df.sort_values('ai_score', ascending=False)
-
-    async def _analyze_single_stock(self, row, dp, global_context="", concepts_map=None):
-        """
-        Analyze a single stock (row is a dict from itertuples._asdict()).
-        """
-        try:
-            ts_code = row['ts_code']
-
-            # 1. Get History (last 60 trading days)
-            history_df = await dp.get_stock_history(ts_code, days=60)
-
-            # 2. Calculate technical indicators
-            trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
-            kdj_signal, k, d, j = TechnicalAnalysis.get_kdj(history_df)
-
-            tech_context = {
-                "macd_signal": trend_signal,
-                "kdj_signal": kdj_signal,
-                "k": round(k, 1),
-                "j": round(j, 1)
-            }
-
-            # 3. Get News
-            news = await NewsFetcher.get_stock_news(ts_code, limit=3)
-
-            # 3.5 Get Concepts (use pre-fetched map when available)
-            concepts = []
-            if concepts_map and ts_code in concepts_map:
-                concepts = concepts_map[ts_code]
-            elif not concepts_map:
-                # Fallback if map missing (unlikely)
-                cmap = await dp.cache.get_concepts([ts_code])
-                concepts = cmap.get(ts_code, [])
-
-            # 4. AI Inference — row is already a dict (from itertuples._asdict())
-            stock_info = dict(row)
-            stock_info['concepts'] = concepts
-
-            ai_result = await self.ai_client.analyze_stock(stock_info, tech_context, news, global_context)
-            return ai_result  # {score, summary, ...}
-
-        except Exception as e:
-            logger.error(f"Single stock analysis failed for {row['ts_code']}: {e}")
-            return None
+    def get_ai_context(self, row: dict) -> str:
+        """Strategy-specific context: explain WHY this stock was selected."""
+        turnover = row.get('turnover_rate', 'N/A')
+        pe = row.get('pe_ttm', 'N/A')
+        pct_chg = row.get('pct_chg', 'N/A')
+        return (
+            f"Selected by AI Active strategy: "
+            f"Turnover={turnover}% (high activity), "
+            f"PE(TTM)={pe} (profitable), "
+            f"Daily Change={pct_chg}%"
+        )

@@ -1,6 +1,8 @@
 import polars as pl
 from strategies.polars_base import PolarsBaseStrategy
+from strategies.base_strategy import register_strategy
 
+@register_strategy("tech_breakout")
 class TechnicalBreakoutStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_tech_breakout_name", "strategy_tech_breakout_desc")
@@ -13,6 +15,7 @@ class TechnicalBreakoutStrategy(PolarsBaseStrategy):
             .sort('pct_chg', descending=True)
         )
 
+@register_strategy("northbound")
 class NorthboundStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_northbound_name", "strategy_northbound_desc")
@@ -39,6 +42,7 @@ class NorthboundStrategy(PolarsBaseStrategy):
             # We log here but let base class handle empty return
             return lf.head(0)
 
+@register_strategy("institutional")
 class InstitutionalStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_institutional_name", "strategy_institutional_desc")
@@ -66,6 +70,7 @@ class InstitutionalStrategy(PolarsBaseStrategy):
         except Exception:
              return lf.head(0)
 
+@register_strategy("block_trade")
 class BlockTradeStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_block_trade_name", "strategy_block_trade_desc")

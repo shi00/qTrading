@@ -300,54 +300,46 @@ CREATE TABLE IF NOT EXISTS sync_status
 -- 8. Screening History
 CREATE TABLE IF NOT EXISTS screening_history
 (
-    id
-    INTEGER
-    PRIMARY
-    KEY
-    AUTOINCREMENT,
-    trade_date
-    TEXT
-    NOT
-    NULL,
-    strategy_name
-    TEXT
-    NOT
-    NULL,
-    ts_code
-    TEXT
-    NOT
-    NULL,
-    name
-    TEXT,
-    close
-    REAL,
-    pct_chg
-    REAL,
-    t1_price
-    REAL,
-    t1_pct
-    REAL,
-    t5_price
-    REAL,
-    t5_pct
-    REAL,
-    ai_score
-    INTEGER,
-    ai_reason
-    TEXT,
-    prediction_result
-    TEXT,
-    created_at
-    TEXT
-    DEFAULT
-    CURRENT_TIMESTAMP,
-    UNIQUE
-(
-    trade_date,
-    strategy_name,
-    ts_code
-)
-    );
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date      TEXT NOT NULL,
+    strategy_name   TEXT NOT NULL,
+    ts_code         TEXT NOT NULL,
+    name            TEXT,
+    close           REAL,
+    pct_chg         REAL,
+    -- Market data snapshot
+    industry        TEXT,
+    vol             REAL,
+    amount          REAL,
+    turnover_rate   REAL,
+    -- Valuation snapshot
+    pe_ttm          REAL,
+    pb              REAL,
+    ps_ttm          REAL,
+    dv_ttm          REAL,
+    total_mv        REAL,
+    circ_mv         REAL,
+    -- Financial snapshot
+    roe             REAL,
+    grossprofit_margin REAL,
+    debt_to_assets  REAL,
+    or_yoy          REAL,
+    netprofit_yoy   REAL,
+    -- Review system fields
+    t1_price        REAL,
+    t1_pct          REAL,
+    t5_price        REAL,
+    t5_pct          REAL,
+    -- AI analysis
+    ai_score        INTEGER,
+    ai_reason       TEXT,
+    thinking        TEXT,
+    prediction_result TEXT,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (trade_date, strategy_name, ts_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sh_date ON screening_history(trade_date);
 
 -- 9. Block Trades
 CREATE TABLE IF NOT EXISTS block_trade
@@ -1063,3 +1055,20 @@ CREATE INDEX IF NOT EXISTS idx_top10_holder ON top10_holders(holder_name);
 
 -- For index_weight(index_code, con_code, trade_date), index_code is covered
 CREATE INDEX IF NOT EXISTS idx_index_weight_date ON index_weight(trade_date);
+
+-- Task Manager History
+CREATE TABLE IF NOT EXISTS task_history
+(
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    task_type    TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    progress     REAL    DEFAULT 0,
+    description  TEXT,
+    error        TEXT,
+    result       TEXT,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_task_history_created ON task_history (created_at);

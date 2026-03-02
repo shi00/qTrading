@@ -52,10 +52,15 @@ def _check_tier(processor, min_tier, func_name):
     """Shared logic to verify quality tier."""
     if processor is None:
         return  # Skip check if no processor found
-    current_tier = getattr(processor, '_quality_tier', 0)
+    current_tier = getattr(processor, '_quality_tier', None)
+    if current_tier is None:
+        current_tier = 0  # Treat uninitialized as CRITICAL
     if current_tier < min_tier:
-        msg = f"Data Quality too low for {func_name}. Required: {min_tier.name}, Current: {QualityTier(current_tier).name}"
-        logger.error(f"[QualityGate] {msg}")
+        from ui.i18n import I18n
+        msg = I18n.get("quality_err_too_low", required=min_tier.name, current=QualityTier(current_tier).name)
+        if msg == "quality_err_too_low": # Fallback if I18n not initialized
+            msg = f"Data Quality too low for {func_name}. Required: {min_tier.name}, Current: {QualityTier(current_tier).name}"
+        logger.warning(f"[QualityGate] {msg}")
         raise QualityGateError(msg)
 
 def require_quality(min_tier: QualityTier):

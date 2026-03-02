@@ -232,12 +232,12 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_screening_history(self):
         """Test screening history saving and updating"""
-        # Save
-        df = pd.DataFrame({
-            'ts_code': ['000001.SZ'], 'name': ['PA'], 
-            'close': [10.0], 'pct_chg': [1.0]
-        })
-        await self.cache.save_screening_result(df, 'value', '20230101')
+        # Use direct SQL insert to test, since save_screening_result was removed
+        # (real save path is now review_manager.save_results which uses _write_db)
+        sql = '''INSERT INTO screening_history 
+                 ("trade_date","strategy_name","ts_code","name","close","pct_chg","ai_score","ai_reason")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)'''
+        await self.cache._write_db(sql, [('20230101', 'value', '000001.SZ', 'PA', 10.0, 1.0, 0, '')], is_many=True)
         
         history = await self.cache.get_screening_history('value')
         self.assertEqual(len(history), 1)

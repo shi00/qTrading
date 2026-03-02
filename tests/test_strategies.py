@@ -3,10 +3,14 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest
 import pandas as pd
-from strategies.all_strategies import (
-    StrategyManager, ValueStrategy, GrowthStrategy, DividendStrategy,
+from strategies.all_strategies import StrategyManager
+from strategies.fundamental import (  
+    ValueStrategy, GrowthStrategy, DividendStrategy,
+    CashFlowStrategy, LargePEStrategy
+)
+from strategies.market import (
     TechnicalBreakoutStrategy, NorthboundStrategy,
-    InstitutionalStrategy, BlockTradeStrategy, CashFlowStrategy, LargePEStrategy
+    InstitutionalStrategy, BlockTradeStrategy
 )
 from strategies.oversold_strategy import OversoldStrategy
 

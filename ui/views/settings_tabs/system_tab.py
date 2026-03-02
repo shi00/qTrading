@@ -1,18 +1,12 @@
 import asyncio
 import logging
-from typing import TYPE_CHECKING
 
 import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
-from ui.components.health_report_dialog import HealthReportDialog
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
-from data.data_processor import DataProcessor
-
-if TYPE_CHECKING:
-    from data.data_processor import DataProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -239,29 +233,7 @@ class SystemTab(ft.Container):
             ], spacing=5, expand=True) # expand=True for input to take space
         )
         
-        # 8. Data Maintenance
-        self.row_maint = SettingRow(
-            icon=ft.Icons.CLEANING_SERVICES_ROUNDED,
-            icon_color=AppColors.ERROR,
-            title=I18n.get("sys_data_maint"),
-            subtitle=I18n.get("sys_data_maint_desc"),
-            control=ft.Row([
-                ft.ElevatedButton(
-                    text=I18n.get("sys_btn_init"),
-                    icon=ft.Icons.REFRESH,
-                    style=ft.ButtonStyle(
-                        color=ft.Colors.WHITE,
-                        bgcolor=AppColors.ERROR,
-                    ),
-                    on_click=self.show_init_dialog
-                ),
-                ft.OutlinedButton(
-                    text=I18n.get("sys_btn_health"),
-                    icon=ft.Icons.HEALTH_AND_SAFETY,
-                    on_click=self.on_health_check_click
-                )
-            ], spacing=5)
-        )
+
 
         self.content = ft.ListView(
             controls=[
@@ -295,12 +267,6 @@ class SystemTab(ft.Container):
                         ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
 
                         self.row_proxy,
-
-                        ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
-
-                        # 8. Data Maintenance (System Init)
-                        # 8. Data Maintenance (System Init)
-                        self.row_maint,
 
                     ], spacing=10)
                 )
@@ -355,68 +321,10 @@ class SystemTab(ft.Container):
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
-    def show_init_dialog(self, e):
-        """Show system initialization confirmation"""
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(I18n.get("sys_btn_init")),
-            content=ft.Text(I18n.get("sys_data_maint_desc")),
-            actions=[
-                ft.TextButton(I18n.get("common_cancel"), on_click=lambda e: self.page.close(dlg)),
-                ft.TextButton(I18n.get("common_confirm"), 
-                              style=ft.ButtonStyle(color=AppColors.ERROR),
-                              on_click=lambda e: self._on_init_confirm(dlg)),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        self.page.open(dlg)
-
-    def _on_init_confirm(self, dlg):
-        self.page.close(dlg)
-        self.page.run_task(self._run_system_init)
-
-    async def _run_system_init(self):
-        """Run system initialization logic"""
-        from data.data_processor import DataProcessor
-        
-        p_bar = ft.ProgressBar(width=300)
-        p_text = ft.Text(I18n.get("common_preparing"))
-        dlg_progress = ft.AlertDialog(
-            modal=True,
-            content=ft.Column([p_text, p_bar], height=70, alignment=ft.MainAxisAlignment.CENTER),
-            actions=[],
-        )
-        self.page.open(dlg_progress)
-
-        def callback(current, total, msg):
-            if total > 0:
-                p_bar.value = current / total
-                p_text.value = f"{msg} ({current:.1f}%)"
-            else:
-                p_bar.value = 0
-                p_text.value = msg
-            dlg_progress.update()
-
-        try:
-            # Step 1: Initialize System Data via DataProcessor
-            res = await DataProcessor().initialize_system(progress_callback=callback)
-            self.page.close(dlg_progress)
-            
-            if res:
-                self.show_snack(I18n.get("sys_data_maint") + " " + I18n.get("common_completed"), color=AppColors.SUCCESS)
-                await self._run_health_check()
-            else:
-                self.show_snack(I18n.get("common_check_fail"), color=AppColors.ERROR)
-
-        except Exception as ex:
-            self.page.close(dlg_progress)
-            self.show_snack(str(ex), color=AppColors.ERROR)
-            logger.error(f"System init failed: {ex}")
-
     def update_theme(self):
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
         inputs = [
-            self.theme_dropdown, self.concurrency_input, self.log_level_dropdown, 
+            self.theme_dropdown, self.concurrency_input, self.log_level_dropdown,
             self.pool_size_input, self.io_workers_input, self.cpu_workers_input,
             self.rate_limit_input, self.no_proxy_input
         ]
@@ -431,7 +339,7 @@ class SystemTab(ft.Container):
             self.update()
 
     async def save_thread_pool_settings(self, e):
-        # Async handler to avoid blocking UI during reload
+        """Async handler to avoid blocking UI during reload."""
         from utils.thread_pool import ThreadPoolManager
         try:
             io_str = self.io_workers_input.value.strip()
@@ -455,11 +363,9 @@ class SystemTab(ft.Container):
             ConfigHandler.set_max_io_workers(io_val)
             ConfigHandler.set_max_cpu_workers(cpu_val)
 
-            # Show "Processing" state?
-            self.show_snack(I18n.get("common_preparing"))  # or "Applying..."
+            self.show_snack(I18n.get("common_preparing"))
 
             # Trigger Reload in thread to avoid UI freeze
-            # ThreadPoolManager().reload_config() waits for tasks, so it can take time
             await asyncio.to_thread(ThreadPoolManager().reload_config)
 
             self.show_snack(I18n.get("sys_snack_pool_saved"), color=AppColors.SUCCESS)
@@ -472,11 +378,11 @@ class SystemTab(ft.Container):
             logger.error(f"Failed to save thread pool settings: {ex}")
 
     def save_rate_limit(self, e):
+        """Save API rate limit setting."""
         try:
             limit_str = self.rate_limit_input.value.strip()
 
             if not limit_str:
-                # Empty means unlimited (0)
                 ConfigHandler.set_tushare_api_limit(0)
                 self.show_snack(I18n.get("sys_snack_limit_off"))
                 logger.info("Tushare API rate limit disabled (Unlimited)")
@@ -499,67 +405,21 @@ class SystemTab(ft.Container):
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
     def save_no_proxy_domains(self, e):
+        """Save no-proxy domain list."""
         try:
             raw_text = self.no_proxy_input.value
             if not raw_text:
                 domains = []
             else:
-                # Split by comma, strip whitespace, remove empty
                 domains = [d.strip() for d in raw_text.split(',') if d.strip()]
 
             ConfigHandler.set_no_proxy_domains(domains)
-            # Use generic "Saved" message or construct one
             self.show_snack(I18n.get("settings_snack_no_proxy_saved"), color=AppColors.SUCCESS)
-            
-            # Trigger ProxyManager reload
-            # For now just save.
             logger.info(f"No-Proxy domains updated: {domains}")
-            
-            # Update ProxyManager runtime? 
-            # We can try to re-apply if possible, but restart is safer.
+
             from utils.proxy_manager import ProxyManager
             from utils.thread_pool import ThreadPoolManager, TaskType
-            
-            # Use standardized ThreadPoolManager instead of ad-hoc asyncio.to_thread
             ThreadPoolManager().submit(TaskType.IO, ProxyManager.apply_smart_proxy_policy)
 
         except Exception as ex:
             self.show_snack(f"Save failed: {ex}", color=AppColors.ERROR)
-
-    def on_health_check_click(self, e):
-        """Run standalone health check reusing the core logic"""
-        self.page.run_task(self._run_health_check)
-
-    async def _run_health_check(self):
-        # Loading Dialog
-        dlg_loading = ft.AlertDialog(
-            modal=True,
-            content=ft.Row([
-                ft.ProgressRing(),
-                ft.Text(I18n.get("health_checking"), size=16)
-            ], alignment=ft.MainAxisAlignment.CENTER),
-            actions=[],
-        )
-        self.page.open(dlg_loading)
-
-        try:
-            # Use context manager or ensure close if DataProcessor supports it, 
-            # but DataProcessor doesn't support async context manager yet.
-            # We'll init, run, and close.
-            dp = DataProcessor()
-            try:
-                report = await dp.check_data_health()
-            finally:
-                 await dp.close() # Ensure resources are freed
-
-            self.page.close(dlg_loading)
-            self._show_health_report(report)
-
-        except Exception as e:
-            self.page.close(dlg_loading)
-            self.show_snack(I18n.get("common_check_fail").format(error=e), color=AppColors.ERROR)
-
-    def _show_health_report(self, report):
-        """Display the health check report dialog"""
-        dlg = HealthReportDialog(self.page, report)
-        self.page.open(dlg)

@@ -1,6 +1,8 @@
 import polars as pl
 from strategies.polars_base import PolarsBaseStrategy
+from strategies.base_strategy import register_strategy
 
+@register_strategy("value")
 class ValueStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_value_name", "strategy_value_desc")
@@ -14,6 +16,7 @@ class ValueStrategy(PolarsBaseStrategy):
             .sort('dv_ttm', descending=True)
         )
 
+@register_strategy("growth")
 class GrowthStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_growth_name", "strategy_growth_desc")
@@ -27,6 +30,7 @@ class GrowthStrategy(PolarsBaseStrategy):
             .sort('roe', descending=True)
         )
 
+@register_strategy("dividend")
 class DividendStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_dividend_name", "strategy_dividend_desc")
@@ -38,6 +42,7 @@ class DividendStrategy(PolarsBaseStrategy):
             .sort('dv_ttm', descending=True)
         )
 
+@register_strategy("cashflow")
 class CashFlowStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_cashflow_name", "strategy_cashflow_desc")
@@ -50,6 +55,7 @@ class CashFlowStrategy(PolarsBaseStrategy):
             .sort('roe', descending=True)
         )
 
+@register_strategy("large_pe")
 class LargePEStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_large_pe_name", "strategy_large_pe_desc")

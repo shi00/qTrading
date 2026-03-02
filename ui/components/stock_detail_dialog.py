@@ -1,14 +1,9 @@
 import flet as ft
 import pandas as pd
-from flet.plotly_chart import PlotlyChart # Keeping this import might be safer if used elsewhere, but we don't use it here anymore.
-from ui.components.chart_utils import generate_kline_html
+from ui.components.chart_utils import generate_kline_png
 from ui.i18n import I18n
 from ui.theme import AppColors
 import logging
-import tempfile
-import os
-import time
-import webbrowser
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +53,12 @@ class StockDetailDialog(ft.AlertDialog):
         # Price section
         close = self._format_val('close', I18n.get("unit_yuan"))
         pct = self.stock_data.get('pct_chg', 0)
-        pct_color = AppColors.UP if pct and pct > 0 else AppColors.DOWN
+        # Guard against NaN from raw DataFrame data
+        try:
+            pct = float(pct) if pct is not None and pct == pct else 0  # NaN != NaN
+        except (ValueError, TypeError):
+            pct = 0
+        pct_color = AppColors.UP if pct > 0 else AppColors.DOWN
         pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
         
         price_section = ft.Column([
@@ -263,14 +263,14 @@ class StockDetailDialog(ft.AlertDialog):
         self.content = self._build_content()
 
     async def load_chart(self, ts_code: str):
-        """Asynchronously load and render the chart"""
+        """Asynchronously load history data and render an inline K-line chart."""
         if not self.data_processor:
             self.chart_container.content = ft.Text(I18n.get("detail_err_no_processor"), color=AppColors.ERROR)
             self.chart_container.update()
             return
             
         try:
-            # Show loading
+            # Show loading spinner
             self.chart_container.content = ft.Column([
                 ft.ProgressRing(),
                 ft.Text(I18n.get("detail_loading_history"), size=12, color=AppColors.TEXT_SECONDARY)
@@ -285,71 +285,27 @@ class StockDetailDialog(ft.AlertDialog):
                 self.chart_container.update()
                 return
 
-            # Check if we have volume data
+            # Ensure volume column exists
             if 'vol' not in df.columns:
                  df['vol'] = 0
             
-            # Generate HTML
-            html_content = generate_kline_html(df, title=f"{self.stock_data.get('name', '')} ({ts_code})")
+            # Generate inline PNG via mplfinance
+            chart_title = f"{self.stock_data.get('name', '')} ({ts_code})"
+            b64_png = generate_kline_png(df, title=chart_title, width=880, height=340)
             
-            # Save to temporary file
-            # Use 'charts' subdir to keep organized
-            tmp_dir = os.path.join(tempfile.gettempdir(), "astock_charts")
-            os.makedirs(tmp_dir, exist_ok=True)
-            
-            # Lazy Cleanup: Remove files older than 10 minutes
-            self._cleanup_old_charts(tmp_dir)
-            
-            filename = f"chart_{ts_code}_{int(time.time())}.html"
-            file_path = os.path.join(tmp_dir, filename)
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-                
-            # Create WebView
-            # Note: file:/// path needs 3 slashes on Windows? "file:///" + path
-            file_uri = f"file:///{file_path.replace(os.sep, '/')}"
-            logger.info(f"Loading chart from: {file_uri}")
-            
-            # Hybrid view: Open in Browser Button (Fallback for when WebView is not supported)
-            
-            def open_browser(e):
-                webbrowser.open(file_uri)
-                
-            content_col = ft.Column([
-                ft.Icon(ft.Icons.SHOW_CHART, size=48, color=AppColors.INFO),
-                ft.Text(I18n.get("detail_chart_generated"), size=16, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                ft.Text(I18n.get("detail_chart_browser_hint"), size=12, color=AppColors.TEXT_SECONDARY),
-                ft.Container(height=10),
-                ft.ElevatedButton(I18n.get("detail_open_browser"), on_click=open_browser, icon=ft.Icons.OPEN_IN_BROWSER)
-            ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
-            
-            self.chart_container.content = content_col
+            self.chart_container.content = ft.Image(
+                src_base64=b64_png,
+                fit=ft.ImageFit.CONTAIN,
+                width=880,
+            )
             self.chart_container.update()
             
         except Exception as e:
             import traceback
             logger.error(f"Error loading chart: {e}\n{traceback.format_exc()}")
-            self.chart_container.content = ft.Text(I18n.get("detail_err_load_chart").format(error=str(e)), color=AppColors.ERROR)
+            self.chart_container.content = ft.Text(
+                I18n.get("detail_err_load_chart").format(error=str(e)[:80]),
+                color=AppColors.ERROR
+            )
             self.chart_container.update()
 
-    def _cleanup_old_charts(self, tmp_dir):
-        """Cleanup chart files older than 10 minutes"""
-        try:
-            now = time.time()
-            for f in os.listdir(tmp_dir):
-                if not f.startswith("chart_") or not f.endswith(".html"):
-                    continue
-                
-                f_path = os.path.join(tmp_dir, f)
-                try:
-                    if os.path.isfile(f_path):
-                        mtime = os.path.getmtime(f_path)
-                        if now - mtime > 600: # 10 minutes
-                            os.remove(f_path)
-                            logger.debug(f"Removed old chart file: {f}")
-                except Exception:
-                    # Ignore file lock errors etc.
-                    pass
-        except Exception as e:
-            logger.warning(f"Failed to cleanup temp charts: {e}")

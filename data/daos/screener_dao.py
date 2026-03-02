@@ -8,27 +8,6 @@ logger = logging.getLogger(__name__)
 class ScreenerDao(BaseDao):
 
     # --- Screening History ---
-    async def save_screening_result(self, df, strategy_name, trade_date):
-        if df is None or df.empty: return 0
-
-        # Prepare params
-        # Prepare params using vectorized helper for performance
-        cols = ['trade_date', 'strategy_name', 'ts_code', 'name', 'close', 'pct_chg']
-        
-        # Ensure df has these columns, fill logic if needed
-        df_to_save = df.copy()
-        df_to_save['trade_date'] = trade_date
-        df_to_save['strategy_name'] = strategy_name
-        
-        # Map or ensure columns exist
-        if 'name' not in df_to_save.columns: df_to_save['name'] = None
-        if 'close' not in df_to_save.columns: df_to_save['close'] = None
-        if 'pct_chg' not in df_to_save.columns: df_to_save['pct_chg'] = None
-        
-        sql = "INSERT OR IGNORE INTO screening_history (trade_date, strategy_name, ts_code, name, close, pct_chg) VALUES (?, ?, ?, ?, ?, ?)"
-        
-        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df_to_save, cols)
-        return await self._write_db(sql, params, is_many=True)
 
     async def get_screening_history(self, strategy_name=None, limit=100):
         sql = "SELECT * FROM screening_history WHERE 1=1"
@@ -39,6 +18,34 @@ class ScreenerDao(BaseDao):
         sql += " ORDER BY trade_date DESC LIMIT ?"
         p.append(limit)
         return await self._read_db(sql, p)
+
+    async def get_history_tree(self, offset=0, limit=30):
+        """
+        Get aggregated tree data for the history sidebar.
+        Returns rows of (trade_date, strategy_name, cnt) grouped and ordered by date DESC.
+        Python caller should further group by trade_date to build the tree structure.
+        """
+        sql = """
+            SELECT trade_date, strategy_name, COUNT(*) as cnt 
+            FROM screening_history 
+            GROUP BY trade_date, strategy_name 
+            ORDER BY trade_date DESC 
+            LIMIT ? OFFSET ?
+        """
+        return await self._read_db(sql, (limit * 5, offset))  # limit*5 to cover multiple strategies per date
+
+    async def get_history_records(self, trade_date, strategy_name=None):
+        """
+        Get screening records for a specific date, optionally filtered by strategy.
+        """
+        sql = "SELECT * FROM screening_history WHERE trade_date = ?"
+        p = [trade_date]
+        if strategy_name:
+            sql += " AND strategy_name = ?"
+            p.append(strategy_name)
+        sql += " ORDER BY ai_score DESC"
+        return await self._read_db(sql, p)
+
 
     async def get_pending_reviews(self):
         async with self.engine.connect() as conn:

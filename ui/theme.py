@@ -55,6 +55,8 @@ class DashboardCardStyle(TypedDict):
 
 class ThemeColors(TypedDict):
     """主题配色定义 (必须包含所有业务色 key)"""
+    UP_RED: str
+    DOWN_GREEN: str
     UP: str
     DOWN: str
     SUCCESS: str
@@ -81,6 +83,8 @@ class ThemeColors(TypedDict):
 
 CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.DARK: {
+        "UP_RED": "#F44336",
+        "DOWN_GREEN": "#4CAF50",
         "UP": "#FF3333",
         "DOWN": "#00E676",
         "SUCCESS": "#00E676",
@@ -101,6 +105,8 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "LOG_TEXT": "#CCCCCC",
     },
     ThemeName.LIGHT: {
+        "UP_RED": "#F44336",
+        "DOWN_GREEN": "#4CAF50",
         "UP": "#D32F2F",
         "DOWN": "#388E3C",
         "SUCCESS": "#388E3C",
@@ -121,6 +127,8 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "LOG_TEXT": "#212121",
     },
     ThemeName.NAVY: {
+        "UP_RED": "#EF4444",
+        "DOWN_GREEN": "#22C55E",
         "UP": "#F87171",
         "DOWN": "#4ADE80",
         "SUCCESS": "#4ADE80",
@@ -141,6 +149,8 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "LOG_TEXT": "#CBD5E1",
     },
     ThemeName.DRACULA: {
+        "UP_RED": "#F44336",
+        "DOWN_GREEN": "#4CAF50",
         "UP": "#FF5555",      # Red
         "DOWN": "#50FA7B",    # Green
         "SUCCESS": "#50FA7B",
@@ -321,6 +331,8 @@ class AppColors:
     # ====================================================================
     # Layer 2: 业务自定义色 (Hex 值 — 需手动更新)
     # ====================================================================
+    UP_RED = "#F44336"
+    DOWN_GREEN = "#4CAF50"
     UP = "#FF3333"
     DOWN = "#00E676"
     RISE = UP

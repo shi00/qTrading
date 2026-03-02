@@ -12,6 +12,20 @@ HEALTH_THRESHOLD_FINANCIAL_EXCELLENT = 0.98 # Excellent quality (Green)
 HEALTH_THRESHOLD_MARKET_LAG_DAYS = 3
 HEALTH_CHECK_DEFAULT_TIMEOUT = 30 # Seconds
 
+# Depth & Breadth Health Check Constants
+# Full-score baseline: ~3 years of trading days (245 trade days/year × 3 ≈ 735, rounded to 700)
+HEALTH_DEPTH_FULL_TRADE_DAYS = 700
+# Safety multiplier: require 2x the max strategy history requirement to account for warm-up
+HEALTH_DEPTH_SAFETY_MULTIPLIER = 2
+# Breadth: expected_rows already excludes IPO gaps; residual gap is suspension (~0.3%) + API blind spots (~1-3%)
+HEALTH_THRESHOLD_BREADTH = 0.90
+# UI color warning threshold for depth display (below this, show orange)
+HEALTH_DEPTH_WARNING_RATIO = 0.30
+
+# Quality Tier Assignment Thresholds (used by _assign_basic_tier fast-path)
+TIER_QUOTE_FRESHNESS_DAYS = 5       # Max lag days for daily_quotes to qualify as SILVER
+TIER_FINANCIAL_FRESHNESS_DAYS = 100  # Max lag days for financial_reports to qualify as GOLD
+
 # Financial Report Schema Columns (Unified for Income, Balance, Cashflow, Indicator)
 FINANCIAL_REPORT_SCHEMA_COLS = [
     'ts_code', 'end_date', 'ann_date', 'report_type', 
@@ -80,7 +94,6 @@ FINANCIAL_STOCK_TABLES = {
         'api': 'get_pledge_stat', 
         'date_col': 'end_date', 
         'key': ['ts_code', 'end_date'], 
-        # Note: Pledge stat usually by end_date snapshot
         'desc': '股权质押'
     }
 }
@@ -115,6 +128,7 @@ HEALTH_CHECK_TABLES = {
 # UI Display Order (must cover ALL keys in HEALTH_CHECK_TABLES)
 HEALTH_REPORT_ORDER = [
     # Core
+    'daily_quotes',
     'financial_reports', 
     'fina_forecast', 
     'daily_indicators',

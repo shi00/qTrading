@@ -7,7 +7,9 @@ from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE, 
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
     HEALTH_REPORT_ORDER,
-    HEALTH_CHECK_TABLES
+    HEALTH_CHECK_TABLES,
+    HEALTH_DEPTH_WARNING_RATIO,
+    HEALTH_THRESHOLD_BREADTH
 )
 
 logger = logging.getLogger(__name__)
@@ -240,11 +242,25 @@ class CoverageDetailTable(ft.Column):
                 ft.Container(width=10),
                 ft.Column([
                     ft.Text(f"{ratio*100:.1f}%", size=12, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-                    ft.Text(I18n.get("health_freshness", ratio=f"{fresh_ratio*100:.0f}%"), size=10, color=AppColors.TEXT_HINT)
-                ], spacing=0, alignment=ft.MainAxisAlignment.CENTER, width=60)
+                    ft.Text(I18n.get("health_freshness", ratio=f"{fresh_ratio*100:.0f}%"), size=10, color=AppColors.TEXT_HINT),
+                ] + self._build_depth_breadth_items(stats), spacing=0, alignment=ft.MainAxisAlignment.CENTER, width=70)
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
         )
 
+    def _build_depth_breadth_items(self, stats):
+        """Build optional Depth/Breadth indicator items (only shown when not None)."""
+        items = []
+        depth_ratio = stats.get('depth_ratio')
+        breadth_ratio = stats.get('breadth_ratio')
+        if depth_ratio is not None:
+            items.append(ft.Text(
+                I18n.get("health_depth", ratio=f"{depth_ratio*100:.0f}%"),
+                size=10, color=AppColors.WARNING if depth_ratio < HEALTH_DEPTH_WARNING_RATIO else AppColors.TEXT_HINT))
+        if breadth_ratio is not None:
+            items.append(ft.Text(
+                I18n.get("health_breadth", ratio=f"{breadth_ratio*100:.0f}%"),
+                size=10, color=AppColors.WARNING if breadth_ratio < HEALTH_THRESHOLD_BREADTH else AppColors.TEXT_HINT))
+        return items
 
 # ==============================================================================
 # Main Dialog

@@ -154,12 +154,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         end_date = datetime.datetime.now().strftime('%Y%m%d')
         start_date = (datetime.datetime.now() - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
 
-        # Full Sync should also perform the Date-Based Batch Sync for the whole period
-        # We spawn this as a side-task or do it after?
-        # Let's do it concurrently to save time, or after to avoid rate limits?
-        # Batch sync is fast. Let's fire it off.
-        logger.info("[FinancialSyncStrategy] Launching Full Batch Sync (Corporate Actions)...")
-        # Generate full date range
+        # Generate full date range for batch sync (run AFTER stock loop to avoid API contention)
         all_dates = []
         curr = datetime.datetime.strptime(start_date, '%Y%m%d')
         end_dt_obj = datetime.datetime.strptime(end_date, '%Y%m%d')
@@ -167,19 +162,17 @@ class FinancialSyncStrategy(ISyncStrategy):
             all_dates.append(curr.strftime('%Y%m%d'))
             curr += datetime.timedelta(days=1)
 
-        # Fire and forget (it has its own concurrency control)? No, await it to ensure completion.
-        # But we don't want to block the stock loop. 
-        # Create task.
-        batch_task = asyncio.create_task(self._sync_corporate_actions_by_date(all_dates))
-
         # Inner processing function
         async def process_one_stock(ts_code):
+            nonlocal completed_count
             if self._shutdown_event.is_set(): return
 
+            processed = False
             try:
                 async with semaphore:
                     if self._shutdown_event.is_set(): return
 
+                    processed = True
                     has_error = False
 
                     # Fetch Helper
@@ -204,7 +197,6 @@ class FinancialSyncStrategy(ISyncStrategy):
                         (self.context.api.get_fina_indicator, self.context.cache.save_financial_reports, 0),
                         (self.context.api.get_fina_audit, self.context.cache.save_fina_audit, 0),
                         (self.context.api.get_fina_mainbz, self.context.cache.save_fina_mainbz, 0),
-                        (self.context.api.get_pledge_stat, self.context.cache.save_pledge_stat, 1),
                         # Note: Repurchase/Dividend removed from Stock Loop (moved to Batch Loop)
                         # But wait, original code had them. 
                         # If we keep them here, it's redundant but safe (Double Coverage).
@@ -235,12 +227,23 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                     if not has_error:
                         await self.context.cache.mark_stock_step4_completed(ts_code, sync_version=1)
+                        result_accumulator.added += 1
                     else:
                         logger.warning(f"Stock {ts_code} incomplete, will retry.")
 
             except Exception as e:
                 logger.error(f"Failed Step 4 for {ts_code}: {e}")
                 # Don't abort all, just this stock
+
+            # Per-stock progress update (advance progress bar for processed stocks)
+            if processed:
+                completed_count += 1
+                if progress_callback and completed_count % 5 == 0:
+                    # Stock phase occupies 0→80% of Step 4 progress
+                    pct = int(completed_count / total_stocks * 80)
+                    progress_callback(pct, 100,
+                        I18n.get('progress_sync_fundamentals').format(
+                            current=completed_count, total=total_stocks, stock=ts_code))
 
         # Batch execution
         batch_size = ConfigHandler.get_max_batch_rows()
@@ -259,16 +262,16 @@ class FinancialSyncStrategy(ISyncStrategy):
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
 
-            completed_count += len(batch)
-            result_accumulator.added += len(batch)  # Rough count
+        # Batch phase: corporate actions sync (serial, AFTER stock loop to avoid API contention)
+        logger.info("[FinancialSyncStrategy] Starting Batch Sync (Corporate Actions)...")
 
+        def batch_progress(current, total, msg):
             if progress_callback:
-                progress_callback(completed_count, total_stocks,
-                                  I18n.get('progress_sync_fundamentals').format(current=completed_count,
-                                                                                total=total_stocks, stock=batch[0]))
+                # Batch phase occupies 80→100% of Step 4 progress
+                pct = 80 + int(current / max(total, 1) * 20)
+                progress_callback(pct, 100, msg)
 
-        # Wait for batch task
-        await batch_task
+        await self._sync_corporate_actions_by_date(all_dates, batch_progress)
 
     async def _run_incremental_sync(self, progress_callback, result_accumulator: SyncResult):
         """
@@ -354,14 +357,16 @@ class FinancialSyncStrategy(ISyncStrategy):
                                                     total_saved)
         result_accumulator.added = total_saved
 
-    async def _sync_corporate_actions_by_date(self, dates: List[str]):
+    async def _sync_corporate_actions_by_date(self, dates: List[str], progress_callback=None):
         """
         Batch sync corporate actions (Forecast, Dividend, etc.) by date.
         Uses O(Time) strategy instead of O(Stock).
+        Iterates per-date to avoid creating thousands of tasks at once.
         """
         if not dates: return
 
-        logger.info(f"[HybridSync] Batch syncing corporate actions for {len(dates)} days...")
+        total = len(dates)
+        logger.info(f"[HybridSync] Batch syncing corporate actions for {total} days...")
 
         concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(concurrency)
@@ -370,20 +375,13 @@ class FinancialSyncStrategy(ISyncStrategy):
             async with semaphore:
                 try:
                     api_method = getattr(self.context.api, table_cfg['api'])
-                    # Batch fetch by 'ann_date'
                     df = await ThreadPoolManager().run_async(TaskType.IO, lambda: api_method(ann_date=date_str))
 
                     if df is not None and not df.empty:
-                        # Dynamic save method? 
-                        # CacheManager usually has specific save methods.
-                        # We need to map table_name to save_method or use generic save if possible.
-                        # For now, we map manually or assume standard naming convention?
-                        # Let's map manually for safety.
                         save_map = {
                             'fina_forecast': self.context.cache.save_fina_forecast,
                             'dividend': self.context.cache.save_dividend,
                             'repurchase': self.context.cache.save_repurchase,
-                            # Add others if batchable
                         }
 
                         save_func = save_map.get(table_name)
@@ -392,23 +390,33 @@ class FinancialSyncStrategy(ISyncStrategy):
                             logger.debug(f"[HybridSync] Synced {table_name} for {date_str}: {len(df)} records")
 
                 except Exception as e:
-                    # Capture permission-like errors
                     err_str = str(e).lower()
                     if "permission" in err_str or "积分" in err_str or "no access" in err_str:
                         logger.warning(f"[HybridSync] ⛔ Permission Denied for {table_name}: {e}")
-                        # Mark status as permission_denied so Health Check knows to skip it
                         await self.context.cache.update_sync_status(table_name, date_str, 0, status='permission_denied')
                     else:
                         logger.warning(f"[HybridSync] Failed batch sync {table_name} on {date_str}: {e}")
 
-        # Iterate dates and tables
-        tasks = []
-        for d in dates:
-            for tbl, cfg in FINANCIAL_BATCH_TABLES.items():
-                tasks.append(asyncio.create_task(sync_one_date_table(d, tbl, cfg)))
+        # Iterate per-date (not all-at-once) to avoid task explosion
+        for i, d in enumerate(dates):
+            if self._shutdown_event.is_set():
+                logger.info("[HybridSync] Cancelled during corporate actions batch sync")
+                break
 
-        if tasks:
-            await asyncio.gather(*tasks)
+            # Each date: 3 tables in parallel
+            coros = [sync_one_date_table(d, tbl, cfg)
+                     for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
+            await asyncio.gather(*coros)
+
+            # Report progress every 10 days
+            if progress_callback and (i + 1) % 10 == 0:
+                progress_callback(i + 1, total,
+                    I18n.get('progress_sync_fundamentals').format(
+                        current=i + 1, total=total, stock=f"batch:{d}"))
+
+        # Final completion report
+        if progress_callback:
+            progress_callback(total, total, I18n.get("status_ready"))
 
     async def _fetch_comprehensive_financial_data(self, ts_code, start_date=None, end_date=None, period=None):
         """
@@ -452,14 +460,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                 return False
 
         try:
-            # Launch Aux Tasks
             aux_tasks = [
                 fetch_aux(api.get_fina_mainbz, self.context.cache.save_fina_mainbz, 'fina_mainbz', ts_code=ts_code,
                           period=period, start_date=start_date, end_date=end_date),
                 fetch_aux(api.get_fina_audit, self.context.cache.save_fina_audit, 'fina_audit', ts_code=ts_code,
-                          start_date=start_date, end_date=end_date),
-                fetch_aux(api.get_pledge_stat, self.context.cache.save_pledge_stat, 'pledge_stat', ts_code=ts_code,
-                          end_date=end_date)
+                          start_date=start_date, end_date=end_date)
             ]
 
             # Parallel fetch core + aux

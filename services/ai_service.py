@@ -119,7 +119,8 @@ class AIService:
         # It will be overwritten on next _setup_local_model success.
 
     async def _chat_completion(self, messages: list, model: str = None, provider: str = "cloud",
-                               temperature: float = 0.3, timeout: float = 30.0, json_mode: bool = True) -> dict:
+                               temperature: float = 0.3, timeout: float = 30.0, json_mode: bool = True,
+                               on_chunk=None) -> dict:
         """
         Unified helper for Chat Completions (Cloud or Local).
         Args:
@@ -165,14 +166,36 @@ class AIService:
                 raise ValueError("Model not configured")
 
             async with await self._get_semaphore():
+                logger.info(f"[AI] Invoking cloud model: {model} with {len(messages)} messages")
+                logger.info(f"[AI] Request Payload (Messages):\n{json.dumps(messages, ensure_ascii=False, indent=2)}")
+                
                 response = await self.client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    response_format={"type": "json_object"} if json_mode else None,
+                    # When streaming, response_format json_object is often unsupported by providers, so we disable it
+                    response_format={"type": "json_object"} if json_mode and not on_chunk else None,
                     temperature=temperature,
-                    timeout=timeout  # Let the SDK handle timeout natively so retries work
+                    timeout=timeout,  # Let the SDK handle timeout natively so retries work
+                    stream=bool(on_chunk)
                 )
-                response_content = response.choices[0].message.content
+                
+                if on_chunk:
+                    response_content = ""
+                    reasoning_content = ""
+                    async for chunk in response:
+                        if not chunk.choices: continue
+                        delta = chunk.choices[0].delta
+                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                            reasoning_content += delta.reasoning_content
+                            on_chunk(delta.reasoning_content, True) # True for is_reasoning
+                        if delta.content:
+                            response_content += delta.content
+                            on_chunk(delta.content, False)
+                    # Guard: some models put everything in reasoning_content
+                    if not response_content and reasoning_content:
+                        response_content = reasoning_content
+                else:
+                    response_content = response.choices[0].message.content
 
         # --- Post-Processing (JSON Parsing) ---
         if json_mode:
@@ -209,8 +232,10 @@ class AIService:
 
         return {"content": response_content}
 
-    @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=30000)
-    async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="") -> dict:
+    @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=120000)
+    async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="",
+                            strategy_context: str = "", capital_flow_text: str = "", financials_text: str = "",
+                            history_text: str = "", on_chunk=None) -> dict:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'ai_model_name' to be configured.
@@ -226,7 +251,10 @@ class AIService:
         tech_xml = "\n".join([f"  {k}: {v}" for k, v in tech_info.items()])
 
         # Format news
-        news_text = "\n".join([f"- {n.get('publish_time', '')[:10]} {n.get('title', '')}" for n in news_list[:5]])
+        news_text = "\n".join([
+            f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}" 
+            for n in news_list[:5]
+        ])
         if not news_list:
             news_text = "No recent news found."
 
@@ -263,6 +291,10 @@ class AIService:
         # Load System Prompt from Config
         system_prompt = ConfigHandler.get_ai_system_prompt()
 
+        # Capital flow and financials: use real data or fallback
+        capital_flow_content = capital_flow_text if capital_flow_text else "(Data not available yet, assume neutral)"
+        financials_content = financials_text if financials_text else "(Data not available yet, assume neutral)"
+
         user_prompt = f"""
         <stock_info>
         {stock_xml}
@@ -280,14 +312,22 @@ class AIService:
           {self._safe_truncate(global_context, 2000)}
         </global_context>
 
+        <strategy_context>
+          {self._safe_truncate(strategy_context, 1000) if strategy_context else 'No specific strategy context provided.'}
+        </strategy_context>
+
+        <recent_price_action>
+          {history_text if history_text else "No historical price data available."}
+        </recent_price_action>
+
         {self._safe_truncate(history_context, 3000)}
 
         <capital_flow>
-          (Data not available yet, assume neutral)
+          {capital_flow_content}
         </capital_flow>
 
         <financials>
-          (Data not available yet, assume neutral)
+          {financials_content}
         </financials>
         """
 
@@ -298,7 +338,8 @@ class AIService:
 
         try:
             # Analyze Stock uses Cloud by default as it requires high reasoning capability
-            return await self._chat_completion(messages, provider="cloud", timeout=30.0, json_mode=True)
+            res = await self._chat_completion(messages, provider="cloud", timeout=120.0, json_mode=True, on_chunk=on_chunk)
+            return res
 
         except asyncio.TimeoutError:
             logger.error(f"[AI] Analysis timeout")

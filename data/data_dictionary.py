@@ -117,6 +117,14 @@ COMMON_COLUMNS = {
     "exchange": "col_exchange",
     "concept_name": "col_concept_name",
     "concept_id": "col_concept_id",
+
+    # AI Analysis Results (used by screener results table)
+    "ai_score": "col_ai_score",
+    "ai_reason": "col_ai_reason",
+    "thinking": "col_thinking",
+
+    # Technical Indicators (dynamic columns)
+    "rsi_6": "col_rsi_6",
 }
 
 # Table Definitions with Table-Specific Column Overrides
@@ -131,6 +139,7 @@ TABLE_DEFINITIONS = {
     },
     "daily_quotes": {
         "alias": "tab_daily_quotes",
+        "quality_config": {"tier": 3, "monitor": True, "critical": True, "frequency": "daily"},
         "columns": {}
     },
     "financial_reports": {
@@ -143,7 +152,7 @@ TABLE_DEFINITIONS = {
     "daily_indicators": {
         "alias": "tab_daily_indicators",
         "desc": "每日指标(PE/PB)",
-        "quality_config": {"tier": 3, "monitor": True, "critical": True},
+        "quality_config": {"tier": 3, "monitor": True, "critical": True, "frequency": "daily"},
         "columns": {}
     },
     "fina_forecast": {
@@ -233,7 +242,7 @@ TABLE_DEFINITIONS = {
     "moneyflow_daily": {
         "alias": "tab_moneyflow_daily",
         "desc": "日资金流",
-        "quality_config": {"tier": 2, "monitor": True, "critical": True},
+        "quality_config": {"tier": 2, "monitor": True, "critical": True, "frequency": "daily"},
         "columns": {}
     },
     "index_daily": {
@@ -444,6 +453,23 @@ TABLE_DEFINITIONS = {
             "sgt": "col_sgt_north_money",
             "north_money": "col_north_money",
             "south_money": "col_south_money",
+        }
+    },
+    "task_history": {
+        "alias": "tab_task_history",
+        "desc": "系统任务执行历史日志",
+        "columns": {
+            "id": "col_id",
+            "name": "col_name",
+            "task_type": "col_task_type",
+            "status": "col_status",
+            "progress": "col_progress",
+            "description": "col_description",
+            "error": "col_error",
+            "result": "col_result",
+            "created_at": "col_created_at",
+            "started_at": "col_started_at",
+            "completed_at": "col_completed_at"
         }
     },
 }

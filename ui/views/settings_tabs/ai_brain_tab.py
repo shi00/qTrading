@@ -727,8 +727,8 @@ class AIBrainTab(ft.Container):
                 self.show_snack(I18n.get("settings_snack_ai_saved"))
             
         except Exception as e:
-            logger.error(f"Error saving AI settings: {e}")
-            self.show_snack(I18n.get("settings_snack_ai_error").format(error=str(e)), color=AppColors.ERROR)
+            logger.error(f"Error saving config: {e}", exc_info=True)
+            self.show_snack(I18n.get("settings_snack_ai_error").format(error="配置保存失败，请检查文件权限或日志。"), color=AppColors.ERROR)
 
     async def _test_ai_connection(self, e):
         """测试 AI 连接"""
@@ -753,7 +753,8 @@ class AIBrainTab(ft.Container):
                 self.show_snack(I18n.get("ai_snack_conn_fail"), color=AppColors.ERROR)
                 self._update_connection_status("ai_status_disconnected", AppColors.ERROR, ft.Icons.ERROR)
         except Exception as ex:
-            self.show_snack(f"{I18n.get('ai_status_disconnected')}: {str(ex)}", color=AppColors.ERROR)
+            logger.error(f"AI test connection error: {ex}", exc_info=True)
+            self.show_snack(f"{I18n.get('ai_status_disconnected')}: 内部连接错误", color=AppColors.ERROR)
         finally:
             self.btn_test_connection.text = I18n.get("ai_btn_test")
             self.btn_test_connection.disabled = False

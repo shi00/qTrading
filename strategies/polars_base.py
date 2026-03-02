@@ -18,7 +18,7 @@ class PolarsBaseStrategy(BaseStrategy):
     """
     
     
-    @require_quality(QualityTier.SILVER)
+    @require_quality(QualityTier.BRONZE)
     async def filter(self, context):
         """
         Template method that handles boilerplates.

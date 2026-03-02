@@ -1,8 +1,8 @@
 import json
 import logging
 import os
-import keyring
 
+import keyring
 from readerwriterlock import rwlock
 
 import config
@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
-
 
 DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 你是一个专业的金融量化分析助手，专注于A股市场分析。
@@ -132,7 +131,8 @@ class ConfigHandler:
             # Save if any changes
             if dirty:
                 ConfigHandler.save_config(current_config, replace=True)
-                logger.info(f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}")
+                logger.info(
+                    f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}")
 
         except Exception as e:
             logger.error(f"Failed to ensure default config: {e}")
@@ -354,10 +354,10 @@ class ConfigHandler:
     def get_ai_config():
         """Get all AI related clean config"""
         config = ConfigHandler.load_config()
-        
+
         # Try keyring first
         api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
-        
+
         # Legacy fallback
         if not api_key:
             encrypted_key = config.get("ai_api_key", "")
@@ -375,7 +375,7 @@ class ConfigHandler:
         if api_key:
             try:
                 keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
-                encrypted_key = "" # Clear from plain json
+                encrypted_key = ""  # Clear from plain json
             except Exception as e:
                 logger.warning(f"Keyring save failed: {e}. Falling back to SecurityManager.")
                 encrypted_key = SecurityManager.encrypt_data(api_key)
@@ -385,7 +385,7 @@ class ConfigHandler:
             except Exception:
                 pass
             encrypted_key = ""
-        
+
         return ConfigHandler.save_config({
             "ai_api_key": encrypted_key,
             "ai_base_url": base_url,
@@ -602,6 +602,28 @@ class ConfigHandler:
     @staticmethod
     def set_max_cpu_workers(count):
         return ConfigHandler.save_config({"max_cpu_workers": int(count)})
+
+    # === Task Manager Configuration ===
+    @staticmethod
+    def get_max_concurrent_tasks():
+        """Get max concurrent tasks for TaskManager.
+        Defaults to cpu_workers count to avoid overwhelming the CPU pool.
+        Falls back to 5 if neither is configured."""
+        config = ConfigHandler.load_config()
+        val = config.get("max_concurrent_tasks", 0)
+        try:
+            val = int(val)
+        except (ValueError, TypeError):
+            val = 0
+        if val > 0:
+            return val
+        # Fallback: derive from CPU pool size, or use 5
+        cpu = ConfigHandler.get_max_cpu_workers()
+        return cpu if cpu > 0 else 5
+
+    @staticmethod
+    def set_max_concurrent_tasks(count):
+        return ConfigHandler.save_config({"max_concurrent_tasks": int(count)})
 
     # === Sync Rate Limiting ===
     @staticmethod

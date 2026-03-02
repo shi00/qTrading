@@ -35,6 +35,10 @@ async def main(page: ft.Page):
     # Start Cache Manager explicitly on Main Loop
     await CacheManager().init_db()
 
+    # Initialize TaskManager persistence (load history, mark interrupted tasks)
+    from services.task_manager import TaskManager
+    await TaskManager().init_db()
+
     # Start background scheduler
     scheduler.start()
 
@@ -54,6 +58,10 @@ async def main(page: ft.Page):
         logger.info("[Main] Cleanup initiated. Stopping services...")
 
         try:
+            logger.info("[Main] Step 0: Cancelling all TaskManager tasks...")
+            from services.task_manager import TaskManager
+            await TaskManager().cancel_all_running_async()
+
             logger.info("[Main] Step 1: Stopping Background Services...")
             
             logger.info("[Main] - Stopping Scheduler...")

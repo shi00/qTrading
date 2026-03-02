@@ -284,7 +284,6 @@ class HistoricalSyncStrategy(ISyncStrategy):
         async def save_if_ok(key, method, critical=False):
             df = data_map.get(key)
             if df is not None and not df.empty:
-                # Introspect method to see if it accepts 'suppress_errors'
                 target_func = method
                 while hasattr(target_func, '__wrapped__'):
                     target_func = target_func.__wrapped__
@@ -293,36 +292,32 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     sig = inspect.signature(target_func)
                     
                     if 'suppress_errors' in sig.parameters:
-                        # For critical tables, suppress_errors=False (allow bubble up)
-                        # For non-critical, suppress_errors=True (suppress)
-                        await method(df, suppress_errors=not critical)
+                        row_count = await method(df, suppress_errors=not critical)
                     else:
-                        await method(df)
-                    return True
+                        row_count = await method(df)
+                    return row_count if row_count is not None else len(df)
                 except Exception as e:
                     if critical:
                         logger.error(f"[HistoricalSync] Critical save failed for {key}: {e}")
                         raise e 
                     else:
                         logger.warning(f"[HistoricalSync] Non-critical save failed for {key}: {e}")
-            return False
+            return 0
 
         # 1. Quotes (Critical)
-        await save_if_ok("quotes", cache.save_daily_quotes, critical=True)
+        quotes_rows = await save_if_ok("quotes", cache.save_daily_quotes, critical=True)
         
         # 2. Adj Factor (Critical, derived from quotes)
-        # Note: adj_factor is inside quotes dataframe, so we handle it explicitly
         df_quotes = data_map.get("quotes")
         if df_quotes is not None and not df_quotes.empty and 'adj_factor' in df_quotes.columns:
             try:
-                # We know save_adj_factors supports suppress_errors=False
                 await cache.save_adj_factors(df_quotes[['ts_code', 'trade_date', 'adj_factor']], suppress_errors=False)
             except Exception as e:
                 logger.error(f"[HistoricalSync] Critical save failed for adj_factor: {e}")
                 raise e
 
         # 3. Basic / Daily Indicators (Critical)
-        await save_if_ok("basic", cache.save_daily_indicators, critical=True)
+        basic_rows = await save_if_ok("basic", cache.save_daily_indicators, critical=True)
 
         # 4. Others (Non-critical, can fail silently or log)
         await save_if_ok("limit", cache.save_limit_list)
@@ -345,14 +340,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except Exception as e:
             logger.warning(f"[DailySync] Northbound save failed (non-critical): {e}")
 
-        # Update sync status for key tables
-        saved_quotes = data_map.get("quotes")
-        if saved_quotes is not None and not saved_quotes.empty:
-            await cache.update_sync_status('daily_quotes', trade_date, len(saved_quotes))
+        # Strictly update sync status using actual rows written, protecting against silent DB failures
+        if quotes_rows > 0:
+            await cache.update_sync_status('daily_quotes', trade_date, quotes_rows)
 
-        saved_basic = data_map.get("basic")
-        if saved_basic is not None and not saved_basic.empty:
-            await cache.update_sync_status('daily_indicators', trade_date, len(saved_basic))
+        if basic_rows > 0:
+            await cache.update_sync_status('daily_indicators', trade_date, basic_rows)
 
     async def sync_moneyflow(self, trade_date=None):
         """Sync money flow for a specific date (Standalone)."""
@@ -367,7 +360,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_moneyflow, trade_date=trade_date)
             if df is not None and not df.empty:
                 count = await self.context.cache.save_moneyflow(df)
-                await self.context.cache.update_sync_status('moneyflow_daily', trade_date, count)
+                if count is not None and count > 0:
+                    await self.context.cache.update_sync_status('moneyflow_daily', trade_date, count)
                 return count
         except Exception as e:
             logger.warning(f"sync_moneyflow failed: {e}")
@@ -384,7 +378,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 df = df[df['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
                 if not df.empty:
                     count = await self.context.cache.save_northbound(df)
-                    await self.context.cache.update_sync_status('northbound_holding', trade_date, count)
+                    if count is not None and count > 0:
+                        await self.context.cache.update_sync_status('northbound_holding', trade_date, count)
                     return count
         except Exception as e:
             logger.warning(f"sync_northbound failed: {e}")

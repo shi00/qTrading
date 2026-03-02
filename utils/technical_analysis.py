@@ -189,7 +189,7 @@ class TechnicalAnalysis:
         # If roll_down is 0, rs is inf. 100/(1+inf) is 0. 100-0 = 100. Correct.
         # But if both are 0? Nan.
 
-        return rsi.fill_nan(50.0).alias(alias)
+        return rsi.fill_nan(50.0).fill_null(50.0).alias(alias)
 
     @staticmethod
     def get_macd_expr(col_name='close', fast=12, slow=26, sign=9):
@@ -202,9 +202,9 @@ class TechnicalAnalysis:
         macd = (dif - dea) * 2  # Typical MACD histogram
 
         return pl.struct([
-            dif.alias("dif"),
-            dea.alias("dea"),
-            macd.alias("macd")
+            dif.fill_null(0.0).alias("dif"),
+            dea.fill_null(0.0).alias("dea"),
+            macd.fill_null(0.0).alias("macd")
         ]).alias("macd_struct")
 
     @staticmethod

@@ -1,15 +1,15 @@
-import sqlite3
-import pandas as pd
 import logging
 import re
+import sqlite3
 from contextlib import contextmanager
 
-import config
+import pandas as pd
 import sqlparse
-from sqlparse.sql import Statement
-from sqlparse import tokens as T
+
+import config
 
 logger = logging.getLogger(__name__)
+
 
 class DatabaseManager:
     """
@@ -38,7 +38,8 @@ class DatabaseManager:
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
                 tables = [row[0] for row in cursor.fetchall()]
                 return tables
         except Exception as e:
@@ -82,7 +83,7 @@ class DatabaseManager:
             self._validate_table_name(table_name)
             query = f"SELECT COUNT(*) FROM {table_name}"
             params = []
-            
+
             if filters:
                 where_clauses = []
                 for col, op, val in filters:
@@ -91,10 +92,10 @@ class DatabaseManager:
                         continue
                     where_clauses.append(f"{col} {op} ?")
                     params.append(val)
-                
+
                 if where_clauses:
                     query += " WHERE " + " AND ".join(where_clauses)
-            
+
             with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
@@ -118,11 +119,11 @@ class DatabaseManager:
         """
         try:
             self._validate_table_name(table_name)
-            
+
             offset = (page - 1) * page_size
             query = f"SELECT * FROM {table_name}"
             params = []
-            
+
             # 1. Apply Filters
             if filters:
                 where_clauses = []
@@ -130,18 +131,18 @@ class DatabaseManager:
                     if op not in ['=', '>', '<', '>=', '<=', 'LIKE', '!=']:
                         continue
                     # Simple column name validation (alphanumeric)
-                    if not re.match(r'^[a-zA-Z0-9_]+$', col): 
+                    if not re.match(r'^[a-zA-Z0-9_]+$', col):
                         continue
-                        
+
                     where_clauses.append(f"{col} {op} ?")
                     # Handle LIKE wildcards if not present
                     if op == 'LIKE' and '%' not in str(val):
                         val = f"%{val}%"
                     params.append(val)
-                
+
                 if where_clauses:
                     query += " WHERE " + " AND ".join(where_clauses)
-            
+
             # 2. Apply Sorting
             if sort_col:
                 # Sanitize sort_col to prevent injection (simple check)
@@ -149,17 +150,17 @@ class DatabaseManager:
                 direction = "ASC" if sort_asc else "DESC"
                 query += f" ORDER BY {clean_col} {direction}"
             elif table_name == 'daily_quotes':
-                 # Default sort for common tables
-                 query += " ORDER BY trade_date DESC, ts_code ASC"
-            
+                # Default sort for common tables
+                query += " ORDER BY trade_date DESC, ts_code ASC"
+
             # 3. Apply Pagination
             query += f" LIMIT {page_size} OFFSET {offset}"
-            
+
             with self._get_conn() as conn:
                 # Use pandas for easier DataFrame creation
                 df = pd.read_sql_query(query, conn, params=params)
                 return df
-                
+
         except Exception as e:
             logger.error(f"Error querying table {table_name}: {e}")
             return pd.DataFrame()
@@ -181,7 +182,7 @@ class DatabaseManager:
         try:
             parsed = sqlparse.parse(sql_query)
         except Exception as e:
-             return {
+            return {
                 'success': False,
                 'data': None,
                 'error': f"SQL Parse Error: {str(e)}"
@@ -201,30 +202,31 @@ class DatabaseManager:
                     'data': None,
                     'error': f"Security Alert: Only SELECT statements are allowed. Found: {statement.get_type()}"
                 }
-        
+
         # 2. Execute with strictly Read-Only connection and Memory Protection
         conn = None
         try:
             db_uri = f"file:{self.db_path}?mode=ro"
             conn = sqlite3.connect(db_uri, uri=True)
             cursor = conn.cursor()
-            
+
             cursor.execute(sql_query)
-            
+
             # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
             # The UI only shows 100 anyway, but we allow slightly more for export potential later if needed.
             # This replaces the dangerous pd.read_sql which fetches ALL rows.
             MAX_FETCH = 2000
-            
+
             cols = [description[0] for description in cursor.description]
             rows = cursor.fetchmany(MAX_FETCH)
-            
+
             df = pd.DataFrame(rows, columns=cols)
-            
+
             return {
                 'success': True,
                 'data': df,
-                'error': None if len(rows) < MAX_FETCH else f"Warning: Result truncated to {MAX_FETCH} rows for performance."
+                'error': None if len(
+                    rows) < MAX_FETCH else f"Warning: Result truncated to {MAX_FETCH} rows for performance."
             }
         except Exception as e:
             return {

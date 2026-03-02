@@ -409,10 +409,9 @@ class TableViewerTab(ft.Container):
             await self._refresh_data_rows()
 
         except Exception as e:
-            logger.error(f"Error loading schema: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error loading schema: {e}", exc_info=True)
             if self.page:
-                self.page.show_toast(I18n.get("data_err_load_schema", error=str(e)), "error")
+                self.page.show_toast(I18n.get("data_err_load_schema", error="内部读取错误"), "error")
         finally:
             await self._toggle_loading(False)
             self._is_loading = False  # Release loading lock
@@ -534,10 +533,9 @@ class TableViewerTab(ft.Container):
             # This reduces double-render flicker.
 
         except Exception as e:
-            logger.error(f"Error fetching data: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error fetching data: {e}", exc_info=True)
             if self.page:
-                self.page.show_toast(I18n.get("data_err_fetch", error=str(e)), "error")
+                self.page.show_toast(I18n.get("data_err_fetch", error="内部读取错误"), "error")
 
     async def _on_query_click(self, e):
         self.current_page = 1
@@ -642,8 +640,8 @@ class TableViewerTab(ft.Container):
             self.page.show_toast(msg, "success")
 
         except Exception as e:
-            logger.error(f"Export failed: {e}")
-            self.page.show_toast(I18n.get("data_export_fail", error=str(e)), "error")
+            logger.error(f"Export failed: {e}", exc_info=True)
+            self.page.show_toast(I18n.get("data_export_fail", error="内部处理错误"), "error")
         finally:
             await self._toggle_loading(False)
 
@@ -833,9 +831,9 @@ class SQLConsoleTab(ft.Container):
                 self.result_table.rows = []
 
         except Exception as e:
-            self.status_text.value = I18n.get("data_sys_error", error=str(e))
+            self.status_text.value = I18n.get("data_sys_error", error="内部数据库执行错误")
             self.status_text.color = AppColors.ERROR
-            logger.error(f"SQL Execution error: {e}")
+            logger.error(f"SQL Execution error: {e}", exc_info=True)
         finally:
             self.btn_run.disabled = False
             self.progress_ring.visible = False

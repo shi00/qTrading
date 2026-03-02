@@ -1,100 +1,152 @@
-import plotly.graph_objects as go
+"""
+K-Line Chart utilities using mplfinance.
+
+Generates professional candlestick charts with volume subplots and
+moving averages, rendered as in-memory PNG for inline display via ft.Image.
+"""
+import io
+import base64
+import logging
+
 import pandas as pd
+import mplfinance as mpf
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend, safe for threading
+
+import flet as ft
 from ui.theme import AppColors
-from ui.i18n import I18n
 
-import flet as ft # Needed for ThemeMode comparison
+logger = logging.getLogger(__name__)
 
-def create_kline_chart(df, title="", theme_mode=None):
+# ── A-share market style: red rise / green fall ──────────────────────
+_RISE_COLOR = "#F44336"   # Red for rise (China convention)
+_FALL_COLOR = "#26A69A"   # Green for fall
+
+def _build_market_colors(is_dark: bool):
+    """Build mplfinance MarketColors matching the app theme."""
+    return mpf.make_marketcolors(
+        up=_RISE_COLOR,
+        down=_FALL_COLOR,
+        edge="inherit",
+        wick="inherit",
+        volume="in",
+        ohlc="inherit",
+    )
+
+def _build_style(is_dark: bool):
+    """Build a full mplfinance style dict."""
+    mc = _build_market_colors(is_dark)
+    base = "nightclouds" if is_dark else "charles"
+    return mpf.make_mpf_style(
+        base_mpf_style=base,
+        marketcolors=mc,
+        rc={
+            "font.size": 9,
+            "axes.labelsize": 9,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "font.family": ["Microsoft YaHei", "SimHei", "sans-serif"],
+            "axes.unicode_minus": False
+        },
+    )
+
+
+def generate_kline_png(
+    df: pd.DataFrame,
+    title: str = "",
+    width: int = 880,
+    height: int = 440,
+    theme_mode=None,
+) -> str:
     """
-    Create a Plotly K-line chart (Candlestick) with Moving Averages.
-    
-    :param df: DataFrame with columns: trade_date, open, high, low, close
-    :param title: Chart title
-    :param theme_mode: "light", "dark", or None (auto-detect)
-    :return: plotly.graph_objects.Figure
+    Generate a K-line chart PNG and return it as a **base64 encoded string**,
+    ready for ``ft.Image(src_base64=...)``.
+
+    :param df: DataFrame requiring columns: trade_date, open, high, low, close.
+               Optional: vol (volume).
+    :param title: Chart title text.
+    :param width: Image width in pixels.
+    :param height: Image height in pixels.
+    :param theme_mode: "light" | "dark" | None (auto-detect from AppColors).
+    :returns: base64 PNG string.
     """
     if df is None or df.empty:
-        return go.Figure()
+        raise ValueError("Empty DataFrame — cannot render chart")
 
-    # Auto-detect theme if not provided
+    # ── 1. Prepare OHLCV DataFrame with DatetimeIndex ────────────
+    chart_df = df.copy()
+
+    # Ensure date column
+    if "trade_date" in chart_df.columns:
+        chart_df["trade_date"] = pd.to_datetime(chart_df["trade_date"].astype(str))
+        chart_df = chart_df.set_index("trade_date")
+    elif not isinstance(chart_df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame needs a 'trade_date' column or DatetimeIndex")
+
+    # Standardise column names to what mplfinance expects
+    rename_map = {}
+    for col in ("Open", "High", "Low", "Close", "Volume"):
+        lower = col.lower()
+        if lower in chart_df.columns:
+            rename_map[lower] = col
+    # Handle tushare 'vol' → 'Volume'
+    if "vol" in chart_df.columns and "Volume" not in chart_df.columns:
+        rename_map["vol"] = "Volume"
+    if rename_map:
+        chart_df = chart_df.rename(columns=rename_map)
+
+    # Sort chronologically
+    chart_df = chart_df.sort_index()
+
+    has_volume = bool("Volume" in chart_df.columns and chart_df["Volume"].sum() > 0)
+
+    # ── 2. Theme ─────────────────────────────────────────────────
     if theme_mode is None:
         is_dark = AppColors._CURRENT_THEME_MODE == ft.ThemeMode.DARK
     else:
-        is_dark = theme_mode == 'dark'
+        is_dark = theme_mode == "dark"
 
-    # Ensure date is string format (YYYY-MM-DD) for maximum compatibility
-    dates = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d').tolist()
-    
-    # Calculate MAs
-    df['ma5'] = df['close'].rolling(window=5).mean()
-    df['ma10'] = df['close'].rolling(window=10).mean()
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    
-    # Candlestick
-    candlestick = go.Candlestick(
-        x=dates,
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        increasing_line_color=AppColors.RISE,  # Red for rise in China
-        decreasing_line_color=AppColors.FALL,  # Green for fall in China
-        name=I18n.get("chart_kline")
+    style = _build_style(is_dark)
+
+    # ── 3. Moving Averages ───────────────────────────────────────
+    mav = (5, 10, 20)
+
+    # ── 4. Render to PNG buffer ──────────────────────────────────
+    buf = io.BytesIO()
+    dpi = 100
+    figsize = (width / dpi, height / dpi)
+
+    mpf.plot(
+        chart_df,
+        type="candle",
+        style=style,
+        title=title,
+        mav=mav,
+        volume=has_volume,
+        figsize=figsize,
+        tight_layout=True,
+        savefig=dict(fname=buf, dpi=dpi, bbox_inches="tight"),
     )
-    
-    # Moving Averages
-    ma5 = go.Scatter(x=dates, y=df['ma5'], mode='lines', name='MA5', line=dict(color='orange', width=1))
-    ma10 = go.Scatter(x=dates, y=df['ma10'], mode='lines', name='MA10', line=dict(color='blue', width=1))
-    ma20 = go.Scatter(x=dates, y=df['ma20'], mode='lines', name='MA20', line=dict(color='purple', width=1))
-    
-    # Create figure
-    fig = go.Figure(data=[candlestick, ma5, ma10, ma20])
-    
-    # Layout styling matching App Theme
-    # is_dark is already calculated above
-    bg_color = AppColors.BACKGROUND if is_dark else '#FFFFFF' # AppColors might be hex, plotly handles it
-    paper_color = AppColors.SURFACE if is_dark else '#FFFFFF'
-    grid_color = '#333333' if is_dark else '#EEEEEE'
-    text_color = '#FFFFFF' if is_dark else '#333333'
-    
-    fig.update_layout(
-        title=dict(text=title, font=dict(color=text_color, size=16)),
-        xaxis_rangeslider_visible=False,
-        plot_bgcolor=bg_color,
-        paper_bgcolor=paper_color,
-        xaxis=dict(
-            showgrid=True, 
-            gridcolor=grid_color,
-            tickfont=dict(color=text_color)
-        ),
-        yaxis=dict(
-            showgrid=True, 
-            gridcolor=grid_color, 
-            side='right',
-            tickfont=dict(color=text_color)
-        ),
-        margin=dict(l=10, r=40, t=40, b=20),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(color=text_color)
-        ),
-        hovermode='x unified'
-    )
-    
-    return fig
+    buf.seek(0)
+
+    # ── 5. Base64 encode ─────────────────────────────────────────
+    b64 = base64.b64encode(buf.read()).decode("ascii")
+    buf.close()
+
+    # ── 6. Cleanup matplotlib figures to prevent memory leak ─────
+    import matplotlib.pyplot as plt
+    plt.close("all")
+
+    return b64
+
+
+# ── Legacy compatibility wrappers (kept for any external callers) ──
+
+def create_kline_chart(df, title="", theme_mode=None):
+    """Legacy wrapper — returns base64 PNG string instead of Plotly Figure."""
+    return generate_kline_png(df, title=title, theme_mode=theme_mode)
 
 def generate_kline_html(df, title="", theme_mode=None):
-    """
-    Generate HTML string for the K-line chart.
-    """
-    fig = create_kline_chart(df, title, theme_mode)
-    
-    # Generate HTML with CDN version of plotly.js to keep it lightweight
-    # full_html=True ensures it has <html><body> tags for WebView
-    import plotly.io as pio
-    return pio.to_html(fig, full_html=True, include_plotlyjs='cdn')
+    """Legacy wrapper — returns an <img> HTML tag with embedded base64 PNG."""
+    b64 = generate_kline_png(df, title=title, theme_mode=theme_mode)
+    return f'<html><body style="margin:0"><img src="data:image/png;base64,{b64}" style="width:100%"></body></html>'

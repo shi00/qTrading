@@ -126,6 +126,55 @@ class TushareClient:
                 time.sleep(1)
         return None
 
+    def _handle_api_call_paginated(self, func, max_pages=20, **kwargs):
+        """
+        Fetch all pages for bulk queries (handles Tushare's 3000-6000 row caps).
+        
+        Uses dynamic page-size detection: remembers the first page's row count
+        as the 'full page size', and stops when a subsequent page returns fewer.
+        Also catches errors on non-first pages (some Tushare endpoints reject
+        offsets beyond available data with an error instead of returning empty).
+        """
+        # Strip None values to avoid Tushare protocol errors
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        df_list = []
+        offset = 0
+        page = 0
+        full_page_size = None  # Will be set from first page
+
+        while page < max_pages:
+            kwargs['offset'] = offset
+            try:
+                df = self._handle_api_call(func, **kwargs)
+            except Exception:
+                if page == 0:
+                    raise  # First page error is a real failure
+                # Non-first page error: Tushare rejected the offset (end of data)
+                break
+
+            if df is None or df.empty:
+                break
+
+            df_list.append(df)
+            returned_len = len(df)
+
+            if full_page_size is None:
+                full_page_size = returned_len  # Remember first page size
+
+            # Stop if this page returned fewer rows than the first page
+            if returned_len < full_page_size:
+                break
+
+            offset += returned_len
+            page += 1
+
+        if page >= max_pages:
+            logger.warning(f"[API] Pagination hit max_pages={max_pages} (offset={offset}). Results may be incomplete.")
+
+        if not df_list:
+            return None
+        return pd.concat(df_list, ignore_index=True)
+
     # ========== Trade Calendar ==========
 
     def get_trade_cal(self, start_date, end_date, exchange='SSE'):
@@ -535,7 +584,7 @@ class TushareClient:
     def get_pledge_stat(self, ts_code=None, end_date=None):
         """Get share pledge statistics"""
 
-        return self._handle_api_call(
+        return self._handle_api_call_paginated(
             self.pro.pledge_stat,
             ts_code=ts_code,
             end_date=end_date
@@ -594,11 +643,13 @@ class TushareClient:
             end_date=end_date
         )
 
-    def get_top10_holders(self, ts_code=None, end_date=None):
+    def get_top10_holders(self, ts_code=None, end_date=None, start_date=None, ann_date=None):
         """Get Top 10 Holders"""
-        return self._handle_api_call(
+        return self._handle_api_call_paginated(
             self.pro.top10_holders,
             ts_code=ts_code,
+            ann_date=ann_date,
+            start_date=start_date,
             end_date=end_date
         )
 
@@ -612,12 +663,14 @@ class TushareClient:
             end_date=end_date
         )
 
-    def get_stk_holdernumber(self, ts_code=None, end_date=None, start_date=None):
+    def get_stk_holdernumber(self, ts_code=None, end_date=None, start_date=None, ann_date=None):
         """Get Stock Holder Number (Chip Concentration)"""
-        return self._handle_api_call(
+        return self._handle_api_call_paginated(
             self.pro.stk_holdernumber,
             ts_code=ts_code,
+            ann_date=ann_date,
             end_date=end_date,
             start_date=start_date
+
         )
 

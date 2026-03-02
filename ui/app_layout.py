@@ -16,11 +16,14 @@ from ui.views.settings_view import SettingsView
 logger = logging.getLogger(__name__)
 
 
+from ui.views.task_center_view import TaskCenterView
+
 class NavTabs(IntEnum):
     MARKET = 0
     SCREENER = 1
     DATA = 2
-    SETTINGS = 3
+    TASKS = 3
+    SETTINGS = 4
 
 
 class AppLayout(ft.Container):
@@ -109,6 +112,12 @@ class AppLayout(ft.Container):
                     label_content=ft.Text(I18n.get("nav_data"), size=12, weight=ft.FontWeight.BOLD),
                 ),
                 ft.NavigationRailDestination(
+                    icon=ft.Icons.FORMAT_LIST_BULLETED_OUTLINED, 
+                    selected_icon=ft.Icons.FORMAT_LIST_BULLETED, 
+                    label=I18n.get("nav_tasks", "任务"),
+                    label_content=ft.Text(I18n.get("nav_tasks", "任务"), size=12, weight=ft.FontWeight.BOLD),
+                ),
+                ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED,
                     selected_icon=ft.Icons.SETTINGS,
                     label=I18n.get("nav_settings"),
@@ -153,6 +162,8 @@ class AppLayout(ft.Container):
             view = ScreenerView(self.page)
         elif index == NavTabs.DATA:
             view = DataExplorerView()
+        elif index == NavTabs.TASKS:
+            view = TaskCenterView(self.page)
         elif index == NavTabs.SETTINGS:
             view = SettingsView()
         else:
@@ -176,7 +187,7 @@ class AppLayout(ft.Container):
         """Handle i18n locale change"""
         self.page.title = I18n.get("app_title")
         if self.nav_rail:
-            nav_keys = ["nav_market", "nav_screener", "nav_data", "nav_settings"]
+            nav_keys = ["nav_market", "nav_screener", "nav_data", "nav_tasks", "nav_settings"]
             for i, key in enumerate(nav_keys):
                 if i < len(self.nav_rail.destinations):
                     text = I18n.get(key)

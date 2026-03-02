@@ -11,6 +11,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from data.data_processor import DataProcessor
 from data.review_manager import ReviewManager
+from data.tushare_client import TushareClient
+from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
 
@@ -80,7 +82,8 @@ class SchedulerService:
         """Handle missed job events with clear logging"""
         job_id = event.job_id
         run_time = event.scheduled_run_time
-        logger.warning(f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})")
+        logger.warning(
+            f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})")
 
     def stop(self):
         """Stop the scheduler"""
@@ -103,9 +106,13 @@ class SchedulerService:
 
     async def _watch_config_changes(self):
         """Monitor config changes and reload jobs if needed"""
+        import asyncio
         # Run sync config check in thread pool to avoid blocking event loop
         try:
             current_config = await ThreadPoolManager().run_async(TaskType.IO, self._check_config_sync)
+        except asyncio.CancelledError:
+            logger.info("[Scheduler] _watch_config_changes cancelled (likely shutting down)")
+            raise
         except Exception as e:
             logger.error(f"[Scheduler] Config check failed: {e}")
             return
@@ -179,8 +186,7 @@ class SchedulerService:
             logger.info("[Scheduler] Update skipped (Already updated today)")
             return
 
-        # Check Trading Day — must run in thread pool to avoid blocking the event loop
-        from data.tushare_client import TushareClient
+        # Check Trading Day
         try:
             client = TushareClient()
             is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)
@@ -189,35 +195,39 @@ class SchedulerService:
                 return
         except Exception as e:
             logger.warning(f"[Scheduler] Trade calendar check failed: {e}")
-            if datetime.datetime.now().weekday() >= 5:  # Weekend fallback
+            if datetime.datetime.now().weekday() >= 5:
                 return
 
+        # Submit via TaskManager for visibility and persistence
+        from services.task_manager import TaskManager
 
-        logger.info(f"[Scheduler] Running Scheduled Update for {today}...")
-
-        try:
+        async def _daily_update_logic(task_id: str, **kwargs):
+            tm = TaskManager()
             processor = DataProcessor()
             review_mgr = ReviewManager()
 
+            tm.update_progress(task_id, 0.1, I18n.get("sched_init_processor"))
             await processor.init_data()
 
-            # Sync today's data
+            tm.update_progress(task_id, 0.3, I18n.get("sched_sync_daily_quotes"))
             result = await processor.sync_daily_market_snapshot()
             added = getattr(result, 'added', result) if result else 0
-            logger.info(f"[Scheduler] Data update complete. Rows: {added}")
 
-            # Sync Financial Reports
+            tm.update_progress(task_id, 0.6, I18n.get("sched_sync_financial"))
             await processor.sync_financial_reports()
-            logger.info(f"[Scheduler] Financial reports sync complete.")
 
-            # Update Review Stats
+            tm.update_progress(task_id, 0.8, I18n.get("sched_update_review"))
             await review_mgr.run_review()
-            logger.info(f"[Scheduler] Review performance updated.")
 
             self._last_update_date = today
+            return I18n.get("sched_daily_done", added=added)
 
-        except Exception as e:
-            logger.error(f"[Scheduler] Update failed: {e}", exc_info=True)
+        TaskManager().submit_task(
+            name=I18n.get("sched_task_daily_update", date=today),
+            task_type=I18n.get("sched_task_type_daily"),
+            coroutine_factory=_daily_update_logic,
+            cancellable=False,
+        )
 
     async def _run_nightly_prediction(self):
         """Execute AI Strategy (20:30)"""
@@ -228,7 +238,6 @@ class SchedulerService:
         if self._last_pred_date == today:
             return
 
-        # QA-03 fix: Skip on non-trading days (same check as _run_daily_update)
         try:
             client = TushareClient()
             is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)
@@ -240,43 +249,54 @@ class SchedulerService:
             if datetime.datetime.now().weekday() >= 5:
                 return
 
-        logger.info(f"[Scheduler] Running Nightly Prediction for {today}...")
+        from services.task_manager import TaskManager
 
-        try:
+        async def _prediction_logic(task_id: str, **kwargs):
+            tm = TaskManager()
             from strategies.ai_strategy import AISelectionStrategy
 
-
+            tm.update_progress(task_id, 0.1, I18n.get("sched_pred_init"))
             processor = DataProcessor()
             await processor.init_data()
 
-            # 1. Prepare Market Data
-            target_date = await processor.prepare_market_data()  # Smart check logic
-            logger.info(f"[Scheduler] AI Target Date: {target_date}")
+            tm.update_progress(task_id, 0.2, I18n.get("sched_pred_prepare"))
+            target_date = await processor.prepare_market_data()
 
-            # 2. Get Context
+            tm.update_progress(task_id, 0.3, I18n.get("sched_pred_context"))
             context = await processor.get_strategy_data()
             if not context:
-                logger.error("[Scheduler] No strategy data context available.")
-                return
-
+                raise RuntimeError(I18n.get("sched_pred_no_context"))
             context['data_processor'] = processor
 
-            # 3. Run Strategy
+            tm.update_progress(task_id, 0.5, I18n.get("sched_pred_running"))
+
+            # Inject progress callback so strategy.filter() reports AI analysis sub-progress
+            def _ai_progress(current, total, msg):
+                # Map to 50%→90% range
+                sub_pct = 0.5 + (current / max(total, 1)) * 0.4
+                tm.update_progress(task_id, sub_pct, f"[{current}/{total}] {msg}")
+
+            context['on_progress'] = _ai_progress
+
             strategy = AISelectionStrategy()
             result_df = await strategy.filter(context)
 
             if result_df is not None and not result_df.empty:
-                # Save results
+                tm.update_progress(task_id, 0.9, I18n.get("sched_pred_saving"))
                 rm = ReviewManager()
                 await rm.save_results("AI_Auto_Nightly", result_df)
-                logger.info(f"[Scheduler] Prediction completed. Saved {len(result_df)} candidates.")
+                self._last_pred_date = today
+                return I18n.get("sched_pred_done_found", count=len(result_df))
             else:
-                logger.info("[Scheduler] Prediction completed. No candidates found.")
+                self._last_pred_date = today
+                return I18n.get("sched_pred_done_empty")
 
-            self._last_pred_date = today
-
-        except Exception as e:
-            logger.error(f"[Scheduler] Prediction failed: {e}", exc_info=True)
+        TaskManager().submit_task(
+            name=I18n.get("sched_task_prediction", date=today),
+            task_type=I18n.get("task_type_ai_screening"),
+            coroutine_factory=_prediction_logic,
+            cancellable=False,
+        )
 
     def get_status(self) -> dict:
         """Get scheduler status for UI display"""

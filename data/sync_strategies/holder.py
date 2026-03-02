@@ -1,31 +1,33 @@
 import datetime
 import logging
 from .base import ISyncStrategy, SyncResult
-from data.daos.holder_dao import HolderDao
 from utils.thread_pool import ThreadPoolManager, TaskType
 from utils.log_decorators import log_async_operation
 
 logger = logging.getLogger(__name__)
 
-# How many days before holder data is considered stale
-_STALE_THRESHOLD_DAYS = 90
-# Maximum stocks to process per run to avoid API exhaustion
-_BATCH_SIZE = 50
-# Circuit breaker: abort after this many errors
-_MAX_ERRORS = 10
-# Suppress per-stock error logs after this count
-_ERROR_LOG_THRESHOLD = 3
+# Circuit breaker: abort after this many consecutive errors
+_MAX_ERRORS = 5
 
 
 class HolderSyncStrategy(ISyncStrategy):
     """
-    Strategy for syncing Shareholder data.
-    Uses sparse update: only re-fetches stocks whose data is stale (> 90 days old).
+    Strategy for syncing Shareholder & Pledge data using O(Quarter) approach.
+
+    These tables (stk_holdernumber, top10_holders, pledge_stat) contain
+    quarterly-disclosure data. Fetching by end_date (quarter-end snapshot)
+    returns the entire market in a single paginated API call, making it
+    vastly more efficient than per-stock iteration.
+
+    Typical API call counts per sync:
+      - stk_holdernumber: ~2 calls (5500 rows, paginated)
+      - top10_holders:    ~9 calls (54000 rows, paginated at 6000/page)
+      - pledge_stat:      ~2 calls (4100 rows, paginated at 3000/page)
+      Total: ~13 API calls for 100% market coverage
     """
 
     def __init__(self, context):
         super().__init__(context)
-        self.dao = HolderDao(context.cache.engine)
         self._cancelled = False
 
     async def cancel(self):
@@ -37,23 +39,63 @@ class HolderSyncStrategy(ISyncStrategy):
     async def run(self, **kwargs) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
+        errors = 0
 
         try:
-            stocks = await self.context.cache.get_stock_basic()
-            if stocks is None or stocks.empty:
-                return result
+            # Determine the latest 2 quarter-end dates to ensure coverage
+            quarter_ends = self._get_recent_quarter_ends(count=2)
+            logger.info(f"[HolderSync] Syncing quarterly snapshots: {quarter_ends}")
 
-            ts_codes = stocks['ts_code'].tolist()
-            coverage = await self.dao.check_holder_data_coverage(ts_codes)
-            stale_stocks = self._find_stale_stocks(ts_codes, coverage)
+            for qe in quarter_ends:
+                if self._cancelled:
+                    logger.info("[HolderSync] Cancelled by user.")
+                    break
 
-            logger.info(f"[HolderSync] Found {len(stale_stocks)} stocks needing update")
-            if not stale_stocks:
-                return result
+                # --- stk_holdernumber ---
+                count = await self._sync_one_table(
+                    api_func=self.context.api.get_stk_holdernumber,
+                    save_func=self.context.cache.save_holder_number,
+                    table_name='stk_holdernumber',
+                    end_date=qe
+                )
+                if count < 0:
+                    errors += 1
+                else:
+                    result.added += count
 
-            completed, errors = await self._fetch_batch(stale_stocks[:_BATCH_SIZE], result)
-            result.added = completed
-            logger.info(f"[HolderSync] Completed: {completed}/{min(len(stale_stocks), _BATCH_SIZE)}, Errors: {errors}")
+                if errors >= _MAX_ERRORS or self._cancelled:
+                    break
+
+                # --- top10_holders ---
+                count = await self._sync_one_table(
+                    api_func=self.context.api.get_top10_holders,
+                    save_func=self.context.cache.save_top10_holders,
+                    table_name='top10_holders',
+                    end_date=qe
+                )
+                if count < 0:
+                    errors += 1
+                else:
+                    result.added += count
+
+                if errors >= _MAX_ERRORS or self._cancelled:
+                    break
+
+            # --- pledge_stat (independent of quarter-ends) ---
+            # pledge_stat uses weekly trading dates, not quarter-ends.
+            # We sync it once per run, outside the quarterly loop.
+            if errors < _MAX_ERRORS and not self._cancelled:
+                count = await self._sync_pledge_stat()
+                if count < 0:
+                    errors += 1
+                else:
+                    result.added += count
+
+            if errors >= _MAX_ERRORS:
+                result.status = "partial"
+                result.errors.append(f"Aborted after {errors} errors")
+
+            logger.info(f"[HolderSync] Completed: {result.added} records synced, {errors} errors")
 
         except Exception as e:
             logger.error(f"[HolderSync] Failed: {e}", exc_info=True)
@@ -62,64 +104,82 @@ class HolderSyncStrategy(ISyncStrategy):
 
         return result
 
+    async def _sync_one_table(self, api_func, save_func, table_name, end_date):
+        """
+        Fetch a full-market snapshot for one table by end_date.
+        Returns row count on success, -1 on error.
+        """
+        try:
+            df = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                api_func,
+                end_date=end_date
+            )
+            if df is not None and not df.empty:
+                await save_func(df)
+                logger.info(f"[HolderSync] {table_name} end_date={end_date}: {len(df)} records")
+                return len(df)
+            else:
+                logger.debug(f"[HolderSync] {table_name} end_date={end_date}: no data")
+                return 0
+        except Exception as e:
+            err_str = str(e).lower()
+            if "permission" in err_str or "积分" in err_str:
+                logger.warning(f"[HolderSync] ⛔ Permission denied for {table_name}: {e}")
+            else:
+                logger.warning(f"[HolderSync] Error syncing {table_name} end_date={end_date}: {e}")
+            return -1
+
+    async def _sync_pledge_stat(self):
+        """
+        Fetch the latest full-market pledge_stat snapshot.
+        pledge_stat snapshots are keyed by trading dates (typically weekly Fridays).
+        We pass the most recent Friday as end_date to get a single snapshot,
+        avoiding infinite pagination over all historical data.
+        Returns row count on success, -1 on error.
+        """
+        try:
+            # Use last Friday (or today if Friday) as end_date
+            today = datetime.date.today()
+            days_since_friday = (today.weekday() - 4) % 7
+            last_friday = today - datetime.timedelta(days=days_since_friday)
+            end_date = last_friday.strftime('%Y%m%d')
+
+            df = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                self.context.api.get_pledge_stat,
+                end_date=end_date
+            )
+            if df is not None and not df.empty:
+                await self.context.cache.save_pledge_stat(df)
+                logger.info(f"[HolderSync] pledge_stat end_date={end_date}: {len(df)} records")
+                return len(df)
+            else:
+                logger.debug(f"[HolderSync] pledge_stat end_date={end_date}: no data")
+                return 0
+        except Exception as e:
+            err_str = str(e).lower()
+            if "permission" in err_str or "积分" in err_str:
+                logger.warning(f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}")
+            else:
+                logger.warning(f"[HolderSync] Error syncing pledge_stat: {e}")
+            return -1
+
     @staticmethod
-    def _find_stale_stocks(ts_codes, coverage):
-        """Identify stocks with stale or missing holder data."""
-        today = datetime.datetime.now()
-        stale = []
-        for code in ts_codes:
-            last_date_str = coverage.get(code)
-            if not last_date_str:
-                stale.append(code)
-                continue
-            try:
-                last_dt = datetime.datetime.strptime(str(last_date_str), '%Y%m%d')
-                if (today - last_dt).days > _STALE_THRESHOLD_DAYS:
-                    stale.append(code)
-            except ValueError:
-                stale.append(code)
-        return stale
-
-    async def _fetch_batch(self, batch, result):
-        """Fetch holder data for a batch of stocks. Returns (completed, errors)."""
-        completed = 0
-        errors = 0
-
-        for code in batch:
-            if self._cancelled:
-                logger.info("[HolderSync] Cancelled by user.")
-                break
-
-            try:
-                df_num = await ThreadPoolManager().run_async(
-                    TaskType.IO,
-                    self.context.api.get_stk_holdernumber,
-                    ts_code=code
-                )
-                if df_num is not None and not df_num.empty:
-                    await self.dao.save_holder_number(df_num)
-                    completed += 1
-
-                # Also sync top10_holders for the same stock
-                try:
-                    df_top10 = await ThreadPoolManager().run_async(
-                        TaskType.IO,
-                        self.context.api.get_top10_holders,
-                        ts_code=code
-                    )
-                    if df_top10 is not None and not df_top10.empty:
-                        await self.dao.save_top10_holders(df_top10)
-                except Exception as e_top10:
-                    logger.debug(f"[HolderSync] top10_holders failed for {code}: {e_top10}")
-            except Exception as e:
-                errors += 1
-                if errors <= _ERROR_LOG_THRESHOLD:
-                    logger.warning(f"[HolderSync] Error for {code}: {e}")
-                elif errors == _ERROR_LOG_THRESHOLD + 1:
-                    logger.warning("[HolderSync] Suppressing further per-stock error logs...")
-                if errors >= _MAX_ERRORS:
-                    logger.error("[HolderSync] Too many errors, aborting batch.")
-                    result.errors.append(f"Aborted after {errors} errors")
-                    break
-
-        return completed, errors
+    def _get_recent_quarter_ends(count=2):
+        """
+        Return the most recent `count` quarter-end dates (YYYYMMDD strings)
+        that have already passed, ordered newest first.
+        Example (today=2026-03-02): ['20251231', '20250930']
+        """
+        today = datetime.date.today()
+        quarter_ends = []
+        # Walk backwards from current year
+        for year in range(today.year, today.year - 2, -1):
+            for month, day in [(12, 31), (9, 30), (6, 30), (3, 31)]:
+                qe = datetime.date(year, month, day)
+                if qe < today:
+                    quarter_ends.append(qe.strftime('%Y%m%d'))
+                    if len(quarter_ends) >= count:
+                        return quarter_ends
+        return quarter_ends

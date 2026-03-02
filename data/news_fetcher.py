@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 import requests
 import json
+import threading
+
+# Lock for thread-safe mutation of pd.options.mode.string_storage
+_pd_options_lock = threading.Lock()
 
 
 class NewsFetcher:
@@ -23,17 +27,142 @@ class NewsFetcher:
 
 
     @staticmethod
-    async def get_stock_news(ts_code, limit=10):
+    async def get_stock_news(ts_code, limit=5):
         """
-        Fetch specific stock news. 
-        Note: Specific stock news is hard to get reliably without blocking.
-        Trying Sina or THS via akshare is hit or miss.
-        For now, we return empty list to avoid errors, or implement a broad search if critical.
+        Fetch specific stock news using a dual-layer strategy:
+        1. 巨潮公告 (stock_zh_a_disclosure_report_cninfo) - Official exchange filings (Highest quality)
+        2. 东财搜索 (stock_news_em) - Fallback to keyword search (Lower quality, more noise)
+        
+        Both use a pyarrow string_storage workaround for pandas compatibility.
         """
-        # Placeholder: returning empty safely until a reliable unrestricted source is found 
-        # for individual A-share stock news content.
-        # Could try: ak.stock_news_ths_individual(symbol) if it existed.
-        return []
+        if not ts_code:
+            return []
+
+        # Extract symbol without suffix suffix for standard AKShare calls
+        symbol = ts_code.split('.')[0]
+        
+        # Determine market for cninfo API based on suffix
+        # ts_code format e.g., '000001.SZ' or '600000.SH'
+        suffix = ts_code.split('.')[-1] if '.' in ts_code else ''
+        market_map = {
+            'SZ': '\u6df1\u4ea4\u6240',  # 深交所
+            'SH': '\u4e0a\u4ea4\u6240',  # 上交所
+            'BJ': '\u5317\u4ea4\u6240',  # 北交所
+        }
+        
+        # Dynamic market key resolution due to akshare source code encoding on Windows
+        try:
+            import akshare.stock_feature.stock_disclosure_cninfo as mod
+            import inspect
+            src = inspect.getsource(mod.stock_zh_a_disclosure_report_cninfo)
+            for line in src.split('\n'):
+                if 'szse' in line and ':' in line: market_map['SZ'] = line.split('"')[1]
+                elif 'sse' in line and 'hke' not in line and ':' in line: market_map['SH'] = line.split('"')[1]
+                elif 'bse' in line and ':' in line: market_map['BJ'] = line.split('"')[1]
+        except Exception:
+            pass
+
+        # default to SZ if not found
+        market = market_map.get(suffix.upper(), market_map.get('SZ', '\u6df1\u4ea4\u6240'))
+
+        # Run the IO bound akshare calls in the thread pool
+        def _fetch():
+            # Apply PyArrow Workaround with thread-safety lock:
+            # pd.options.mode.string_storage is a global mutable setting.
+            # Multiple threads calling this concurrently could clobber each other.
+            with _pd_options_lock:
+                old_storage = pd.options.mode.string_storage
+                pd.options.mode.string_storage = 'python'
+            
+            try:
+                # -------------------------------------------------------------
+                # Layer 1: 巨潮资讯公告 (CNINFO Official Filings)
+                # -------------------------------------------------------------
+                try:
+                    # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
+                    end_date = datetime.now().strftime("%Y%m%d")
+                    start_date = (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+                    
+                    df_cninfo = ak.stock_zh_a_disclosure_report_cninfo(
+                        symbol=symbol,
+                        market=market,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if df_cninfo is not None and not df_cninfo.empty:
+                        # Column names may vary by akshare version or encoding.
+                        # Known structure: [代码, 简称, 公告标题, 公告时间, 公告链接]
+                        # We use name-based lookup with positional fallback.
+                        cols = list(df_cninfo.columns)
+                        title_col = '公告标题' if '公告标题' in cols else (cols[2] if len(cols) > 2 else None)
+                        time_col = '公告时间' if '公告时间' in cols else (cols[3] if len(cols) > 3 else None)
+                        
+                        if title_col:
+                            news_list = []
+                            for _, row in df_cninfo.head(limit).iterrows():
+                                title = str(row.get(title_col, '')).strip()
+                                pub_date = str(row.get(time_col, '')) if time_col else ''
+                                pub_time = f"{pub_date} 00:00:00" if pub_date else ""
+                                
+                                news_list.append({
+                                    'title': title,
+                                    'publish_time': pub_time,
+                                    'source': '巨潮公告'
+                                })
+                            
+                            if news_list:
+                                return news_list
+                except Exception as e:
+                    logger.warning(f"[News] CNINFO disclosure failed for {ts_code}: {e}")
+
+                # -------------------------------------------------------------
+                # Layer 2: 东财新闻搜索 (EastMoney News Search) - Fallback
+                # -------------------------------------------------------------
+                try:
+                    df_em = ak.stock_news_em(symbol=symbol)
+                    
+                    if df_em is not None and not df_em.empty:
+                        news_list = []
+                        # EastMoney returns '新闻内容' as title, '新闻链接', '新闻时间', etc.
+                        for _, row in df_em.head(limit).iterrows():
+                            title = row.get('新闻标题', row.get('新闻内容', ''))
+                            pub_time = row.get('新闻时间', row.get('发布时间', ''))
+                            source = row.get('文章来源', '东财新闻')
+                            
+                            # Clean up title: 東方财富 often adds "[XXX]" prefixes or suffixes
+                            title_str = str(title).strip()
+                            
+                            news_list.append({
+                                'title': title_str,
+                                'publish_time': str(pub_time),
+                                'source': str(source)
+                            })
+                        
+                        return news_list
+                except Exception as e:
+                    logger.warning(f"[News] EM search failed for {ts_code}: {e}")
+                
+            except Exception as outer_e:
+                logger.error(f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}")
+            finally:
+                # Always restore global pandas settings (inside lock for thread-safety)
+                with _pd_options_lock:
+                    pd.options.mode.string_storage = old_storage
+                
+            return []
+
+        try:
+            # We use the IO Thread Pool with a 15-second timeout via asyncio.wait_for 
+            # to prevent hanging the AI pipeline if the APIs are slow/dead.
+            future = ThreadPoolManager().run_async(TaskType.IO, _fetch)
+            return await asyncio.wait_for(future, timeout=15.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[News] Timeout fetching news for {ts_code}")
+            return []
+        except Exception as e:
+            logger.error(f"[News] Error dispatching news fetch task for {ts_code}: {e}")
+            return []
 
     @staticmethod
     async def get_latest_global_news(limit=20):

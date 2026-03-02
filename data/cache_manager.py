@@ -11,6 +11,7 @@ import config
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
 from data.data_dictionary import TABLE_DEFINITIONS
+from data.constants import HEALTH_DEPTH_FULL_TRADE_DAYS
 # DAOs
 from data.daos.base_dao import BaseDao  # Expose static helpers via BaseDao if needed, or keeping usage internal
 from data.daos.financial_dao import FinancialDao
@@ -389,6 +390,34 @@ class CacheManager:
             monitored_tables = {k: v for k, v in TABLE_DEFINITIONS.items() 
                                if v.get('quality_config', {}).get('monitor')}
 
+            # === Global baseline precomputation (outside loop, executed once) ===
+            global_trade_days = 0
+            global_expected_rows = None
+            try:
+                r_min = await conn.exec_driver_sql("SELECT MIN(trade_date) FROM daily_quotes")
+                r_max = await conn.exec_driver_sql("SELECT MAX(trade_date) FROM daily_quotes")
+                g_min = r_min.fetchone()[0]
+                g_max = r_max.fetchone()[0]
+                if g_min and g_max:
+                    r_days = await conn.exec_driver_sql(
+                        "SELECT COUNT(*) FROM trade_cal WHERE is_open=1 AND cal_date >= ? AND cal_date <= ?",
+                        (str(g_min), str(g_max))
+                    )
+                    global_trade_days = r_days.fetchone()[0] or 0
+                    # Precise expected rows: sum per-stock trading days using each stock's list_date
+                    r_exp = await conn.exec_driver_sql("""
+                        SELECT SUM(
+                            (SELECT COUNT(*) FROM trade_cal tc
+                             WHERE tc.is_open = 1
+                               AND tc.cal_date >= MAX(s.list_date, ?)
+                               AND tc.cal_date <= ?)
+                        ) FROM stock_basic s WHERE s.list_status = 'L'
+                    """, (str(g_min), str(g_max)))
+                    global_expected_rows = r_exp.fetchone()[0] or 1
+                    logger.info(f"[Health] Global baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}")
+            except Exception as e:
+                logger.warning(f"[Health] Global baseline calc failed (non-fatal): {e}")
+
             for table, meta in monitored_tables.items():
                 try:
                     # Determine check type from explicit metadata field
@@ -448,8 +477,28 @@ class CacheManager:
                         except Exception:
                             pass  # Column may not exist, fresh_ratio stays 0
                     
+                    # --- Depth (all stock tables, based on global trade days) ---
+                    depth_ratio = None
+                    if is_stock_table and global_trade_days > 0:
+                        depth_ratio = min(1.0, global_trade_days / HEALTH_DEPTH_FULL_TRADE_DAYS)
+
+                    # --- Breadth (daily-frequency tables only) ---
+                    breadth_ratio = None
+                    is_daily_freq = meta.get('quality_config', {}).get('frequency') == 'daily'
+                    if is_daily_freq and global_expected_rows and global_expected_rows > 0:
+                        try:
+                            r_total = await conn.exec_driver_sql(f"SELECT COUNT(*) FROM {table}")
+                            actual_rows = r_total.fetchone()[0] or 0
+                            breadth_ratio = min(1.0, actual_rows / global_expected_rows)
+                        except Exception:
+                            pass
+
                     table_type = 'stock' if is_stock_table else 'global'
-                    results[table] = {'covered': cnt, 'ratio': ratio, 'fresh_ratio': fresh_ratio, 'type': table_type}
+                    results[table] = {
+                        'covered': cnt, 'ratio': ratio, 'fresh_ratio': fresh_ratio,
+                        'depth_ratio': depth_ratio, 'breadth_ratio': breadth_ratio,
+                        'type': table_type
+                    }
                     
                     if ratio < 0.1:
                         if is_stock_table:
@@ -458,7 +507,9 @@ class CacheManager:
                             logger.warning(f"[Health] Table {table} (global) CRITICAL: {cnt} records")
                     else:
                         if is_stock_table:
-                            logger.debug(f"[Health] Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}")
+                            d_str = f", depth={depth_ratio:.1%}" if depth_ratio is not None else ""
+                            b_str = f", breadth={breadth_ratio:.1%}" if breadth_ratio is not None else ""
+                            logger.debug(f"[Health] Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}{d_str}{b_str}")
                         else:
                             logger.debug(f"[Health] Table {table} (global): {cnt} records")
                 except Exception as e:
@@ -466,7 +517,7 @@ class CacheManager:
                         logger.warning(f"[Health] Table {table} missing/not created yet.")
                     else:
                         logger.error(f"[Health] Failed to check table {table}: {e}")
-                    results[table] = {'covered': 0, 'ratio': 0, 'fresh_ratio': 0, 'type': meta.get('type', 'stock')}
+                    results[table] = {'covered': 0, 'ratio': 0, 'fresh_ratio': 0, 'depth_ratio': None, 'breadth_ratio': None, 'type': meta.get('type', 'stock')}
 
         return {'total_stocks': total_stocks, 'tables': results}
 
@@ -483,6 +534,12 @@ class CacheManager:
     # --- Extra Savers (Boilerplate) ---
     async def save_fina_forecast(self, df):
         return await self.financial_dao.save_fina_forecast(df)
+
+    async def save_holder_number(self, df):
+        return await self.holder_dao.save_holder_number(df)
+
+    async def save_top10_holders(self, df):
+        return await self.holder_dao.save_top10_holders(df)
 
     async def save_fina_mainbz(self, df):
         return await self.financial_dao.save_fina_mainbz(df)
@@ -535,12 +592,18 @@ class CacheManager:
     async def get_northbound(self, trade_date=None, ts_code=None):
         return await self.quote_dao.get_northbound(trade_date, ts_code)
 
-    # --- Screening History ---
-    async def save_screening_result(self, df, strategy_name, trade_date):
-        return await self.screener_dao.save_screening_result(df, strategy_name, trade_date)
+    async def save_moneyflow_hsgt(self, df):
+        return await self.quote_dao.save_moneyflow_hsgt(df)
 
+    # --- Screening History ---
     async def get_screening_history(self, strategy_name=None, limit=100):
         return await self.screener_dao.get_screening_history(strategy_name, limit)
+
+    async def get_history_tree(self, offset=0, limit=30):
+        return await self.screener_dao.get_history_tree(offset, limit)
+
+    async def get_history_records(self, trade_date, strategy_name=None):
+        return await self.screener_dao.get_history_records(trade_date, strategy_name)
 
     async def get_pending_reviews(self):
         return await self.screener_dao.get_pending_reviews()
