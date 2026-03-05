@@ -10,6 +10,26 @@ logger = logging.getLogger(__name__)
 
 
 class BaseDao:
+
+    # Maintenance gate: cleared during DDL (clear_cache), set otherwise.
+    # All _read_db/_write_db calls await this before executing SQL.
+    _maintenance_event = None  # Lazy init per event loop
+
+    @classmethod
+    def _get_maintenance_event(cls):
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            evt = asyncio.Event()
+            evt.set()
+            return evt
+        if not hasattr(loop, '_basedao_maint_event'):
+            evt = asyncio.Event()
+            evt.set()
+            loop._basedao_maint_event = evt
+        return loop._basedao_maint_event
+
     def __init__(self, engine):
         self.engine = engine
 
@@ -38,6 +58,9 @@ class BaseDao:
         # For executemany, empty params list means nothing to do
         if is_many and not params:
             return 0
+
+        import asyncio
+        await self._get_maintenance_event().wait()
 
         # Check if engine is disposed/closed
         try:
@@ -108,6 +131,9 @@ class BaseDao:
         # Ensure params is a tuple (not list) to avoid being interpreted as executemany
         if params is not None and isinstance(params, list):
             params = tuple(params)
+
+        import asyncio
+        await self._get_maintenance_event().wait()
 
         start_time = time.perf_counter()
         try:

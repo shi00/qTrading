@@ -1,4 +1,5 @@
 from strategies.base_strategy import BaseStrategy, register_strategy
+from data.quality_gate import require_quality, QualityTier
 from strategies.ai_mixin import AIStrategyMixin
 import pandas as pd
 import logging
@@ -17,6 +18,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         super().__init__("strategy_ai_active_name", "strategy_ai_active_desc")
         self.limit = ConfigHandler.get_ai_max_candidates()
 
+    @require_quality(QualityTier.SILVER)
     async def filter(self, context):
         if context is None:
             return pd.DataFrame()

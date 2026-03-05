@@ -110,10 +110,7 @@ class HolderSyncStrategy(ISyncStrategy):
         Returns row count on success, -1 on error.
         """
         try:
-            df = await ThreadPoolManager().run_async(
-                TaskType.IO,
-                api_func,
-                end_date=end_date
+            df = await api_func(end_date=end_date
             )
             if df is not None and not df.empty:
                 await save_func(df)

@@ -90,6 +90,13 @@ class HomeView(ft.Container):
     def will_unmount(self):
         self._is_mounted = False
         self.vm.dispose()
+        # Fix P1-9: Unsubscribe PubSub to prevent ghost event handling
+        if self.page and self._pubsub_subscribed:
+            try:
+                self.page.pubsub.unsubscribe(self._on_broadcast_message)
+            except Exception:
+                pass
+            self._pubsub_subscribed = False
         try:
             I18n.unsubscribe(self.refresh_locale)
         except Exception:

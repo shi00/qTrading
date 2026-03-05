@@ -16,6 +16,7 @@ from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
 from utils.log_decorators import log_async_operation
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         """
         Sync historical data for the last N days.
         """
-        end_date = datetime.datetime.now().strftime('%Y%m%d')
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
+        end_date = get_now().strftime('%Y%m%d')
+        start_date = (get_now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
 
         # Use cached trade calendar (Step 2 already ensured calendar is available)
         try:
@@ -246,14 +247,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
         async def fetch_wrapper(key, func, name):
             try:
                 # Return (key, data, error)
-                return (key, await ThreadPoolManager().run_async(TaskType.IO, func, trade_date=trade_date), None)
+                return (key, await func(trade_date=trade_date), None)
             except Exception as e:
                 logger.warning(f"[DailySync] Fetch {name} failed for {trade_date}: {e}")
                 return (key, None, e)
 
         async def fetch_indices():
             try:
-                tasks = [ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_index_daily, ts_code=c,
+                tasks = [self.context.api.get_index_daily(ts_code=c,
                                                        trade_date=trade_date) for c in MAJOR_INDICES]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
@@ -354,10 +355,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
             # Assume caller provides it or we use context to get it?
             # For standalone, let's use datetime.now or assume today if not provided
             # But better to let caller handle default.
-            trade_date = datetime.datetime.now().strftime('%Y%m%d')
+            trade_date = get_now().strftime('%Y%m%d')
 
         try:
-            df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_moneyflow, trade_date=trade_date)
+            df = await self.context.api.get_moneyflow(trade_date=trade_date)
             if df is not None and not df.empty:
                 count = await self.context.cache.save_moneyflow(df)
                 if count is not None and count > 0:
@@ -370,10 +371,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
     async def sync_northbound(self, trade_date=None):
         """Sync northbound holding for a specific date (Standalone)."""
         if trade_date is None:
-            trade_date = datetime.datetime.now().strftime('%Y%m%d')
+            trade_date = get_now().strftime('%Y%m%d')
 
         try:
-            df = await ThreadPoolManager().run_async(TaskType.IO, self.context.api.get_hk_hold, trade_date=trade_date)
+            df = await self.context.api.get_hk_hold(trade_date=trade_date)
             if df is not None and not df.empty:
                 df = df[df['ts_code'].astype(str).str.endswith(('.SH', '.SZ'))]
                 if not df.empty:

@@ -455,6 +455,13 @@ TABLE_DEFINITIONS = {
             "south_money": "col_south_money",
         }
     },
+    "alembic_version": {
+        "alias": "tab_alembic_version",
+        "desc": "数据库版本",
+        "columns": {
+            "version_num": "col_version_num"
+        }
+    },
     "task_history": {
         "alias": "tab_task_history",
         "desc": "系统任务执行历史日志",

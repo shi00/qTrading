@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 import requests
 import json
 import threading
+from utils.time_utils import get_now
 
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
@@ -80,8 +81,8 @@ class NewsFetcher:
                 # -------------------------------------------------------------
                 try:
                     # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
-                    end_date = datetime.now().strftime("%Y%m%d")
-                    start_date = (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+                    end_date = get_now().strftime("%Y%m%d")
+                    start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
                     
                     df_cninfo = ak.stock_zh_a_disclosure_report_cninfo(
                         symbol=symbol,
@@ -185,7 +186,7 @@ class NewsFetcher:
                 return []
 
             news_list = []
-            now = datetime.now()
+            now = get_now()
             today_str = now.strftime('%Y-%m-%d')
             
             for _, row in df.head(limit).iterrows():

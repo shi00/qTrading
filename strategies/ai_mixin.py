@@ -18,12 +18,14 @@ import asyncio
 import logging
 import math
 import pandas as pd
+from datetime import datetime, timedelta
 
 from data.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from utils.config_handler import ConfigHandler  # Used by get_ai_max_candidates
 from utils.technical_analysis import TechnicalAnalysis
 from ui.i18n import I18n
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,15 @@ class AIStrategyMixin:
             candidates_df = candidates_df.head(cap)
 
         # --- Fetch Global Context ONCE ---
+        # --- Pre-fetch Learning Context ONCE for the entire batch ---
+        history_context = ""
+        try:
+            from data.review_manager import ReviewManager
+            rm = ReviewManager()
+            history_context = await rm.get_learning_context()
+        except Exception as e:
+            logger.warning(f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}")
+
         global_context = ""
         try:
             global_context = await NewsFetcher.get_us_major_moves()
@@ -103,11 +114,37 @@ class AIStrategyMixin:
 
         # --- Pre-fetch Concepts for all candidates (N+1 optimization) ---
         concepts_map = {}
+        all_ts_codes = candidates_df['ts_code'].tolist()
         try:
-            all_ts_codes = candidates_df['ts_code'].tolist()
             concepts_map = await dp.cache.get_concepts(all_ts_codes)
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to pre-fetch concepts: {e}")
+
+        # --- Ultimate Pipeline: Bulk History DB Query & Async News Task Pipelining (Fixing N+1) ---
+        prefetched_history = {}
+        news_tasks = {}
+        try:
+            # 1. O(1) DB Query for History
+            end_date_str = get_now().strftime('%Y%m%d')
+            start_date_str = (get_now() - timedelta(days=60)).strftime('%Y%m%d')
+            bulk_history_df = await dp.cache.get_daily_quotes(
+                ts_code_list=all_ts_codes, start_date=start_date_str, end_date=end_date_str
+            )
+            if bulk_history_df is not None and not bulk_history_df.empty:
+                for code, group in bulk_history_df.groupby('ts_code'):
+                    prefetched_history[code] = group
+
+            # 2. Background Pipelining for News with Semaphore(1)
+            news_sem = asyncio.Semaphore(1)
+            
+            async def bg_fetch_news(code):
+                async with news_sem:
+                    try: return await NewsFetcher.get_stock_news(code, limit=5)
+                    except Exception: return []
+                    
+            news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
+        except Exception as e:
+            logger.warning(f"[AIStrategyMixin] Ultimate Pipeline init failed: {e}")
 
         # --- Batch Pre-Fetch: Capital Flow Data (Moneyflow, TopList, Northbound) ---
         # Fetch once for the trade date, filter per-stock in the loop (0ms per stock)
@@ -174,10 +211,16 @@ class AIStrategyMixin:
                 if on_progress:
                     on_progress(completed_count, total_tasks,
                                 I18n.get("ai_analyzing_stock", name=stock_name))
+                                
+                hist_df = prefetched_history.get(row_data.get('ts_code'), pd.DataFrame())
+                news_list = []
+                if row_data.get('ts_code') in news_tasks:
+                    news_list = await news_tasks[row_data.get('ts_code')]
                     
                 res = await self._mixin_analyze_single(
                     row_data, dp, ai_client, global_context, concepts_map,
-                    prefetched_capital=prefetched_capital, on_chunk=on_chunk_callback
+                    prefetched_capital=prefetched_capital, on_chunk=on_chunk_callback,
+                    history_df=hist_df, news=news_list, history_context=history_context
                 )
                 
                 completed_count += 1
@@ -217,6 +260,11 @@ class AIStrategyMixin:
 
         logger.info(f"[AIStrategyMixin] Complete. {completed_count}/{total_tasks} processed, {len(final_rows)} valid results")
 
+        # Cleanup: Cancel any orphan news tasks that were never awaited (e.g. user cancelled early)
+        for code, task in news_tasks.items():
+            if not task.done():
+                task.cancel()
+
         if not final_rows:
             return candidates_df  # Fallback: return math-only results
 
@@ -225,7 +273,8 @@ class AIStrategyMixin:
 
     async def _mixin_analyze_single(self, row: dict, dp, ai_client: AIService,
                                      global_context: str, concepts_map: dict,
-                                     prefetched_capital: dict = None, on_chunk=None):
+                                     prefetched_capital: dict = None, on_chunk=None,
+                                     history_df=None, news=None, history_context: str = None):
         """
         Analyze a single stock. Fetches history, tech indicators, news,
         capital flow, financials, then calls AI with strategy-specific context injected.
@@ -234,7 +283,8 @@ class AIStrategyMixin:
             ts_code = row['ts_code']
 
             # 1. History (60 trading days)
-            history_df = await dp.get_stock_history(ts_code, days=60)
+            if history_df is None or history_df.empty:
+                history_df = await dp.get_stock_history(ts_code, days=60)
 
             # 2. Technical Indicators (pointwise)
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
@@ -252,7 +302,8 @@ class AIStrategyMixin:
             tech_context.update(tech_structure)
 
             # 3. News
-            news = await NewsFetcher.get_stock_news(ts_code, limit=5)
+            if news is None:
+                news = await NewsFetcher.get_stock_news(ts_code, limit=5)
 
             # 4. Concepts (use pre-fetched map)
             concepts = []
@@ -284,7 +335,8 @@ class AIStrategyMixin:
                 capital_flow_text=capital_flow_text,
                 financials_text=financials_text,
                 history_text=history_text,
-                on_chunk=on_chunk
+                on_chunk=on_chunk,
+                history_context=history_context
             )
             return ai_result
 
@@ -310,7 +362,9 @@ class AIStrategyMixin:
             return result
 
         try:
-            df = history_df.sort_values('trade_date', ascending=True).copy()
+            # D11: Apply Forward Adjusted Prices (QFQ) to avoid split/dividend gaps fooling the AI
+            df_qfq = TechnicalAnalysis._get_qfq_df(history_df)
+            df = df_qfq.sort_values('trade_date', ascending=True).copy()
             close = df['close']
 
             # MA Alignment
@@ -386,8 +440,10 @@ class AIStrategyMixin:
             return ""
         
         try:
+            # D11: Apply Forward Adjusted Prices (QFQ) to avoid split/dividend gaps fooling the AI
+            df_qfq = TechnicalAnalysis._get_qfq_df(history_df)
             # Ensure chronological order
-            df = history_df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+            df = df_qfq.sort_values('trade_date', ascending=True).reset_index(drop=True)
             if len(df) < 5:
                 return "Insufficient historical data (<5 days)."
             

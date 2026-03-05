@@ -5,7 +5,7 @@ from data.cache_manager import CacheManager
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
-from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class ReviewManager:
             logger.info("[Review] No pending predictions to review.")
             return
 
-        current_date = datetime.datetime.now().strftime('%Y%m%d')
+        current_date = get_now().strftime('%Y%m%d')
         updated_count = 0
 
         # 2. Check each prediction
@@ -83,7 +83,7 @@ class ReviewManager:
                     # Determine Result (Relative Return)
                     # We need Index Return for this date to calculate Alpha.
                     # Default benchmark: 000300.SH (CSI 300) or 000001.SH (Shanghai Composite)
-                    index_code = '000001.SH' 
+                    index_code = ConfigHandler.get_config('benchmark_index', '000001.SH')
                     
                     # Fetch Index Quote for T+1
                     # Since we don't cache index daily quotes in the same efficient way yet (or handled by quotes table?),
@@ -92,9 +92,8 @@ class ReviewManager:
                     
                     index_pct = 0.0
                     try:
-                        # get_index_daily is synchronous — must run in thread pool
-                        df_idx = await ThreadPoolManager().run_async(
-                            TaskType.IO, self.api.get_index_daily,
+                        # P0-4 Fix: directly await async API method
+                        df_idx = await self.api.get_index_daily(
                             ts_code=index_code,
                             start_date=t1_row['trade_date'],
                             end_date=t1_row['trade_date']
@@ -134,22 +133,10 @@ class ReviewManager:
         - Missing columns: Uses safe column access
         - Date edge cases: Uses 10-day lookback window
         """
-        date_threshold = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime('%Y%m%d')
+        date_threshold = (get_now() - datetime.timedelta(days=10)).strftime('%Y%m%d')
         
         try:
-            # Query screening_history for pending reviews
-            sql = '''
-                SELECT id, trade_date, ts_code, ai_score, ai_reason 
-                FROM screening_history 
-                WHERE trade_date >= ? 
-                  AND prediction_result IS NULL
-                  AND ai_score > 0
-                ORDER BY trade_date DESC
-            '''
-            
-            df = await self.cache._read_db(sql, (date_threshold,))
-            if df is None or df.empty:
-                return pd.DataFrame()
+            return await self.cache.screener_dao.get_pending_predictions(date_threshold)
             return df
                     
         except Exception as e:
@@ -170,24 +157,7 @@ class ReviewManager:
         losses = []
         
         try:
-            # Query top wins (highest positive alpha)
-            sql_wins = '''
-                SELECT ts_code, name, t1_pct, ai_score, ai_reason
-                FROM screening_history 
-                WHERE prediction_result = 'WIN' AND t1_pct IS NOT NULL
-                ORDER BY t1_pct DESC
-                LIMIT ?
-            '''
-            
-            sql_losses = '''
-                SELECT ts_code, name, t1_pct, ai_score, ai_reason
-                FROM screening_history 
-                WHERE prediction_result = 'LOSS' AND t1_pct IS NOT NULL
-                ORDER BY t1_pct ASC
-                LIMIT ?
-            '''
-            
-            df_wins = await self.cache._read_db(sql_wins, (limit,))
+            df_wins = await self.cache.screener_dao.get_learning_context(limit=limit, is_win=True)
             if df_wins is not None and not df_wins.empty:
                 for _, row in df_wins.iterrows():
                     wins.append({
@@ -198,7 +168,7 @@ class ReviewManager:
                         'reason': str(row['ai_reason'])[:50] if row['ai_reason'] else ''
                     })
 
-            df_losses = await self.cache._read_db(sql_losses, (limit,))
+            df_losses = await self.cache.screener_dao.get_learning_context(limit=limit, is_win=False)
             if df_losses is not None and not df_losses.empty:
                 for _, row in df_losses.iterrows():
                     losses.append({
@@ -234,8 +204,7 @@ class ReviewManager:
 
     async def _update_result(self, record_id, pct, label, index_pct=0.0):
         """Update DB with result. index_pct reserved for future alpha storage."""
-        sql = 'UPDATE screening_history SET "t1_pct"=?, "prediction_result"=? WHERE "id"=?'
-        await self.cache._write_db(sql, (pct, label, record_id), is_many=False)
+        await self.cache.screener_dao.update_prediction_result(record_id, pct, label)
 
     async def save_results(self, strategy_name, df):
         """
@@ -245,7 +214,7 @@ class ReviewManager:
         if df is None or df.empty:
             return
 
-        current_date = datetime.datetime.now().strftime('%Y%m%d')
+        current_date = get_now().strftime('%Y%m%d')
         
         # Helpers to safely extract fields
         def _f(row_data, key, default=None):
@@ -318,27 +287,6 @@ class ReviewManager:
         if not records:
             return
 
-        sql = '''
-            INSERT INTO screening_history 
-            ("trade_date","strategy_name","ts_code","name","close","pct_chg",
-             "industry","vol","amount","turnover_rate",
-             "pe_ttm","pb","ps_ttm","dv_ttm","total_mv","circ_mv",
-             "roe","grossprofit_margin","debt_to_assets","or_yoy","netprofit_yoy",
-             "ai_score","ai_reason","thinking")
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT("trade_date","strategy_name","ts_code") DO UPDATE SET
-            "name"=excluded."name","close"=excluded."close","pct_chg"=excluded."pct_chg",
-            "industry"=excluded."industry","vol"=excluded."vol","amount"=excluded."amount",
-            "turnover_rate"=excluded."turnover_rate",
-            "pe_ttm"=excluded."pe_ttm","pb"=excluded."pb","ps_ttm"=excluded."ps_ttm",
-            "dv_ttm"=excluded."dv_ttm","total_mv"=excluded."total_mv","circ_mv"=excluded."circ_mv",
-            "roe"=excluded."roe","grossprofit_margin"=excluded."grossprofit_margin",
-            "debt_to_assets"=excluded."debt_to_assets","or_yoy"=excluded."or_yoy",
-            "netprofit_yoy"=excluded."netprofit_yoy",
-            "ai_score"=excluded."ai_score","ai_reason"=excluded."ai_reason",
-            "thinking"=excluded."thinking"
-        '''
-        
-        await self.cache._write_db(sql, records, is_many=True)
+        await self.cache.screener_dao.save_screening_results(records)
         logger.info(f"[Review] Saved {len(records)} predictions for {strategy_name}")
 

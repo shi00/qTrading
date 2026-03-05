@@ -1,4 +1,5 @@
 flet==0.28.3
+flet-desktop==0.28.3
 tushare>=1.4.24
 pandas>=3.0.0
 aiosqlite>=0.22.1
@@ -16,6 +17,7 @@ readerwriterlock>=1.0.9
 pandas_market_calendars>=4.0.0
 sqlparse>=0.4.4
 tzdata>=2025.3 # Required for APScheduler timezone support on Windows
+pytz>=2024.1
 
 apscheduler>=3.10.0
 llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Install manually if needed.
@@ -23,6 +25,7 @@ llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Instal
 polars>=1.38.1
 pyarrow>=14.0.0 # Required by Polars for converting Pandas nullable Int64/Float64 types
 sqlalchemy>=2.0.46
+alembic>=1.14.0
 async-lru>=2.1.0
 
 urllib3>=2.6.3 # Fix Brotli decode error; must be >= 2.6.2

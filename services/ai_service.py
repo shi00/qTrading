@@ -235,7 +235,7 @@ class AIService:
     @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=120000)
     async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="",
                             strategy_context: str = "", capital_flow_text: str = "", financials_text: str = "",
-                            history_text: str = "", on_chunk=None) -> dict:
+                            history_text: str = "", on_chunk=None, history_context: str = None) -> dict:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'ai_model_name' to be configured.
@@ -278,15 +278,14 @@ class AIService:
         # Add concepts to stock_xml
         stock_xml += f"\n  Concepts: {concepts_str}"
 
-        # Fetch Learning Context (Few-Shot)
-        history_context = ""
-        try:
-            # We instantiate ReviewManager here. In a real app, maybe inject it.
-            # But for now, simple instantiation is fine as it uses lightweight DB calls.
-            rm = ReviewManager()
-            history_context = await rm.get_learning_context()
-        except Exception as e:
-            logger.warning(f"[AI] Failed to fetch learning context: {e}")
+        # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
+        if history_context is None:
+            try:
+                rm = ReviewManager()
+                history_context = await rm.get_learning_context()
+            except Exception as e:
+                logger.warning(f"[AI] Failed to fetch learning context: {e}")
+                history_context = ""
 
         # Load System Prompt from Config
         system_prompt = ConfigHandler.get_ai_system_prompt()

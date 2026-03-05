@@ -15,6 +15,7 @@ from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class SchedulerService:
             logger.info("[Scheduler] Update skipped (Auto-update disabled)")
             return
 
-        today = datetime.datetime.now().strftime('%Y%m%d')
+        today = get_now().strftime('%Y%m%d')
         if self._last_update_date == today:
             logger.info("[Scheduler] Update skipped (Already updated today)")
             return
@@ -189,13 +190,13 @@ class SchedulerService:
         # Check Trading Day
         try:
             client = TushareClient()
-            is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)
+            is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)  # TODO: P0-4 Phase 2 will make this fully async
             if not is_trading:
                 logger.info(f"[Scheduler] Update skipped ({today} is not a trading day)")
                 return
         except Exception as e:
             logger.warning(f"[Scheduler] Trade calendar check failed: {e}")
-            if datetime.datetime.now().weekday() >= 5:
+            if get_now().weekday() >= 5:
                 return
 
         # Submit via TaskManager for visibility and persistence
@@ -234,19 +235,19 @@ class SchedulerService:
         if not ConfigHandler.is_auto_update_enabled():
             return
 
-        today = datetime.datetime.now().strftime('%Y%m%d')
+        today = get_now().strftime('%Y%m%d')
         if self._last_pred_date == today:
             return
 
         try:
             client = TushareClient()
-            is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)
+            is_trading = await ThreadPoolManager().run_async(TaskType.IO, client.is_trading_day, today)  # TODO: P0-4 Phase 2 will make this fully async
             if not is_trading:
                 logger.info(f"[Scheduler] Prediction skipped ({today} is not a trading day)")
                 return
         except Exception as e:
             logger.warning(f"[Scheduler] Trade calendar check failed for prediction: {e}")
-            if datetime.datetime.now().weekday() >= 5:
+            if get_now().weekday() >= 5:
                 return
 
         from services.task_manager import TaskManager

@@ -4,6 +4,8 @@ import logging
 import os
 import threading
 
+import re
+import sqlalchemy as sa
 from sqlalchemy import text, event, Engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -22,6 +24,7 @@ from data.daos.stock_dao import StockDao
 from data.daos.sync_dao import SyncDao
 from data.daos.macro_dao import MacroDao
 from data.daos.holder_dao import HolderDao
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +63,17 @@ class CacheManager:
         connection_string = f"sqlite+aiosqlite:///{self.db_path}"
 
         # Load pool settings from config
-        db_pool_size = ConfigHandler.get_db_connection_pool_size()
+        try:
+            db_pool_size = int(ConfigHandler.get_db_connection_pool_size())
+        except (TypeError, ValueError):
+            db_pool_size = 5 # Safe fallback
         
         self.engine = create_async_engine(
             connection_string,
             echo=False,
             # Pool settings for high concurrency
             pool_size=db_pool_size,  # Configurable (default 5)
-            max_overflow=max(30, int(db_pool_size * 0.1)),  # Allow 10% overflow or at least 30
+            max_overflow=max(5, int(db_pool_size * 0.5)),  # Allow 50% overflow, capped reasonably for SQLite WAL
             pool_timeout=60,  # Wait up to 60s for connection
             future=True
         )
@@ -124,6 +130,13 @@ class CacheManager:
     async def close(self):
         """Dispose the engine"""
         logger.info("[CacheManager] Disposing engine...")
+        # Unblock any coroutines waiting on maintenance before disposing
+        self._maintenance_event.set()
+        try:
+            from data.daos.base_dao import BaseDao
+            BaseDao._get_maintenance_event().set()
+        except Exception:
+            pass
         await self.engine.dispose()
 
     # --- Maintenance & Helpers ---
@@ -144,7 +157,7 @@ class CacheManager:
             'content': item.get('content', '').strip(),
             'tags': item.get('tags', ''),
             'publish_time': item.get('time',
-                                     item.get('publish_time', datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))),
+                                     item.get('publish_time', get_now().strftime("%Y-%m-%d %H:%M:%S"))),
             'source': item.get('source', default_source)
         }
 
@@ -157,9 +170,20 @@ class CacheManager:
         return await dao._write_db(sql, params, is_many)
 
     async def _read_db(self, sql, params=None):
-        await self.wait_for_maintenance()
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params)
+
+    def checkpoint_wal(self):
+        """Synchronous WAL checkpoint for safe shutdown before os._exit.
+        Uses raw sqlite3 to avoid event loop dependency during cleanup."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+            logger.info("[CacheManager] WAL checkpoint completed before exit.")
+        except Exception as e:
+            logger.warning(f"[CacheManager] WAL checkpoint failed: {e}")
 
     # --- Init & Reset ---
     async def init_db(self, force=False):
@@ -177,26 +201,41 @@ class CacheManager:
             if self._schema_initialized and not force:
                 return
 
-            logger.info("[CacheManager] Initializing DB Schema...")
-            schema_path = os.path.join(os.path.dirname(__file__), 'schema.sql')
-            if not os.path.exists(schema_path):
-                logger.error("Schema file not found!")
-                return
+            logger.info("[CacheManager] Initializing DB Schema via Alembic...")
+            
+            # Check DB schema state to handle legacy users transitioning to Alembic
+            has_alembic, has_old_schema = False, False
+            try:
+                from sqlalchemy import inspect
+                async with self.engine.connect() as conn:
+                    def _sync_check(c):
+                        inspector = inspect(c)
+                        tables = inspector.get_table_names()
+                        return 'alembic_version' in tables, 'stock_basic' in tables
+                    has_alembic, has_old_schema = await conn.run_sync(_sync_check)
+            except Exception as e:
+                logger.warning(f"[CacheManager] Failed to inspect DB tables: {e}")
 
-            # Offload file read
-            def read_schema():
-                with open(schema_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+            def run_alembic_upgrade():
+                from alembic.config import Config
+                from alembic import command
+                
+                alembic_ini_path = os.path.join(os.path.dirname(__file__), '..', 'alembic.ini')
+                alembic_cfg = Config(alembic_ini_path)
+                # Set the base directory so alembic can find its scripts
+                alembic_cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), '..', 'alembic'))
+                
+                # If the legacy database exists but Alembic doesn't, stamp it with the baseline 
+                # (which exactly matches the old schema.sql) to prevent 'table already exists' errors.
+                if has_old_schema and not has_alembic:
+                    logger.info("[CacheManager] Legacy database detected. Stamping Alembic baseline...")
+                    command.stamp(alembic_cfg, "367c382dbf28")
+                
+                command.upgrade(alembic_cfg, "head")
 
             try:
-                msg = await ThreadPoolManager().run_async(TaskType.IO, read_schema)
-
-                # Split by ; and execute statements individually
-                statements = [s.strip() for s in msg.split(';') if s.strip()]
-
-                async with self.engine.begin() as conn:
-                    for stmt in statements:
-                        await conn.execute(text(stmt))
+                # Run alembic synchronously in thread pool
+                await ThreadPoolManager().run_async(TaskType.IO, run_alembic_upgrade)
 
                 self._schema_initialized = True
                 logger.info("[CacheManager] DB Init Complete.")
@@ -204,26 +243,11 @@ class CacheManager:
             except Exception as e:
                 logger.error(f"[CacheManager] Init DB Failed: {e}", exc_info=True)
 
-        # Run auto-migration check
-        await self._check_and_update_schema()
-
-    async def _check_and_update_schema(self):
-        """Auto-migrate schema for known missing columns."""
-        try:
-            async with self.engine.begin() as conn:
-                # Check daily_indicators.volume_ratio
-                try:
-                    await conn.execute(text("ALTER TABLE daily_indicators ADD COLUMN volume_ratio REAL"))
-                    logger.info("[Schema] Added volume_ratio to daily_indicators")
-                except Exception as e:
-                    # Likely "duplicate column name" or table missing. Ignore.
-                    pass
-        except Exception as e:
-             logger.warning(f"[Schema] Auto-migration check failed: {e}")
-
     async def hard_reset(self):
         """Delete DB and Re-init"""
         self._maintenance_event.clear()
+        from data.daos.base_dao import BaseDao
+        BaseDao._get_maintenance_event().clear()
         try:
             await self.engine.dispose()
             await asyncio.sleep(0.5)
@@ -246,11 +270,18 @@ class CacheManager:
             await self.init_db(force=True)
 
         finally:
+            try:
+                from data.daos.base_dao import BaseDao
+                BaseDao._get_maintenance_event().set()
+            except Exception:
+                pass
             self._maintenance_event.set()
 
     async def clear_all_cache(self):
         """Drop all user tables and re-initialize schema."""
         self._maintenance_event.clear()
+        from data.daos.base_dao import BaseDao
+        BaseDao._get_maintenance_event().clear()
         try:
             # Dynamically query all user tables from sqlite_master
             # so we never miss newly added tables
@@ -261,12 +292,20 @@ class CacheManager:
                 tables = [row[0] for row in r.fetchall()]
 
                 for t in tables:
-                    await conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{t}"')
+                    if not re.match(r'^[a-zA-Z0-9_]+$', t):
+                        logger.error(f"[CacheManager] Malformed table name skipped: {t}")
+                        continue
+                    await conn.execute(sa.text(f'DROP TABLE IF EXISTS "{t}"'))
                 logger.info(f"[CacheManager] Dropped {len(tables)} tables: {tables}")
 
             self._schema_initialized = False
             await self.init_db(force=True)
         finally:
+            try:
+                from data.daos.base_dao import BaseDao
+                BaseDao._get_maintenance_event().set()
+            except Exception:
+                pass
             self._maintenance_event.set()
 
     # --- DELAGATIONS START HERE ---
@@ -279,8 +318,6 @@ class CacheManager:
     async def get_stock_basic(self):
         return await self.stock_dao.get_stock_basic()
 
-    async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
-        return await self.stock_dao.get_trade_cal(start_date, end_date, is_open)
     # --- Concepts ---
     async def save_concepts(self, df):
         return await self.stock_dao.save_concepts(df)
@@ -362,8 +399,8 @@ class CacheManager:
 
     # --- Screening Data ---
     async def get_screening_data(self, trade_date=None):
-        # Logic slightly complex, delegate to ScreenerDao but pass latest_trade_date func
-        return await self.screener_dao.get_screening_data(trade_date, self.get_latest_trade_date)
+        # P0-2: DAO now self-resolves latest_trade_date internally (Defense in Depth)
+        return await self.screener_dao.get_screening_data(trade_date)
 
     # --- Sync Stats & Misc ---
     async def update_sync_status(self, table_name, last_data_date, record_count, status='success'):
@@ -427,8 +464,9 @@ class CacheManager:
 
                     if not is_stock_table:
                         # Global Check: Just ensure data exists (>0 rows)
-                        r = await conn.exec_driver_sql(f"SELECT count(*) FROM {table}")
-                        cnt = r.fetchone()[0] or 0
+                        tbl = sa.table(table)
+                        r = await conn.execute(sa.select(sa.func.count()).select_from(tbl))
+                        cnt = r.scalar() or 0
                         ratio = 1.0 if cnt > 0 else 0.0
                         fresh_ratio = ratio  # Global: presence = fresh
                     else:
@@ -437,8 +475,9 @@ class CacheManager:
                         keys = meta.get('sync_config', {}).get('keys', [])
                         code_col = 'con_code' if 'con_code' in cols or 'con_code' in keys else 'ts_code'
                         
-                        r = await conn.exec_driver_sql(f"SELECT count(DISTINCT {code_col}) FROM {table}")
-                        cnt = r.fetchone()[0] or 0
+                        tbl = sa.table(table)
+                        r = await conn.execute(sa.select(sa.func.count(sa.distinct(sa.column(code_col)))).select_from(tbl))
+                        cnt = r.scalar() or 0
                         ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
                         
                         # Freshness Check: How recent is the latest data?
@@ -453,16 +492,17 @@ class CacheManager:
                             max_date = None
                             for dc in date_col_candidates:
                                 try:
-                                    r2 = await conn.exec_driver_sql(f"SELECT MAX({dc}) FROM {table}")
-                                    val = r2.fetchone()[0]
+                                    tbl_d = sa.table(table)
+                                    r2 = await conn.execute(sa.select(sa.func.max(sa.column(dc))).select_from(tbl_d))
+                                    val = r2.scalar()
                                     if val:
                                         max_date = val
                                         break
                                 except Exception:
-                                    continue
+                                    continue  # Column doesn't exist in this table
                             if max_date:
                                 max_dt = datetime.datetime.strptime(str(max_date)[:8], '%Y%m%d')
-                                age_days = (datetime.datetime.now() - max_dt).days
+                                age_days = (get_now() - max_dt).days
                                     # Fresh if within 7 days, decay linearly to 30 days
                                 if age_days <= 7:
                                     fresh_ratio = 1.0
@@ -475,7 +515,7 @@ class CacheManager:
                             if ratio < 0.01:
                                 fresh_ratio = 0.0
                         except Exception:
-                            pass  # Column may not exist, fresh_ratio stays 0
+                            logger.debug(f"[Health] Freshness check skipped for {table}: no valid date column")
                     
                     # --- Depth (all stock tables, based on global trade days) ---
                     depth_ratio = None
@@ -487,11 +527,12 @@ class CacheManager:
                     is_daily_freq = meta.get('quality_config', {}).get('frequency') == 'daily'
                     if is_daily_freq and global_expected_rows and global_expected_rows > 0:
                         try:
-                            r_total = await conn.exec_driver_sql(f"SELECT COUNT(*) FROM {table}")
-                            actual_rows = r_total.fetchone()[0] or 0
+                            tbl_b = sa.table(table)
+                            r_total = await conn.execute(sa.select(sa.func.count()).select_from(tbl_b))
+                            actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
                         except Exception:
-                            pass
+                            logger.debug(f"[Health] Breadth calc failed for {table}")
 
                     table_type = 'stock' if is_stock_table else 'global'
                     results[table] = {
@@ -523,23 +564,11 @@ class CacheManager:
 
     async def get_concept_count(self):
         """Get total count of stock concept mappings."""
-        try:
-            async with self.engine.connect() as conn:
-                r = await conn.exec_driver_sql("SELECT COUNT(*) FROM stock_concepts")
-                return r.scalar() or 0
-        except Exception as e:
-            # logger.warning(f"Failed to count concepts: {e}")
-            return 0
+        return await self.stock_dao.get_concept_count()
 
     # --- Extra Savers (Boilerplate) ---
     async def save_fina_forecast(self, df):
         return await self.financial_dao.save_fina_forecast(df)
-
-    async def save_holder_number(self, df):
-        return await self.holder_dao.save_holder_number(df)
-
-    async def save_top10_holders(self, df):
-        return await self.holder_dao.save_top10_holders(df)
 
     async def save_fina_mainbz(self, df):
         return await self.financial_dao.save_fina_mainbz(df)
@@ -591,9 +620,6 @@ class CacheManager:
 
     async def get_northbound(self, trade_date=None, ts_code=None):
         return await self.quote_dao.get_northbound(trade_date, ts_code)
-
-    async def save_moneyflow_hsgt(self, df):
-        return await self.quote_dao.save_moneyflow_hsgt(df)
 
     # --- Screening History ---
     async def get_screening_history(self, strategy_name=None, limit=100):

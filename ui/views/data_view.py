@@ -12,6 +12,7 @@ from data.metadata_manager import MetaDataManager
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.time_utils import get_now
 
 # Initialize logger properly
 logger = logging.getLogger(__name__)
@@ -628,7 +629,7 @@ class TableViewerTab(ft.Container):
                 os.makedirs(export_dir)
 
             suffix = f"_p{self.current_page}" if current_page else "_all"
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             filename = f"{self.current_table}{suffix}_{timestamp}.csv"
             filepath = os.path.join(export_dir, filename)
 
@@ -740,7 +741,7 @@ class SQLConsoleTab(ft.Container):
                         self.btn_run,
                         self.progress_ring,
                         ft.Container(expand=True),
-                        ft.Text(I18n.get("data_date_fmt_hint"), size=11, color=AppColors.TEXT_HINT, italic=True),
+                        ft.Text(I18n.get("data_date_fmt_hint"), size=11, color=AppColors.TEXT_HINT),
                         ft.OutlinedButton("SELECT * LIMIT 10",
                                           style=AppStyles.outline_button(),
                                           on_click=lambda e: self._set_sql("SELECT * FROM stock_basic LIMIT 10")),
@@ -906,6 +907,15 @@ class DataExplorerView(ft.Container):
         # This method is called by Flet when the control is added to the page.
         # We delegate to an async method to handle the actual work.
         self.page.run_task(self.did_mount_async)
+
+    def will_unmount(self):
+        """Clean up subscriptions when view is detached"""
+        if self.page and getattr(self, "_pubsub_subscribed", False):
+            try:
+                self.page.pubsub.unsubscribe(self._on_broadcast_message)
+            except Exception:
+                pass
+            self._pubsub_subscribed = False
 
     async def did_mount_async(self):
         import time as _time

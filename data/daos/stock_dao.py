@@ -2,6 +2,7 @@ import datetime
 import logging
 from .base_dao import BaseDao
 from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class StockDao(BaseDao):
         cols = ['ts_code', 'symbol', 'name', 'area', 'industry', 'market', 'list_date', 'list_status', 'updated_at']
 
         df = df.copy()
-        df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        df['updated_at'] = get_now().strftime('%Y-%m-%d %H:%M:%S')
         return await self._save_upsert(df, "stock_basic", cols, pk_columns=['ts_code'])
 
     async def get_stock_basic(self):
@@ -22,9 +23,10 @@ class StockDao(BaseDao):
 
     async def get_active_stock_count(self):
         """Count stocks with list_status='L'"""
-        async with self.engine.connect() as conn:
-            r = await conn.exec_driver_sql("SELECT count(*) FROM stock_basic WHERE list_status='L'")
-            return r.fetchone()[0] or 0
+        df = await self._read_db("SELECT count(*) as cnt FROM stock_basic WHERE list_status='L'")
+        if df is not None and not df.empty:
+            return df['cnt'].iloc[0] or 0
+        return 0
 
     # --- Trade Calendar ---
     async def save_trade_cal(self, df):
@@ -53,10 +55,10 @@ class StockDao(BaseDao):
 
     async def get_trade_cal_range(self):
         """Get the min and max calendar dates from DB"""
-        async with self.engine.connect() as conn:
-            r = await conn.exec_driver_sql("SELECT MIN(cal_date), MAX(cal_date) FROM trade_cal")
-            row = r.fetchone()
-            return (row[0], row[1]) if row else (None, None)
+        df = await self._read_db("SELECT MIN(cal_date) as min_d, MAX(cal_date) as max_d FROM trade_cal")
+        if df is not None and not df.empty:
+            return (df['min_d'].iloc[0], df['max_d'].iloc[0])
+        return (None, None)
 
     # --- Concepts ---
     async def save_concepts(self, df):
@@ -65,7 +67,7 @@ class StockDao(BaseDao):
         cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
         
         df = df.copy()
-        df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        df['updated_at'] = get_now().strftime('%Y-%m-%d %H:%M:%S')
         
         return await self._save_upsert(df, "stock_concepts", cols, pk_columns=['ts_code', 'concept_id'])
 
@@ -79,7 +81,7 @@ class StockDao(BaseDao):
         
         cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
         df = df.copy()
-        df['updated_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        df['updated_at'] = get_now().strftime('%Y-%m-%d %H:%M:%S')
 
         # Prepare params outside transaction
         params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
@@ -88,6 +90,9 @@ class StockDao(BaseDao):
         sql_insert = f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join(['?']*len(cols))})"
 
         try:
+            # Gate: wait for maintenance before direct engine access
+            import asyncio
+            await self._get_maintenance_event().wait()
             async with self.engine.begin() as conn:
                 # 1. Clear old data
                 await conn.exec_driver_sql("DELETE FROM stock_concepts")
@@ -106,8 +111,7 @@ class StockDao(BaseDao):
         Clear all concept data.
         NOTE: Prefer overwrite_concepts for full refresh to ensure atomicity.
         """
-        async with self.engine.begin() as conn:
-            await conn.exec_driver_sql("DELETE FROM stock_concepts")
+        await self._write_db("DELETE FROM stock_concepts")
 
     async def get_concepts(self, ts_codes: list = None):
         """
@@ -139,3 +143,13 @@ class StockDao(BaseDao):
             result[code] = group['concept_name'].tolist()
 
         return result
+
+    async def get_concept_count(self):
+        """Get total count of stock concept mappings."""
+        try:
+            df = await self._read_db("SELECT COUNT(*) as cnt FROM stock_concepts")
+            if df is not None and not df.empty:
+                return df['cnt'].iloc[0] or 0
+            return 0
+        except Exception:
+            return 0

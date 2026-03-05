@@ -18,9 +18,8 @@ class QuoteDao(BaseDao):
 
     async def check_data_exists(self, trade_date: str) -> bool:
         try:
-            async with self.engine.connect() as conn:
-                res = await conn.exec_driver_sql("SELECT 1 FROM daily_quotes WHERE trade_date=? LIMIT 1", (trade_date,))
-                return res.fetchone() is not None
+            df = await self._read_db("SELECT 1 as val FROM daily_quotes WHERE trade_date=? LIMIT 1", (trade_date,))
+            return df is not None and not df.empty
         except Exception:
             return False
 
@@ -73,16 +72,16 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, params)
 
     async def get_latest_trade_date(self):
-        async with self.engine.connect() as conn:
-            res = await conn.exec_driver_sql("SELECT MAX(trade_date) FROM daily_quotes")
-            row = res.fetchone()
-            return row[0] if row else None
+        df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
+        if df is not None and not df.empty:
+            return df['max_td'].iloc[0]
+        return None
 
     async def get_cached_trade_dates(self):
-        async with self.engine.connect() as conn:
-            res = await conn.exec_driver_sql("SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date")
-            rows = res.fetchall()
-            return set(row[0] for row in rows)
+        df = await self._read_db("SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date")
+        if df is None or df.empty:
+            return set()
+        return set(df['trade_date'])
 
     # --- Index Data ---
     async def save_index_daily(self, df):
@@ -171,10 +170,6 @@ class QuoteDao(BaseDao):
             p.append(ts_code)
         return await self._read_db(sql, p)
 
-    async def save_moneyflow_hsgt(self, df):
-        cols = ['trade_date', 'ggt_ss', 'ggt_sz', 'hgt', 'sgt', 'north_money', 'south_money']
-        return await self._save_upsert(df, "moneyflow_hsgt", cols, pk_columns=['trade_date'])
-
     # --- Northbound ---
     async def save_northbound(self, df):
         cols = ['ts_code', 'trade_date', 'name', 'vol', 'ratio', 'exchange']
@@ -192,10 +187,11 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, p)
 
     async def get_latest_northbound(self):
-        async with self.engine.connect() as conn:
-            r = await conn.exec_driver_sql("SELECT MAX(trade_date) FROM northbound_holding")
-            row = r.fetchone()
-            td = row[0] if row else None
-            if not td:
-                return pd.DataFrame()
+        df = await self._read_db("SELECT MAX(trade_date) as max_td FROM northbound_holding")
+        if df is not None and not df.empty:
+            td = df['max_td'].iloc[0]
+        else:
+            td = None
+        if not td:
+            return pd.DataFrame()
         return await self.get_northbound(trade_date=td)

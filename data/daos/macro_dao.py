@@ -1,6 +1,7 @@
 import datetime
 import logging
 from data.daos.base_dao import BaseDao
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class MacroDao(BaseDao):
 
         if 'created_at' not in df.columns:
             df = df.copy()
-            df['created_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            df['created_at'] = get_now().strftime('%Y-%m-%d %H:%M:%S')
             columns.append('created_at')
 
         return await self._save_upsert(df, 'macro_economy', columns, pk_columns=['period'])

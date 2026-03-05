@@ -507,6 +507,7 @@ class DataSourceTab(ft.Container):
             self.show_snack(I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR)
 
     def confirm_clear_cache(self, e):
+        if self.is_syncing: return
         self._show_confirm_dialog(
             title_key="dialog_confirm_clear_title",
             content_key="dialog_confirm_clear_content",
@@ -715,7 +716,8 @@ class DataSourceTab(ft.Container):
             name=I18n.get("task_name_init_sync"),
             task_type=I18n.get("task_type_data_sync"),
             coroutine_factory=_run_initial_sync,
-            cancellable=True
+            cancellable=True,
+            unique_key="system_init_sync"
         )
 
     def update_progress(self, current, total, message):

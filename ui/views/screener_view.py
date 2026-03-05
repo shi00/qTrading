@@ -168,6 +168,11 @@ class ScreenerView(ft.Container):
     def will_unmount(self):
         TaskManager().unsubscribe(self._on_tasks_updated)
         self.vm.dispose()
+        
+        # P1-11 Fix: Detach the thousands of Flet Row references inside the VirtualTable
+        if hasattr(self, 'result_table') and self.result_table:
+            self.result_table.list_view.controls.clear()
+            
         # Cleanup overlay to prevent memory leak
         if self.detail_dialog and self.page:
             try:
@@ -557,12 +562,15 @@ class ScreenerView(ft.Container):
                 step = p.get("step", 1)
                 divisions = int((max_val - min_val) / step) if step > 0 else 10
 
-                # Value display text
-                value_text = ft.Text(f"{label}: {default}", size=12, color=AppColors.TEXT_SECONDARY)
+                # Value display text — format consistently with on_change handler
+                init_display = int(default) if default == int(default) else round(default, 1)
+                value_text = ft.Text(f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY)
 
                 def make_on_change(vt, lbl):
                     def handler(e):
-                        vt.value = f"{lbl}: {int(e.control.value)}"
+                        val = e.control.value
+                        display = int(val) if val == int(val) else round(val, 1)
+                        vt.value = f"{lbl}: {display}"
                         vt.update()
                         
                         # Trigger dynamic strategy description update
@@ -624,7 +632,8 @@ class ScreenerView(ft.Container):
                 continue  # Skip labels/decorators
             name = ctrl.data
             if isinstance(ctrl, ft.Slider):
-                params[name] = int(ctrl.value)  # Slider returns float; strategies expect int
+                val = ctrl.value
+                params[name] = int(val) if val == int(val) else round(val, 2)
             elif isinstance(ctrl, ft.TextField):
                 try:
                     params[name] = float(ctrl.value)

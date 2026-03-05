@@ -17,6 +17,7 @@ from data.cache_manager import CacheManager
 from utils.thread_pool import ThreadPoolManager, TaskType
 from ui.i18n import I18n
 from utils.log_decorators import log_async_operation
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ class MarketDataService:
     @log_async_operation(operation_name="fetch_market_data")
     async def _fetch_market_data(self):
         """获取市场概览数据"""
-        now = datetime.datetime.now()
+        now = get_now()
         today_str = now.strftime('%Y%m%d')
         start_str = (now - datetime.timedelta(days=30)).strftime('%Y%m%d')
         
@@ -223,9 +224,7 @@ class MarketDataService:
     
     async def _get_index(self, code: str, name_key: str, date: str) -> dict:
         """获取指数数据"""
-        df = await ThreadPoolManager().run_async(
-            TaskType.IO, self.api.get_index_daily, ts_code=code, trade_date=date
-        )
+        df = await self.api.get_index_daily(ts_code=code, trade_date=date)
         if df is not None and not df.empty:
             row = df.iloc[0]
             c = self._safe_float(row.get('pct_chg'))
@@ -245,9 +244,7 @@ class MarketDataService:
     
     async def _get_hsgt(self, date: str) -> dict:
         """获取北向资金数据"""
-        df = await ThreadPoolManager().run_async(
-            TaskType.IO, self.api.get_moneyflow_hsgt, trade_date=date
-        )
+        df = await self.api.get_moneyflow_hsgt(trade_date=date)
         if df is not None and not df.empty:
             val = self._safe_float(df.iloc[0].get('north_money'))
             # north_money unit: 万元 (10K CNY). >100万 -> 亿 display.

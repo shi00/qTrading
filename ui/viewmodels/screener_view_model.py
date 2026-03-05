@@ -15,6 +15,7 @@ from ui.i18n import I18n
 from services.task_manager import TaskManager
 from data.quality_gate import QualityGateError
 from data.cache_manager import CacheManager
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +81,18 @@ class ScreenerViewModel:
         pass
         
     def dispose(self):
-        """Cleanup resources"""
+        """Cleanup resources and ensure aggressive GC of large dataframes"""
+        # Detach bindings
         self.on_update = None
         self.on_log = None
         self.on_status = None
         self.on_progress = None
         self.on_log_stream_start = None
+        
+        # P1-11 Fix: Prevent massive Pandas DataFrame leak across component remounts
+        self._full_results = None
+        self._ai_buffer = []
+        self._realtime_snapshot = None
         
     # --- Data Actions ---
     
@@ -467,7 +474,7 @@ class ScreenerViewModel:
             if not os.path.exists(folder):
                 os.makedirs(folder)
                 
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             filename = f"screener_results_{timestamp}.csv"
             filepath = os.path.join(folder, filename)
             

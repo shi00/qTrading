@@ -1,16 +1,30 @@
+import functools
 import logging
 import pandas as pd
 from .base_dao import BaseDao
 from utils.thread_pool import ThreadPoolManager, TaskType
+from data.models import ScreeningHistory
 
 logger = logging.getLogger(__name__)
 
 class ScreenerDao(BaseDao):
 
+    @functools.cached_property
+    def SH_BASE_COLS(self):
+        """Dynamically generate base columns excluding heavy fields like 'thinking'."""
+        # Reflection using SQLAlchemy Core Table columns (runs once, cached per instance)
+        cols = [c.name for c in ScreeningHistory.__table__.columns if c.name != 'thinking']
+        return ", ".join(cols)
+
+    @functools.cached_property
+    def SH_FULL_COLS(self):
+        """Full columns including 'thinking' for detail views."""
+        return f"{self.SH_BASE_COLS}, thinking"
+
     # --- Screening History ---
 
     async def get_screening_history(self, strategy_name=None, limit=100):
-        sql = "SELECT * FROM screening_history WHERE 1=1"
+        sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE 1=1"
         p = []
         if strategy_name:
             sql += " AND strategy_name=?"
@@ -38,7 +52,7 @@ class ScreenerDao(BaseDao):
         """
         Get screening records for a specific date, optionally filtered by strategy.
         """
-        sql = "SELECT * FROM screening_history WHERE trade_date = ?"
+        sql = f"SELECT {self.SH_FULL_COLS} FROM screening_history WHERE trade_date = ?"
         p = [trade_date]
         if strategy_name:
             sql += " AND strategy_name = ?"
@@ -46,13 +60,12 @@ class ScreenerDao(BaseDao):
         sql += " ORDER BY ai_score DESC"
         return await self._read_db(sql, p)
 
-
     async def get_pending_reviews(self):
-        async with self.engine.connect() as conn:
-            res = await conn.exec_driver_sql(
-                "SELECT * FROM screening_history WHERE t1_price IS NULL OR t5_price IS NULL")
-            rows = res.fetchall()
-            return [dict(zip(list(res.keys()), row)) for row in rows]
+        sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE t1_price IS NULL OR t5_price IS NULL ORDER BY created_at DESC LIMIT 500"
+        df = await self._read_db(sql)
+        if df is None or df.empty:
+            return []
+        return df.to_dict('records')
 
     async def update_screening_performance(self, updates):
         # updates = list of tuples (t1_price, t1_pct, t5_price, t5_pct, id)
@@ -62,26 +75,29 @@ class ScreenerDao(BaseDao):
         await self._write_db(sql, updates, is_many=True)
 
     async def get_learning_examples(self, limit=3):
-        wins, losses = None, None
-        async with self.engine.connect() as conn:
-            # Wins
-            r = await conn.exec_driver_sql(
-                "SELECT * FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT ?", (limit,))
-            rows = r.fetchall()
-            wins = pd.DataFrame(rows, columns=list(r.keys()))
-
-            # Losses
-            r = await conn.exec_driver_sql(
-                "SELECT * FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT ?", (limit,))
-            rows = r.fetchall()
-            losses = pd.DataFrame(rows, columns=list(r.keys()))
-
+        
+        sql_win = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT ?"
+        sql_loss = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT ?"
+        
+        wins = await self._read_db(sql_win, (limit,))
+        losses = await self._read_db(sql_loss, (limit,))
+        
         return wins, losses
 
+    # --- Internal: Resolve latest trade date from DB (Defense in Depth) ---
+    async def _get_latest_closed_trade_date(self) -> str:
+        """DAO self-resolves the latest closed trade date from daily_quotes.
+        This ensures the security boundary is fully encapsulated within the DAO,
+        preventing callers from accidentally injecting future dates."""
+        df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
+        if df is not None and not df.empty:
+            return df['max_td'].iloc[0]
+        return None
+
     # --- Screening Data Fetch for Logic ---
-    async def get_screening_data(self, trade_date, latest_trade_date_func):
+    async def get_screening_data(self, trade_date=None):
         if not trade_date:
-            trade_date = await latest_trade_date_func()
+            trade_date = await self._get_latest_closed_trade_date()
 
         sql = '''
               SELECT b.ts_code,
@@ -111,11 +127,78 @@ class ScreenerDao(BaseDao):
                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = ?
                        LEFT JOIN (SELECT f1.*
                                   FROM financial_reports f1
-                                           INNER JOIN (SELECT ts_code, MAX(end_date) as max_date
+                                           INNER JOIN (SELECT ts_code, MAX(ann_date) as max_ann
                                                        FROM financial_reports
+                                                       WHERE ann_date <= ?
                                                        GROUP BY ts_code) f2
-                                                      ON f1.ts_code = f2.ts_code AND f1.end_date = f2.max_date) f
+                                                      ON f1.ts_code = f2.ts_code AND f1.ann_date = f2.max_ann
+                                  WHERE f1.end_date = (
+                                      SELECT MAX(f3.end_date) FROM financial_reports f3
+                                      WHERE f3.ts_code = f1.ts_code AND f3.ann_date = f1.ann_date
+                                  )) f
                                  ON b.ts_code = f.ts_code
-              WHERE q.close IS NOT NULL \
+               WHERE q.close IS NOT NULL \
               '''
-        return await self._read_db(sql, (trade_date, trade_date))
+        return await self._read_db(sql, (trade_date, trade_date, trade_date))
+
+    # --- Review Manager Methods (P2-S3 Abstracting raw SQL) ---
+
+    async def get_pending_predictions(self, date_threshold: str):
+        """Get predictions that have no result yet since the date_threshold."""
+        sql = f'''
+            SELECT id, trade_date, ts_code, ai_score, ai_reason 
+            FROM screening_history 
+            WHERE trade_date >= ? 
+              AND prediction_result IS NULL
+              AND ai_score > 0
+            ORDER BY trade_date DESC
+        '''
+        df = await self._read_db(sql, (date_threshold,))
+        return df if df is not None else pd.DataFrame()
+
+    async def get_learning_context(self, limit: int = 3, is_win: bool = True):
+        """Extract 'Best Wins' or 'Worst Losses' for Learning Context."""
+        label = 'WIN' if is_win else 'LOSS'
+        order = 'DESC' if is_win else 'ASC'
+        
+        sql = f'''
+            SELECT ts_code, name, t1_pct, ai_score, ai_reason
+            FROM screening_history 
+            WHERE prediction_result = ? AND t1_pct IS NOT NULL
+            ORDER BY t1_pct {order}
+            LIMIT ?
+        '''
+        df = await self._read_db(sql, (label, limit))
+        return df if df is not None else pd.DataFrame()
+
+    async def update_prediction_result(self, record_id: int, pct: float, label: str):
+        """Update DB with T+1 result."""
+        sql = 'UPDATE screening_history SET "t1_pct"=?, "prediction_result"=? WHERE "id"=?'
+        await self._write_db(sql, (pct, label, record_id), is_many=False)
+
+    async def save_screening_results(self, records: list):
+        """
+        Save screening results to history using BaseDao UPSERT.
+        Replaces manual 24-column SQL string.
+        """
+        if not records: return
+        
+        # Determine cols based on the raw record length mapped from ReviewManager
+        # The tuple has 24 items aligning with SH_FULL_COLS minus id + t1/t5/result/created_at
+        cols = [
+            "trade_date", "strategy_name", "ts_code", "name", "close", "pct_chg", 
+            "industry", "vol", "amount", "turnover_rate", 
+            "pe_ttm", "pb", "ps_ttm", "dv_ttm", "total_mv", "circ_mv", 
+            "roe", "grossprofit_margin", "debt_to_assets", "or_yoy", "netprofit_yoy", 
+            "ai_score", "ai_reason", "thinking"
+        ]
+        
+        # Convert list of tuples to list of dicts for _save_upsert
+        dict_records = [dict(zip(cols, r)) for r in records]
+        df = pd.DataFrame(dict_records)
+        
+        await self._save_upsert(
+            df=df,
+            table_name='screening_history',
+            unique_keys=['trade_date', 'strategy_name', 'ts_code']
+        )

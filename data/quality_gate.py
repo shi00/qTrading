@@ -51,6 +51,7 @@ def _find_processor(instance, args, kwargs):
 def _check_tier(processor, min_tier, func_name):
     """Shared logic to verify quality tier."""
     if processor is None:
+        logger.warning(f"[QualityGate] Bypassed for {func_name}: DataProcessor not found in context. (Could be test env or context missing)")
         return  # Skip check if no processor found
     current_tier = getattr(processor, '_quality_tier', None)
     if current_tier is None:

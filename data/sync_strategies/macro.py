@@ -5,6 +5,7 @@ from data.daos.macro_dao import MacroDao
 from utils.thread_pool import ThreadPoolManager, TaskType
 from data.constants import MAJOR_INDICES
 from utils.log_decorators import log_async_operation
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ class MacroSyncStrategy(ISyncStrategy):
         """Fetch and save daily Shibor rates."""
         try:
             latest = await self.dao.get_shibor_latest_date()
-            today = datetime.datetime.now().strftime('%Y%m%d')
+            today = get_now().strftime('%Y%m%d')
 
             start_date = self._compute_shibor_start(latest)
             if start_date > today:
@@ -140,12 +141,12 @@ class MacroSyncStrategy(ISyncStrategy):
     def _compute_shibor_start(latest):
         """Compute start_date for Shibor sync based on last available date."""
         if not latest:
-            return (datetime.datetime.now() - datetime.timedelta(days=_SHIBOR_DEFAULT_LOOKBACK_DAYS)).strftime('%Y%m%d')
+            return (get_now() - datetime.timedelta(days=_SHIBOR_DEFAULT_LOOKBACK_DAYS)).strftime('%Y%m%d')
         try:
             last_dt = datetime.datetime.strptime(str(latest), '%Y%m%d')
             return (last_dt + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)).strftime('%Y%m%d')
         except ValueError:
-            return (datetime.datetime.now() - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)).strftime('%Y%m%d')
+            return (get_now() - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)).strftime('%Y%m%d')
 
     async def _sync_index_weights(self, result):
         """Sync Index Weights for Major Indices (Monthly)."""
@@ -159,7 +160,7 @@ class MacroSyncStrategy(ISyncStrategy):
             # We just fetch by trade_date range or just 'latest' snapshot logic?
             # Tushare index_weight(index_code, start_date, end_date)
             
-            today = datetime.datetime.now()
+            today = get_now()
             should_update = False
             
             if not latest:

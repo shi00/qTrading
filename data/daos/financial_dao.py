@@ -49,6 +49,12 @@ class FinancialDao(BaseDao):
         return await self._write_db(sql, params, is_many=True)
 
     async def get_latest_financials(self):
+        """Get latest financial report per stock.
+
+        WARNING: Dead code — only called from test_cache_manager.py L148.
+        Uses MAX(end_date) which is a future-function risk if used in strategies.
+        If reactivated, must change to MAX(ann_date) with ann_date <= cutoff_date filter.
+        """
         sql = '''
               SELECT f.*
               FROM financial_reports f
@@ -60,32 +66,34 @@ class FinancialDao(BaseDao):
         return await self._read_db(sql)
 
     async def get_cached_financial_records(self, period=None):
-        async with self.engine.connect() as conn:
-            if period:
-                res = await conn.exec_driver_sql("SELECT ts_code, end_date FROM financial_reports WHERE end_date = ?",
-                                                 (period,))
-            else:
-                res = await conn.exec_driver_sql("SELECT ts_code, end_date FROM financial_reports")
-            return set((row[0], row[1]) for row in res.fetchall())
+        if period:
+            df = await self._read_db("SELECT ts_code, end_date FROM financial_reports WHERE end_date = ?", (period,))
+        else:
+            df = await self._read_db("SELECT ts_code, end_date FROM financial_reports")
+        if df is None or df.empty:
+            return set()
+        return set(zip(df['ts_code'], df['end_date']))
 
     # --- Daily Indicators (Read Only — writes go through MarketDao) ---
 
     async def get_latest_indicators(self, trade_date=None):
         with_date = trade_date
         if not with_date:
-            async with self.engine.connect() as conn:
-                r = await conn.exec_driver_sql("SELECT MAX(trade_date) FROM daily_indicators")
-                row = r.fetchone()
-                with_date = row[0] if row else None
+            df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_indicators")
+            if df is not None and not df.empty:
+                with_date = df['max_td'].iloc[0]
+            else:
+                with_date = None
 
         if not with_date:
             return pd.DataFrame()
         return await self._read_db("SELECT * FROM daily_indicators WHERE trade_date = ?", (with_date,))
 
     async def get_cached_indicator_dates(self):
-        async with self.engine.connect() as conn:
-            res = await conn.exec_driver_sql("SELECT DISTINCT trade_date FROM daily_indicators")
-            return set(row[0] for row in res.fetchall())
+        df = await self._read_db("SELECT DISTINCT trade_date FROM daily_indicators")
+        if df is None or df.empty:
+            return set()
+        return set(df['trade_date'])
 
     # --- Extra Savers (Boilerplate) ---
     async def save_fina_forecast(self, df):

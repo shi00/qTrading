@@ -112,6 +112,14 @@ async def main(page: ft.Page):
         # Give logs a split second to flush
         import time
         import os
+
+        # WAL checkpoint before forced exit to prevent data loss
+        try:
+            from data.cache_manager import CacheManager
+            CacheManager().checkpoint_wal()
+        except Exception:
+            pass
+
         time.sleep(0.1)
         os._exit(0)
 

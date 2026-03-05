@@ -13,6 +13,7 @@ from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager
 from ui.i18n import I18n
 import pandas as pd
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class AppTask:
     progress: float = 0.0  # 0.0 to 1.0
     cancellable: bool = False
     
-    created_at: datetime.datetime = field(default_factory=datetime.datetime.now)
+    created_at: datetime.datetime = field(default_factory=get_now)
     started_at: Optional[datetime.datetime] = None
     completed_at: Optional[datetime.datetime] = None
     
@@ -52,6 +53,7 @@ class AppTask:
     _coroutine_gen: Callable = None  # Function that returns a coroutine
     _asyncio_task: Optional[asyncio.Task] = None
     _cancel_event: Optional[asyncio.Event] = None
+    unique_key: Optional[str] = None  # For deduplication
 
 
 class TaskManager:
@@ -82,6 +84,7 @@ class TaskManager:
                 
             self._tasks: Dict[str, AppTask] = {}
             self._subscribers: List[Callable[[List[AppTask]], None]] = []
+            self._background_tasks = set() # Strong references to prevent GC
             
             # Semaphore is created lazily inside the event loop to avoid
             # DeprecationWarning on Python 3.10+ when no loop is running.
@@ -150,7 +153,7 @@ class TaskManager:
         return self._tasks.get(task_id)
 
     def submit_task(self, name: str, task_type: str, coroutine_factory: Callable, 
-                    cancellable: bool = False, **kwargs) -> str:
+                    cancellable: bool = False, unique_key: str = None, **kwargs) -> Optional[str]:
         """
         Submit a new background task.  Thread-safe: may be called from either
         the event-loop thread or a worker thread (Flet dispatches sync on_click
@@ -160,7 +163,15 @@ class TaskManager:
         (dict write, subscriber notification, task launch) happen on the
         event loop thread — no try/except branching needed.
         """
+        # Deduplication: reject if a task with same unique_key is already active
+        if unique_key:
+            for t in self._tasks.values():
+                if t.unique_key == unique_key and t.status in (TaskStatus.QUEUED, TaskStatus.RUNNING):
+                    logger.warning(f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})")
+                    return None
+
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
+        task.unique_key = unique_key
         task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
 
         if self._loop and self._loop.is_running():
@@ -178,7 +189,11 @@ class TaskManager:
         self._persist_task(task)
         self._notify_subscribers()
         logger.info(f"[TaskManager] Queued task: [{task.id}] {task.name}")
-        asyncio.create_task(self._task_runner(task.id))
+
+        # Keep a strong reference to the task to prevent garbage collection
+        coro_task = asyncio.create_task(self._task_runner(task.id))
+        self._background_tasks.add(coro_task)
+        coro_task.add_done_callback(self._background_tasks.discard)
 
     def update_progress(self, task_id: str, progress: float, description: str = None):
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
@@ -223,7 +238,7 @@ class TaskManager:
         if task._asyncio_task and not task._asyncio_task.done():
             task._asyncio_task.cancel()
             
-        task.completed_at = datetime.datetime.now()
+        task.completed_at = get_now()
         self._persist_task(task)
         self._notify_subscribers()
 
@@ -256,7 +271,7 @@ class TaskManager:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
             task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
-            task.completed_at = datetime.datetime.now()
+            task.completed_at = get_now()
             if task._cancel_event:
                 task._cancel_event.set()
             if task._asyncio_task and not task._asyncio_task.done():
@@ -294,7 +309,7 @@ class TaskManager:
             task._cancel_event = asyncio.Event()
 
         task.status = TaskStatus.RUNNING
-        task.started_at = datetime.datetime.now()
+        task.started_at = get_now()
         task.description = "Starting..."
         self._persist_task(task)
         self._notify_subscribers()
@@ -330,7 +345,7 @@ class TaskManager:
         finally:
             task._asyncio_task = None
             if task.completed_at is None:
-                task.completed_at = datetime.datetime.now()
+                task.completed_at = get_now()
             self._persist_task(task)
             self._notify_subscribers()
             self._auto_evict_old()
@@ -393,7 +408,7 @@ class TaskManager:
                         description=str(row.get("description", "") or ""),
                         error=str(row.get("error", "") or ""),
                         result=row.get("result"),
-                        created_at=self._safe_dt(row.get("created_at")) or datetime.datetime.now(),
+                        created_at=self._safe_dt(row.get("created_at")) or get_now(),
                         started_at=self._safe_dt(row.get("started_at")),
                         completed_at=self._safe_dt(row.get("completed_at")),
                     )

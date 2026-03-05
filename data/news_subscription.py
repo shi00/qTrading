@@ -35,9 +35,11 @@ class NewsSubscriptionService:
         self._last_news_time = None
         self._last_news_content = None
         
-        # Async Queue — created lazily in start() to avoid cross-event-loop issues
-        # (asyncio.Queue binds to the running loop at creation time in Python < 3.10)
+        # Async Queue
         self.processing_queue = None
+        
+        # Strong references to prevent GC from killing background tasks
+        self._background_tasks = set()
         
         # Observer Pattern: List of callbacks
         # Format: set of callables
@@ -46,6 +48,11 @@ class NewsSubscriptionService:
 
         self._current_fetch_task = None
         self._processing_task = None
+        
+        # P2-R4: Content hash dedup (LRU-style) to catch duplicates across restarts
+        self._seen_hashes = set()
+        self._MAX_SEEN = 200
+        
         self._initialized = True
         
     def add_listener(self, callback, is_alert=False):
@@ -88,11 +95,15 @@ class NewsSubscriptionService:
         # to avoid binding to the wrong loop when singleton is created before loop starts.
         self.processing_queue = asyncio.Queue()
 
-        # Use weak ref to task if needed, or just fire and forget since we have _running flag
-        asyncio.create_task(self._poll_loop())
+        # Keep strong references to background tasks to prevent GC
+        poll_task = asyncio.create_task(self._poll_loop())
+        self._background_tasks.add(poll_task)
+        poll_task.add_done_callback(self._background_tasks.discard)
         
         # Start background processing loop
         self._processing_task = asyncio.create_task(self._processing_loop())
+        self._background_tasks.add(self._processing_task)
+        self._processing_task.add_done_callback(self._background_tasks.discard)
         
         logger.info("[NewsService] Started news polling service [STARTED]")
         
@@ -127,9 +138,10 @@ class NewsSubscriptionService:
             # Read config dynamically
             base_interval = ConfigHandler.get_config('news_poll_interval', 60)
             
-            # Fire and forget (but track it for cleanup). 
-            # We use create_task so the sleep interval is independent of fetch duration (strict interval).
+            # Fire and forget but track for cleanup and GC prevention.
             self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())
+            self._background_tasks.add(self._current_fetch_task)
+            self._current_fetch_task.add_done_callback(self._background_tasks.discard)
             
             # Simple error handling for the loop itself (unlikely to fail here)
             try:
@@ -273,19 +285,33 @@ class NewsSubscriptionService:
             
             news_list = await NewsFetcher.get_latest_global_news(limit=fetch_limit)
             
+            def get_hash(item):
+                # Combined hash of content and optionally time
+                content = item.get('content', '').strip()
+                time_str = item.get('time', '')
+                return hashlib.md5(f"{time_str}_{content}".encode('utf-8')).hexdigest()
+
             if not news_list:
                 return
             
             # Initial Sync: Batch save all news (RAW)
             if is_initial_sync:
                 logger.info(f"[NewsService] Initial sync: saving {len(news_list)} news items")
-                for item in news_list:
-                    # Save RAW content first for immediate UI display
-                    normalized = CacheManager.normalize_news_item(item, default_source='CLS')
-                    await self.cache.save_market_news(normalized)
-                    
-                    # Queue for AI tagging
-                    await self.processing_queue.put(item)
+                for item in reversed(news_list):
+                    h = get_hash(item)
+                    if h not in self._seen_hashes:
+                        self._seen_hashes.add(h)
+                        
+                        # Save RAW content first for immediate UI display
+                        normalized = CacheManager.normalize_news_item(item, default_source='CLS')
+                        await self.cache.save_market_news(normalized)
+                        
+                        # Queue for AI tagging
+                        await self.processing_queue.put(item)
+                
+                # Maintain bounds
+                if len(self._seen_hashes) > self._MAX_SEEN:
+                    self._seen_hashes = set(list(self._seen_hashes)[-self._MAX_SEEN:])
                 
                 # 设置初始状态（用最新一条作为基准）
                 latest_item = news_list[0]
@@ -298,48 +324,48 @@ class NewsSubscriptionService:
                 self._notify_listeners()
                 return
             
-            # Polling: Only check the latest item
-            latest_item = news_list[0]
-            current_news_content = latest_item.get('content', '')
-            current_news_time = latest_item.get('time', '')
+            # Polling: Process all returned items to catch missed ones
+            new_items_found = False
+            for item in reversed(news_list):
+                h = get_hash(item)
+                if h not in self._seen_hashes:
+                    self._seen_hashes.add(h)
+                    new_items_found = True
+                    
+                    # Maintain bounds
+                    if len(self._seen_hashes) > self._MAX_SEEN:
+                        self._seen_hashes = set(list(self._seen_hashes)[-self._MAX_SEEN:])
+                    
+                    current_news_content = item.get('content', '')
+                    current_news_time = item.get('time', '')
+                    logger.info(f"[NewsService] Found NEW update! Time: {current_news_time}")
+                    
+                    # PERSISTENCE: Save to DB for AI
+                    clean_content = current_news_content.strip()
+                    normalized = CacheManager.normalize_news_item({
+                        'content': clean_content,
+                        'tags': "",
+                        'publish_time': current_news_time,
+                        'source': 'CLS'
+                    })
+                    await self.cache.save_market_news(normalized, wait=True)
+                    
+                    # Queue for AI
+                    await self.processing_queue.put(item)
+                    
+                    # Handle Alerts (Popup)
+                    display_msg = clean_content
+                    enable_alerts = ConfigHandler.get_config('enable_news_alerts', True)
+                    if enable_alerts:
+                        for listener in list(self._alert_listeners):
+                            try:
+                                listener(display_msg)
+                            except Exception as e:
+                                logger.error(f"[NewsService] Alert listener error: {e}")
             
-            # Check for new news
-            if current_news_time != self._last_news_time or current_news_content != self._last_news_content:
-                logger.info(f"[NewsService] Found NEW update! Old time: {self._last_news_time}, New time: {current_news_time}")
-                
-                # Update state
-                self._last_news_time = current_news_time
-                self._last_news_content = current_news_content
-                
-                # Save Raw & Queue
-                # PERSISTENCE: Save to DB for AI（使用公共方法标准化字段）
-                clean_content = current_news_content.strip()
-                normalized = CacheManager.normalize_news_item({
-                    'content': clean_content,
-                    'tags': "", # Empty tags initially
-                    'publish_time': current_news_time,
-                    'source': 'CLS'
-                })
-                await self.cache.save_market_news(normalized, wait=True)
-                
-                # Queue for AI
-                await self.processing_queue.put(latest_item)
-                
+            if new_items_found:
                 # Notify UI of new content (Raw)
                 self._notify_listeners()
-                
-                # Handle Alerts (Popup)
-                # For alerts, we might want to wait for AI tags? 
-                # Or just show raw content. User said: "Fetch and display news immediately without AI tags."
-                # So we show raw alert.
-                display_msg = clean_content
-                enable_alerts = ConfigHandler.get_config('enable_news_alerts', True)
-                if enable_alerts:
-                    for listener in list(self._alert_listeners):
-                        try:
-                            listener(display_msg)
-                        except Exception as e:
-                            logger.error(f"[NewsService] Alert listener error: {e}")
                     
         except Exception as e:
             logger.warning(f"[NewsService] Poll failed: {e}", exc_info=True)

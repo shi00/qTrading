@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 
 import config
 from utils.config_handler import ConfigHandler
+from utils.time_utils import get_now
 
 # Define logs dir path (creation happens in setup_logging)
 LOG_DIR = os.path.join(config.APP_ROOT, "logs")
@@ -149,7 +150,7 @@ def setup_logging(name="astock_screener"):
     for lib in noisy_libs:
         logging.getLogger(lib).setLevel(logging.WARNING)
 
-    logger.info(f"--- Log Session Started: {datetime.datetime.now()} ---")
+    logger.info(f"--- Log Session Started: {get_now()} ---")
     return logger
 
 

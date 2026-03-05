@@ -447,6 +447,10 @@ class AIBrainTab(ft.Container):
 
     def will_unmount(self):
         """组件卸载前取消订阅"""
+        if self.page and getattr(self, "file_picker", None) in self.page.overlay:
+            self.page.overlay.remove(self.file_picker)
+            self.page.update()
+            
         if self._locale_subscription_id:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
