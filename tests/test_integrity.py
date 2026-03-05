@@ -27,7 +27,7 @@ class TestDataIntegrity:
     async def test_repair_financial_data(self):
         """Test repair logic calls API sequentially"""
         dp = DataProcessor()
-        dp.api = MagicMock()
+        dp.api = AsyncMock()
         dp.cache = AsyncMock()
         
         # Critical: Update context because strategies hold a reference to it

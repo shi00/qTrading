@@ -8,26 +8,23 @@ mplfinance>=0.12.10b0
 matplotlib>=3.10.0
 requests>=2.32.5
 cryptography>=46.0.4
-
 akshare>=1.18.30
 openai>=2.17.0
 httpx>=0.27.0
-
 readerwriterlock>=1.0.9
 pandas_market_calendars>=4.0.0
 sqlparse>=0.4.4
 tzdata>=2025.3 # Required for APScheduler timezone support on Windows
 pytz>=2024.1
-
 apscheduler>=3.10.0
 llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Install manually if needed.
-
 polars>=1.38.1
 pyarrow>=14.0.0 # Required by Polars for converting Pandas nullable Int64/Float64 types
 sqlalchemy>=2.0.46
 alembic>=1.14.0
 async-lru>=2.1.0
-
 urllib3>=2.6.3 # Fix Brotli decode error; must be >= 2.6.2
 brotlicffi>=1.1.0.0 # Brotli compression support for urllib3 (optional dep, must be explicit)
 keyring>=25.0.0 # For secure credential storage
+pytest>=8.0.0
+pytest-asyncio>=0.23.5

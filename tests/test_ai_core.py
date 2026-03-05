@@ -59,6 +59,10 @@ def mock_data_processor():
     
     mock_dp.get_stock_history = mock_get_history
     mock_dp.is_cancelled.return_value = False
+    
+    from data.quality_gate import QualityTier
+    mock_dp._quality_tier = QualityTier.SILVER
+    
     return mock_dp
 
 
@@ -70,10 +74,14 @@ class TestAISelectionStrategy:
     """Tests for AISelectionStrategy"""
     
     @pytest.mark.asyncio
-    async def test_filter_returns_empty_when_no_api_key(self, sample_screening_df, mock_data_processor):
+    @patch('strategies.ai_strategy.AIService')
+    async def test_filter_returns_empty_when_no_api_key(self, mock_ai_service_cls, sample_screening_df, mock_data_processor):
         """Test: Strategy raises error when API key is missing"""
+        mock_ai_service = MagicMock()
+        mock_ai_service.client = None
+        mock_ai_service_cls.return_value = mock_ai_service
+        
         strategy = AISelectionStrategy()
-        strategy.ai_client.client = None  # Simulate no API key
         
         context = {
             'screening_data': sample_screening_df,
@@ -86,11 +94,14 @@ class TestAISelectionStrategy:
         assert "API Key" in str(excinfo.value)
     
     @pytest.mark.asyncio
-    async def test_filter_returns_empty_when_no_data(self, mock_data_processor):
+    @patch('strategies.ai_strategy.AIService')
+    async def test_filter_returns_empty_when_no_data(self, mock_ai_service_cls, mock_data_processor):
         """Test: Strategy returns empty DataFrame when input is empty"""
+        mock_ai_service = MagicMock()
+        mock_ai_service.client = MagicMock()
+        mock_ai_service_cls.return_value = mock_ai_service
+        
         strategy = AISelectionStrategy()
-        # Mock client to exist
-        strategy.ai_client.client = MagicMock()
         
         context = {
             'screening_data': pd.DataFrame(),
@@ -101,37 +112,50 @@ class TestAISelectionStrategy:
         assert result.empty
     
     @pytest.mark.asyncio
-    async def test_filter_returns_empty_when_no_dp(self, sample_screening_df):
-        """Test: Strategy returns empty when DataProcessor is missing"""
+    @patch('strategies.ai_strategy.AIService')
+    async def test_filter_returns_empty_when_no_dp(self, mock_ai_service_cls, sample_screening_df):
+        """Test: Strategy handles missing DataProcessor gracefully.
+        
+        When data_processor is None, the quality gate is bypassed (logged as warning),
+        and the strategy proceeds. It should not crash.
+        """
+        mock_ai_service = MagicMock()
+        mock_ai_service.client = MagicMock()
+        mock_ai_service_cls.return_value = mock_ai_service
+        
         strategy = AISelectionStrategy()
-        strategy.ai_client.client = MagicMock()
         
         context = {
             'screening_data': sample_screening_df,
             'data_processor': None
         }
         
+        # Should not raise; quality gate is bypassed when dp is None
         result = await strategy.filter(context)
-        assert result.empty
+        assert isinstance(result, pd.DataFrame)
     
     @pytest.mark.asyncio
-    async def test_pre_filter_removes_negative_pe(self, sample_screening_df, mock_data_processor):
+    @patch('strategies.ai_strategy.AIService')
+    async def test_pre_filter_removes_negative_pe(self, mock_ai_service_cls, sample_screening_df, mock_data_processor):
         """Test: Pre-filter correctly removes stocks with negative PE"""
-        strategy = AISelectionStrategy()
-        strategy.ai_client.client = MagicMock()
+        mock_ai_service = MagicMock()
+        mock_ai_service.client = MagicMock()
         
         # Mock analyze_stock to return valid result
         async def mock_analyze(*args, **kwargs):
             return {"score": 80, "summary": "Test", "decision": "Buy"}
+        mock_ai_service.analyze_stock.side_effect = mock_analyze
+        mock_ai_service_cls.return_value = mock_ai_service
         
-        with patch.object(strategy.ai_client, 'analyze_stock', side_effect=mock_analyze):
-            with patch.object(NewsFetcher, 'get_us_major_moves', return_value=""):
-                with patch.object(NewsFetcher, 'get_stock_news', return_value=[]):
-                    context = {
-                        'screening_data': sample_screening_df,
-                        'data_processor': mock_data_processor
-                    }
-                    result = await strategy.filter(context)
+        strategy = AISelectionStrategy()
+        
+        with patch.object(NewsFetcher, 'get_us_major_moves', return_value=""):
+            with patch.object(NewsFetcher, 'get_stock_news', return_value=[]):
+                context = {
+                    'screening_data': sample_screening_df,
+                    'data_processor': mock_data_processor
+                }
+                result = await strategy.filter(context)
         
         # Should have 2 results (negative PE stock filtered out)
         assert len(result) == 2

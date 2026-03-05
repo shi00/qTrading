@@ -2,7 +2,6 @@ import datetime
 import logging
 from .base import ISyncStrategy, SyncResult
 from data.daos.macro_dao import MacroDao
-from utils.thread_pool import ThreadPoolManager, TaskType
 from data.constants import MAJOR_INDICES
 from utils.log_decorators import log_async_operation
 from utils.time_utils import get_now
@@ -63,15 +62,9 @@ class MacroSyncStrategy(ISyncStrategy):
         try:
             latest = await self.dao.get_macro_latest_date()
 
-            df_m2 = await ThreadPoolManager().run_async(
-                TaskType.IO, self.context.api.get_macro_data, 'cn_m', start_m=latest
-            )
-            df_cpi = await ThreadPoolManager().run_async(
-                TaskType.IO, self.context.api.get_macro_data, 'cn_cpi', start_m=latest
-            )
-            df_ppi = await ThreadPoolManager().run_async(
-                TaskType.IO, self.context.api.get_macro_data, 'cn_ppi', start_m=latest
-            )
+            df_m2 = await self.context.api.get_macro_data('cn_m', start_m=latest)
+            df_cpi = await self.context.api.get_macro_data('cn_cpi', start_m=latest)
+            df_ppi = await self.context.api.get_macro_data('cn_ppi', start_m=latest)
 
             merged = self._merge_macro_data(df_m2, df_cpi, df_ppi)
 
@@ -125,9 +118,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 logger.debug("[MacroSync] Shibor already up to date.")
                 return
 
-            df = await ThreadPoolManager().run_async(
-                TaskType.IO, self.context.api.get_shibor, start_date=start_date, end_date=today
-            )
+            df = await self.context.api.get_shibor(start_date=start_date, end_date=today)
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
@@ -191,8 +182,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 # Tushare: index_weight(index_code='399300.SZ', start_date='20180901', end_date='20180930')
                 
                 try:
-                    df = await ThreadPoolManager().run_async(
-                        TaskType.IO, self.context.api.get_index_weight, 
+                    df = await self.context.api.get_index_weight(
                         index_code=idx_code, start_date=start_date, end_date=end_date
                     )
                     

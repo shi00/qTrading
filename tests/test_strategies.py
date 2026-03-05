@@ -47,7 +47,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.mgr.get_strategy("growth"))
         self.assertTrue(len(self.mgr.get_all_names()) > 0)
 
-    def test_value_strategy(self):
+    async def test_value_strategy(self):
         """Test ValueStrategy: PE 5-20, PB 0.5-3, Div > 2%"""
         # Stock A: PE 10 (Pass), PB 1 (Pass), Div 3 (Pass) -> Match
         # Stock B: PE 50 (Fail)
@@ -55,43 +55,43 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         # Note: Code says PE > 5. So 5.0 might fail if strictly >
         
         s = ValueStrategy()
-        res = s.filter(self.context)
+        res = await s.filter(self.context)
         
         # Should contain Stock A
         self.assertIn('000001.SZ', res['ts_code'].values)
         # Should not contain Stock B (PE too high)
         self.assertNotIn('000002.SZ', res['ts_code'].values)
 
-    def test_growth_strategy(self):
+    async def test_growth_strategy(self):
         """Test GrowthStrategy: Rev > 20%, Profit > 25%, ROE > 15%"""
         # Stock A: 25, 30, 16 -> Pass
         # Others fail
         s = GrowthStrategy()
-        res = s.filter(self.context)
+        res = await s.filter(self.context)
         
         self.assertIn('000001.SZ', res['ts_code'].values)
         self.assertEqual(len(res), 1)
 
-    def test_dividend_strategy(self):
+    async def test_dividend_strategy(self):
         """Test DividendStrategy: Div > 4%"""
         # Stock C: 4.5 -> Pass
         s = DividendStrategy()
-        res = s.filter(self.context)
+        res = await s.filter(self.context)
         
         self.assertIn('000003.SZ', res['ts_code'].values)
         self.assertNotIn('000001.SZ', res['ts_code'].values) # 3.0 < 4
 
-    def test_technical_breakout(self):
+    async def test_technical_breakout(self):
         """Test Breakout: 2 < Pct < 7, 3 < Turn < 15"""
         # Stock A: Pct 3 (Pass), Turn 5 (Pass)
         # Stock B: Pct 8 (Fail)
         s = TechnicalBreakoutStrategy()
-        res = s.filter(self.context)
+        res = await s.filter(self.context)
         
         self.assertIn('000001.SZ', res['ts_code'].values)
         self.assertNotIn('000002.SZ', res['ts_code'].values)
 
-    def test_northbound(self):
+    async def test_northbound(self):
         """Test Northbound: Ratio > 5%"""
         nb_data = pd.DataFrame({
             'ts_code': ['000001.SZ', '000002.SZ'],
@@ -100,13 +100,13 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         ctx = {'northbound_data': nb_data, 'screening_data': self.base_data}
         
         s = NorthboundStrategy()
-        res = s.filter(ctx)
+        res = await s.filter(ctx)
         
         self.assertIn('000001.SZ', res['ts_code'].values)
         self.assertNotIn('000002.SZ', res['ts_code'].values)
         
         # Empty context
-        self.assertTrue(s.filter({}).empty)
+        self.assertTrue((await s.filter({})).empty)
 
     async def test_oversold(self):
         """Test Oversold: Pct < -3, PE < 30"""
@@ -115,23 +115,25 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         # Mock DataProcessor
         from unittest.mock import AsyncMock, MagicMock
         dp_mock = MagicMock()
+        dp_mock._quality_tier = 2  # SILVER
         dp_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
         
         # Mock CacheManager
         cache_mock = MagicMock()
+        cache_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
         
         # Create dummy history for RSI
         # Stock C needs to have RSI < 20
         # We need significant drop in recent days.
-        # 10 days of data
-        dates = pd.date_range(end='20230101', periods=14).strftime('%Y%m%d').tolist()
+        # 30 days of data to pass `day_count >= 28` guard
+        dates = pd.date_range(end='20230101', periods=30).strftime('%Y%m%d').tolist()
         
-        # Stock C logs: Drop from 20 to 10 -> Low RSI
-        c_prices = [20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7]
+        # Stock C logs: Drop from 30 to 5 -> Low RSI
+        c_prices = list(range(35, 5, -1))
         
         history_data = []
         for d, p in zip(dates, c_prices):
-            history_data.append({'ts_code': '000003.SZ', 'trade_date': d, 'close': p})
+            history_data.append({'ts_code': '000003.SZ', 'trade_date': d, 'close': p, 'adj_factor': 1.0})
             
         history_df = pd.DataFrame(history_data)
         cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
@@ -147,7 +149,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         
         self.assertIn('000003.SZ', res['ts_code'].values)
 
-    def test_institutional(self):
+    async def test_institutional(self):
         """Test Institutional: Net > 3000"""
         lhb_data = pd.DataFrame({
             'ts_code': ['000001.SZ', '000002.SZ'],
@@ -156,12 +158,12 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         ctx = {'top_list': lhb_data, 'screening_data': self.base_data}
         
         s = InstitutionalStrategy()
-        res = s.filter(ctx)
+        res = await s.filter(ctx)
         
         self.assertIn('000001.SZ', res['ts_code'].values)
         self.assertNotIn('000002.SZ', res['ts_code'].values)
 
-    def test_block_trade(self):
+    async def test_block_trade(self):
         """Test Block Trade: Amount > 1000"""
         block_data = pd.DataFrame({
             'ts_code': ['000001.SZ', '000001.SZ', '000002.SZ'],
@@ -181,29 +183,29 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         
         ctx = {'block_trade': block_data_pass, 'screening_data': self.base_data}
         s = BlockTradeStrategy()
-        res = s.filter(ctx)
+        res = await s.filter(ctx)
         self.assertIn('000001.SZ', res['ts_code'].values)
 
-    def test_cashflow(self):
+    async def test_cashflow(self):
         """Test CashFlow: Debt < 50, ROE > 10"""
         # Stock A: Debt 40 (Pass), ROE 16 (Pass)
         s = CashFlowStrategy()
-        res = s.filter(self.context)
+        res = await s.filter(self.context)
         self.assertIn('000001.SZ', res['ts_code'].values)
 
-    def test_large_pe(self):
+    async def test_large_pe(self):
         """Test LargePE: MV > 500亿, PE < 15"""
         # Stock A: MV 600亿 (Pass), PE 10 (Pass)
         s = LargePEStrategy()
-        res = s.filter(self.context)
+        res = await s.filter(self.context)
         self.assertIn('000001.SZ', res['ts_code'].values)
 
-    def test_empty_input(self):
+    async def test_empty_input(self):
         """Test handling of empty or None input"""
         s = ValueStrategy()
-        self.assertTrue(s.filter({}).empty)
-        self.assertTrue(s.filter({'screening_data': None}).empty)
-        self.assertTrue(s.filter({'screening_data': pd.DataFrame()}).empty)
+        self.assertTrue((await s.filter({})).empty)
+        self.assertTrue((await s.filter({'screening_data': None})).empty)
+        self.assertTrue((await s.filter({'screening_data': pd.DataFrame()})).empty)
 
 if __name__ == '__main__':
     unittest.main()

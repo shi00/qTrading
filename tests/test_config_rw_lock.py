@@ -88,4 +88,11 @@ def test_config_thread_safety():
         print("TEST FAILED: Some writes lost (expected via merge logic) or corrupted.")
 
 if __name__ == "__main__":
-    test_config_thread_safety()
+    import tempfile
+    from unittest.mock import patch as mock_patch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_file = os.path.join(tmpdir, "test_settings.json")
+        with mock_patch('utils.config_handler.CONFIG_FILE', tmp_file):
+            ConfigHandler._config_cache = None
+            test_config_thread_safety()

@@ -1,7 +1,6 @@
 import datetime
 import logging
 from .base import ISyncStrategy, SyncResult
-from utils.thread_pool import ThreadPoolManager, TaskType
 from utils.log_decorators import log_async_operation
 
 logger = logging.getLogger(__name__)
@@ -142,9 +141,7 @@ class HolderSyncStrategy(ISyncStrategy):
             last_friday = today - datetime.timedelta(days=days_since_friday)
             end_date = last_friday.strftime('%Y%m%d')
 
-            df = await ThreadPoolManager().run_async(
-                TaskType.IO,
-                self.context.api.get_pledge_stat,
+            df = await self.context.api.get_pledge_stat(
                 end_date=end_date
             )
             if df is not None and not df.empty:

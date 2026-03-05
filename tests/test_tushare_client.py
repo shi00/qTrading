@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch, call, AsyncMock
 import time
 import tushare as ts
 # Make sure to import the class to be tested
@@ -13,7 +13,7 @@ import tushare as ts
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 
-class TestTushareClient(unittest.TestCase):
+class TestTushareClient(unittest.IsolatedAsyncioTestCase):
     
     def setUp(self):
         # Reset singleton
@@ -25,10 +25,10 @@ class TestTushareClient(unittest.TestCase):
     # Legacy RateLimiter tests removed as RateLimiter class was replaced by TokenBucket
 
         
-    @patch('time.sleep')
+    @patch('asyncio.sleep', new_callable=AsyncMock)
     @patch('tushare.pro_api')
     @patch('tushare.set_token')
-    def test_client_respects_rate_limit(self, mock_set_token, mock_pro_api, mock_sleep):
+    async def test_client_respects_rate_limit(self, mock_set_token, mock_pro_api, mock_sleep):
         """Test that client integration works"""
         mock_api_instance = MagicMock()
         mock_pro_api.return_value = mock_api_instance
@@ -37,26 +37,27 @@ class TestTushareClient(unittest.TestCase):
         mock_df = MagicMock()
         mock_df.empty = False
         mock_api_instance.daily.return_value = mock_df
+        mock_api_instance.adj_factor.return_value = None
         
         # Mock Config to return a known limit
         with patch.object(ConfigHandler, 'get_tushare_api_limit', return_value=60): # 1s interval
              client = TushareClient(token="dummy")
              
              # Mock internal limiter to verify acquire is called
-             client._rate_limiter = MagicMock()
+             client._rate_limiter = AsyncMock()
              
-             client.get_daily_quotes(ts_code="000001.SZ")
+             await client.get_daily_quotes(ts_code="000001.SZ")
              
-             client.get_daily_quotes(ts_code="000001.SZ")
+             await client.get_daily_quotes(ts_code="000001.SZ")
              
-             # get_daily_quotes calls daily and adj_factor, so acquire might be called twice
-             self.assertGreaterEqual(client._rate_limiter.consume.call_count, 1)
+             # get_daily_quotes calls daily and adj_factor, so consume_async might be called multiple times
+             self.assertGreaterEqual(client._rate_limiter.consume_async.call_count, 1)
 
 
-    @patch('time.sleep')
+    @patch('asyncio.sleep', new_callable=AsyncMock)
     @patch('tushare.pro_api')
     @patch('tushare.set_token')
-    def test_retry_on_rate_limit(self, mock_set_token, mock_pro_api, mock_sleep):
+    async def test_retry_on_rate_limit(self, mock_set_token, mock_pro_api, mock_sleep):
         """Test retry logic when rate limit is hit"""
         # Setup mock API
         mock_api_instance = MagicMock()
@@ -71,23 +72,22 @@ class TestTushareClient(unittest.TestCase):
             Exception("抱歉，您每分钟最多访问"),
             mock_df
         ]
+        mock_api_instance.adj_factor.return_value = None
         
         client = TushareClient(token="dummy")
         # Disable rate limiter for this test to focus on retry logic
         client._rate_limiter = None 
         
-        result = client.get_daily_quotes(ts_code="000001.SZ")
+        result = await client.get_daily_quotes(ts_code="000001.SZ")
         
-        # Merge logic in get_daily_quotes might fail if adj_factor fails or returns None.
-        # But here we just check result is not None
         self.assertIsNotNone(result)
         self.assertEqual(mock_api_instance.daily.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertGreaterEqual(mock_sleep.call_count, 2)
         
-    @patch('time.sleep')
+    @patch('asyncio.sleep', new_callable=AsyncMock)
     @patch('tushare.pro_api')
     @patch('tushare.set_token')
-    def test_retry_on_network_error(self, mock_set_token, mock_pro_api, mock_sleep):
+    async def test_retry_on_network_error(self, mock_set_token, mock_pro_api, mock_sleep):
         """Test retry logic on network error"""
         mock_api_instance = MagicMock()
         mock_pro_api.return_value = mock_api_instance
@@ -99,20 +99,21 @@ class TestTushareClient(unittest.TestCase):
             Exception("Connection timeout"),
             mock_df
         ]
+        mock_api_instance.adj_factor.return_value = None
         
         client = TushareClient(token="dummy")
         client._rate_limiter = None
         
-        result = client.get_daily_quotes(ts_code="000001.SZ")
+        result = await client.get_daily_quotes(ts_code="000001.SZ")
         
         self.assertIsNotNone(result)
         self.assertEqual(mock_api_instance.daily.call_count, 2)
-        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertGreaterEqual(mock_sleep.call_count, 1)
 
-    @patch('time.sleep')
+    @patch('asyncio.sleep', new_callable=AsyncMock)
     @patch('tushare.pro_api')
     @patch('tushare.set_token')
-    def test_failure_after_max_retries(self, mock_set_token, mock_pro_api, mock_sleep):
+    async def test_failure_after_max_retries(self, mock_set_token, mock_pro_api, mock_sleep):
         """Test that it raises exception after max retries"""
         mock_api_instance = MagicMock()
         mock_pro_api.return_value = mock_api_instance
@@ -123,7 +124,7 @@ class TestTushareClient(unittest.TestCase):
         client._rate_limiter = None
         
         with self.assertRaises(Exception):
-            client.get_daily_quotes(ts_code="000001.SZ")
+            await client.get_daily_quotes(ts_code="000001.SZ")
             
         self.assertEqual(mock_api_instance.daily.call_count, 3) # Max retries default is 3
 

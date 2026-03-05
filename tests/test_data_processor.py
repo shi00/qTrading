@@ -28,7 +28,7 @@ class TestDataProcessor(unittest.TestCase):
         self.patcher_tpm.start()
 
         # Mock TushareClient (Sync)
-        self.mock_api = MagicMock(spec=TushareClient)
+        self.mock_api = AsyncMock(spec=TushareClient)
         
         # Setup Patcher
         self.patcher_api = patch('data.data_processor.TushareClient', return_value=self.mock_api)
@@ -414,18 +414,15 @@ class TestDataProcessor(unittest.TestCase):
     # --- sync_stock_basic ---
 
     async def async_test_sync_stock_basic(self):
-        """Test sync_stock_basic with ThreadPoolManager"""
+        """Test sync_stock_basic calls api.get_stock_list directly"""
         mock_df = pd.DataFrame({'ts_code': ['000001.SZ'], 'name': ['PingAn']})
-        self.mock_api.get_stock_list.return_value = mock_df
+        self.mock_api.get_stock_list = AsyncMock(return_value=mock_df)
         self.mock_cache.save_stock_basic = AsyncMock(return_value=1)
         
         # Reset the sync lock flag
         self.processor._is_syncing_basic = False
         
-        # Patch ThreadPoolManager at the data_processor import location
-        with patch('data.data_processor.ThreadPoolManager') as mock_tpm:
-            mock_tpm.return_value.run_async = AsyncMock(return_value=mock_df)
-            count = await self.processor.sync_stock_basic()
+        count = await self.processor.sync_stock_basic()
         
         self.assertEqual(count, 1)
         self.mock_cache.save_stock_basic.assert_called()
@@ -553,21 +550,22 @@ class TestDataProcessor(unittest.TestCase):
             'is_open': [1, 1]
         })
         
-        with patch('data.data_processor.ThreadPoolManager') as mock_tpm:
-             mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame({
-                 'close': [3000], 'pct_chg': [1.0], 'north_money': [500]
-             }))
-             
-             # Pre-seed the _trade_cal_cache so that ensure_trade_cal sees a cache hit
-             # This simulates having already called ensure_trade_cal once before
-             today_str = datetime.datetime.now().strftime('%Y%m%d')
-             self.processor._trade_cal_cache = {'date': today_str}
-             
-             with patch.object(self.processor, '_ensure_trade_cal_impl', new_callable=AsyncMock, return_value=True) as mock_impl:
-                 await self.processor.get_market_overview()
-                 # Because _trade_cal_cache is pre-seeded with today's date,
-                 # ensure_trade_cal should SKIP the _ensure_trade_cal_impl call
-                 mock_impl.assert_not_called()
+        # Mock API methods to return valid DataFrames
+        mock_result_df = pd.DataFrame({
+            'close': [3000], 'pct_chg': [1.0], 'north_money': [500]
+        })
+        self.mock_api.get_index_daily = AsyncMock(return_value=mock_result_df)
+        self.mock_api.get_moneyflow_hsgt = AsyncMock(return_value=mock_result_df)
+        
+        # Pre-seed the _trade_cal_cache so that ensure_trade_cal sees a cache hit
+        today_str = datetime.datetime.now().strftime('%Y%m%d')
+        self.processor._trade_cal_cache = {'date': today_str}
+        
+        with patch.object(self.processor, '_ensure_trade_cal_impl', new_callable=AsyncMock, return_value=True) as mock_impl:
+            await self.processor.get_market_overview()
+            # Because _trade_cal_cache is pre-seeded with today's date,
+            # ensure_trade_cal should SKIP the _ensure_trade_cal_impl call
+            mock_impl.assert_not_called()
 
     def test_get_market_overview_uses_memory_cache(self):
         asyncio.run(self.async_test_get_market_overview_uses_memory_cache())

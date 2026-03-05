@@ -30,14 +30,16 @@ class TestScreenerViewModel(unittest.TestCase):
         self.assertEqual(page_data.iloc[0]['A'], 0)
         
         # Next page
-        asyncio.run(self.vm.change_page(1))
+        self.vm.change_page(1) # Removed asyncio.run
         self.assertEqual(self.vm.page_no, 2)
+        self.vm._update_pagination() # Call it directly as change_page is throttled and needs event loop
         page_data = self.vm.get_current_page_data()
         self.assertEqual(len(page_data), 50)
         self.assertEqual(page_data.iloc[0]['A'], 50)
         
         # Ignore out of bounds
-        asyncio.run(self.vm.change_page(1))
+        self.vm.change_page(1) # Removed asyncio.run
+        self.vm._update_pagination()
         self.assertEqual(self.vm.page_no, 2)
 
     def test_sorting(self):

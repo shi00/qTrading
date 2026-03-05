@@ -38,6 +38,11 @@ class DatabaseManager:
             # Read-only intent: we only do SELECTs through Core
         )
 
+    def close(self):
+        """Disposes the SQLAlchemy engine connection pool, releasing file locks."""
+        if hasattr(self, '_engine') and self._engine:
+            self._engine.dispose()
+
     def get_all_tables(self):
         """
         Get a list of all tables in the database.

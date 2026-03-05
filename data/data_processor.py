@@ -19,7 +19,6 @@ from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import log_async_operation
-from utils.thread_pool import ThreadPoolManager, TaskType
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -266,7 +265,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         try:
             logger.info("[sync_stock_basic] Starting stock list sync...")
-            df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_stock_list)
+            df = await self.api.get_stock_list()
 
             if df is not None and not df.empty:
                 count = await self.cache.save_stock_basic(df)
@@ -299,7 +298,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Fetch Concept List
             # Fetch Concept List (uses _handle_api_call for rate limiting)
-            df_c = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_concept_list)
+            df_c = await self.api.get_concept_list()
             if df_c is None or df_c.empty:
                 return 0
 
@@ -317,7 +316,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 async with sem:
                     # Double check inside semaphore
                     if self.is_cancelled(): return None
-                    return await ThreadPoolManager().run_async(TaskType.IO, self.api.get_concept_detail_by_id, c)
+                    return await self.api.get_concept_detail_by_id(c)
 
             # Create tasks eagerly but execute with semaphore
             # This avoids "coroutine never awaited" because we wrap in create_task
@@ -413,8 +412,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Parallel Fetch
             async def get_idx(code, name_key):
-                df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_index_daily, ts_code=code,
-                                                         trade_date=date)
+                df = await self.api.get_index_daily(ts_code=code, trade_date=date)
                 name = I18n.get(name_key)
                 if df is not None and not df.empty:
                     row = df.iloc[0]
@@ -425,7 +423,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return {'name': name, 'value': '-', 'change': '-', 'color': 'grey'}
 
             async def get_hsgt():
-                df = await ThreadPoolManager().run_async(TaskType.IO, self.api.get_moneyflow_hsgt, trade_date=date)
+                df = await self.api.get_moneyflow_hsgt(trade_date=date)
                 name = I18n.get('home_northbound')
                 if df is not None and not df.empty:
                     val = float(df.iloc[0]['north_money'])

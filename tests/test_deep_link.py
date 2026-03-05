@@ -25,15 +25,24 @@ class TestDeepLinking(unittest.TestCase):
             with patch('ui.views.screener_view.ScreenerViewModel') as mock_vm_cls:
                 mock_vm = mock_vm_cls.return_value
                 mock_vm.get_strategies = AsyncMock(return_value={'strategy_a': 'Description A'})
+                mock_strategy = MagicMock()
+                mock_strategy.get_parameters = MagicMock(return_value=[])
+                mock_strategy.quality_tier = 0
+                mock_vm.strategy_mgr.get_strategy.return_value = mock_strategy
+                mock_vm.get_strategy_desc.return_value = 'Description A'
+                
                 # Mock run_strategy
                 mock_vm.run_strategy = AsyncMock()
                 
                 view = ScreenerView(self.page)
+                view._Control__page = self.page  # Simulate mounted state
                 # Mock update methods to avoid "Control must be added to the page" error
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
                 view.log_view.update = MagicMock()
                 view.status_text.update = MagicMock()
+                view.strategy_desc_text.update = MagicMock()
+                view.params_container.update = MagicMock()
                 
                 # Verify initial state
                 self.assertIsNone(view._pending_strategy_key)
@@ -52,7 +61,7 @@ class TestDeepLinking(unittest.TestCase):
                 # Verify Execution
                 self.assertIsNone(view._pending_strategy_key) # Should be cleared
                 self.assertEqual(view.strategy_dropdown.value, 'strategy_a')
-                mock_vm.run_strategy.assert_called_with('strategy_a')
+                mock_vm.run_strategy.assert_called_with('strategy_a', params={})
                 
         asyncio.run(run_test())
 
@@ -61,12 +70,21 @@ class TestDeepLinking(unittest.TestCase):
             with patch('ui.views.screener_view.ScreenerViewModel') as mock_vm_cls:
                 mock_vm = mock_vm_cls.return_value
                 mock_vm.get_strategies = AsyncMock(return_value={'strategy_b': 'Description B'})
+                mock_strategy = MagicMock()
+                mock_strategy.get_parameters = MagicMock(return_value=[])
+                mock_strategy.quality_tier = 0
+                mock_vm.strategy_mgr.get_strategy.return_value = mock_strategy
+                mock_vm.get_strategy_desc.return_value = 'Description B'
+                
                 mock_vm.run_strategy = AsyncMock()
                 
                 view = ScreenerView(self.page)
+                view._Control__page = self.page  # Simulate mounted state
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
                 view.log_view.update = MagicMock()
+                view.strategy_desc_text.update = MagicMock()
+                view.params_container.update = MagicMock()
                 
                 # 1. Pre-load strategies
                 await view._load_strategies()
@@ -76,7 +94,7 @@ class TestDeepLinking(unittest.TestCase):
                 
                 # Verify Immediate Execution
                 self.assertIsNone(view._pending_strategy_key)
-                mock_vm.run_strategy.assert_called_with('strategy_b')
+                mock_vm.run_strategy.assert_called_with('strategy_b', params={})
                 
         asyncio.run(run_test())
 

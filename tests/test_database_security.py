@@ -28,6 +28,8 @@ class TestDatabaseManagerSecurity(unittest.TestCase):
         self.db_manager = DatabaseManager(db_path=self.test_db_abs)
 
     def tearDown(self):
+        if hasattr(self, 'db_manager'):
+            self.db_manager.close()
         if os.path.exists(self.test_db):
             try:
                 os.remove(self.test_db)
