@@ -738,6 +738,7 @@ class I18n:
 
             # Data Source Tab
             "ds_val_placeholder_count": "5000+ 股票",
+            "ds_sync_in_progress": "后台数据同步或处理中，请等待当前操作完成",
             "ds_text_cov_detail": "覆盖率: {cov} | 财报覆盖: {fin_cov} (近期: {recent}) | 滞后: {lag}天",
             "ds_health_summary_sys": "系统指标: 全局覆盖 {cov} | 滞后 {lag} 天",
             "ds_health_summary_core": "完整性: {miss} 个核心表缺失",
@@ -1836,6 +1837,7 @@ class I18n:
 
             # Data Source Tab
             "ds_val_placeholder_count": "5000+ Stocks",
+            "ds_sync_in_progress": "System is busy processing data. Please wait for completion.",
             "ds_text_cov_detail": "Cov: {cov} | Fin Cmd: {fin_cov} (Recent: {recent}) | Lag: {lag}d",
             "ds_health_summary_sys": "System: Coverage {cov} | Lag {lag} days",
             "ds_health_summary_core": "Integrity: {miss} core missing",

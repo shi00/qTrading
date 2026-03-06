@@ -721,8 +721,7 @@ class DataSourceTab(ft.Container):
         self.is_syncing = is_busy
         if not self.page: return
 
-        # Include btn_repair in the managed controls
-        controls = [self.action_update_today, self.action_full_sync, self.action_clear_cache, self.sync_button, self.btn_repair]
+        controls = [self.action_update_today, self.action_full_sync, self.action_clear_cache, self.sync_button]
         
         for ctrl in controls:
             # Case 1: Active Button (The one clicked)
