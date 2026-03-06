@@ -1,26 +1,50 @@
 import pytest
 from unittest.mock import patch
 from utils.config_handler import ConfigHandler
+from utils.security_utils import SecurityManager
 
+# ---------------------------------------------------------------------------
+# Keyring 内存替身（Mock）
+# ---------------------------------------------------------------------------
+_MOCK_KEYRING = {}
+
+def _mock_set(service, username, password):
+    _MOCK_KEYRING[(service, username)] = password
+
+def _mock_get(service, username):
+    return _MOCK_KEYRING.get((service, username))
+
+def _mock_del(service, username):
+    _MOCK_KEYRING.pop((service, username), None)
+
+
+# ---------------------------------------------------------------------------
+# 全局测试隔离夹具
+# ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
-def isolate_config_file(tmp_path):
+def isolate_environment(tmp_path):
     """
     全局测试隔离夹具（Global Autouse Fixture）。
-    
-    确保每一个测试函数运行时，ConfigHandler 操作的是一个由 pytest 全权管理的
-    临时文件，而非工程根目录下的真实 user_settings.json。
-    
-    - 作用域：function（每个测试用例独立隔离）
-    - 自动注入：autouse=True（无需任何测试文件显式引用）
-    - 无文件锁：使用 tmp_path 而非 mkstemp，规避 Windows 文件锁定问题
+
+    将三类"可穿透到真实环境"的外部资源统一收进 tmp_path 沙盒：
+      1. user_settings.json  —— 防止测试覆写用户配置
+      2. keyring (OS Vault)  —— 防止测试覆写 Tushare Token / AI API Key
+      3. .secret.key         —— 防止测试重写加密母钥导致历史密文不可逆解密
     """
-    tmp_file = str(tmp_path / "test_settings.json")
-
-    # 清空内存缓存，防止读取到上一个测例的残留状态
+    # --- 重置内存缓存 ---
     ConfigHandler._config_cache = None
+    SecurityManager._key = None
+    _MOCK_KEYRING.clear()
 
-    with patch('utils.config_handler.CONFIG_FILE', tmp_file):
+    with patch('utils.config_handler.CONFIG_FILE', str(tmp_path / "test_settings.json")), \
+         patch.object(SecurityManager, 'KEY_FILE', str(tmp_path / ".secret.key")), \
+         patch.object(SecurityManager, 'KEY_FILE_BAK', str(tmp_path / ".secret.key.bak")), \
+         patch('keyring.set_password', side_effect=_mock_set), \
+         patch('keyring.get_password', side_effect=_mock_get), \
+         patch('keyring.delete_password', side_effect=_mock_del):
         yield
 
-    # 测试结束后再次清空，确保下一个测例从零开始
+    # --- 清扫 ---
     ConfigHandler._config_cache = None
+    SecurityManager._key = None
+    _MOCK_KEYRING.clear()

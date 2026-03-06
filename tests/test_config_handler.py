@@ -1,39 +1,21 @@
 import unittest
 import os
 import sys
-import json
-import tempfile
-from unittest.mock import patch, mock_open
+from unittest.mock import patch
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.config_handler import ConfigHandler
-import config
 
 class TestConfigHandler(unittest.TestCase):
     
     def setUp(self):
-        # Reset cache
+        # Reset cache (redundant with conftest but harmless for standalone runs)
         ConfigHandler._config_cache = None
-        
-        # Create a temporary file for config
-        self.test_dir = tempfile.TemporaryDirectory()
-        self.config_file = os.path.join(self.test_dir.name, "user_settings.json")
-        
-        # Patch the CONFIG_FILE path in ConfigHandler
-        self.patcher = patch('utils.config_handler.CONFIG_FILE', self.config_file)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        self.test_dir.cleanup()
 
     def test_load_config_empty(self):
         """Test loading when file doesn't exist"""
-        if os.path.exists(self.config_file):
-            os.remove(self.config_file)
-            
         config_data = ConfigHandler.load_config()
         self.assertEqual(config_data, {})
 
@@ -92,10 +74,12 @@ class TestConfigHandler(unittest.TestCase):
 
     def test_load_config_error(self):
         """Test handling of corrupt config file"""
-        with open(self.config_file, 'w') as f:
+        from utils.config_handler import CONFIG_FILE
+        with open(CONFIG_FILE, 'w') as f:
             f.write("{invalid_json")
             
         # Should return empty dict on error
+        ConfigHandler._config_cache = None  # force re-read from disk
         config_data = ConfigHandler.load_config()
         self.assertEqual(config_data, {})
 
