@@ -377,7 +377,10 @@ class DataSourceTab(ft.Container):
 
 
     def update_daily_quotes(self, e):
-        if self.is_syncing: return
+        if self.is_syncing:
+            logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
+            self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
+            return
         self.show_snack(I18n.get("snack_daily_sync_start"))
         self._set_sync_busy(True, self.action_update_today)
         self.page.run_task(self.sync_daily_async)
@@ -396,7 +399,10 @@ class DataSourceTab(ft.Container):
             self._set_sync_busy(False)
 
     def full_daily_sync(self, e):
-        if self.is_syncing: return
+        if self.is_syncing:
+            logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
+            self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
+            return
         self._show_confirm_dialog(
             title_key="dialog_confirm_full_sync_title",
             content_key="dialog_confirm_full_sync_content",
@@ -466,7 +472,10 @@ class DataSourceTab(ft.Container):
             self.show_snack(I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR)
 
     def confirm_clear_cache(self, e):
-        if self.is_syncing: return
+        if self.is_syncing:
+            logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
+            self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
+            return
         self._show_confirm_dialog(
             title_key="dialog_confirm_clear_title",
             content_key="dialog_confirm_clear_content",
@@ -476,8 +485,17 @@ class DataSourceTab(ft.Container):
         )
 
     async def clear_cache_async(self):
-        if self.is_syncing: return
+        if self.is_syncing:
+            logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
+            self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
+            return
+            
         self._set_sync_busy(True, self.action_clear_cache)
+        
+        # [CRITICAL for Flet]: Force yield to pump WebSocket sending queue.
+        # Ensure the 'Loading' ring renders on-screen BEFORE we lock the main loop with DB migrations.
+        await asyncio.sleep(0.1)
+
         try:
             # init_db is handled inside clear_all_cache.
             await self._cache.clear_all_cache()
@@ -561,9 +579,10 @@ class DataSourceTab(ft.Container):
             self.sync_button.disabled = True
             self.update()
             return
-
-        if self.is_syncing: return
-        
+        if self.is_syncing:
+            logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
+            self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
+            return
         # Prevent accidental trigger, show confirm dialog
         self._show_confirm_dialog(
             title_key="dialog_confirm_init_title",
