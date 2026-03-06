@@ -50,18 +50,7 @@ class DataSourceTab(ft.Container):
             border_radius=8,
             border=ft.border.all(1, AppColors.DIVIDER)
         )
-        # Repair UI
-        self.missing_fin_codes = []
-        self.btn_repair = ft.ElevatedButton(
-            I18n.get("ds_btn_repair"),
-            icon=ft.Icons.BUILD_CIRCLE,
-            style=ft.ButtonStyle(color=AppColors.TEXT_ON_PRIMARY, icon_color=AppColors.TEXT_ON_PRIMARY,
-                                 bgcolor=AppColors.ERROR),
-            visible=False,
-            on_click=self.repair_data,
-            height=40,
-            width=AppStyles.CONTROL_WIDTH_MD
-        )
+
 
         style_health = AppStyles.primary_button()
         style_health.padding = ft.padding.symmetric(horizontal=15, vertical=0)
@@ -98,9 +87,7 @@ class DataSourceTab(ft.Container):
                 ft.Container(height=10),
                 ft.Container(height=10),
                 ft.Container(height=10),
-                self.health_summary_container,
-                ft.Container(height=5),
-                ft.Row([self.btn_repair], alignment=ft.MainAxisAlignment.END)
+                self.health_summary_container
             ])
         )
 
@@ -361,14 +348,7 @@ class DataSourceTab(ft.Container):
                      ft.Row(integrity_items, spacing=5, alignment=ft.MainAxisAlignment.START, wrap=True)
                  ], spacing=6)
 
-                 stale_count = 0
-                 missing_fin = 0 
-                 total_need_repair = missing_fin + stale_count
-                 if total_need_repair > 0:
-                     self.missing_fin_codes = []
-                     self.btn_repair.visible = True
-                 else:
-                     self.btn_repair.visible = False
+
                  self._safe_update()
                  
                  return I18n.get("task_result_health_done")
@@ -394,30 +374,7 @@ class DataSourceTab(ft.Container):
              cancellable=True
         )
 
-    def repair_data(self, e):
-        if self.is_syncing: return
-        self.show_snack(I18n.get("ds_repair_start_snack"))
-        self._set_sync_busy(True, self.btn_repair)
-        self.page.run_task(self.repair_data_async)
 
-    async def repair_data_async(self):
-        try:
-            await self._processor.init_data()  # ensure init
-
-            self.show_snack(I18n.get("ds_repair_progress"), color=AppColors.INFO)
-
-            count = await self._processor.repair_financial_data(
-                self.missing_fin_codes,
-                progress_callback=lambda c, t, m: self.update_progress(c, t, m)
-            )
-
-            self.show_snack(I18n.get("ds_repair_done").format(count=count), color=AppColors.SUCCESS)
-            # Auto refresh health
-            self.refresh_health_status(None)
-        except Exception as e:
-            self.show_snack(I18n.get("ds_repair_fail").format(error=e), color=AppColors.ERROR)
-        finally:
-            self._set_sync_busy(False)
 
     def update_daily_quotes(self, e):
         if self.is_syncing: return
