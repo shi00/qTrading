@@ -550,6 +550,7 @@ class DataSourceTab(ft.Container):
         self.status_text.color = AppColors.WARNING
         self.status_icon.color = AppColors.WARNING
         self.status_icon.icon = ft.Icons.HOURGLASS_TOP
+        self.verify_btn.disabled = True
         self.update()
 
         # Run verification in background to avoid blocking UI
@@ -592,6 +593,7 @@ class DataSourceTab(ft.Container):
             self.status_icon.icon = ft.Icons.ERROR
         finally:
             self._is_verifying = False
+            self.verify_btn.disabled = False
             self._safe_update()
 
     def init_historical_data(self, e):
