@@ -32,7 +32,7 @@ class MacroSyncStrategy(ISyncStrategy):
     async def cancel(self):
         """Handle cancellation request."""
         self._cancelled = True
-        logger.info("[MacroSync] Cancellation requested.")
+        logger.debug("[MacroSync] Stop | Cancellation requested.")
 
     @log_async_operation(operation_name="MacroSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(self, **kwargs) -> SyncResult:
@@ -51,9 +51,9 @@ class MacroSyncStrategy(ISyncStrategy):
             logger.error(f"[MacroSync] Failed: {e}", exc_info=True)
             result.status = "failed"
             result.errors.append(str(e))
-
+        if result.status != "failed":
+            logger.info(f"[MacroSync] Run | ✅ Complete. Added={result.added}, Errors={len(result.errors)}")
         return result
-
     async def _sync_macro_monthly(self, result):
         """
         Fetch M2, CPI, PPI and merge into a single DataFrame before save.
@@ -71,10 +71,10 @@ class MacroSyncStrategy(ISyncStrategy):
             if merged is not None and not merged.empty:
                 count = await self.dao.save_macro_economy(merged)
                 result.added += count if count else 0
-                logger.info(f"[MacroSync] Saved {count} macro records")
+                logger.debug(f"[MacroSync] Monthly | Saved {count} macro records")
 
         except Exception as e:
-            logger.warning(f"[MacroSync] Macro Monthly error: {e}", exc_info=True)
+            logger.warning(f"[MacroSync] Monthly | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Macro Monthly: {e}")
 
     @classmethod
@@ -122,10 +122,10 @@ class MacroSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
-                logger.info(f"[MacroSync] Saved {count} Shibor records")
+                logger.debug(f"[MacroSync] Shibor | Saved {count} records")
 
         except Exception as e:
-            logger.warning(f"[MacroSync] Shibor error: {e}", exc_info=True)
+            logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Shibor: {e}")
 
     @staticmethod
@@ -170,7 +170,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 return
 
             end_date = today.strftime('%Y%m%d')
-            logger.info(f"[MacroSync] Syncing Index Weights for {len(MAJOR_INDICES)} indices...")
+            logger.debug(f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...")
 
             for idx_code in MAJOR_INDICES:
                 if self._cancelled: break
@@ -190,9 +190,9 @@ class MacroSyncStrategy(ISyncStrategy):
                         count = await self.context.cache.save_index_weights(df)
                         result.added += count if count else 0
                 except Exception as e:
-                    logger.warning(f"[MacroSync] Index Weight error {idx_code}: {e}")
+                    logger.warning(f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}")
                     # Continue to next index
 
         except Exception as e:
-            logger.warning(f"[MacroSync] Index Weight flow error: {e}", exc_info=True)
+            logger.warning(f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}", exc_info=True)
             result.errors.append(f"IndexWeight: {e}")

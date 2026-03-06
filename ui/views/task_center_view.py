@@ -3,6 +3,7 @@ from services.task_manager import TaskManager, TaskStatus, AppTask
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 import logging
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ class TaskCenterView(ft.Container):
             if self.page:
                 self.page.run_task(self._safe_refresh, current_tasks)
         except Exception as e:
-            logger.error(f"[TaskCenterView] Error scheduling UI update: {e}")
+            logger.error(f"[TaskCenterView] Refresh | ❌ Error scheduling UI update: {e}", exc_info=True)
 
     async def _safe_refresh(self, current_tasks):
         try:
@@ -344,9 +345,10 @@ class TaskCenterView(ft.Container):
     # --- Handlers ---
 
     def _handle_cancel(self, task_id: str):
-        logger.info(f"[TaskCenterView] User pressed cancel for task_id: {task_id}")
+        UILogger.log_action("TaskCenterView", "Click", f"btn_cancel | task_id={task_id}")
         self.task_manager.cancel_task(task_id)
 
     def _handle_clear(self, e):
+        UILogger.log_action("TaskCenterView", "Click", "btn_clear_finished")
         self._current_page = 1
         self.task_manager.clear_finished()

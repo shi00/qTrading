@@ -5,6 +5,7 @@ AI Brain Tab - AI 配置与策略调优
 """
 import asyncio
 import logging
+from utils.log_decorators import UILogger
 import os
 
 import flet as ft
@@ -566,6 +567,7 @@ class AIBrainTab(ft.Container):
 
     async def _save_ai_settings(self, e):
         """保存 AI 配置"""
+        UILogger.log_action("AIBrainTab", "Click", f"btn_save_ai | model={self.ai_model_dropdown.value}")
         try:
             # Cloud AI
             ai_key = self.ai_api_key_input.value.strip()
@@ -697,7 +699,7 @@ class AIBrainTab(ft.Container):
                 else:
                     self._update_connection_status("settings_status_verify_err", AppColors.ERROR, ft.Icons.ERROR)
             except Exception as ex:
-                logger.error(f"AI connection verification failed: {ex}")
+                logger.error(f"[AIBrainTab] Verify | ❌ Connection verification failed: {ex}", exc_info=True)
                 self._update_connection_status("common_error", AppColors.ERROR, ft.Icons.ERROR)
                 
             self._safe_update()
@@ -736,6 +738,7 @@ class AIBrainTab(ft.Container):
 
     async def _test_ai_connection(self, e):
         """测试 AI 连接"""
+        UILogger.log_action("AIBrainTab", "Click", f"btn_test_connection | model={self.ai_model_dropdown.value}")
         api_key = self.ai_api_key_input.value.strip()
         base_url = self.ai_base_url_input.value.strip()
         model = self.ai_model_dropdown.value

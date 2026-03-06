@@ -47,7 +47,7 @@ class FinancialSyncStrategy(ISyncStrategy):
     async def cancel(self):
         """Signal cancellation."""
         self._shutdown_event.set()
-        logger.info("[FinancialSyncStrategy] Cancellation signal received.")
+        logger.debug("[FinancialSync] Stop | Cancellation signal received.")
         # Cancel active tasks
         with self._tasks_lock:
             for task in self._active_tasks:
@@ -66,15 +66,15 @@ class FinancialSyncStrategy(ISyncStrategy):
             should_full_sync = False
             if periods is not None:
                 should_full_sync = True
-                logger.info("[sync_financial] STRATEGY: Full Sync (manual periods)")
+                logger.debug("[FinancialSync] Strategy | Full Sync (manual periods)")
             elif force:
                 should_full_sync = True
-                logger.info("[sync_financial] STRATEGY: Full Sync (force=True)")
+                logger.debug("[FinancialSync] Strategy | Full Sync (force=True)")
             else:
                 status = await self.context.cache.get_sync_status('financial_reports')
                 if not status or not status.get('last_sync_date'):
                     should_full_sync = True
-                    logger.info("[sync_financial] STRATEGY: Full Sync (first run)")
+                    logger.debug("[FinancialSync] Strategy | Full Sync (first run)")
 
             if should_full_sync:
                 await self._run_full_sync(periods, progress_callback, force=force, result_accumulator=result)
@@ -82,10 +82,10 @@ class FinancialSyncStrategy(ISyncStrategy):
                 await self._run_incremental_sync(progress_callback, result_accumulator=result)
 
         except asyncio.CancelledError:
-            logger.info("[FinancialSyncStrategy] Operation cancelled.")
+            logger.debug("[FinancialSync] Stop | Operation cancelled.")
             result.status = "cancelled"
         except Exception as e:
-            logger.error(f"[FinancialSyncStrategy] Error: {e}", exc_info=True)
+            logger.error(f"[FinancialSync] Run | ❌ Top-level failure: {e}", exc_info=True)
             result.status = "failed"
             result.errors.append(str(e))
 
@@ -106,17 +106,17 @@ class FinancialSyncStrategy(ISyncStrategy):
         if self._shutdown_event.is_set():
             return
 
-        logger.info(f"[FinancialSyncStrategy] Starting Comprehensive Fundamentals Sync (force={force})...")
+        logger.debug(f"[FinancialSync] FullSync | Starting comprehensive fundamentals (force={force})...")
 
         # Force Logic: Reset sync status for resume
         if force:
-            logger.warning("[sync_fundamentals] Force mode: Clearing previous sync status...")
+            logger.debug("[FinancialSync] FullSync | Force mode: Clearing previous sync status...")
             await self.context.cache.clear_step4_sync_status()
 
         # 1. Get Stock List
         df_basic = await self.context.cache.get_stock_basic()
         if df_basic.empty:
-            logger.error("[FinancialSyncStrategy] No stocks found. Please run Basic Sync first.")
+            logger.error("[FinancialSync] FullSync | ❌ No stocks found. Run Stock Basic sync first.")
             result_accumulator.errors.append("No stocks found in cache")
             result_accumulator.status = "failed"
             return
@@ -138,10 +138,10 @@ class FinancialSyncStrategy(ISyncStrategy):
         result_accumulator.updated += skipped_count  # Technically skipped, but "done"
 
         if skipped_count > 0:
-            logger.info(f"[sync_fundamentals] RESUME: {skipped_count} stocks completed, {len(pending_stocks)} pending")
+            logger.debug(f"[FinancialSync] FullSync | Resume: {skipped_count} done, {len(pending_stocks)} pending")
 
         if not pending_stocks:
-            logger.info("[sync_fundamentals] All stocks already synced.")
+            logger.debug("[FinancialSync] FullSync | All stocks already synced.")
             if progress_callback:
                 progress_callback(total_stocks, total_stocks,
                                   I18n.get('progress_sync_fundamentals').format(current=total_stocks,
@@ -186,7 +186,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             raise e  # Critical
                         except Exception as e:
                             has_error = True
-                            logger.warning(f"Fetch failed for {ts_code} [{func.__name__}]: {e}")
+                            logger.warning(f"[FinancialSync] StockSync | ⚠️ Fetch {func.__name__} failed for {ts_code}: {e}")
                             return None
 
                     # Task Specs
@@ -231,10 +231,10 @@ class FinancialSyncStrategy(ISyncStrategy):
                             await self.context.cache.mark_stock_step4_completed(ts_code, sync_version=1)
                         result_accumulator.added += 1
                     else:
-                        logger.warning(f"Stock {ts_code} incomplete, will retry.")
+                        logger.debug(f"[FinancialSync] StockSync | {ts_code} incomplete, pending retry.")
 
             except Exception as e:
-                logger.error(f"Failed Step 4 for {ts_code}: {e}")
+                logger.warning(f"[FinancialSync] StockSync | ⚠️ Failed for {ts_code}: {e}")
                 # Don't abort all, just this stock
 
             # Per-stock progress update (advance progress bar for processed stocks)
@@ -265,7 +265,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     self._active_tasks.difference_update(tasks)
 
         # Batch phase: corporate actions sync (serial, AFTER stock loop to avoid API contention)
-        logger.info("[FinancialSyncStrategy] Starting Batch Sync (Corporate Actions)...")
+        logger.debug("[FinancialSync] BatchSync | Starting corporate actions batch phase...")
 
         def batch_progress(current, total, msg):
             if progress_callback:
@@ -299,7 +299,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             curr += datetime.timedelta(days=1)
 
         if not dates_to_sync:
-            logger.debug("[incremental_sync] Data already up-to-date")
+            logger.debug("[FinancialSync] Incremental | Data already up-to-date")
             return
 
         total_saved = 0
@@ -339,7 +339,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             if count > 0:
                                 total_saved += count
                     except Exception as e:
-                        logger.warning(f"Failed incremental sync for {ts_code} {period}: {e}")
+                        logger.warning(f"[FinancialSync] Incremental | ⚠️ Failed {ts_code} period={period}: {e}")
 
             for item in target_list:
                 tasks.append(sync_one_target(item))
@@ -367,7 +367,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         if not dates: return
 
         total = len(dates)
-        logger.info(f"[HybridSync] Batch syncing corporate actions for {total} days...")
+        logger.debug(f"[FinancialSync] BatchSync | Syncing corporate actions across {total} days...")
 
         concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(concurrency)
@@ -388,20 +388,20 @@ class FinancialSyncStrategy(ISyncStrategy):
                         save_func = save_map.get(table_name)
                         if save_func:
                             await save_func(df)
-                            logger.debug(f"[HybridSync] Synced {table_name} for {date_str}: {len(df)} records")
+                            logger.debug(f"[FinancialSync] BatchSync | Synced {table_name} for {date_str}: {len(df)} records")
 
                 except Exception as e:
                     err_str = str(e).lower()
                     if "permission" in err_str or "积分" in err_str or "no access" in err_str:
-                        logger.warning(f"[HybridSync] ⛔ Permission Denied for {table_name}: {e}")
+                        logger.warning(f"[FinancialSync] BatchSync | ⛔ Permission Denied for {table_name}: {e}")
                         await self.context.cache.update_sync_status(table_name, date_str, 0, status='permission_denied')
                     else:
-                        logger.warning(f"[HybridSync] Failed batch sync {table_name} on {date_str}: {e}")
+                        logger.warning(f"[FinancialSync] BatchSync | ⚠️ Failed {table_name} on {date_str}: {e}")
 
         # Iterate per-date (not all-at-once) to avoid task explosion
         for i, d in enumerate(dates):
             if self._shutdown_event.is_set():
-                logger.info("[HybridSync] Cancelled during corporate actions batch sync")
+                logger.debug("[FinancialSync] BatchSync | Cancelled during corporate actions.")
                 break
 
             # Each date: 3 tables in parallel
@@ -456,7 +456,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             except Exception as e:
                 err_str = str(e).lower()
                 if "permission" in err_str or "积分" in err_str:
-                    logger.debug(f"Permission denied for {table_name} on {ts_code}")
+                    logger.debug(f"[FinancialSync] Fetch | Permission denied for {table_name} on {ts_code}")
                 return False
 
         try:
@@ -500,7 +500,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             return df_merged
 
         except Exception as e:
-            logger.warning(f"Failed to fetch comprehensive data for {ts_code}: {e}")
+            logger.warning(f"[FinancialSync] Fetch | ⚠️ Comprehensive data failed for {ts_code}: {e}")
             return None
 
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
@@ -518,7 +518,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             p_cands.extend([f"{y}0331", f"{y}0630", f"{y}0930", f"{y}1231"])
         periods = sorted([p for p in p_cands if p < now.strftime('%Y%m%d')], reverse=True)[:12]
 
-        logger.info(f"[FinancialSyncStrategy] 🚑 Comprehensive Repairing {len(ts_codes)} stocks...")
+        logger.debug(f"[FinancialSync] Repair | Repairing {len(ts_codes)} stocks...")
 
         semaphore = asyncio.Semaphore(1)
         total_saved = 0

@@ -3,6 +3,7 @@ import unittest
 import sys
 import os
 import logging
+import asyncio
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -40,12 +41,12 @@ class TestTushareLimits(unittest.TestCase):
             # So we access .pro directly if possible, or use _handle_api_call
             
             # Using _handle_api_call to use the client's retry/error handling logic
-            df = client._handle_api_call(
+            df = asyncio.run(client._handle_api_call(
                 client.pro.fina_indicator, 
                 period=period, 
                 limit=5,
                 fields='ts_code,end_date,roe'
-            )
+            ))
             
             if df is not None and not df.empty:
                 print("API Success! Returned data:")

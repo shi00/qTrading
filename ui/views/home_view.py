@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+from utils.log_decorators import UILogger
 import flet as ft
 import pandas as pd
 
@@ -109,7 +110,7 @@ class HomeView(ft.Container):
     def set_visible(self, visible: bool):
         if self._is_visible != visible:
             self._is_visible = visible
-            logger.info(f"[HomeView] Visibility changed to: {visible}")
+            logger.debug(f"[HomeView] Visibility | changed to: {visible}")
 
     def refresh_news_if_visible(self):
         self._run_if_visible(self._refresh_news_data, "Refreshing news list")
@@ -133,6 +134,7 @@ class HomeView(ft.Container):
                 self.update()
 
     def _refresh_clicked(self, e):
+        UILogger.log_action("HomeView", "Click", "btn_refresh")
         if self.page:
             self.page.run_task(self._load_data)
 
@@ -154,7 +156,7 @@ class HomeView(ft.Container):
             self.news_feed.update_locale()
             self.update()
         except Exception as e:
-            logger.error(f"Error refreshing locale: {e}")
+            logger.error(f"[HomeView] Locale | ❌ Refresh failed: {e}", exc_info=True)
 
     def update_theme(self):
         """Handle theme change"""
@@ -171,7 +173,7 @@ class HomeView(ft.Container):
             # It's an IconButton, default icon color might need refresh if not set?
             # It usually picks up theme primary/on_surface.
         except Exception as e:
-            logger.error(f"Error updating theme: {e}")
+            logger.error(f"[HomeView] Theme | ❌ Update failed: {e}", exc_info=True)
 
     # --- Data Loading Logic ---
 
@@ -184,7 +186,7 @@ class HomeView(ft.Container):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"[HomeView] Init failed: {e}")
+            logger.error(f"[HomeView] Init | ❌ Failed: {e}", exc_info=True)
 
     async def _load_data(self):
         """Initial Full Load (Market + News)"""
@@ -206,11 +208,11 @@ class HomeView(ft.Container):
                 self.date_text.update()
                 self.dashboard.update_data(data)
         except Exception as e:
-            logger.error(f"[HomeView] Error loading market data: {e}")
+            logger.error(f"[HomeView] Market | ❌ Load failed: {e}", exc_info=True)
 
     async def _refresh_news_data(self):
         try:
             news_data, has_more = await self.vm.refresh_news()
             self.news_feed.set_news(news_data, has_more)
         except Exception as e:
-            logger.error(f"[HomeView] Error loading news data: {e}")
+            logger.error(f"[HomeView] News | ❌ Load failed: {e}", exc_info=True)

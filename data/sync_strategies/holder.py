@@ -32,7 +32,7 @@ class HolderSyncStrategy(ISyncStrategy):
     async def cancel(self):
         """Handle cancellation request."""
         self._cancelled = True
-        logger.info("[HolderSync] Cancellation requested.")
+        logger.debug("[HolderSync] Stop | Cancellation requested.")
 
     @log_async_operation(operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(self, **kwargs) -> SyncResult:
@@ -43,11 +43,11 @@ class HolderSyncStrategy(ISyncStrategy):
         try:
             # Determine the latest 2 quarter-end dates to ensure coverage
             quarter_ends = self._get_recent_quarter_ends(count=2)
-            logger.info(f"[HolderSync] Syncing quarterly snapshots: {quarter_ends}")
+            logger.debug(f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}")
 
             for qe in quarter_ends:
                 if self._cancelled:
-                    logger.info("[HolderSync] Cancelled by user.")
+                    logger.debug("[HolderSync] Stop | Cancelled by user.")
                     break
 
                 # --- stk_holdernumber ---
@@ -94,10 +94,10 @@ class HolderSyncStrategy(ISyncStrategy):
                 result.status = "partial"
                 result.errors.append(f"Aborted after {errors} errors")
 
-            logger.info(f"[HolderSync] Completed: {result.added} records synced, {errors} errors")
+            logger.info(f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}")
 
         except Exception as e:
-            logger.error(f"[HolderSync] Failed: {e}", exc_info=True)
+            logger.error(f"[HolderSync] Run | ❌ Top-level failure: {e}", exc_info=True)
             result.status = "failed"
             result.errors.append(str(e))
 
@@ -113,17 +113,17 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             if df is not None and not df.empty:
                 await save_func(df)
-                logger.info(f"[HolderSync] {table_name} end_date={end_date}: {len(df)} records")
+                logger.debug(f"[HolderSync] Table | {table_name} end_date={end_date}: {len(df)} records")
                 return len(df)
             else:
-                logger.debug(f"[HolderSync] {table_name} end_date={end_date}: no data")
+                logger.debug(f"[HolderSync] Table | {table_name} end_date={end_date}: no data")
                 return 0
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
                 logger.warning(f"[HolderSync] ⛔ Permission denied for {table_name}: {e}")
             else:
-                logger.warning(f"[HolderSync] Error syncing {table_name} end_date={end_date}: {e}")
+                logger.warning(f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}")
             return -1
 
     async def _sync_pledge_stat(self):
@@ -146,17 +146,17 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             if df is not None and not df.empty:
                 await self.context.cache.save_pledge_stat(df)
-                logger.info(f"[HolderSync] pledge_stat end_date={end_date}: {len(df)} records")
+                logger.debug(f"[HolderSync] Table | pledge_stat end_date={end_date}: {len(df)} records")
                 return len(df)
             else:
-                logger.debug(f"[HolderSync] pledge_stat end_date={end_date}: no data")
+                logger.debug(f"[HolderSync] Table | pledge_stat end_date={end_date}: no data")
                 return 0
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
                 logger.warning(f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}")
             else:
-                logger.warning(f"[HolderSync] Error syncing pledge_stat: {e}")
+                logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")
             return -1
 
     @staticmethod

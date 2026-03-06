@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from utils.log_decorators import UILogger
 
 import flet as ft
 
@@ -277,6 +278,7 @@ class SystemTab(ft.Container):
 
     def on_theme_change(self, e):
         """Handle theme change"""
+        UILogger.log_action("SystemTab", "Select", f"theme={self.theme_dropdown.value}")
         try:
             theme_name = self.theme_dropdown.value
             ConfigHandler.set_theme_name(theme_name)
@@ -288,11 +290,12 @@ class SystemTab(ft.Container):
             
             self.show_snack(I18n.get("settings_snack_theme_updated"))
         except Exception as ex:
-            logger.error(f"Theme change failed: {ex}")
+            logger.error(f"[SystemTab] Theme | ❌ Change failed: {ex}", exc_info=True)
             self.show_snack(f"Theme Error: {ex}", color=AppColors.ERROR)
 
     def on_log_level_change(self, e):
         """Handle log level change"""
+        UILogger.log_action("SystemTab", "Select", f"log_level={self.log_level_dropdown.value}")
         level = self.log_level_dropdown.value
         ConfigHandler.set_log_level(level)
         self.show_snack(I18n.get("sys_log_label") + ": " + level)
@@ -375,7 +378,7 @@ class SystemTab(ft.Container):
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
         except Exception as ex:
             self.show_snack(I18n.get("sys_snack_save_err").format(error=str(ex)), color=AppColors.ERROR)
-            logger.error(f"Failed to save thread pool settings: {ex}")
+            logger.error(f"[SystemTab] ThreadPool | ❌ Save failed: {ex}", exc_info=True)
 
     def save_rate_limit(self, e):
         """Save API rate limit setting."""

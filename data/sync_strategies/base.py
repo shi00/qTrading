@@ -71,4 +71,4 @@ class ISyncStrategy(ABC):
         Handle cancellation requests. 
         Default implementation just logs, overrides should set internal flags.
         """
-        self.logger.info("Cancellation requested.")
+        self.logger.debug("Cancellation requested.")

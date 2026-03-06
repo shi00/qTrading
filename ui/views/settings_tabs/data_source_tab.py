@@ -1,4 +1,5 @@
 import logging
+from utils.log_decorators import UILogger
 import asyncio
 import flet as ft
 from ui.components.settings_widgets import DashboardCard, MetricCard, ActionChip, SectionHeader, SettingRow
@@ -258,6 +259,7 @@ class DataSourceTab(ft.Container):
     # --- Logic Methods (Migrated from SettingsView) ---
 
     def refresh_health_status(self, e):
+        UILogger.log_action("DataSourceTab", "Click", "btn_check_health")
         if not self.page:
             return
         
@@ -354,7 +356,7 @@ class DataSourceTab(ft.Container):
                  return I18n.get("task_result_health_done")
 
              except Exception as e:
-                 logger.error(f"Health check error: {e}", exc_info=True)
+                 logger.error(f"[DataSourceTab] Health | ❌ Check failed: {e}", exc_info=True)
                  self.metric_health.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR,
                                               AppColors.ERROR)
                  self.health_summary_container.content = ft.Text(I18n.get("ds_health_check_error"), size=12, color=AppColors.ERROR)
@@ -377,6 +379,7 @@ class DataSourceTab(ft.Container):
 
 
     def update_daily_quotes(self, e):
+        UILogger.log_action("DataSourceTab", "Click", "btn_update_daily")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
@@ -399,6 +402,7 @@ class DataSourceTab(ft.Container):
             self._set_sync_busy(False)
 
     def full_daily_sync(self, e):
+        UILogger.log_action("DataSourceTab", "Click", "btn_full_sync")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
@@ -432,7 +436,7 @@ class DataSourceTab(ft.Container):
     def _show_confirm_dialog(self, title_key, content_key, confirm_btn_key, on_confirm_callback, is_destructive=False):
         try:
             if not self.page:
-                logger.error("Page is not attached")
+                logger.error("[DataSourceTab] Dialog | ❌ Page not attached, cannot open dialog")
                 return
 
             # Prevent multiple dialogs
@@ -468,10 +472,11 @@ class DataSourceTab(ft.Container):
             self.page.open(dialog)
         except Exception as ex:
             self._dialog_open = False
-            logger.error(f"Error opening dialog: {ex}")
+            logger.error(f"[DataSourceTab] Dialog | ❌ Failed to open dialog: {ex}", exc_info=True)
             self.show_snack(I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR)
 
     def confirm_clear_cache(self, e):
+        UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
@@ -504,11 +509,12 @@ class DataSourceTab(ft.Container):
         except Exception as ex:
             self.show_snack(I18n.get("ds_clean_fail").format(error=str(ex)[:100]))
         finally:
-            logger.info("[clear_cache_async] Releasing sync lock...")
+            logger.info("[DataSourceTab] ClearCache | Releasing sync lock...")
             self._set_sync_busy(False)
 
     def save_and_verify_tushare(self, e):
         """Initiate async token verification to avoid blocking UI"""
+        UILogger.log_action("DataSourceTab", "Click", "btn_save_token")
         # Prevent double-click during verification
         if self._is_verifying:
             logger.warning("[DataSourceTab] Token verification double-click intercepted.")
@@ -573,6 +579,7 @@ class DataSourceTab(ft.Container):
 
     def init_historical_data(self, e):
         if self.is_syncing and getattr(self.sync_button, "text", "").startswith(I18n.get("common_cancel")):
+            UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
             # Request cancellation via DataProcessor
             self.page.run_task(self._processor.request_cancel)
             self.sync_button.text = I18n.get("sys_init_cancel_wait")
@@ -583,6 +590,7 @@ class DataSourceTab(ft.Container):
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
+        UILogger.log_action("DataSourceTab", "Click", "btn_init_historical")
         # Prevent accidental trigger, show confirm dialog
         self._show_confirm_dialog(
             title_key="dialog_confirm_init_title",
@@ -656,7 +664,7 @@ class DataSourceTab(ft.Container):
                         self._set_sync_busy(False)
                         self._safe_update()
                     except Exception as ex:
-                        logger.error(f"Error reverting UI on cancel: {ex}")
+                        logger.error(f"[DataSourceTab] Sync | ❌ Error reverting UI on cancel: {ex}", exc_info=True)
                 
                 if self.page and self.page.loop:
                     self.page.loop.call_soon_threadsafe(_safe_revert)
@@ -673,7 +681,7 @@ class DataSourceTab(ft.Container):
                 
                 self.show_snack(msg, color=AppColors.ERROR)
                 self.progress_text.value = I18n.get("ds_progress_failed_fmt", msg=msg)
-                logger.error(f"Sync error: {e}", exc_info=True)
+                logger.error(f"[DataSourceTab] Sync | ❌ Init sync failed: {e}", exc_info=True)
                 
                 # Revert UI
                 self.sync_button.text = I18n.get("settings_init_data")
@@ -685,7 +693,7 @@ class DataSourceTab(ft.Container):
                         self._set_sync_busy(False)
                         self._safe_update()
                     except Exception as ex:
-                        logger.error(f"Error reverting UI on exception: {ex}")
+                        logger.error(f"[DataSourceTab] Sync | ❌ Error reverting UI on exception: {ex}", exc_info=True)
                 
                 if self.page and self.page.loop:
                     self.page.loop.call_soon_threadsafe(_safe_revert_err)
@@ -752,7 +760,7 @@ class DataSourceTab(ft.Container):
                             ctrl.set_loading(False) # Reset state
                             ctrl.opacity = 1.0
                     except Exception as e:
-                        logger.error(f"Failed to reset ctrl state ({ctrl}): {e}")
+                        logger.error(f"[DataSourceTab] Sync | ❌ Failed to reset ctrl state ({ctrl}): {e}", exc_info=True)
 
         # Batch update via parent container to ensure consistency
         try:
@@ -762,6 +770,7 @@ class DataSourceTab(ft.Container):
 
     def show_health_report_dialog(self, e):
         """Show full health report dialog"""
+        UILogger.log_action("DataSourceTab", "Click", "btn_health_report")
         if not self.page: return
         self.page.run_task(self._show_health_report_task)
 

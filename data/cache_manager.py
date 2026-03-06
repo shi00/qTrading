@@ -415,13 +415,13 @@ class CacheManager:
         await self.wait_for_maintenance()
         results = {}
         
-        logger.info("[Health] Starting comprehensive data check...")
+        logger.debug("[CacheManager] Health | Starting comprehensive check...")
 
         async with self.engine.connect() as conn:
             # Total Stocks
             total_stocks = await self.stock_dao.get_active_stock_count()
             total_stocks = total_stocks or 1
-            logger.info(f"[Health] Total Active Stocks: {total_stocks}")
+            logger.debug(f"[CacheManager] Health | Active stocks baseline: {total_stocks}")
 
             # Tables Check (Dynamic iteration based on registry)
             # Filter for quality monitored tables
@@ -452,9 +452,9 @@ class CacheManager:
                         ) FROM stock_basic s WHERE s.list_status = 'L'
                     """, (str(g_min), str(g_max)))
                     global_expected_rows = r_exp.fetchone()[0] or 1
-                    logger.info(f"[Health] Global baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}")
+                    logger.debug(f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}")
             except Exception as e:
-                logger.warning(f"[Health] Global baseline calc failed (non-fatal): {e}")
+                logger.warning(f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}")
 
             for table, meta in monitored_tables.items():
                 try:
@@ -516,7 +516,7 @@ class CacheManager:
                             if ratio < 0.01:
                                 fresh_ratio = 0.0
                         except Exception:
-                            logger.debug(f"[Health] Freshness check skipped for {table}: no valid date column")
+                            logger.debug(f"[CacheManager] Health | Freshness check skipped for {table}: no valid date column")
                     
                     # --- Depth (all stock tables, based on global trade days) ---
                     depth_ratio = None
@@ -533,7 +533,7 @@ class CacheManager:
                             actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
                         except Exception:
-                            logger.debug(f"[Health] Breadth calc failed for {table}")
+                            logger.debug(f"[CacheManager] Health | Breadth calc failed for {table}")
 
                     table_type = 'stock' if is_stock_table else 'global'
                     results[table] = {
@@ -544,21 +544,21 @@ class CacheManager:
                     
                     if ratio < 0.1:
                         if is_stock_table:
-                            logger.warning(f"[Health] Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})")
+                            logger.warning(f"[CacheManager] Health | ⚠️ Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})")
                         else:
-                            logger.warning(f"[Health] Table {table} (global) CRITICAL: {cnt} records")
+                            logger.warning(f"[CacheManager] Health | ⚠️ Table {table} (global) CRITICAL: {cnt} records")
                     else:
                         if is_stock_table:
                             d_str = f", depth={depth_ratio:.1%}" if depth_ratio is not None else ""
                             b_str = f", breadth={breadth_ratio:.1%}" if breadth_ratio is not None else ""
-                            logger.debug(f"[Health] Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}{d_str}{b_str}")
+                            logger.debug(f"[CacheManager] Health | Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}{d_str}{b_str}")
                         else:
-                            logger.debug(f"[Health] Table {table} (global): {cnt} records")
+                            logger.debug(f"[CacheManager] Health | Table {table} (global): {cnt} records")
                 except Exception as e:
                     if "no such table" in str(e):
-                        logger.warning(f"[Health] Table {table} missing/not created yet.")
+                        logger.warning(f"[CacheManager] Health | ⚠️ Table {table} missing/not created yet.")
                     else:
-                        logger.error(f"[Health] Failed to check table {table}: {e}")
+                        logger.error(f"[CacheManager] Health | ❌ Failed to check table {table}: {e}", exc_info=True)
                     results[table] = {'covered': 0, 'ratio': 0, 'fresh_ratio': 0, 'depth_ratio': None, 'breadth_ratio': None, 'type': meta.get('type', 'stock')}
 
         return {'total_stocks': total_stocks, 'tables': results}

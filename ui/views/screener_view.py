@@ -10,6 +10,7 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
 from services.task_manager import TaskManager
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +216,7 @@ class ScreenerView(ft.Container):
             ]
             self.strategy_dropdown.update()
         except Exception as e:
-            logger.error(f"[ScreenerView] Failed to load strategies: {e}")
+            logger.error(f"[ScreenerView] Strategy | ❌ Failed to load strategies: {e}", exc_info=True)
             self.status_text.value = I18n.get("screener_load_failed").format(error=e)
             self.status_text.color = AppColors.ERROR
             self.status_text.update()
@@ -223,14 +224,14 @@ class ScreenerView(ft.Container):
 
         # Handle Pending Deep Link
         if self._pending_strategy_key:
-            logger.info(f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}")
+            logger.debug(f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}")
             await self.select_and_run_strategy(self._pending_strategy_key)
             self._pending_strategy_key = None
 
     async def select_and_run_strategy(self, strategy_key: str):
         """Public API to select and run a strategy (Deep Link)"""
         if not self.strategy_dropdown.options:
-            logger.info(f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}")
+            logger.debug(f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}")
             self._pending_strategy_key = strategy_key
             return
 
@@ -381,6 +382,7 @@ class ScreenerView(ft.Container):
         All UI mutations must be routed through page.run_task() to avoid
         cross-thread races with _do_update() on the async event loop.
         """
+        UILogger.log_action("ScreenerView", "Toggle", f"mode={list(e.control.selected)[0] if e.control.selected else 'unknown'}")
         selected = e.control.selected
         if not selected:
             return
@@ -481,7 +483,7 @@ class ScreenerView(ft.Container):
             self.history_load_more_btn.update()
 
         except Exception as ex:
-            logger.error(f"[ScreenerView] Failed to load history tree: {ex}", exc_info=True)
+            logger.error(f"[ScreenerView] History | ❌ Failed to load history tree: {ex}", exc_info=True)
 
     def _on_tree_item_click(self, trade_date: str, strategy_name=None):
         """Handle click on a tree node to load historical records."""
@@ -506,6 +508,7 @@ class ScreenerView(ft.Container):
     # --- Event Handlers ---
 
     def _on_strategy_change(self, e):
+        UILogger.log_action("ScreenerView", "Select", f"strategy={self.strategy_dropdown.value}")
         self.selected_strategy = self.strategy_dropdown.value
         self.run_btn.disabled = not self.selected_strategy
 
@@ -529,6 +532,7 @@ class ScreenerView(ft.Container):
         self._render_strategy_params()
 
     def _on_run_click(self, e):
+        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}")
         if not self.selected_strategy: return
         self.run_btn.disabled = True
         self.run_btn.update()
@@ -663,6 +667,7 @@ class ScreenerView(ft.Container):
 
     async def _on_export_click(self, e):
         """Export current results"""
+        UILogger.log_action("ScreenerView", "Click", "btn_export")
         self.export_btn.disabled = True
         self.export_btn.update()
 
@@ -676,7 +681,7 @@ class ScreenerView(ft.Container):
                 self.page.show_snack_bar(ft.SnackBar(content=ft.Text(I18n.get("data_export_fail").format(error=error)),
                                                      bgcolor=AppColors.ERROR))
         except Exception as ex:
-            logger.error(f"UI Export error: {ex}")
+            logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
         finally:
             self.export_btn.disabled = False
             self.export_btn.update()
@@ -1008,6 +1013,6 @@ class ScreenerView(ft.Container):
             try:
                 self._render_table()
             except Exception as e:
-                logger.error(f"Error re-rendering table on theme change: {e}")
+                logger.error(f"[ScreenerView] Theme | ❌ Re-render failed: {e}", exc_info=True)
 
             self.page.update()

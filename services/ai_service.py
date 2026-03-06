@@ -50,7 +50,7 @@ class AIService:
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("[AIService] No running event loop for semaphore. Using dummy lock.")
+            logger.debug("[AIService] Semaphore | No running event loop, using DummySemaphore.")
             class DummySemaphore:
                 async def __aenter__(self): return
                 async def __aexit__(self, *args): return
@@ -76,12 +76,12 @@ class AIService:
         base_url = ai_cfg.get('ai_base_url')
 
         if not api_key:
-            logger.warning("[AI] API Key not found. AI features will be disabled.")
+            logger.warning("[AIService] Config | ⚠️ API Key not found. AI features disabled.")
             self.client = None
             return
 
         if not base_url:
-            logger.error("[AI] Configuration Error: 'ai_base_url' is mandatory. No default fallback.")
+            logger.error("[AIService] Config | ❌ 'ai_base_url' is mandatory. No default fallback.")
             self.client = None
             return
 
@@ -93,7 +93,7 @@ class AIService:
             timeout=httpx.Timeout(30.0, connect=5.0),
             max_retries=2
         )
-        logger.info(f"[AI] Client initialized with Base URL: {base_url}")
+        logger.info(f"[AIService] Init | ✅ Cloud client ready. base_url={base_url}")
 
     def _safe_truncate(self, text: str, max_len: int) -> str:
         """Safely truncate text to avoid token overflow"""
@@ -166,8 +166,8 @@ class AIService:
                 raise ValueError("Model not configured")
 
             async with await self._get_semaphore():
-                logger.info(f"[AI] Invoking cloud model: {model} with {len(messages)} messages")
-                logger.info(f"[AI] Request Payload (Messages):\n{json.dumps(messages, ensure_ascii=False, indent=2)}")
+                logger.debug(f"[AIService] Cloud | Invoking {model} ({len(messages)} messages)")
+                logger.debug(f"[AIService] Cloud | Payload preview: {str(messages)[:200]}...")
                 
                 response = await self.client.chat.completions.create(
                     model=model,
@@ -273,7 +273,7 @@ class AIService:
                 concepts_str = "Data not synced"
 
         except Exception as e:
-            logger.warning(f"[AI] Failed to process concepts: {e}")
+            logger.warning(f"[AIService] Analyze | ⚠️ Concepts processing failed: {e}")
 
         # Add concepts to stock_xml
         stock_xml += f"\n  Concepts: {concepts_str}"
@@ -284,7 +284,7 @@ class AIService:
                 rm = ReviewManager()
                 history_context = await rm.get_learning_context()
             except Exception as e:
-                logger.warning(f"[AI] Failed to fetch learning context: {e}")
+                logger.warning(f"[AIService] Analyze | ⚠️ Learning context fetch failed: {e}")
                 history_context = ""
 
         # Load System Prompt from Config
@@ -341,10 +341,10 @@ class AIService:
             return res
 
         except asyncio.TimeoutError:
-            logger.error(f"[AI] Analysis timeout")
+            logger.error(f"[AIService] Analyze | ❌ Timeout (120s exceeded)", exc_info=True)
             return {"error": "Analysis timeout", "score": 0}
         except Exception as e:
-            logger.error(f"[AI] Analysis failed: {e}", exc_info=True)
+            logger.error(f"[AIService] Analyze | ❌ Top-level failure: {e}", exc_info=True)
             return {"error": str(e), "score": 0}
 
     async def _get_setup_lock(self):
@@ -352,7 +352,7 @@ class AIService:
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("[AIService] No running event loop for setup block. Using dummy lock.")
+            logger.debug("[AIService] SetupLock | No running event loop, using DummyLock.")
             class DummyLock:
                 async def __aenter__(self): return
                 async def __aexit__(self, *args): return
@@ -410,15 +410,15 @@ class AIService:
         try:
             raw_result = await self._chat_completion(messages, provider="local", json_mode=True)
             result = self._parse_news_result(raw_result)
-            logger.info(f"[AI] Local classification result: {result.get('category')} ({result.get('sentiment')})")
+            logger.debug(f"[AIService] Classify | Local ✅ {result.get('category')} / {result.get('sentiment')}")
             return result
         except Exception as local_e:
             # Local failed (not configured, crash, etc.)
             # Log only if it wasn't just "not configured" (which is common)
             if "not installed" not in str(local_e) and "not configured" not in str(local_e):
-                logger.warning(f"[AI] Local classification failed, falling back to cloud: {local_e}")
+                logger.warning(f"[AIService] Classify | ⚠️ Local failed, falling back to cloud: {local_e}")
             else:
-                logger.info(f"[AI] Local model unavailable ({local_e}). Using Cloud.")
+                logger.warning(f"[AIService] Classify | ⚠️ Local model unavailable, falling back to cloud: {local_e}")
 
         # 2. Fallback to Cloud
         try:
@@ -428,10 +428,10 @@ class AIService:
             # We will use 30s default.
             raw_result = await self._chat_completion(messages, provider="cloud", json_mode=True)
             result = self._parse_news_result(raw_result)
-            logger.info(f"[AI] Cloud classification result: {result.get('category')} ({result.get('sentiment')})")
+            logger.debug(f"[AIService] Classify | Cloud ✅ {result.get('category')} / {result.get('sentiment')}")
             return result
         except Exception as e:
-            logger.error(f"[AI] Classification failed (All providers): {e}", exc_info=True)
+            logger.error(f"[AIService] Classify | ❌ All providers failed: {e}", exc_info=True)
             return None
 
     async def verify_connection(self) -> bool:
@@ -454,7 +454,7 @@ class AIService:
             )
             return True
         except Exception as e:
-            logger.error(f"[AI] Verification failed: {e}")
+            logger.error(f"[AIService] Verify | ❌ Connection verification failed: {e}", exc_info=True)
             raise e
 
     @staticmethod
@@ -482,5 +482,5 @@ class AIService:
             )
             return True
         except Exception as e:
-            logger.error(f"[AI] Test connection failed: {e}")
+            logger.error(f"[AIService] TestConn | ❌ Test connection failed: {e}", exc_info=True)
             raise e

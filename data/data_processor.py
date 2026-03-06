@@ -18,7 +18,7 @@ from data.sync_strategies.holder import HolderSyncStrategy
 from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -163,13 +163,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     # Delegated Sync Methods
     # ==========================================
 
-    @log_async_operation(operation_name="sync_historical")
+    @log_async_operation(operation_name="sync_historical", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def sync_historical_data(self, days=365, progress_callback=None):
         """Delegated to HistoricalSyncStrategy"""
         result = await self.strategies['historical'].run(days=days, progress_callback=progress_callback)
         return result
 
-    @log_async_operation(operation_name="sync_financial")
+    @log_async_operation(operation_name="sync_financial", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def sync_financial_reports(self, periods=None, progress_callback=None, force=False):
         """Delegated to FinancialSyncStrategy"""
         result = await self.strategies['financial'].run(periods=periods, force=force,
@@ -210,7 +210,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     #       → HealthCheckMixin
     # ==========================================
 
-    @log_async_operation(operation_name="init_data")
+    @log_async_operation(operation_name="init_data", threshold_ms=PerfThreshold.GLOBAL_INIT)
     async def init_data(self):
         """Initialize DB with enhanced schema"""
         await self.cache.init_db()
@@ -246,7 +246,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     # ... Other simple sync/get methods ...
 
-    @log_async_operation(operation_name="sync_stock_basic")
+    @log_async_operation(operation_name="sync_stock_basic", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def sync_stock_basic(self):
         """Sync stock basic info (Step 1 of initialization)."""
         if self.is_cancelled():
@@ -283,7 +283,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             with self._sync_lock:
                 self._is_syncing_basic = False
 
-    @log_async_operation(operation_name="sync_concepts")
+    @log_async_operation(operation_name="sync_concepts", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def sync_concepts(self):
         """Sync stock concepts from Tushare."""
         if self.is_cancelled():
@@ -598,7 +598,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def get_strategy_data(self):
         return await self.prepare_screening_context()
 
-    @log_async_operation(operation_name="prepare_screening_context")
+    @log_async_operation(operation_name="prepare_screening_context", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def prepare_screening_context(self):
         """Prepare context for screening execution."""
 
