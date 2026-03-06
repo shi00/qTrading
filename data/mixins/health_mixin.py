@@ -27,7 +27,7 @@ from data.data_dictionary import TABLE_DEFINITIONS
 from data.data_quality import DataQualityService
 from strategies.base_strategy import _STRATEGY_REGISTRY
 from ui.i18n import I18n
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now, parse_date
 
 if TYPE_CHECKING:
@@ -141,7 +141,7 @@ class HealthCheckMixin:
             # If we can't even read metadata, be conservative but don't block everything
             self._quality_tier = 1
 
-    @log_async_operation(operation_name="check_data_health", log_result=True)
+    @log_async_operation(operation_name="check_data_health", log_result=True, threshold_ms=PerfThreshold.DB_BULK_IO)
     async def check_data_health(self):
         """Check data health status. Read-only diagnostic — immune to sync cancellation."""
         now = time.time()
@@ -331,7 +331,7 @@ class HealthCheckMixin:
             logger.error(f"Health check failed: {e}", exc_info=True)
             return {'status': 'red', 'msg': f"Check failed: {str(e)}"}
 
-    @log_async_operation(operation_name="run_quality_scan")
+    @log_async_operation(operation_name="run_quality_scan", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_quality_scan(self, sample_size=50, progress_callback=None):
         """
         Tier 2/Tier 3 Deep Health Scan.

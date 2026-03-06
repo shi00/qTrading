@@ -16,7 +16,7 @@ from data.news_fetcher import NewsFetcher
 from data.cache_manager import CacheManager
 from utils.thread_pool import ThreadPoolManager, TaskType
 from ui.i18n import I18n
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ class MarketDataService:
         except Exception as e:
             logger.error(f"[MarketDataService] Error fetching market data: {e}", exc_info=True)
     
-    @log_async_operation(operation_name="fetch_market_data")
+    @log_async_operation(operation_name="fetch_market_data", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_market_data(self):
         """获取市场概览数据"""
         now = get_now()

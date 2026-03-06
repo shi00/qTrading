@@ -3,7 +3,7 @@ import logging
 from .base import ISyncStrategy, SyncResult
 from data.daos.macro_dao import MacroDao
 from data.constants import MAJOR_INDICES
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class MacroSyncStrategy(ISyncStrategy):
         self._cancelled = True
         logger.info("[MacroSync] Cancellation requested.")
 
-    @log_async_operation(operation_name="MacroSyncStrategy.run")
+    @log_async_operation(operation_name="MacroSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(self, **kwargs) -> SyncResult:
         result = SyncResult()
         self._cancelled = False

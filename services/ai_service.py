@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from data.review_manager import ReviewManager
 from services.local_model_manager import LocalModelManager
 from utils.config_handler import ConfigHandler
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ class AIService:
 
         return {"content": response_content}
 
-    @log_async_operation(operation_name="analyze_stock", log_args=False, performance_threshold_ms=120000)
+    @log_async_operation(operation_name="analyze_stock", log_args=False, threshold_ms=PerfThreshold.AI_INFERENCE)
     async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="",
                             strategy_context: str = "", capital_flow_text: str = "", financials_text: str = "",
                             history_text: str = "", on_chunk=None, history_context: str = None) -> dict:
@@ -395,7 +395,7 @@ class AIService:
 
         return raw_result
 
-    @log_async_operation(operation_name="classify_news", performance_threshold_ms=30000)
+    @log_async_operation(operation_name="classify_news", threshold_ms=PerfThreshold.AI_INFERENCE)
     async def classify_news(self, text: str) -> dict:
         """
         Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).

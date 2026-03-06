@@ -13,10 +13,57 @@ import functools
 import logging
 import time
 from typing import Callable, Optional, Any, List
+import inspect
 
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
+
+
+class PerfThreshold:
+    """标准性能红线界定（毫秒）"""
+    MEMORY_COMPUTE = 50        # 内存与本地纯计算
+    DB_SINGLE_QUERY = 200      # 数据库单行/少数读写
+    EXTERNAL_NETWORK = 2000    # 外部公网接口调用 (如 Tushare)
+    DB_BULK_IO = 5000          # 数据库大批量聚合插入
+    AI_INFERENCE = 15000       # 本地大模型推理计算
+    GLOBAL_INIT = 15000        # 全局大动作
+
+class UILogger:
+    """UI 交互动作全量埋点专用日志"""
+    
+    _logger = logging.getLogger("ui.action")
+    
+    @classmethod
+    def log_action(cls, component: str, action: str, target: str = None, details: str = None):
+        """
+        静态辅助方法：为匿名 Lambda 等无法挂接装饰器的场景准备的单行打点入口
+        """
+        msg = f"[UI_ACTION] {component} | action={action}"
+        if target:
+            msg += f" | target={target}"
+        if details:
+            msg += f" | {details}"
+        cls._logger.info(msg)
+
+
+def log_ui_action(component_name: str, action_type: str = "Click", target_name: str = None):
+    """
+    UI 动作强制埋点装饰器 (适用于绑定在类方法的 Event Handler)
+    """
+    def decorator(func: Callable):
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            UILogger.log_action(component_name, action_type, target_name)
+            return func(*args, **kwargs)
+        
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            UILogger.log_action(component_name, action_type, target_name)
+            return await func(*args, **kwargs)
+            
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+    return decorator
 
 
 def log_async_operation(
@@ -25,7 +72,8 @@ def log_async_operation(
         log_args: bool = False,
         log_result: bool = False,
         log_exceptions: bool = True,
-        performance_threshold_ms: Optional[int] = None
+        threshold_ms: Optional[int] = None,
+        log_level: int = logging.DEBUG
 ):
     """
     异步操作自动日志装饰器
@@ -43,10 +91,11 @@ def log_async_operation(
         log_args: 是否记录参数
         log_result: 是否记录返回值
         log_exceptions: 是否记录异常
-        performance_threshold_ms: 性能阈值(毫秒),超过则记录WARNING
+        threshold_ms: 性能阈值(毫秒),超过则记录WARNING
+        log_level: 默认日志级别，默认为 DEBUG，不打扰控制台
         
     Usage:
-        @log_async_operation(operation_name="sync_data", log_args=True)
+        @log_async_operation(operation_name="sync_data", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
         async def sync_daily_market_snapshot(self, trade_date=None):
             ...
     """
@@ -69,7 +118,7 @@ def log_async_operation(
                 )
                 logger.debug(f"[{op_name}] args: {clean_kwargs}")
 
-            logger.info(f"[{op_name}] started")
+            logger.log(log_level, f"[{op_name}] started")
 
             result = None
             try:
@@ -89,14 +138,14 @@ def log_async_operation(
                         result_info = f" | result: {type(result).__name__}"
 
                 # 性能检查
-                log_level = logging.INFO
+                final_level = log_level
                 perf_warning = ""
-                if performance_threshold_ms and elapsed_ms > performance_threshold_ms:
-                    log_level = logging.WARNING
-                    perf_warning = f" [SLOW: >{performance_threshold_ms}ms threshold]"
+                if threshold_ms is not None and elapsed_ms > threshold_ms:
+                    final_level = logging.WARNING
+                    perf_warning = f" [SLOW: >{threshold_ms}ms threshold]"
 
                 logger.log(
-                    log_level,
+                    final_level,
                     f"[{op_name}] completed in {elapsed_str}{result_info}{perf_warning}"
                 )
 
@@ -124,7 +173,7 @@ def log_async_operation(
 
 
 def track_performance(
-        threshold_seconds: float = 5.0,
+        threshold_ms: int = PerfThreshold.DB_BULK_IO,
         alert_level: str = "WARNING",
         operation_name: str = None
 ):
@@ -134,12 +183,12 @@ def track_performance(
     超过阈值时自动记录告警
     
     Args:
-        threshold_seconds: 性能阈值(秒)
+        threshold_ms: 性能阈值(毫秒)
         alert_level: 告警级别(INFO/WARNING/ERROR)
         operation_name: 操作名称(默认使用函数名)
         
     Usage:
-        @track_performance(threshold_seconds=3.0)
+        @track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
         async def slow_operation():
             ...
     """
@@ -148,17 +197,18 @@ def track_performance(
         op_name = operation_name or func.__name__
         level = getattr(logging, alert_level.upper(), logging.WARNING)
 
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs):
                 start_time = time.perf_counter()
                 result = await func(*args, **kwargs)
                 elapsed = time.perf_counter() - start_time
+                elapsed_ms = elapsed * 1000
 
-                if elapsed > threshold_seconds:
+                if elapsed_ms > threshold_ms:
                     logger.log(
                         level,
-                        f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_seconds}s)"
+                        f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)"
                     )
 
                 return result
@@ -170,11 +220,12 @@ def track_performance(
                 start_time = time.perf_counter()
                 result = func(*args, **kwargs)
                 elapsed = time.perf_counter() - start_time
+                elapsed_ms = elapsed * 1000
 
-                if elapsed > threshold_seconds:
+                if elapsed_ms > threshold_ms:
                     logger.log(
                         level,
-                        f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_seconds}s)"
+                        f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)"
                     )
 
                 return result
@@ -197,17 +248,19 @@ class AsyncOperationLogger:
             # 自动在退出时汇总
     """
 
-    def __init__(self, operation: str, context: dict = None):
+    def __init__(self, operation: str, context: dict = None, log_level: int = logging.DEBUG):
         """
         Args:
             operation: 操作名称
             context: 上下文信息
+            log_level: 日志级别
         """
         self.operation = operation
         self.context = context or {}
         self.metrics = {}
         self.start_time = None
         self.logger = logging.getLogger(__name__)
+        self.log_level = log_level
 
     async def __aenter__(self):
         """进入上下文"""
@@ -215,7 +268,8 @@ class AsyncOperationLogger:
 
         # 记录开始
         context_str = ", ".join(f"{k}={v}" for k, v in self.context.items())
-        self.logger.info(f"[{self.operation}] started ({context_str})")
+        params_str = f" | {context_str}" if context_str else ""
+        self.logger.log(self.log_level, f"[{self.operation}] started{params_str}")
 
         return self
 
@@ -226,19 +280,21 @@ class AsyncOperationLogger:
         # 构建度量摘要
         metrics_str = ""
         if self.metrics:
-            metrics_parts = [f"{k}: {v}" for k, v in self.metrics.items()]
-            metrics_str = f" | metrics: {{{', '.join(metrics_parts)}}}"
+            import json
+            metrics_str = f" | metrics: {json.dumps(self.metrics)}"
 
         # 记录完成
         if exc_type is None:
-            self.logger.info(
+            self.logger.log(
+                self.log_level,
                 f"[{self.operation}] completed in {elapsed:.1f}s{metrics_str}"
             )
         else:
             # 异常情况
             error_msg = DataSanitizer.sanitize_error(exc_val)
             self.logger.error(
-                f"[{self.operation}] failed after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}"
+                f"[{self.operation}] failed after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                exc_info=True
             )
 
         return False  # 不抑制异常
@@ -252,7 +308,8 @@ class AsyncOperationLogger:
             **kwargs: 附加信息
         """
         info_str = ", ".join(f"{k}={v}" for k, v in kwargs.items())
-        self.logger.info(f"[{self.operation}] milestone: {milestone} ({info_str})")
+        params_str = f" | {info_str}" if info_str else ""
+        self.logger.log(self.log_level, f"[{self.operation}] {milestone}{params_str}")
 
     def add_metric(self, key: str, value: Any):
         """

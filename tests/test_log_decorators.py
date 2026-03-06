@@ -107,7 +107,7 @@ class TestLogAsyncOperation:
             await asyncio.sleep(0.01)
             return "success"
         
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             result = await dummy_func()
         
         # 验证日志存在
@@ -165,7 +165,7 @@ class TestLogAsyncOperation:
         """测试性能阈值告警"""
         @log_async_operation(
             operation_name="slow_op",
-            performance_threshold_ms=10
+            threshold_ms=10
         )
         async def slow_func():
             await asyncio.sleep(0.02)  # 20ms,超过10ms阈值
@@ -184,7 +184,7 @@ class TestTrackPerformance:
     @pytest.mark.asyncio
     async def test_under_threshold(self, caplog):
         """测试未超过阈值"""
-        @track_performance(threshold_seconds=1.0)
+        @track_performance(threshold_ms=1000)
         async def fast_func():
             await asyncio.sleep(0.01)
         
@@ -197,7 +197,7 @@ class TestTrackPerformance:
     @pytest.mark.asyncio
     async def test_over_threshold(self, caplog):
         """测试超过阈值"""
-        @track_performance(threshold_seconds=0.01, operation_name="slow_test")
+        @track_performance(threshold_ms=10, operation_name="slow_test")
         async def slow_func():
             await asyncio.sleep(0.02)
         
@@ -210,7 +210,7 @@ class TestTrackPerformance:
     
     def test_sync_function(self, caplog):
         """测试同步函数支持"""
-        @track_performance(threshold_seconds=0.01)
+        @track_performance(threshold_ms=10)
         def sync_slow():
             import time
             time.sleep(0.02)
@@ -227,7 +227,7 @@ class TestAsyncOperationLogger:
     @pytest.mark.asyncio
     async def test_basic_context(self, caplog):
         """测试基础上下文管理"""
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             async with AsyncOperationLogger("test_ctx", {"days": 30}) as op:
                 await asyncio.sleep(0.01)
         
@@ -239,20 +239,20 @@ class TestAsyncOperationLogger:
     @pytest.mark.asyncio
     async def test_milestone_logging(self, caplog):
         """测试里程碑记录"""
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             async with AsyncOperationLogger("test_milestone") as op:
                 op.log_milestone("step1", count=100)
                 op.log_milestone("step2", done=True)
         
         # 验证里程碑
-        assert "milestone: step1" in caplog.text
+        assert "step1" in caplog.text
         assert "count=100" in caplog.text
-        assert "milestone: step2" in caplog.text
+        assert "step2" in caplog.text
     
     @pytest.mark.asyncio
     async def test_metrics_collection(self, caplog):
         """测试指标收集"""
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             async with AsyncOperationLogger("test_metrics") as op:
                 op.add_metric("processed", 500)
                 op.add_metric("failed", 5)
@@ -260,8 +260,8 @@ class TestAsyncOperationLogger:
         
         # 验证指标汇总
         assert "metrics:" in caplog.text
-        assert "processed: 500" in caplog.text
-        assert "failed: 5" in caplog.text
+        assert "processed\": 500" in caplog.text
+        assert "failed\": 5" in caplog.text
     
     @pytest.mark.asyncio
     async def test_exception_handling(self, caplog):
@@ -276,7 +276,7 @@ class TestAsyncOperationLogger:
         assert "[test_error] failed" in caplog.text
         assert "RuntimeError" in caplog.text
         # 验证指标仍然被记录
-        assert "attempts: 3" in caplog.text
+        assert "attempts\": 3" in caplog.text
 
 
 if __name__ == "__main__":

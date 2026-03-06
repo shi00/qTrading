@@ -4,7 +4,7 @@ import datetime
 from data.cache_manager import CacheManager
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class ReviewManager:
         self.api = TushareClient()
         self.config = ConfigHandler()
 
-    @log_async_operation(operation_name="t1_review", performance_threshold_ms=10000)
+    @log_async_operation(operation_name="t1_review", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_review(self):
         """
         Main entry point: Review all pending predictions.

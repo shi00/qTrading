@@ -15,7 +15,7 @@ from data.sync_strategies.base import ISyncStrategy, SyncResult
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
-    @log_async_operation(operation_name="HistoricalSyncStrategy.run")
+    @log_async_operation(operation_name="HistoricalSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(self, days: int = 365, progress_callback=None, **kwargs) -> SyncResult:
         """
         Main entry point for historical sync.

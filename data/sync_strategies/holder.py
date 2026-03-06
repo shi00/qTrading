@@ -1,7 +1,7 @@
 import datetime
 import logging
 from .base import ISyncStrategy, SyncResult
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class HolderSyncStrategy(ISyncStrategy):
         self._cancelled = True
         logger.info("[HolderSync] Cancellation requested.")
 
-    @log_async_operation(operation_name="HolderSyncStrategy.run")
+    @log_async_operation(operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(self, **kwargs) -> SyncResult:
         result = SyncResult()
         self._cancelled = False

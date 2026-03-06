@@ -15,7 +15,7 @@ import time
 from typing import TYPE_CHECKING
 
 from data.constants import MARKET_CLOSE_HOUR
-from utils.log_decorators import log_async_operation
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.time_utils import get_now
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class CalendarMixin:
 
     # CR-02: Use manual TTL cache (5 min) instead of infinite alru_cache
     # @alru_cache(maxsize=1) 
-    @log_async_operation(operation_name="get_latest_trade_date", log_exceptions=True)
+    @log_async_operation(operation_name="get_latest_trade_date", log_exceptions=True, threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_latest_trade_date(self):
         """Get absolute latest trading date (today or previous trading day)."""
         # Initialize cache if missing (guard for edge-case hot paths)
@@ -79,7 +79,7 @@ class CalendarMixin:
         fallback_res = dt.strftime('%Y%m%d')
         return fallback_res
 
-    @log_async_operation(operation_name="get_trade_dates", log_exceptions=True)
+    @log_async_operation(operation_name="get_trade_dates", log_exceptions=True, threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_trade_dates(self, start_date, end_date):
         """Get list of trade dates between start and end."""
         try:
@@ -121,7 +121,7 @@ class CalendarMixin:
 
         return success
 
-    @log_async_operation(operation_name="ensure_trade_cal_impl")
+    @log_async_operation(operation_name="ensure_trade_cal_impl", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _ensure_trade_cal_impl(self, end_date, required_start_date=None):
         """
         Ensure trade calendar covers [required_start_date, end_date].
