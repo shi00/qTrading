@@ -70,7 +70,7 @@ class CalendarMixin:
                 self._trade_date_cache = {'ts': now_ts, 'val': result}
                 return result
         except Exception as e:
-            logger.warning(f"[DataProcessor] Failed to get latest trade date: {e}")
+            logger.warning(f"[DataProcessor] Calendar | ⚠️ Failed to fetch latest trade date fallback: {e}")
 
         # Fallback
         dt = end_dt
@@ -92,7 +92,7 @@ class CalendarMixin:
                 # Ensure it's list of strings
                 return sorted(cache_df['cal_date'].astype(str).tolist())
         except Exception as e:
-            logger.warning(f"[DataProcessor] Trade calendar sync failed: {e}")
+            logger.error(f"[DataProcessor] Calendar | ❌ Primary calendar sync rejected: {e}", exc_info=True)
 
         # Fallback (Simple logic)
         dates = []
@@ -139,7 +139,7 @@ class CalendarMixin:
                 real_end = datetime.date(y, 12, 31).strftime('%Y%m%d')
                 if e < real_end: e = real_end
 
-                logger.info(f"[DataProcessor] Syncing trade calendar: {s} - {e}")
+                pass # 动作已由装饰器覆盖
                 df = await self.api.get_trade_cal(start_date=s, end_date=e)
                 if df is not None and not df.empty:
                     await self.cache.save_trade_cal(df)
@@ -167,5 +167,5 @@ class CalendarMixin:
             return True  # Already covered
 
         except Exception as e:
-            logger.error(f"[DataProcessor] ensure_trade_cal failed: {e}")
+            logger.error(f"[DataProcessor] Calendar | ❌ Deep engine failure on ensure_trade_cal limit break: {e}", exc_info=True)
             return False

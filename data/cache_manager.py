@@ -93,7 +93,7 @@ class CacheManager:
 
         self._initialized = True
         self._schema_initialized = False
-        logger.info(f"[CacheManager] Initialized with SQLAlchemy AsyncEngine: {self.db_path}")
+        logger.debug(f"[CacheManager] State | Initialized with AsyncEngine: {self.db_path}")
 
     @property
     def _maintenance_event(self):
@@ -116,7 +116,7 @@ class CacheManager:
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("[CacheManager] No running event loop for _init_lock. Using dummy lock.")
+            logger.warning("[CacheManager] Config | ⚠️ No running event loop for _init_lock. Using dummy.")
             class DummyLock:
                 async def __aenter__(self): return
                 async def __aexit__(self, *args): return
@@ -129,7 +129,7 @@ class CacheManager:
 
     async def close(self):
         """Dispose the engine"""
-        logger.info("[CacheManager] Disposing engine...")
+        logger.debug("[CacheManager] State | Disposing engine...")
         # Unblock any coroutines waiting on maintenance before disposing
         self._maintenance_event.set()
         try:
@@ -142,7 +142,7 @@ class CacheManager:
     # --- Maintenance & Helpers ---
     async def wait_for_maintenance(self):
         if not self._maintenance_event.is_set():
-            logger.info("[CacheManager] Waiting for maintenance...")
+            pass  # logger.info("[CacheManager] Waiting for maintenance...") removed
             await self._maintenance_event.wait()
 
     @staticmethod
@@ -181,9 +181,9 @@ class CacheManager:
             conn = sqlite3.connect(self.db_path)
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.close()
-            logger.info("[CacheManager] WAL checkpoint completed before exit.")
+            logger.debug("[CacheManager] WAL | Checkpoint finalized before exit.")
         except Exception as e:
-            logger.warning(f"[CacheManager] WAL checkpoint failed: {e}")
+            logger.error(f"[CacheManager] WAL | ❌ Urgent: WAL checkpoint failed, potential disk issue: {e}", exc_info=True)
 
     # --- Init & Reset ---
     async def init_db(self, force=False):
@@ -194,14 +194,14 @@ class CacheManager:
                 async with self.engine.connect() as raw_conn:
                     conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
                     await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-                    logger.info("[CacheManager] WAL file truncated/cleaned.")
+                    logger.debug("[CacheManager] WAL | File cleanly truncated.")
             except Exception as e:
-                logger.warning(f"[CacheManager] Failed to truncate WAL: {e}")
+                logger.error(f"[CacheManager] WAL | ❌ Truncate failed: {e}", exc_info=True)
 
             if self._schema_initialized and not force:
                 return
 
-            logger.info("[CacheManager] Initializing DB Schema via Alembic...")
+            logger.debug("[CacheManager] Schema | Initializing via Alembic...")
             
             # Check DB schema state to handle legacy users transitioning to Alembic
             has_alembic, has_old_schema = False, False
@@ -214,7 +214,7 @@ class CacheManager:
                         return 'alembic_version' in tables, 'stock_basic' in tables
                     has_alembic, has_old_schema = await conn.run_sync(_sync_check)
             except Exception as e:
-                logger.warning(f"[CacheManager] Failed to inspect DB tables: {e}")
+                logger.error(f"[CacheManager] Schema | ❌ Table inspection failed: {e}", exc_info=True)
 
             def run_alembic_upgrade():
                 from alembic.config import Config
@@ -229,7 +229,7 @@ class CacheManager:
                 # If the legacy database exists but Alembic doesn't, stamp it with the baseline 
                 # (which exactly matches the old schema.sql) to prevent 'table already exists' errors.
                 if has_old_schema and not has_alembic:
-                    logger.info("[CacheManager] Legacy database detected. Stamping Alembic baseline...")
+                    logger.debug("[CacheManager] Schema | Legacy database detected. Stamped baseline.")
                     command.stamp(alembic_cfg, "367c382dbf28")
                 
                 command.upgrade(alembic_cfg, "head")
@@ -239,10 +239,10 @@ class CacheManager:
                 await ThreadPoolManager().run_async(TaskType.IO, run_alembic_upgrade)
 
                 self._schema_initialized = True
-                logger.info("[CacheManager] DB Init Complete.")
+                logger.debug("[CacheManager] Schema | Init completed without errors.")
 
             except Exception as e:
-                logger.error(f"[CacheManager] Init DB Failed: {e}", exc_info=True)
+                logger.error(f"[CacheManager] Schema | ❌ Init failed critically: {e}", exc_info=True)
 
     async def hard_reset(self):
         """Delete DB and Re-init"""
@@ -259,9 +259,9 @@ class CacheManager:
                     if os.path.exists(f):
                         try:
                             os.remove(f)
-                            logger.info(f"Removed {f}")
+                            logger.debug(f"[CacheManager] Wipe | Successfully removed legacy DB file at {f}")
                         except Exception as e:
-                            logger.warning(f"Failed to remove {f}: {e}")
+                            logger.error(f"[CacheManager] Wipe | ❌ Unable to remove legacy file {f}: {e}", exc_info=True)
 
             # Offload file deletion
             await ThreadPoolManager().run_async(TaskType.IO, remove_db_files, self.db_path)
@@ -294,10 +294,10 @@ class CacheManager:
 
                 for t in tables:
                     if not re.match(r'^[a-zA-Z0-9_]+$', t):
-                        logger.error(f"[CacheManager] Malformed table name skipped: {t}")
+                        logger.warning(f"[CacheManager] Wipe | ⚠️ Malformed table name skipped: {t}")
                         continue
                     await conn.execute(sa.text(f'DROP TABLE IF EXISTS "{t}"'))
-                logger.info(f"[CacheManager] Dropped {len(tables)} tables: {tables}")
+                logger.debug(f"[CacheManager] Wipe | Dropped {len(tables)} tables.")
 
             self._schema_initialized = False
             await self.init_db(force=True)

@@ -99,7 +99,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         Request cancellation of current operation.
         Called by UI when user clicks cancel or closes window.
         """
-        logger.info("[DataProcessor] Cancel requested")
+        logger.debug("[DataProcessor] Stop | Cancel requested")
         self._get_cancel_event().set()
         self._quality_tier = None  # Reset to uninitialized; will re-evaluate on next strategy run
 
@@ -107,9 +107,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         for name, strategy in self.strategies.items():
             try:
                 await strategy.cancel()
-                logger.debug(f"[DataProcessor] Cancelled strategy: {name}")
+                logger.debug(f"[DataProcessor] Stop | Cancelled strategy: {name}")
             except Exception as e:
-                logger.warning(f"[DataProcessor] Failed to cancel {name}: {e}")
+                logger.error(f"[DataProcessor] Stop | ❌ Failed to cancel {name}: {e}", exc_info=True)
 
     def is_cancelled(self):
         """Check if cancellation has been requested."""
@@ -121,7 +121,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     async def stop(self):
         """Signal all running tasks to stop. Async to ensure proper cleanup."""
-        logger.info("[DataProcessor] Global stop signal received.")
+        logger.debug("[DataProcessor] Stop | Global stop signal received.")
         self._get_cancel_event().set()
 
         # Delegate cancellation to strategies
@@ -132,10 +132,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-                logger.info("[DataProcessor] All strategies cancelled.")
+                logger.debug("[DataProcessor] Stop | All strategies cancelled.")
 
         except Exception as e:
-            logger.warning(f"[DataProcessor] Error during stop propagation: {e}")
+            logger.error(f"[DataProcessor] Stop | ❌ Error during stop propagation: {e}", exc_info=True)
 
     def refresh_token(self, new_token=None):
         """Refresh API token without recreating instance"""
@@ -145,7 +145,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         self.api = TushareClient(token=new_token)
         # Update context
         self.context.api = self.api
-        logger.info("[DataProcessor] Token refreshed")
+        logger.debug("[DataProcessor] Auth | Tushare token gracefully refreshed")
 
     async def close(self):
         """Gracefully close resources"""
@@ -157,7 +157,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             if self.cache:
                 await self.cache.close()
         except Exception as e:
-            logger.error(f"[DataProcessor] Error during close: {e}")
+            logger.error(f"[DataProcessor] State | ❌ Error during engine close: {e}", exc_info=True)
 
     # ==========================================
     # Delegated Sync Methods
@@ -260,24 +260,24 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 should_run = True
 
         if not should_run:
-            logger.debug("[sync_stock_basic] Already running, skipping")
+            logger.debug("[DataProcessor] Sync Basic | Already running, skipping")
             return 0
 
         try:
-            logger.info("[sync_stock_basic] Starting stock list sync...")
+            logger.debug("[DataProcessor] Sync Basic | Starting...")
             df = await self.api.get_stock_list()
 
             if df is not None and not df.empty:
                 count = await self.cache.save_stock_basic(df)
                 await self.cache.update_sync_status('stock_basic', get_now().strftime('%Y%m%d'), count)
-                logger.info(f"[sync_stock_basic] ✅ Synced {count} stocks")
+                logger.info(f"[DataProcessor] Sync Basic | ✅ Pushed {count} active stocks")
                 return count
             else:
-                logger.warning("[sync_stock_basic] API returned empty data")
+                logger.warning("[DataProcessor] Sync Basic | ⚠️ Remote API returned empty dataset")
                 return 0
 
         except Exception as e:
-            logger.error(f"[sync_stock_basic] ❌ Failed: {e}", exc_info=True)
+            logger.error(f"[DataProcessor] Sync Basic | ❌ Failed: {e}", exc_info=True)
             return 0
         finally:
             with self._sync_lock:
@@ -290,7 +290,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
         try:
-            logger.info("[sync_concepts] Starting concept sync...")
+            logger.debug("[DataProcessor] Sync Concepts | Starting...")
             # Strategy:
             # 1. Get all concepts: `df_concepts = pro.concept()`
             # 2. Parallel fetch `pro.concept_detail(id=c)` for all `c` using ThreadPool and Semaphore.
@@ -336,10 +336,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                         all_dfs.append(r)
                     elif isinstance(r, Exception):
                         # Log but don't stop everything for one failed concept
-                        logger.warning(f"[sync_concepts] Task failed: {r}")
+                        logger.warning(f"[DataProcessor] Sync Concepts | ⚠️ Subtask failed: {r}")
 
             except asyncio.CancelledError:
-                logger.info("[sync_concepts] Cancelled during gather")
+                logger.debug("[DataProcessor] Sync Concepts | Cancelled during gather")
                 raise
             finally:
                 # Ensure all pending tasks are cancelled if we exit early
@@ -362,11 +362,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Atomic overwrite (refresh)
             count = await self.cache.overwrite_concepts(full_df)
-            logger.info(f"[sync_concepts] ✅ Synced {count} concept mappings (Atomic)")
+            logger.info(f"[DataProcessor] Sync Concepts | ✅ Saved {count} structured mappings")
             return count
 
         except Exception as e:
-            logger.error(f"[sync_concepts] ❌ Failed: {e}", exc_info=True)
+            logger.error(f"[DataProcessor] Sync Concepts | ❌ Failed: {e}", exc_info=True)
             return 0
 
 
@@ -451,7 +451,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             }
 
         except Exception as e:
-            logger.error(f"Failed to get market overview: {e}", exc_info=True)
+            logger.error(f"[DataProcessor] Config | ❌ Unexpected error fetching market summary: {e}", exc_info=True)
             return None
 
     async def get_screening_data(self, trade_date=None):
@@ -514,7 +514,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             report_step(1)
             stock_count = await self.sync_stock_basic()
             if stock_count == 0:
-                logger.error("[initialize_system] Step 1 failed: No stocks synced, aborting")
+                logger.error("[DataProcessor] Init | ❌ Critical failure: Stock Basic sync returned empty, aborting entire phase.")
                 return None
             if self.is_cancelled(): return None
 
@@ -528,7 +528,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             start_date = (get_now() - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
             cal_success = await self.ensure_trade_cal(end_date, required_start_date=start_date)
             if not cal_success:
-                logger.error("[initialize_system] Step 2 failed: Trade calendar sync failed, aborting")
+                logger.error("[DataProcessor] Init | ❌ Critical failure: Trade calendar sync failed, aborting entire phase.")
                 return None
             if self.is_cancelled(): return None
 
@@ -541,7 +541,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 progress_callback=step3_callback
             )
             if history_result and history_result.status == "failed":
-                logger.error(f"[initialize_system] Step 3 failed: {history_result.errors}")
+                logger.error(f"[DataProcessor] Init | ❌ Historical daily sync encountered errors: {history_result.errors}")
                 return None
             if self.is_cancelled(): return None
 
@@ -553,7 +553,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 progress_callback=step4_callback
             )
             if financial_result and financial_result.status == "failed":
-                logger.error(f"[initialize_system] Step 4 failed: {financial_result.errors}")
+                logger.error(f"[DataProcessor] Init | ❌ Financial sync encountered errors: {financial_result.errors}")
                 return None
             if self.is_cancelled(): return None
 
@@ -562,13 +562,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             macro_res = await self.strategies['macro'].run()
             if macro_res.status == "failed":
-                logger.warning(f"[initialize_system] Macro sync failed: {macro_res.errors}")
+                logger.warning(f"[DataProcessor] Init | ⚠️ Macro sync failed: {macro_res.errors}")
 
             report_step(5, 1, 3, I18n.get("init_sync_holders"))
 
             holder_res = await self.strategies['holder'].run()
             if holder_res.status == "failed":
-                logger.warning(f"[initialize_system] Holder sync failed: {holder_res.errors}")
+                logger.warning(f"[DataProcessor] Init | ⚠️ Holder sync failed: {holder_res.errors}")
 
             report_step(5, 2, 3, I18n.get("init_step_5_done"))
 
@@ -586,7 +586,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         except Exception as e:
             step_label = I18n.get(f"init_step_{current_step}") if current_step > 0 else "Initialization"
-            logger.error(f"[initialize_system] ❌ Failed at {step_label}: {e}")
+            logger.error(f"[DataProcessor] Init | ❌ System init unexpectedly failed at {step_label}: {e}", exc_info=True)
             raise  # Re-raise so UI can catch and display
 
     # ... get_stock_history, get_strategy_data ...
