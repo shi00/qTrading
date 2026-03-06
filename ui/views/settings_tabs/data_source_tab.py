@@ -536,6 +536,8 @@ class DataSourceTab(ft.Container):
         """Initiate async token verification to avoid blocking UI"""
         # Prevent double-click during verification
         if self._is_verifying:
+            logger.warning("[DataSourceTab] Token verification double-click intercepted.")
+            self.show_snack(I18n.get("settings_status_verifying"), color=AppColors.WARNING)
             return
 
         token = self.token_input.value.strip()
