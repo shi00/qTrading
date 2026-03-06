@@ -395,7 +395,7 @@ class AIService:
 
         return raw_result
 
-    @log_async_operation(operation_name="classify_news", performance_threshold_ms=5000)
+    @log_async_operation(operation_name="classify_news", performance_threshold_ms=30000)
     async def classify_news(self, text: str) -> dict:
         """
         Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).
