@@ -210,12 +210,7 @@ class MarketDataService:
             'hot_concepts': hot_concepts
         }
 
-    # Instance methods forwarding to static equivalents
-    def _get_empty_index_data(self, name_key: str) -> dict:
-        return self._get_empty_index_data_static(name_key)
-
-    def _get_empty_hsgt_data(self) -> dict:
-        return self._get_empty_hsgt_data_static()
+    # Instance methods forwarding to static equivalents (removed to avoid confusion)
     
     async def _ensure_trade_cal(self, end_date: str):
         """确保交易日历已缓存"""
@@ -237,9 +232,10 @@ class MarketDataService:
                 'change': f"{c:+.2f}%",
                 'color': color
             }
-        return self._get_empty_index_data(name_key)
+        return MarketDataService._get_empty_index_data_static(name_key)
 
-    def _get_empty_index_data(self, name_key: str) -> dict:
+    @staticmethod
+    def _get_empty_index_data_static(name_key: str) -> dict:
         return {'name': I18n.get(name_key), 'value': '-', 'change': '-', 'color': 'grey'}
     
     async def _get_hsgt(self, date: str) -> dict:
@@ -254,9 +250,10 @@ class MarketDataService:
                 'sub': I18n.get('home_inflow') if val > 0 else I18n.get('home_outflow'),
                 'color': 'red' if val > 0 else 'green' if val < 0 else 'grey'
             }
-        return self._get_empty_hsgt_data()
+        return MarketDataService._get_empty_hsgt_data_static()
 
-    def _get_empty_hsgt_data(self) -> dict:
+    @staticmethod
+    def _get_empty_hsgt_data_static() -> dict:
         return {'name': I18n.get('home_northbound'), 'value': '-', 'sub': '-', 'color': 'grey'}
 
     @staticmethod

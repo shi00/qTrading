@@ -25,7 +25,8 @@ alembic_config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
 if alembic_config.config_file_name is not None:
-    fileConfig(alembic_config.config_file_name)
+    if alembic_config.attributes.get('configure_logger', True):
+        fileConfig(alembic_config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support

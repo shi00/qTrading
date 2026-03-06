@@ -222,6 +222,7 @@ class CacheManager:
                 
                 alembic_ini_path = os.path.join(os.path.dirname(__file__), '..', 'alembic.ini')
                 alembic_cfg = Config(alembic_ini_path)
+                alembic_cfg.attributes['configure_logger'] = False
                 # Set the base directory so alembic can find its scripts
                 alembic_cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), '..', 'alembic'))
                 

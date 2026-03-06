@@ -8,6 +8,8 @@ from utils.config_handler import ConfigHandler
 from data.data_processor import DataProcessor
 from data.cache_manager import CacheManager
 from services.task_manager import TaskManager
+from utils.thread_pool import ThreadPoolManager, TaskType
+from data.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
