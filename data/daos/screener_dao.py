@@ -200,5 +200,6 @@ class ScreenerDao(BaseDao):
         await self._save_upsert(
             df=df,
             table_name='screening_history',
-            unique_keys=['trade_date', 'strategy_name', 'ts_code']
+            columns=cols,
+            pk_columns=['trade_date', 'strategy_name', 'ts_code']
         )

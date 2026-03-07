@@ -120,4 +120,4 @@ class FinancialDao(BaseDao):
     async def save_dividend(self, df):
         cols = ['ts_code', 'end_date', 'ann_date', 'div_proc', 'stk_div', 'stk_bo_rate', 'stk_co_rate', 'cash_div_tax',
                 'cash_div_tax_rate', 'record_date', 'ex_date']
-        return await self._save_upsert(df, "dividend", cols, pk_columns=['ts_code', 'ann_date'])
+        return await self._save_upsert(df, "dividend", cols, pk_columns=['ts_code', 'end_date', 'ann_date'])
