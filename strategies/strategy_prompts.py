@@ -10,10 +10,11 @@ _UNIVERSAL_RULES = """
 【铁律1】如果提供的近期新闻或财务数据与你的预训练知识存在矛盾，请以本次提供的实时数据为准，并明确指出你发现了变化。
 【铁律2】请利用你的预训练知识对行业平均水平进行参照对比，例如"ROE 15%在白酒行业是平庸的，在钢铁行业是出类拔萃的"。不要孤立地看一家公司。
 
-【输出格式】你的结论部分必须同时包含：
+【输出格式】你的结论部分必须严格包含以下键名的 JSON 结构：
 1. conclusion_label：从 strong_buy / watchlist / uncertain / reject 中选择一个
 2. score：1-100 的数字评分
-3. reason：一句话结论"""
+3. thinking：你的推理与分析过程（约100-200字）
+4. summary：一句话核心操作建议或定性总结"""
 
 
 STRATEGY_PROMPTS = {
@@ -208,15 +209,17 @@ STRATEGY_PROMPTS = {
 - 相关概念板块
 - 近期新闻
 
-【A股特别提示】注意涨跌停制度：主板±10%，创业板/科创板±20%。如果股票正处于连续一字跌停状态，即使RSI严重超卖也不构成交易信号。
+【A股特别提示】注意涨跌停制度：主板±10%，创业板/科创板±20%，北交所±30%。如果股票正处于连续一字跌停状态，即使RSI严重超卖也不构成交易信号。
 
-1.【超卖原因诊断】是什么导致了这轮暴跌？利空性质决定了反弹的可能性。
+【策略逻辑特别说明】请注意，本策略专门寻找“超跌反弹”，因此当前股票的均线呈现极度空头排列（如 MA5 < MA10 < MA20）是绝对正常的入选预期。请**切勿**因为“技术面呈现空头趋势”而扣分或Reject，你的核心任务是判断它是否跌过头、底部是否企稳、以及基本面是否能支撑其Mean Reversion（均值回归）。
+
+1.【超卖原因诊断】是什么导致了这轮暴跌？是情绪恐慌还是基本面实质恶化？
 2.【板块联动判断】这是个股独跌还是整个板块被集体错杀？
-3.【量价底部特征】是否出现经典的"缩量企稳+放量反弹"底部结构？MACD是否出现底背离？
-4.【资金面信号】暴跌过程中是否有主力资金逆势流入？
-5.【基本面兜底】公司盈利能力是否正常？有无退市风险？
+3.【量价底部特征】是否出现经典的"背离"形态（如MACD底背离）或"缩量钝化+放量试盘"？
+4.【资金面特征】暴跌末端是否有主力资金（主力净流入/龙虎榜/大宗交易）逆势抄底？
+5.【基本面兜底】公司核心财务（ROE/现金流）是否健康？绝不能碰有退市风险或财务造假的垃圾股。
 
-【结论】给出conclusion_label和score。如果是基本面崩塌导致的趋势下跌，请使用reject。""",
+【结论】给出conclusion_label和score。如果判定暴跌是因为不可逆的基本面崩塌，请果断使用reject。""",
 
     "tech_breakout": """你是一位趋势跟踪型交易员，信奉"强者恒强"的动量哲学。
 
@@ -266,12 +269,49 @@ STRATEGY_PROMPTS = {
 }
 
 
-def get_default_prompt(strategy_key: str) -> str:
+def get_base_prompt(strategy_key: str) -> str:
     """
-    Get the default system prompt for a strategy, with universal rules appended.
-    Returns None if no default prompt is defined.
+    Gets the raw base prompt (user config, strategy default, or global fallback) 
+    WITHOUT universal rules. This is specifically for UI rendering and editing.
     """
+    from utils.config_handler import ConfigHandler
+    
+    def _clean_rules(text):
+        if not text: return ""
+        text = text.strip()
+        
+        # 1. Exact match removal
+        if _UNIVERSAL_RULES in text:
+            text = text.replace(_UNIVERSAL_RULES, "").strip()
+            
+        # 2. Fallback heuristic: If trailing whitespaces were trimmed by JSON serdes
+        # aggressively strip anything after the schema enforcement block boundary
+        marker_idx = text.rfind("【输出格式】")
+        if marker_idx != -1 and "conclusion_label" in text[marker_idx:]:
+            text = text[:marker_idx].strip()
+            
+        return text
+
+    # 1. User-modified strategy prompt
+    user_prompt = ConfigHandler.get_strategy_prompt(strategy_key)
+    if user_prompt and user_prompt.strip():
+        return _clean_rules(user_prompt)
+        
+    # 2. Strategy default prompt
     base = STRATEGY_PROMPTS.get(strategy_key)
+    if base and base.strip():
+        return _clean_rules(base)
+        
+    # 3. Global fallback
+    return _clean_rules(ConfigHandler.get_ai_system_prompt())
+
+
+def resolve_prompt(strategy_key: str) -> str:
+    """
+    Returns the fully resolved prompt WITH universal rules appended.
+    Used exclusively by the backend AI engine.
+    """
+    base = get_base_prompt(strategy_key)
     if base:
-        return base.strip() + _UNIVERSAL_RULES
-    return None
+        return base + "\n\n" + _UNIVERSAL_RULES
+    return _UNIVERSAL_RULES

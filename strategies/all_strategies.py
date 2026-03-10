@@ -25,8 +25,13 @@ import strategies.market               # noqa: F401
 
 class StrategyManager:
     def __init__(self):
-        # Auto-instantiate all registered strategies
-        self.strategies = {k: cls() for k, cls in _STRATEGY_REGISTRY.items()}
+        # Auto-instantiate all registered strategies and inject their key
+        self.strategies = {}
+        for k, cls in _STRATEGY_REGISTRY.items():
+            instance = cls()
+            instance.key = k
+            self.strategies[k] = instance
+            
         logger.info(f"[StrategyManager] Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}")
         self._validate_i18n()
 

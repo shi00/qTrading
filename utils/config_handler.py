@@ -101,7 +101,10 @@ class ConfigHandler:
         "local_n_gpu_layers": 0,
 
         # Concurrency
-        "sync_concurrency_light": 20
+        "sync_concurrency_light": 20,
+        
+        # Initialization History Horizon
+        "init_history_years": 3
     }
 
     @staticmethod
@@ -123,6 +126,9 @@ class ConfigHandler:
             existing_keys = list(current_config.keys())
 
             for key in existing_keys:
+                # Whitelist dynamic strategy prompts and UI keys
+                if key.startswith("ai_strategy_prompt_"):
+                    continue
                 if key not in valid_keys:
                     logger.info(f"Removing deprecated/unused config: {key}")
                     current_config.pop(key)
@@ -276,6 +282,18 @@ class ConfigHandler:
     def set_log_level(level):
         return ConfigHandler.save_config({"log_level": level.upper()})
 
+    @classmethod
+    def get_init_history_years(cls) -> int:
+        """获取初始化数据年限，默认 3 年"""
+        # Note: Using get_setting internally via class method or static
+        return int(ConfigHandler.get_setting('init_history_years', 3))
+
+    @classmethod
+    def set_init_history_years(cls, years: int):
+        """设置初始化数据年限 (1-5)"""
+        years = max(1, min(5, int(years)))
+        return ConfigHandler.save_config({'init_history_years': years})
+
     @staticmethod
     def get_auto_update_time():
         config = ConfigHandler.load_config()
@@ -295,6 +313,13 @@ class ConfigHandler:
     def get_db_connection_pool_size():
         config = ConfigHandler.load_config()
         return config.get("db_connection_pool_size", 5)
+
+    @staticmethod
+    def get_db_url():
+        """Get PostgreSQL connection URL from user config or system config."""
+        import config as sys_config
+        user_config = ConfigHandler.load_config()
+        return user_config.get("db_url", sys_config.DB_URL)
 
     @staticmethod
     def set_db_connection_pool_size(size):
@@ -453,6 +478,19 @@ class ConfigHandler:
     @staticmethod
     def save_ai_system_prompt(prompt):
         return ConfigHandler.save_config({"ai_system_prompt": prompt})
+
+    @staticmethod
+    def get_strategy_prompt(strategy_key):
+        """Get user-customized prompt for a specific strategy."""
+        config = ConfigHandler.load_config()
+        key = f"ai_strategy_prompt_{strategy_key}"
+        return config.get(key, None)
+
+    @staticmethod
+    def set_strategy_prompt(strategy_key, prompt):
+        """Save user-customized prompt for a specific strategy."""
+        key = f"ai_strategy_prompt_{strategy_key}"
+        return ConfigHandler.save_config({key: prompt})
 
     @staticmethod
     def get_ai_news_prompt():

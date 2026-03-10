@@ -105,7 +105,20 @@ class ScreenerViewModel:
 
     def get_strategy_params(self, key: str) -> list:
         """Get dynamic parameter definitions for a strategy."""
-        return self.strategy_mgr.get_strategy_params(key)
+        # Defensive copy to prevent mutating a strategy's cached class attributes
+        params = list(self.strategy_mgr.get_strategy_params(key))
+        
+        # Inject AI System Prompt override parameter globally so ALL strategies can use it.
+        # Check to avoid duplicate if a strategy still happens to implement it natively.
+        if not any(p.get("name") == "ai_system_prompt" for p in params):
+            params.append({
+                "name": "ai_system_prompt",
+                "label_key": "ai_system_prompt",
+                "type": "textarea",
+                "default": "" # UI uses get_base_prompt to map the value dynamically
+            })
+            
+        return params
         
     async def run_strategy(self, strategy_key: str, save_results: bool = True, params: dict = None):
         """Execute strategy screening via the global TaskManager."""

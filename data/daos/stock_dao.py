@@ -41,14 +41,17 @@ class StockDao(BaseDao):
     async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
         sql = "SELECT * FROM trade_cal WHERE 1=1"
         p = []
+        idx = 1
         if start_date:
-            sql += " AND cal_date>=?"
+            sql += f" AND cal_date>=${idx}"
             p.append(start_date)
+            idx += 1
         if end_date:
-            sql += " AND cal_date<=?"
+            sql += f" AND cal_date<=${idx}"
             p.append(end_date)
+            idx += 1
         if is_open is not None:
-            sql += " AND is_open=?"
+            sql += f" AND is_open=${idx}"
             p.append(is_open)
         sql += " ORDER BY cal_date ASC"
         return await self._read_db(sql, p)
@@ -87,7 +90,7 @@ class StockDao(BaseDao):
         params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, cols)
         
         col_str = self._quote_columns(cols)
-        sql_insert = f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join(['?']*len(cols))})"
+        sql_insert = f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join([f'${i+1}' for i in range(len(cols))])})"
 
         try:
             # Gate: wait for maintenance before direct engine access
@@ -124,10 +127,10 @@ class StockDao(BaseDao):
         if ts_codes:
             # Handle large list of codes
             if len(ts_codes) == 1:
-                sql += " WHERE ts_code=?"
+                sql += " WHERE ts_code=$1"
                 params.append(ts_codes[0])
             else:
-                placeholders = ",".join(["?"] * len(ts_codes))
+                placeholders = ",".join([f"${i+1}" for i in range(len(ts_codes))])
                 sql += f" WHERE ts_code IN ({placeholders})"
                 params.extend(ts_codes)
                 
@@ -140,7 +143,10 @@ class StockDao(BaseDao):
 
         # P3-2: Use groupby instead of iterrows for better performance
         for code, group in rows.groupby('ts_code'):
-            result[code] = group['concept_name'].tolist()
+            # 过滤掉防无限循环的占位符概念名
+            concepts = [c for c in group['concept_name'].tolist() if c != '已扫描无强概念']
+            if concepts:
+                result[code] = concepts
 
         return result
 
@@ -153,3 +159,53 @@ class StockDao(BaseDao):
             return 0
         except Exception:
             return 0
+
+    async def upsert_ai_concepts(self, ai_concept_entries: list):
+        """
+        AI 专属概念批量入库接口。
+        强制为每一个生成的概念附加唯一的 AI_DOUBAO 前缀哈希 ID，以实现物理隔离。
+        ai_concept_entries: list of dict, e.g. [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
+        """
+        import hashlib
+        import pandas as pd
+        
+        if not ai_concept_entries:
+            return 0
+            
+        now = get_now().strftime('%Y-%m-%d %H:%M:%S')
+        records = []
+        
+        for item in ai_concept_entries:
+            ts_code = item.get('ts_code')
+            if not ts_code:
+                continue
+                
+            concepts = item.get('concepts', [])
+            if not concepts:
+                # 记录一条空概念，证明 AI 已经看过了，防止下次重复扫描
+                dummy_id = f"AI_DOUBAO_{hashlib.md5(b'NONE').hexdigest()}"
+                records.append({
+                    'ts_code': ts_code, 
+                    'concept_id': dummy_id, 
+                    'concept_name': '已扫描无强概念', 
+                    'updated_at': now
+                })
+                continue
+                
+            for concept in concepts:
+                concept_id = f"AI_DOUBAO_{hashlib.md5(concept.encode('utf-8')).hexdigest()}"
+                records.append({
+                    'ts_code': ts_code,
+                    'concept_id': concept_id,
+                    'concept_name': concept,
+                    'updated_at': now
+                })
+                
+        if not records:
+            return 0
+            
+        df = pd.DataFrame(records)
+        cols = ['ts_code', 'concept_name', 'concept_id', 'updated_at']
+        
+        # 使用基础类的 upsert 机制保证安全入库
+        return await self._save_upsert(df, "stock_concepts", cols, pk_columns=['ts_code', 'concept_id'])

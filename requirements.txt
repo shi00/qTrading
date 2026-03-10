@@ -1,30 +1,61 @@
+# === GUI & UI Framework ===
 flet==0.28.3
 flet-desktop==0.28.3
+
+# === Data Fetching & APIs ===
+# Market data providers
 tushare>=1.4.24
-pandas>=3.0.0
-aiosqlite>=0.22.1
-plotly>=6.5.2
-mplfinance>=0.12.10b0
-matplotlib>=3.10.0
-requests>=2.32.5
-cryptography>=46.0.4
 akshare>=1.18.30
-openai>=2.17.0
+# HTTP Clients
+requests>=2.32.5
 httpx>=0.27.0
-readerwriterlock>=1.0.9
-pandas_market_calendars>=4.0.0
-sqlparse>=0.4.4
-tzdata>=2025.3 # Required for APScheduler timezone support on Windows
-pytz>=2024.1
-apscheduler>=3.10.0
-llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Install manually if needed.
+# Network Utilities
+urllib3>=2.6.3 # Fix Brotli decode error for requests; must be >= 2.6.2
+brotlicffi>=1.1.0.0 # Fast Brotli compression support for urllib3 (optional dep, must be explicit)
+
+# === Data Processing & Analysis ===
+# Core dataframe libraries
+pandas>=3.0.0
 polars>=1.38.1
 pyarrow>=14.0.0 # Required by Polars for converting Pandas nullable Int64/Float64 types
-sqlalchemy>=2.0.46
-alembic>=1.14.0
-async-lru>=2.1.0
-urllib3>=2.6.3 # Fix Brotli decode error; must be >= 2.6.2
-brotlicffi>=1.1.0.0 # Brotli compression support for urllib3 (optional dep, must be explicit)
-keyring>=25.0.0 # For secure credential storage
+# Financial specific
+pandas_market_calendars>=4.0.0
+
+# === Database & Storage (PostgreSQL Ecosystem) ===
+# PostgreSQL Drivers
+asyncpg>=0.31.0 # Asynchronous PostgreSQL driver (Used by async DAOs)
+psycopg2-binary>=2.9.9 # Synchronous PostgreSQL driver (Used by SQLAlchemy/Alembic)
+# ORM & Schema Management
+sqlalchemy>=2.0.46 # ORM and Database Toolkit
+alembic>=1.14.0 # Database Migration Tool
+sqlparse>=0.4.4 # SQL Query parser and formatter
+
+# === AI & LLM Integration ===
+# Cloud LLM APIs (DeepSeek / OpenAI compatible)
+openai>=2.17.0
+# Local LLM Inference
+llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Install manually if needed.
+
+# === Charting & Visualization ===
+plotly>=6.5.2 # Interactive UI Charts
+mplfinance>=0.12.10b0 # Candlestick Charts
+matplotlib>=3.10.0 # Base plotting library
+
+# === Scheduling & Time Management ===
+apscheduler>=3.10.0 # Background Task Scheduler
+tzdata>=2025.3 # Required for APScheduler timezone support on Windows
+pytz>=2024.1 # Timezone offset calculations
+
+# === Security & Configuration ===
+python-dotenv>=1.0.1 # Load environment variables from .env file
+keyring>=25.0.0 # Secure OS-level credential storage (Windows Credential Locker, macOS Keychain)
+cryptography>=46.0.4 # File-based encryption fallback for token storage
+
+# === Advanced Utilities ===
+readerwriterlock>=1.0.9 # Advanced Thread-safe read/write locks for CacheManager
+async-lru>=2.1.0 # Async LRU caching for high-frequency queries
+
+# === Testing & Automation ===
 pytest>=8.0.0
 pytest-asyncio>=0.23.5
+playwright>=1.58.0 # Browser automation (For News/Information web scraping and UI tests)

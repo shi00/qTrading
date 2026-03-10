@@ -1,5 +1,4 @@
 import logging
-import sqlite3
 
 import pandas as pd
 import sqlparse
@@ -30,12 +29,10 @@ class DatabaseManager:
     eliminate f-string SQL injection vectors.
     """
 
-    def __init__(self, db_path=None):
-        self.db_path = db_path or config.DB_PATH
+    def __init__(self):
         self._engine = sa.create_engine(
-            f"sqlite:///{self.db_path}",
+            config.DB_URL_SYNC,
             echo=False,
-            # Read-only intent: we only do SELECTs through Core
         )
 
     def close(self):
@@ -219,32 +216,26 @@ class DatabaseManager:
         # 2. Execute with strictly Read-Only connection and Memory Protection
         conn = None
         try:
-            db_uri = f"file:{self.db_path}?mode=ro"
-            conn = sqlite3.connect(db_uri, uri=True)
-            cursor = conn.cursor()
+            with self._engine.connect() as conn:
+                result = conn.execute(sa.text(sql_query))
 
-            cursor.execute(sql_query)
+                # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
+                MAX_FETCH = 2000
 
-            # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
-            MAX_FETCH = 2000
+                cols = list(result.keys())
+                rows = result.fetchmany(MAX_FETCH)
 
-            cols = [description[0] for description in cursor.description]
-            rows = cursor.fetchmany(MAX_FETCH)
+                df = pd.DataFrame(rows, columns=cols)
 
-            df = pd.DataFrame(rows, columns=cols)
-
-            return {
-                'success': True,
-                'data': df,
-                'error': None if len(
-                    rows) < MAX_FETCH else f"Warning: Result truncated to {MAX_FETCH} rows for performance."
-            }
+                return {
+                    'success': True,
+                    'data': df,
+                    'error': None if len(
+                        rows) < MAX_FETCH else f"Warning: Result truncated to {MAX_FETCH} rows for performance."
+                }
         except Exception as e:
             return {
                 'success': False,
                 'data': None,
                 'error': str(e)
             }
-        finally:
-            if conn:
-                conn.close()

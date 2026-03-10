@@ -66,7 +66,7 @@ python main.py
 *   **UI 触控层 (ui/)**: `Flet` 组件化体系结构，囊括了视图路由 (`views/`)、高复用控件 (`components/`)，支持多语言扩展 (`I18n`)。
 *   **业务编排逻辑 (services/)**: `TaskManager` 处理并发作业的挂起与容错，并包含其它顶层微服务胶水层。
 *   **量化核发与大脑 (strategies/ & models/)**: 存放各类传统技术因子、数据穿透策略及与 LLM 对话的主上下文构建器与 Prompt 栈。
-*   **底层基础设施 (data/ & utils/)**: 包含对外的 Market Data/News 获取，内部 `aiosqlite` 存储网格，基础工具函数群（网络代理管控、日志拦截、加密器）。
+*   **底层基础设施 (data/ & utils/)**: 包含对外的 Market Data/News 获取，内部 `asyncpg`/PostgreSQL 存储网格，基础工具函数群（网络代理管控、日志拦截、加密器）。
 
 ---
 

@@ -13,8 +13,11 @@ HEALTH_THRESHOLD_MARKET_LAG_DAYS = 3
 HEALTH_CHECK_DEFAULT_TIMEOUT = 30 # Seconds
 
 # Depth & Breadth Health Check Constants
-# Full-score baseline: ~3 years of trading days (245 trade days/year × 3 ≈ 735, rounded to 700)
-HEALTH_DEPTH_FULL_TRADE_DAYS = 700
+# Full-score baseline: dynamic based on configured history years
+def get_health_depth_full_trade_days() -> int:
+    """动态获取满分生命周期的交易日天数基线 (250天/年)"""
+    from utils.config_handler import ConfigHandler
+    return ConfigHandler.get_init_history_years() * 250
 # Safety multiplier: require 2x the max strategy history requirement to account for warm-up
 HEALTH_DEPTH_SAFETY_MULTIPLIER = 2
 # Breadth: expected_rows already excludes IPO gaps; residual gap is suspension (~0.3%) + API blind spots (~1-3%)

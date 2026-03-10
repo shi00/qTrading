@@ -42,30 +42,18 @@ class NewsFetcher:
         # Extract symbol without suffix suffix for standard AKShare calls
         symbol = ts_code.split('.')[0]
         
-        # Determine market for cninfo API based on suffix
-        # ts_code format e.g., '000001.SZ' or '600000.SH'
-        suffix = ts_code.split('.')[-1] if '.' in ts_code else ''
-        market_map = {
-            'SZ': '\u6df1\u4ea4\u6240',  # 深交所
-            'SH': '\u4e0a\u4ea4\u6240',  # 上交所
-            'BJ': '\u5317\u4ea4\u6240',  # 北交所
-        }
-        
-        # Dynamic market key resolution due to akshare source code encoding on Windows
+        # dynamic market key resolution:
+        # Instead of guessing "上交所"/"深交所"/"北交所" and hitting KeyErrors in akshare,
+        # akshare actually consolidates all of them under a single key in its column_map.
+        # We dynamically fetch the exact default string from its signature definition
+        # to perfectly bypass any GBK/UTF-8 mojibake issues on Windows.
+        market = ""
         try:
             import akshare.stock_feature.stock_disclosure_cninfo as mod
-            import inspect
-            src = inspect.getsource(mod.stock_zh_a_disclosure_report_cninfo)
-            for line in src.split('\n'):
-                if 'szse' in line and ':' in line: market_map['SZ'] = line.split('"')[1]
-                elif 'sse' in line and 'hke' not in line and ':' in line: market_map['SH'] = line.split('"')[1]
-                elif 'bse' in line and ':' in line: market_map['BJ'] = line.split('"')[1]
+            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]
         except Exception:
-            pass
-
-        # default to SZ if not found
-        market = market_map.get(suffix.upper(), market_map.get('SZ', '\u6df1\u4ea4\u6240'))
-
+            market = "沪深京"  # Fallback to standard standard UTF-8 key
+            
         # Run the IO bound akshare calls in the thread pool
         def _fetch():
             # Apply PyArrow Workaround with thread-safety lock:
@@ -115,7 +103,7 @@ class NewsFetcher:
                             if news_list:
                                 return news_list
                 except Exception as e:
-                    logger.warning(f"[News] CNINFO disclosure failed for {ts_code}: {e}")
+                    logger.warning(f"[News] CNINFO disclosure failed for {ts_code}: {e}", exc_info=True)
 
                 # -------------------------------------------------------------
                 # Layer 2: 东财新闻搜索 (EastMoney News Search) - Fallback

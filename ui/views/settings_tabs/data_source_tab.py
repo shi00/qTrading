@@ -68,7 +68,7 @@ class DataSourceTab(ft.Container):
         self.health_dashboard = DashboardCard(
             content=ft.Column([
                 ft.Row([
-                    SectionHeader(I18n.get("settings_sec_health") + " (3Y)"),
+                    SectionHeader(I18n.get("settings_sec_health")),
                     ft.Row([
                         ft.IconButton(
                             icon=ft.Icons.INFO_OUTLINE,
@@ -188,14 +188,28 @@ class DataSourceTab(ft.Container):
             width=AppStyles.CONTROL_WIDTH_MD, 
         )
 
-        # Refactored Historical Card using SettingRow
-        # Uses identical structure to row_token for consistent alignment
+        # Generate history limit selection dropdown
+        years = ConfigHandler.get_init_history_years()
+        self.history_years_dropdown = ft.Dropdown(
+            label=I18n.get("settings_history_range", "History Range"),
+            value=str(years),
+            options=[
+                ft.dropdown.Option("1", f'1 {I18n.get("unit_year", "Year")}'.strip()),
+                ft.dropdown.Option("2", f'2 {I18n.get("unit_years", "Years")}'.strip()),
+                ft.dropdown.Option("3", f'3 {I18n.get("unit_years", "Years")}'.strip()),
+                ft.dropdown.Option("4", f'4 {I18n.get("unit_years", "Years")}'.strip()),
+                ft.dropdown.Option("5", f'5 {I18n.get("unit_years", "Years")}'.strip()),
+            ],
+            width=150,
+            on_change=self.on_history_years_change
+        )
+
         self.row_init = SettingRow(
             icon=ft.Icons.HISTORY_ROUNDED,
             title=I18n.get("settings_init_data"),
             subtitle=I18n.get("settings_hint_first_run"),
             control=ft.Column([
-                ft.Row([self.sync_button], alignment=ft.MainAxisAlignment.END),
+                ft.Row([self.history_years_dropdown, self.sync_button], alignment=ft.MainAxisAlignment.END, spacing=10),
                 ft.Row([
                     ft.Column([self.progress_bar, self.progress_text], spacing=2, expand=True)
                 ], alignment=ft.MainAxisAlignment.END) # Container row
@@ -254,6 +268,22 @@ class DataSourceTab(ft.Container):
         # We can implement a minimal set for now
         self.token_input.label = I18n.get("settings_token")
         self.btn_save_token.text = I18n.get("common_save")
+        
+        # Historical Data Card
+        self.sync_button.text = I18n.get("settings_init_data")
+        self.sync_button.tooltip = I18n.get("settings_init_desc")
+        self.row_init.title = I18n.get("settings_init_data")
+        self.row_init.subtitle = I18n.get("settings_hint_first_run")
+        
+        self.history_years_dropdown.label = I18n.get("settings_history_range", "History Range")
+        self.history_years_dropdown.options = [
+            ft.dropdown.Option("1", f'1 {I18n.get("unit_year", "Year")}'.strip()),
+            ft.dropdown.Option("2", f'2 {I18n.get("unit_years", "Years")}'.strip()),
+            ft.dropdown.Option("3", f'3 {I18n.get("unit_years", "Years")}'.strip()),
+            ft.dropdown.Option("4", f'4 {I18n.get("unit_years", "Years")}'.strip()),
+            ft.dropdown.Option("5", f'5 {I18n.get("unit_years", "Years")}'.strip()),
+        ]
+        
         self._safe_update()
 
     # --- Logic Methods (Migrated from SettingsView) ---
@@ -724,6 +754,19 @@ class DataSourceTab(ft.Container):
             self.progress_text.value = f"{progress * 100:.1f}% - {message}"
             self._safe_update()
             self._last_ui_update = now
+
+    def on_history_years_change(self, e):
+        """Handle history year dropdown selection"""
+        from utils.config_handler import ConfigHandler
+        from ui.theme import AppColors
+        try:
+            val = int(e.control.value)
+            ConfigHandler.set_init_history_years(val)
+            self.history_years_dropdown.value = str(val)
+            self.show_snack(I18n.get("common_saved", "Saved"), color=AppColors.SUCCESS)
+            self._safe_update()
+        except Exception as ex:
+            logger.error(f"[DataSourceTab] HistoryRange | ❌ Failed to set config: {ex}")
 
     def _set_sync_busy(self, is_busy: bool, active_btn: ft.Control = None):
         self.is_syncing = is_busy

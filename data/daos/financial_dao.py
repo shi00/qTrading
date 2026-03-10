@@ -24,7 +24,7 @@ class FinancialDao(BaseDao):
                 "total_hldr_eqy_exc_min_int","roe","roe_dt","grossprofit_margin",
                 "netprofit_margin","debt_to_assets","or_yoy","netprofit_yoy","goodwill"
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
             ) 
             ON CONFLICT("ts_code","end_date") DO UPDATE SET
                 "ann_date" = COALESCE(excluded."ann_date", financial_reports."ann_date"),
@@ -67,7 +67,7 @@ class FinancialDao(BaseDao):
 
     async def get_cached_financial_records(self, period=None):
         if period:
-            df = await self._read_db("SELECT ts_code, end_date FROM financial_reports WHERE end_date = ?", (period,))
+            df = await self._read_db("SELECT ts_code, end_date FROM financial_reports WHERE end_date = $1", (period,))
         else:
             df = await self._read_db("SELECT ts_code, end_date FROM financial_reports")
         if df is None or df.empty:
@@ -87,7 +87,7 @@ class FinancialDao(BaseDao):
 
         if not with_date:
             return pd.DataFrame()
-        return await self._read_db("SELECT * FROM daily_indicators WHERE trade_date = ?", (with_date,))
+        return await self._read_db("SELECT * FROM daily_indicators WHERE trade_date = $1", (with_date,))
 
     async def get_cached_indicator_dates(self):
         df = await self._read_db("SELECT DISTINCT trade_date FROM daily_indicators")

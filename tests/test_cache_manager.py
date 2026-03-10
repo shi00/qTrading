@@ -31,9 +31,6 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
         # But CacheManager is a Singleton.
         # Let's mock config.DB_PATH
         
-        from data import cache_manager
-        cache_manager.config.DB_PATH = self.db_path
-        
         self.cache = CacheManager()
         # Force re-init if singleton was alive (though we set _instance=None)
         if not hasattr(self.cache, 'engine'):

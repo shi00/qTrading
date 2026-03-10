@@ -26,10 +26,12 @@ class ScreenerDao(BaseDao):
     async def get_screening_history(self, strategy_name=None, limit=100):
         sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE 1=1"
         p = []
+        idx = 1
         if strategy_name:
-            sql += " AND strategy_name=?"
+            sql += f" AND strategy_name=${idx}"
             p.append(strategy_name)
-        sql += " ORDER BY trade_date DESC LIMIT ?"
+            idx += 1
+        sql += f" ORDER BY trade_date DESC LIMIT ${idx}"
         p.append(limit)
         return await self._read_db(sql, p)
 
@@ -44,7 +46,7 @@ class ScreenerDao(BaseDao):
             FROM screening_history 
             GROUP BY trade_date, strategy_name 
             ORDER BY trade_date DESC 
-            LIMIT ? OFFSET ?
+            LIMIT $1 OFFSET $2
         """
         return await self._read_db(sql, (limit * 5, offset))  # limit*5 to cover multiple strategies per date
 
@@ -52,10 +54,10 @@ class ScreenerDao(BaseDao):
         """
         Get screening records for a specific date, optionally filtered by strategy.
         """
-        sql = f"SELECT {self.SH_FULL_COLS} FROM screening_history WHERE trade_date = ?"
+        sql = f"SELECT {self.SH_FULL_COLS} FROM screening_history WHERE trade_date = $1"
         p = [trade_date]
         if strategy_name:
-            sql += " AND strategy_name = ?"
+            sql += " AND strategy_name = $2"
             p.append(strategy_name)
         sql += " ORDER BY ai_score DESC"
         return await self._read_db(sql, p)
@@ -71,13 +73,13 @@ class ScreenerDao(BaseDao):
         # updates = list of tuples (t1_price, t1_pct, t5_price, t5_pct, id)
         if not updates:
             return
-        sql = "UPDATE screening_history SET t1_price = ?, t1_pct = ?, t5_price = ?, t5_pct = ? WHERE id = ?"
+        sql = "UPDATE screening_history SET t1_price = $1, t1_pct = $2, t5_price = $3, t5_pct = $4 WHERE id = $5"
         await self._write_db(sql, updates, is_many=True)
 
     async def get_learning_examples(self, limit=3):
         
-        sql_win = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT ?"
-        sql_loss = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT ?"
+        sql_win = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT $1"
+        sql_loss = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT $1"
         
         wins = await self._read_db(sql_win, (limit,))
         losses = await self._read_db(sql_loss, (limit,))
@@ -122,21 +124,21 @@ class ScreenerDao(BaseDao):
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy
-              FROM stock_basic b
-                       LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = ?
-                       LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = ?
-                       LEFT JOIN (SELECT f1.*
-                                  FROM financial_reports f1
-                                           INNER JOIN (SELECT ts_code, MAX(ann_date) as max_ann
-                                                       FROM financial_reports
-                                                       WHERE ann_date <= ?
-                                                       GROUP BY ts_code) f2
-                                                      ON f1.ts_code = f2.ts_code AND f1.ann_date = f2.max_ann
-                                  WHERE f1.end_date = (
-                                      SELECT MAX(f3.end_date) FROM financial_reports f3
-                                      WHERE f3.ts_code = f1.ts_code AND f3.ann_date = f1.ann_date
-                                  )) f
-                                 ON b.ts_code = f.ts_code
+               FROM stock_basic b
+                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
+                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
+                        LEFT JOIN (SELECT f1.*
+                                   FROM financial_reports f1
+                                            INNER JOIN (SELECT ts_code, MAX(ann_date) as max_ann
+                                                        FROM financial_reports
+                                                        WHERE ann_date <= $3
+                                                        GROUP BY ts_code) f2
+                                                       ON f1.ts_code = f2.ts_code AND f1.ann_date = f2.max_ann
+                                   WHERE f1.end_date = (
+                                       SELECT MAX(f3.end_date) FROM financial_reports f3
+                                       WHERE f3.ts_code = f1.ts_code AND f3.ann_date = f1.ann_date
+                                   )) f
+                                  ON b.ts_code = f.ts_code
                WHERE q.close IS NOT NULL \
               '''
         return await self._read_db(sql, (trade_date, trade_date, trade_date))
@@ -148,7 +150,7 @@ class ScreenerDao(BaseDao):
         sql = f'''
             SELECT id, trade_date, ts_code, ai_score, ai_reason 
             FROM screening_history 
-            WHERE trade_date >= ? 
+            WHERE trade_date >= $1 
               AND prediction_result IS NULL
               AND ai_score > 0
             ORDER BY trade_date DESC
@@ -164,16 +166,16 @@ class ScreenerDao(BaseDao):
         sql = f'''
             SELECT ts_code, name, t1_pct, ai_score, ai_reason
             FROM screening_history 
-            WHERE prediction_result = ? AND t1_pct IS NOT NULL
+            WHERE prediction_result = $1 AND t1_pct IS NOT NULL
             ORDER BY t1_pct {order}
-            LIMIT ?
+            LIMIT $2
         '''
         df = await self._read_db(sql, (label, limit))
         return df if df is not None else pd.DataFrame()
 
     async def update_prediction_result(self, record_id: int, pct: float, label: str):
         """Update DB with T+1 result."""
-        sql = 'UPDATE screening_history SET "t1_pct"=?, "prediction_result"=? WHERE "id"=?'
+        sql = 'UPDATE screening_history SET "t1_pct"=$1, "prediction_result"=$2 WHERE "id"=$3'
         await self._write_db(sql, (pct, label, record_id), is_many=False)
 
     async def save_screening_results(self, records: list):

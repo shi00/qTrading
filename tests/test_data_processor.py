@@ -56,7 +56,8 @@ class TestDataProcessor(unittest.TestCase):
         if hasattr(self.processor, 'context'):
              self.processor.context.api = self.processor.api
              self.processor.context.cache = self.processor.cache
-        
+             self.processor.context.processor = self.processor
+
         # Reset strategies if needed or rely on context propagation
         # (Strategies hold reference to self.context object)
 

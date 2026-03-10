@@ -29,7 +29,7 @@ class HolderDao(BaseDao):
 
     async def get_latest_holder_date(self, ts_code):
         """Get latest end_date for a specific stock."""
-        sql = "SELECT MAX(end_date) as max_date FROM stk_holdernumber WHERE ts_code = ?"
+        sql = "SELECT MAX(end_date) as max_date FROM stk_holdernumber WHERE ts_code = $1"
         df = await self._read_db(sql, (ts_code,))
         if not df.empty and df.iloc[0]['max_date']:
             return df.iloc[0]['max_date']

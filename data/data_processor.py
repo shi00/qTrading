@@ -524,9 +524,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # ===== Step 2: Trade Calendar (5%) =====
             report_step(2)
+            from utils.config_handler import ConfigHandler
+            years = ConfigHandler.get_init_history_years()
             end_date = get_now().strftime('%Y%m%d')
-            start_date = (get_now() - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
-            cal_success = await self.ensure_trade_cal(end_date, required_start_date=start_date)
+            rough_start = (get_now() - datetime.timedelta(days=365 * years + 30)).strftime('%Y%m%d')
+            cal_success = await self.ensure_trade_cal(end_date, required_start_date=rough_start)
             if not cal_success:
                 logger.error("[DataProcessor] Init | ❌ Critical failure: Trade calendar sync failed, aborting entire phase.")
                 return None
@@ -536,8 +538,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             def step3_callback(current, total, msg):
                 report_step(3, current, total, msg)
 
+            trade_days = 250 * years
             history_result = await self.sync_historical_data(
-                days=365 * 3,
+                days=trade_days,
                 progress_callback=step3_callback
             )
             if history_result and history_result.status == "failed":
@@ -592,7 +595,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365):
         end = get_now().strftime('%Y%m%d')
-        start = (get_now() - datetime.timedelta(days=days)).strftime('%Y%m%d')
+        # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
+        rough_start = (get_now() - datetime.timedelta(days=int(days * 2.0))).strftime('%Y%m%d')
+        all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end)
+        start = all_dates[-days] if len(all_dates) >= days else (all_dates[0] if all_dates else rough_start)
         return await self.cache.get_daily_quotes(ts_code=ts_code, start_date=start, end_date=end)
 
     async def get_strategy_data(self):

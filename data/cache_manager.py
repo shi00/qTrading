@@ -6,14 +6,14 @@ import threading
 
 import re
 import sqlalchemy as sa
-from sqlalchemy import text, event, Engine
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import config
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager, TaskType
 from data.data_dictionary import TABLE_DEFINITIONS
-from data.constants import HEALTH_DEPTH_FULL_TRADE_DAYS
+from data.constants import get_health_depth_full_trade_days
 # DAOs
 from data.daos.base_dao import BaseDao  # Expose static helpers via BaseDao if needed, or keeping usage internal
 from data.daos.financial_dao import FinancialDao
@@ -29,14 +29,6 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
-# --- WAL Mode Enforcement ---
-@event.listens_for(Engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.execute("PRAGMA busy_timeout=30000")
-    cursor.close()
 
 
 class CacheManager:
@@ -55,12 +47,7 @@ class CacheManager:
         if self._initialized:
             return
 
-        self.db_path = config.DB_PATH
-        # DB_PATH check
-        if not self.db_path:
-            self.db_path = "stock_data.db"  # Fallback
-
-        connection_string = f"sqlite+aiosqlite:///{self.db_path}"
+        connection_string = ConfigHandler.get_db_url() if hasattr(ConfigHandler, 'get_db_url') else config.DB_URL
 
         # Load pool settings from config
         try:
@@ -71,10 +58,9 @@ class CacheManager:
         self.engine = create_async_engine(
             connection_string,
             echo=False,
-            # Pool settings for high concurrency
-            pool_size=db_pool_size,  # Configurable (default 5)
-            max_overflow=max(5, int(db_pool_size * 0.5)),  # Allow 50% overflow, capped reasonably for SQLite WAL
-            pool_timeout=60,  # Wait up to 60s for connection
+            pool_size=db_pool_size,
+            max_overflow=max(5, int(db_pool_size * 0.5)),
+            pool_timeout=60,
             future=True
         )
 
@@ -93,7 +79,7 @@ class CacheManager:
 
         self._initialized = True
         self._schema_initialized = False
-        logger.debug(f"[CacheManager] State | Initialized with AsyncEngine: {self.db_path}")
+        logger.debug(f"[CacheManager] State | Initialized with AsyncEngine: {connection_string}")
 
     @property
     def _maintenance_event(self):
@@ -174,29 +160,13 @@ class CacheManager:
         return await dao._read_db(sql, params)
 
     def checkpoint_wal(self):
-        """Synchronous WAL checkpoint for safe shutdown before os._exit.
-        Uses raw sqlite3 to avoid event loop dependency during cleanup."""
-        try:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.close()
-            logger.debug("[CacheManager] WAL | Checkpoint finalized before exit.")
-        except Exception as e:
-            logger.error(f"[CacheManager] WAL | ❌ Urgent: WAL checkpoint failed, potential disk issue: {e}", exc_info=True)
+        """No-op for PostgreSQL. Kept for backward compatibility with callers."""
+        pass
 
     # --- Init & Reset ---
     async def init_db(self, force=False):
         """Initialize Tables"""
         async with self._init_lock:
-            # Explicit truncation on startup (P0 fix for 800MB WAL)
-            try:
-                async with self.engine.connect() as raw_conn:
-                    conn = await raw_conn.execution_options(isolation_level="AUTOCOMMIT")
-                    await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-                    logger.debug("[CacheManager] WAL | File cleanly truncated.")
-            except Exception as e:
-                logger.error(f"[CacheManager] WAL | ❌ Truncate failed: {e}", exc_info=True)
 
             if self._schema_initialized and not force:
                 return
@@ -245,38 +215,13 @@ class CacheManager:
                 logger.error(f"[CacheManager] Schema | ❌ Init failed critically: {e}", exc_info=True)
 
     async def hard_reset(self):
-        """Delete DB and Re-init"""
-        self._maintenance_event.clear()
-        from data.daos.base_dao import BaseDao
-        BaseDao._get_maintenance_event().clear()
+        """Hard reset by clearing all tables (dropping them) and reinitializing via Alembic."""
         try:
-            await self.engine.dispose()
-            await asyncio.sleep(0.5)
-
-            def remove_db_files(base_path):
-                for ext in ['', '-shm', '-wal']:
-                    f = base_path + ext
-                    if os.path.exists(f):
-                        try:
-                            os.remove(f)
-                            logger.debug(f"[CacheManager] Wipe | Successfully removed legacy DB file at {f}")
-                        except Exception as e:
-                            logger.error(f"[CacheManager] Wipe | ❌ Unable to remove legacy file {f}: {e}", exc_info=True)
-
-            # Offload file deletion
-            await ThreadPoolManager().run_async(TaskType.IO, remove_db_files, self.db_path)
-
-            # Recreate Engine
-            self._schema_initialized = False
-            await self.init_db(force=True)
-
-        finally:
-            try:
-                from data.daos.base_dao import BaseDao
-                BaseDao._get_maintenance_event().set()
-            except Exception:
-                pass
-            self._maintenance_event.set()
+            await self.clear_all_cache()
+            logger.info("[CacheManager] Wipe | Hard reset completed.")
+        except Exception as e:
+            logger.error(f"[CacheManager] Wipe | ❌ Error during hard reset: {e}", exc_info=True)
+            raise
 
     async def clear_all_cache(self):
         """Drop all user tables and re-initialize schema."""
@@ -284,11 +229,10 @@ class CacheManager:
         from data.daos.base_dao import BaseDao
         BaseDao._get_maintenance_event().clear()
         try:
-            # Dynamically query all user tables from sqlite_master
-            # so we never miss newly added tables
+            # Dynamically query all user tables from PostgreSQL catalog
             async with self.engine.begin() as conn:
                 r = await conn.exec_driver_sql(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'"
                 )
                 tables = [row[0] for row in r.fetchall()]
 
@@ -438,7 +382,7 @@ class CacheManager:
                 g_max = r_max.fetchone()[0]
                 if g_min and g_max:
                     r_days = await conn.exec_driver_sql(
-                        "SELECT COUNT(*) FROM trade_cal WHERE is_open=1 AND cal_date >= ? AND cal_date <= ?",
+                        "SELECT COUNT(*) FROM trade_cal WHERE is_open=1 AND cal_date >= $1 AND cal_date <= $2",
                         (str(g_min), str(g_max))
                     )
                     global_trade_days = r_days.fetchone()[0] or 0
@@ -447,10 +391,11 @@ class CacheManager:
                         SELECT SUM(
                             (SELECT COUNT(*) FROM trade_cal tc
                              WHERE tc.is_open = 1
-                               AND tc.cal_date >= MAX(s.list_date, ?)
-                               AND tc.cal_date <= ?)
-                        ) FROM stock_basic s WHERE s.list_status = 'L'
-                    """, (str(g_min), str(g_max)))
+                               AND tc.cal_date >= MAX(s.list_date, $1)
+                               AND tc.cal_date <= $2)
+                        ) FROM stock_basic s
+                        WHERE s.list_status = 'L'
+                        """, (str(g_min), str(g_max)))
                     global_expected_rows = r_exp.fetchone()[0] or 1
                     logger.debug(f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}")
             except Exception as e:
@@ -521,7 +466,7 @@ class CacheManager:
                     # --- Depth (all stock tables, based on global trade days) ---
                     depth_ratio = None
                     if is_stock_table and global_trade_days > 0:
-                        depth_ratio = min(1.0, global_trade_days / HEALTH_DEPTH_FULL_TRADE_DAYS)
+                        depth_ratio = min(1.0, global_trade_days / get_health_depth_full_trade_days())
 
                     # --- Breadth (daily-frequency tables only) ---
                     breadth_ratio = None

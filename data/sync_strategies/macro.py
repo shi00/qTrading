@@ -8,8 +8,7 @@ from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
-# Default lookback for Shibor history when no prior data exists
-_SHIBOR_DEFAULT_LOOKBACK_DAYS = 365 * 3
+# Default lookback removed in favor of dynamic config.
 # Shibor skip threshold: start from next day after latest
 _SHIBOR_RESUME_OFFSET_DAYS = 1
 # Fallback lookback when date parsing fails
@@ -113,7 +112,21 @@ class MacroSyncStrategy(ISyncStrategy):
             latest = await self.dao.get_shibor_latest_date()
             today = get_now().strftime('%Y%m%d')
 
-            start_date = self._compute_shibor_start(latest)
+            if not latest:
+                from utils.config_handler import ConfigHandler
+                years = ConfigHandler.get_init_history_years()
+                # Trade days to natural days safe multiplier: 2.0
+                rough_start = (get_now() - datetime.timedelta(days=int(250 * years * 2.0))).strftime('%Y%m%d')
+                all_dates = await self.context.processor.get_trade_dates(start_date=rough_start, end_date=today)
+                start_date = all_dates[-(250 * years)] if len(all_dates) >= (250 * years) else (all_dates[0] if all_dates else (get_now() - datetime.timedelta(days=365 * years)).strftime('%Y%m%d'))
+            else:
+                try:
+                    last_dt = datetime.datetime.strptime(str(latest), '%Y%m%d')
+                    start_date = (last_dt + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)).strftime('%Y%m%d')
+                except ValueError:
+                    logger.warning(f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.")
+                    start_date = (get_now() - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)).strftime('%Y%m%d')
+
             if start_date > today:
                 logger.debug("[MacroSync] Shibor already up to date.")
                 return
@@ -127,17 +140,6 @@ class MacroSyncStrategy(ISyncStrategy):
         except Exception as e:
             logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Shibor: {e}")
-
-    @staticmethod
-    def _compute_shibor_start(latest):
-        """Compute start_date for Shibor sync based on last available date."""
-        if not latest:
-            return (get_now() - datetime.timedelta(days=_SHIBOR_DEFAULT_LOOKBACK_DAYS)).strftime('%Y%m%d')
-        try:
-            last_dt = datetime.datetime.strptime(str(latest), '%Y%m%d')
-            return (last_dt + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)).strftime('%Y%m%d')
-        except ValueError:
-            return (get_now() - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)).strftime('%Y%m%d')
 
     async def _sync_index_weights(self, result):
         """Sync Index Weights for Major Indices (Monthly)."""
@@ -156,7 +158,11 @@ class MacroSyncStrategy(ISyncStrategy):
             
             if not latest:
                 should_update = True
-                start_date = (today - datetime.timedelta(days=365)).strftime('%Y%m%d') # Backfill 1 year
+                from utils.config_handler import ConfigHandler
+                years = ConfigHandler.get_init_history_years()
+                rough_start = (today - datetime.timedelta(days=int(250 * years * 2.0))).strftime('%Y%m%d')
+                all_dates = await self.context.processor.get_trade_dates(start_date=rough_start, end_date=today.strftime('%Y%m%d'))
+                start_date = all_dates[-(250 * years)] if len(all_dates) >= (250 * years) else (all_dates[0] if all_dates else (today - datetime.timedelta(days=365 * years)).strftime('%Y%m%d'))
             else:
                 last_dt = datetime.datetime.strptime(str(latest),('%Y%m%d'))
                 if (today - last_dt).days > 30:

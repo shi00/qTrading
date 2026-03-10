@@ -78,6 +78,9 @@ class AIStrategyMixin:
         dp = context.get('data_processor')
         on_progress = context.get('on_progress')
         on_result = context.get('on_stream_result') or context.get('on_result')
+        
+        # Extract UI real-time prompt override (handles users clicking Run before blurring Flet textarea)
+        ui_prompt_override = context.get('params', {}).get('ai_system_prompt', None)
 
         # --- Guard: AI Available? ---
         if ai_client.client is None:
@@ -91,6 +94,7 @@ class AIStrategyMixin:
             return pd.DataFrame()
 
         # --- Cost Control: Cap candidates ---
+        from utils.config_handler import ConfigHandler
         cap = max_stocks or ConfigHandler.get_ai_max_candidates()
         if len(candidates_df) > cap:
             logger.info(f"[AIStrategyMixin] Capping candidates from {len(candidates_df)} to {cap}")
@@ -126,7 +130,9 @@ class AIStrategyMixin:
         try:
             # 1. O(1) DB Query for History
             end_date_str = get_now().strftime('%Y%m%d')
-            start_date_str = (get_now() - timedelta(days=60)).strftime('%Y%m%d')
+            from utils.config_handler import ConfigHandler
+            years = ConfigHandler.get_init_history_years()
+            start_date_str = (get_now() - timedelta(days=365 * years + 30)).strftime('%Y%m%d')
             bulk_history_df = await dp.cache.get_daily_quotes(
                 ts_code_list=all_ts_codes, start_date=start_date_str, end_date=end_date_str
             )
@@ -220,7 +226,8 @@ class AIStrategyMixin:
                 res = await self._mixin_analyze_single(
                     row_data, dp, ai_client, global_context, concepts_map,
                     prefetched_capital=prefetched_capital, on_chunk=on_chunk_callback,
-                    history_df=hist_df, news=news_list, history_context=history_context
+                    history_df=hist_df, news=news_list, history_context=history_context,
+                    ui_prompt_override=ui_prompt_override
                 )
                 
                 completed_count += 1
@@ -274,7 +281,8 @@ class AIStrategyMixin:
     async def _mixin_analyze_single(self, row: dict, dp, ai_client: AIService,
                                      global_context: str, concepts_map: dict,
                                      prefetched_capital: dict = None, on_chunk=None,
-                                     history_df=None, news=None, history_context: str = None):
+                                     history_df=None, news=None, history_context: str = None,
+                                     ui_prompt_override: str = None):
         """
         Analyze a single stock. Fetches history, tech indicators, news,
         capital flow, financials, then calls AI with strategy-specific context injected.
@@ -284,7 +292,8 @@ class AIStrategyMixin:
 
             # 1. History (60 trading days)
             if history_df is None or history_df.empty:
-                history_df = await dp.get_stock_history(ts_code, days=60)
+                req_days = getattr(self, 'required_history_days', 60)
+                history_df = await dp.get_stock_history(ts_code, days=req_days)
 
             # 2. Technical Indicators (pointwise)
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
@@ -336,7 +345,9 @@ class AIStrategyMixin:
                 financials_text=financials_text,
                 history_text=history_text,
                 on_chunk=on_chunk,
-                history_context=history_context
+                history_context=history_context,
+                strategy_key=getattr(self, 'key', None),
+                ui_prompt_override=ui_prompt_override
             )
             return ai_result
 
@@ -444,6 +455,22 @@ class AIStrategyMixin:
             df_qfq = TechnicalAnalysis._get_qfq_df(history_df)
             # Ensure chronological order
             df = df_qfq.sort_values('trade_date', ascending=True).reset_index(drop=True)
+            
+            # Compute Macro Horizon
+            macro_cagr = "N/A"
+            macro_mdd = "N/A"
+            if len(df) > 60:
+                # Compute long-term CAGR and Max Drawdown on `df`
+                first_close_macro = df['close'].iloc[0]
+                if first_close_macro > 0:
+                    macro_cagr = f"{((df['close'].iloc[-1] / first_close_macro) - 1) * 100:.1f}%"
+                roll_max = df['close'].cummax()
+                drawdown = (df['close'] - roll_max) / roll_max
+                macro_mdd = f"{drawdown.min() * 100:.1f}%"
+                
+                # Slice for short-term K-line context
+                df = df.tail(60).reset_index(drop=True)
+
             if len(df) < 5:
                 return "Insufficient historical data (<5 days)."
             
@@ -504,6 +531,9 @@ class AIStrategyMixin:
             
             # 5. Build Semantic Prompt (WITHOUT XML wrapper tags — caller adds them)
             lines = [
+                f"【Macro Horizon】(Configured Baseline)",
+                f"- Long-Term: Total Return {macro_cagr}, Max Drawdown {macro_mdd}.",
+                "",
                 f"【Trend & Swing Characteristics】(Over last {len(df)} trading days)",
                 f"- Swing: Total return {pct_all:+.2f}%, Max Drawdown {mdd:.2f}%.",
                 f"- Short-term Momentum: 5-day return {pct_5d:+.2f}%, currently {consec_str}.",

@@ -28,7 +28,6 @@ class FinancialSyncStrategy(ISyncStrategy):
         super().__init__(context)
         self._lazy_event = None  # ST-01: Lazy init
         self._tasks_lock = threading.Lock()
-        self._db_lock = asyncio.Lock()  # P1-13 S6: Serialize SQLite writes for step4 completions
         self._active_tasks = set()
 
     @property
@@ -153,7 +152,11 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # Invariant Dates
         end_date = get_now().strftime('%Y%m%d')
-        start_date = (get_now() - datetime.timedelta(days=365 * 3)).strftime('%Y%m%d')
+        years = ConfigHandler.get_init_history_years()
+        # Safety multiplier 2.0 for TradeDays -> NaturalDays conversion
+        rough_start = (get_now() - datetime.timedelta(days=int(250 * years * 2.0))).strftime('%Y%m%d')
+        all_dates = await self.context.processor.get_trade_dates(start_date=rough_start, end_date=end_date)
+        start_date = all_dates[-(250 * years)] if len(all_dates) >= (250 * years) else (all_dates[0] if all_dates else (get_now() - datetime.timedelta(days=365 * years)).strftime('%Y%m%d'))
 
         # Generate full date range for batch sync (run AFTER stock loop to avoid API contention)
         all_dates = []
@@ -227,8 +230,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             await save_func(result_data)
 
                     if not has_error:
-                        async with self._db_lock:
-                            await self.context.cache.mark_stock_step4_completed(ts_code, sync_version=1)
+                        await self.context.cache.mark_stock_step4_completed(ts_code, sync_version=1)
                         result_accumulator.added += 1
                     else:
                         logger.debug(f"[FinancialSync] StockSync | {ts_code} incomplete, pending retry.")

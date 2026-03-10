@@ -21,8 +21,10 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     Level 2 (AI):    Parallel AI analysis on top candidates to distinguish
                      "golden pit" rebounds from "falling knife" traps.
     """
-    # RSI(period) needs period*2 days (param max=30 → 60); ai_mixin fetches 60 days
-    required_history_days = 60
+    @property
+    def required_history_days(self):
+        from utils.config_handler import ConfigHandler
+        return ConfigHandler.get_init_history_years() * 250
 
     def __init__(self):
         super().__init__("strategy_oversold_name", "strategy_oversold_desc")

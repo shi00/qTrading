@@ -11,7 +11,7 @@ class MarketDao(BaseDao):
         """Save a single market news item."""
         sql = """
               INSERT INTO market_news ("content","tags","publish_time","source","created_at")
-              VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+              VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
               ON CONFLICT("content","publish_time") DO
               UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags")
               """
@@ -24,10 +24,12 @@ class MarketDao(BaseDao):
     async def get_market_news(self, limit=50, offset=0, min_publish_time=None):
         sql = "SELECT * FROM market_news WHERE 1=1"
         params = []
+        idx = 1
         if min_publish_time:
-            sql += " AND publish_time >= ?"
+            sql += f" AND publish_time >= ${idx}"
             params.append(min_publish_time)
-        sql += " ORDER BY publish_time DESC LIMIT ? OFFSET ?"
+            idx += 1
+        sql += f" ORDER BY publish_time DESC LIMIT ${idx} OFFSET ${idx+1}"
         params.extend([limit, offset])
         return await self._read_db(sql, params)
 
@@ -53,19 +55,23 @@ class MarketDao(BaseDao):
         """Get Daily Indicators."""
         sql = "SELECT * FROM daily_indicators WHERE 1=1"
         params = []
+        idx = 1
         if ts_code:
-            sql += " AND ts_code = ?"
+            sql += f" AND ts_code = ${idx}"
             params.append(ts_code)
+            idx += 1
         if start_date:
-            sql += " AND trade_date >= ?"
+            sql += f" AND trade_date >= ${idx}"
             params.append(start_date)
+            idx += 1
         if end_date:
-            sql += " AND trade_date <= ?"
+            sql += f" AND trade_date <= ${idx}"
             params.append(end_date)
+            idx += 1
             
         sql += " ORDER BY trade_date DESC"
         if limit:
-            sql += " LIMIT ?"
+            sql += f" LIMIT ${idx}"
             params.append(limit)
             
         return await self._read_db(sql, params)
@@ -79,13 +85,15 @@ class MarketDao(BaseDao):
         return await self._save_upsert(df, 'adj_factor', columns, pk_columns=['ts_code', 'trade_date'], suppress_errors=suppress_errors)
 
     async def get_adj_factors(self, ts_code, start_date=None, end_date=None):
-        sql = "SELECT * FROM adj_factor WHERE ts_code = ?"
+        sql = "SELECT * FROM adj_factor WHERE ts_code = $1"
         params = [ts_code]
+        idx = 2
         if start_date:
-            sql += " AND trade_date >= ?"
+            sql += f" AND trade_date >= ${idx}"
             params.append(start_date)
+            idx += 1
         if end_date:
-            sql += " AND trade_date <= ?"
+            sql += f" AND trade_date <= ${idx}"
             params.append(end_date)
         return await self._read_db(sql, params)
 
@@ -98,7 +106,7 @@ class MarketDao(BaseDao):
         return await self._save_upsert(df, 'index_weight', columns, pk_columns=['index_code', 'con_code', 'trade_date'])
 
     async def get_index_weights(self, index_code, trade_date):
-        sql = "SELECT * FROM index_weight WHERE index_code = ? AND trade_date = ?"
+        sql = "SELECT * FROM index_weight WHERE index_code = $1 AND trade_date = $2"
         return await self._read_db(sql, (index_code, trade_date))
 
     async def get_latest_index_weight_date(self):
@@ -120,14 +128,15 @@ class MarketDao(BaseDao):
         """Get Northbound Money Flow."""
         sql = "SELECT * FROM moneyflow_hsgt WHERE 1=1"
         params = []
+        idx = 1
         if trade_date:
-            sql += " AND trade_date = ?"
+            sql += f" AND trade_date = ${idx}"
             params.append(trade_date)
+            idx += 1
             
         sql += " ORDER BY trade_date DESC"
         if limit:
-            sql += " LIMIT ?"
+            sql += f" LIMIT ${idx}"
             params.append(limit)
             
         return await self._read_db(sql, params)
-

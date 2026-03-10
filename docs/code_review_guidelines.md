@@ -1,6 +1,6 @@
 # AStockScreener (QTrading) 代码检视 (Code Review) 终极指南
 
-这份指南是完全基于 **AStockScreener 智能选股系统**当前的真实技术栈（`Flet` + `Polars` + `AioSQLite` + `llama.cpp/OpenAI`）以及业务域（离线数据落盘 + 定量粗筛 + LLM 定性精审）量身定制的架构师级 CR 规范。
+这份指南是完全基于 **AStockScreener 智能选股系统**当前的真实技术栈（`Flet` + `Polars` + `PostgreSQL` + `llama.cpp/OpenAI`）以及业务域（离线数据落盘 + 定量粗筛 + LLM 定性精审）量身定制的架构师级 CR 规范。
 
 在处理这套系统的 Pull Request 时，审查者 (Reviewer) 需要严格按照以下 **6 个核心防区、43 条致命检查项**进行逐行排雷。
 
@@ -105,12 +105,14 @@
 33. **安全秘钥的防泄露 (Credential Leakage)**
     - **审查点**：绝不准许在 Exception traceback 以及日终报告中明文打印出含有 Tushare 官方 Token 或是第三方 LLM Proxy Base_URL 的请求原文内容！项目已使用 `keyring` 与 `SecurityManager` 加密存储凭证，审查新代码时必须确认没有绕过这些安全层。
 34. **隐式时区与时间转换 (Timezone Consistency)**
-    - **审查点**：强制代码中使用并且只使用 `Asia/Shanghai` 时区进行交易日比对，如果用系统本地操作时区对比交易所日历，很容易在海外云服上偏移时钟。
-35. **不可预见的系统兜底 (Global Exception Catching)**
+    - **审查点**：强制代码中使用并且只使用 `Asia/Shanghai` 时区进行交易日比对与本地时间戳生成。所有获取当前时间的调用，**严禁使用原生的 `datetime.datetime.now()`**，必须统一使用项目中封装的 `utils.time_utils.get_now()`，防止在海外云服务器上出现时钟偏移。导出或缓存文件命名时，强烈建议时间戳精确到秒 `%Y%m%d_%H%M%S` 以防同日高频覆盖。
+35. **[关键] 彻底的文件名安全与防路径穿越 (Path Traversal & Sanitization)**
+    - **审查点**：在动态生成本地文件路径（如导出 CSV、日志转储或 prompt 记录）时，绝不允许未经清洗直接凭借外部动态变量（如股票代码、策略输入名）拼接路径。必须强制使用正则表达式 `re.sub(r'[<>:"/\\|?*]', '_', name)` 过滤 Windows 预留特殊字符，彻底防御高级路径穿越（Path Traversal）漏洞与写入溢出带来的静默崩溃。
+36. **不可预见的系统兜底 (Global Exception Catching)**
     - **审查点**：后台 Thread/Task 如果直接触发 Crash，是否向 UI 发送了更新消息？UI 如果一直等不到执行完的 Future，进度条动画将会死死卡在永久等待状态。
-36. **日志规范与纪律 (Log Discipline)**
+37. **日志规范与纪律 (Log Discipline)**
     - **审查点**：① 日志级别不得滥用——`WARNING` 只用于可自愈的降级，`ERROR` 只用于需人工介入的故障，严禁把常规分支写成 WARNING 刷屏。② 关键操作日志必须携带上下文参数（如 `ts_code`, `trade_date`），否则日志回查时无法定位到具体股票。③ 严禁在大循环内逐条调用 `logger.info()`，应在循环外一次性汇总输出，防止日志文件被撑爆。
-37. **并发安全与协程隔离 (Concurrency Safety)**
+38. **并发安全与协程隔离 (Concurrency Safety)**
     - **审查点**：① 使用 `asyncio.gather()` 时必须检查 `return_exceptions=True`，否则单个子任务异常会导致其余所有任务的结果被丢弃。② 多协程/多线程同时操作共享的 `dict`、`list` 或 Polars DataFrame 时，必须引入锁（`asyncio.Lock` 或 `threading.Lock`）保护临界区。③ 回调函数中不得直接修改 ViewModel 的共享状态而不经过事件总线。
 
 ---
@@ -119,15 +121,15 @@
 *目标：维持核心链路极致精简，拒绝技术债堆积如山。*
 **重点文件**: `strategies/*.py`, `data/daos/`, `data/sync_strategies/`, `ui/views/`
 
-38. **策略魔术数字硬编码 (Magic Numbers in Alpha)**
+39. **策略魔术数字硬编码 (Magic Numbers in Alpha)**
     - **审查点**：在选股逻辑 `.filter(pl.col('amount') > 10000000)` 中凭空冒出来的标尺，一律退回。必须被提取到类常量或是注入到随 UI 连动的 `context.get("params")` 定义中，确保策略调整有溯源。
-39. **神级函数肥胖症 (God Function)**
+40. **神级函数肥胖症 (God Function)**
     - **审查点**：一个包含"拉数据"、"洗量纲"、"入库"、"UI 反馈进度条"的巨兽方法（常常超过 80 行）极难测试且会阻塞单元测试，必须勒令将其拆分退化为单一职责。
-40. **强塞在 UI 代码里的原生计算 (Business Logic Leak)**
+41. **强塞在 UI 代码里的原生计算 (Business Logic Leak)**
     - **审查点**：Flet 前端按钮的回调函数里，坚决不能出现关于 DataFrame 合并、排序以及 SQLite 查询的计算逻辑。所有的繁重计算职责必须推迟并委托给 `View` 背后的 `ViewModel`，保证 V 和 VM 之间只有极其弱的信使通信。
-41. **安静吞咽的异常 (Silenced Exceptions)**
+42. **安静吞咽的异常 (Silenced Exceptions)**
     - **审查点**：捕获所有的错误却写下一个干秃秃的 `pass` 是量化体系中最具毁灭性的恶心代码。如果确实打算吞并降级，必须 `logger.warning('Reason')` 并附加详细的入参 `Context`，不然就是任凭残缺数据污染全链路选股池！
-42. **重复代码与复制粘贴 (DRY Principle Violation)**
+43. **重复代码与复制粘贴 (DRY Principle Violation)**
     - **审查点**：如果在两个策略或 DAO 中发现了超过 10 行以上结构高度雷同的逻辑（如几乎一样的 DataFrame 转换、指标计算），必须将其重构并上卷到基类或专属工具方法中。拒绝复制粘贴编程。
-43. **僵尸代码死海 (Dead Code & YAGNI)**
+44. **僵尸代码死海 (Dead Code & YAGNI)**
     - **审查点**：任何不再被使用的废弃函数、未引用的 Import、或是为了"未来大干一场"而提前写下的复杂且未激活的架构代码（YAGNI），必须无情剔除，严禁将代码库当作历史垃圾桶。

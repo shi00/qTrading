@@ -17,7 +17,7 @@ import pandas as pd
 from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
-    HEALTH_DEPTH_FULL_TRADE_DAYS,
+    get_health_depth_full_trade_days,
     HEALTH_DEPTH_SAFETY_MULTIPLIER,
     HEALTH_THRESHOLD_BREADTH,
     TIER_QUOTE_FRESHNESS_DAYS,
@@ -151,9 +151,17 @@ class HealthCheckMixin:
 
         try:
             end_date = await self.get_latest_trade_date()
-            # Generate start date 3 years ago
-            start_date_obj = datetime.datetime.strptime(end_date, '%Y%m%d') - datetime.timedelta(days=365 * 3)
-            start_date = start_date_obj.strftime('%Y%m%d')
+            # Generate start date based on configured dynamic years
+            end_date_obj = datetime.datetime.strptime(end_date, '%Y%m%d')
+            from utils.config_handler import ConfigHandler
+            years = ConfigHandler.get_init_history_years()
+            # Use a safe 2.0 multiplier for trade-days to natural-days conversion
+            rough_start = (end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))).strftime('%Y%m%d')
+            all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end_date)
+            if all_dates and len(all_dates) >= (years * 250):
+                start_date = all_dates[-(years * 250)]
+            else:
+                start_date = all_dates[0] if all_dates else (end_date_obj - datetime.timedelta(days=365 * years)).strftime('%Y%m%d')
 
             official_dates = await self.get_trade_dates(start_date, end_date)
 
@@ -229,7 +237,7 @@ class HealthCheckMixin:
                 (cls.required_history_days for cls in _STRATEGY_REGISTRY.values()),
                 default=0
             )
-            depth_threshold = min(1.0, (max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER) / HEALTH_DEPTH_FULL_TRADE_DAYS) if max_required > 0 else 0
+            depth_threshold = min(1.0, (max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER) / get_health_depth_full_trade_days()) if max_required > 0 else 0
             pass # 调试记录删除
 
             missing_depth = []

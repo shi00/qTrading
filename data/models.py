@@ -7,8 +7,8 @@ from sqlalchemy import Column, String, Float, Integer, UniqueConstraint, Index
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
 
-# Naming convention is CRITICAL for SQLite batch migrations in Alembic
-# SQLite does not support ALTER TABLE DROP/ALTER constraints nicely, Alembic needs to recreate the table.
+# Naming convention for Alembic migrations
+# Ensures consistent constraint naming across environments
 naming_convention = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
@@ -57,6 +57,7 @@ class DailyQuotes(Base):
     qfq_high = Column(Float)
     qfq_low = Column(Float)
     qfq_close = Column(Float)
+    updated_at = Column(String)
 
 class DailyIndicators(Base):
     __tablename__ = 'daily_indicators'
@@ -77,6 +78,7 @@ class DailyIndicators(Base):
     turnover_rate = Column(Float)
     turnover_rate_f = Column(Float)
     volume_ratio = Column(Float)
+    updated_at = Column(String)
 
 class MoneyflowDaily(Base):
     __tablename__ = 'moneyflow_daily'
@@ -100,6 +102,7 @@ class MoneyflowDaily(Base):
     sell_elg_amount = Column(Float)
     net_mf_vol = Column(Integer)
     net_mf_amount = Column(Float)
+    updated_at = Column(String)
 
 class NorthboundHolding(Base):
     __tablename__ = 'northbound_holding'
@@ -109,6 +112,7 @@ class NorthboundHolding(Base):
     vol = Column(Integer)
     ratio = Column(Float)
     exchange = Column(String)
+    updated_at = Column(String)
 
 class TopList(Base):
     __tablename__ = 'top_list'
@@ -127,6 +131,7 @@ class TopList(Base):
     amount_rate = Column(Float)
     float_values = Column(Float)
     reason = Column(String)
+    updated_at = Column(String)
 
 class SyncStatus(Base):
     __tablename__ = 'sync_status'
@@ -207,6 +212,7 @@ class TradeCal(Base):
     exchange = Column(String)
     is_open = Column(Integer)
     pretrade_date = Column(String)
+    updated_at = Column(String)
 
 class FinancialReports(Base):
     __tablename__ = 'financial_reports'
@@ -233,6 +239,7 @@ class FinancialReports(Base):
     __table_args__ = (
         Index('ix_financial_reports_ts_code_ann_date', 'ts_code', 'ann_date'),
     )
+    updated_at = Column(String)
 
 class IndexDaily(Base):
     __tablename__ = 'index_daily'
@@ -247,6 +254,7 @@ class IndexDaily(Base):
     pct_chg = Column(Float)
     vol = Column(Float)
     amount = Column(Float)
+    updated_at = Column(String)
 
 class IndexDailyBasic(Base):
     __tablename__ = 'index_dailybasic'
@@ -262,6 +270,7 @@ class IndexDailyBasic(Base):
     pe = Column(Float)
     pe_ttm = Column(Float)
     pb = Column(Float)
+    updated_at = Column(String)
 
 class MarginDaily(Base):
     __tablename__ = 'margin_daily'
@@ -272,6 +281,7 @@ class MarginDaily(Base):
     rzmre = Column(Float)
     rqyl = Column(Float)
     rzrqye = Column(Float)
+    updated_at = Column(String)
 
 class SuspendD(Base):
     __tablename__ = 'suspend_d'
@@ -279,6 +289,7 @@ class SuspendD(Base):
     trade_date = Column(String, primary_key=True, index=True)
     suspend_timing = Column(String)
     suspend_type_name = Column(String)
+    updated_at = Column(String)
 
 class LimitList(Base):
     __tablename__ = 'limit_list'
@@ -296,6 +307,7 @@ class LimitList(Base):
     open_times = Column(Integer)
     strth = Column(Float)
     limit_type = Column(String)
+    updated_at = Column(String)
 
 class FinaForecast(Base):
     __tablename__ = 'fina_forecast'
@@ -307,6 +319,7 @@ class FinaForecast(Base):
     p_change_max = Column(Float)
     net_profit_min = Column(Float)
     net_profit_max = Column(Float)
+    updated_at = Column(String)
 
 class FinaMainbz(Base):
     __tablename__ = 'fina_mainbz'
@@ -318,6 +331,7 @@ class FinaMainbz(Base):
     bz_cost = Column(Float)
     curr_type = Column(String)
     update_flag = Column(String)
+    updated_at = Column(String)
 
 class PledgeStat(Base):
     __tablename__ = 'pledge_stat'
@@ -328,6 +342,7 @@ class PledgeStat(Base):
     rest_pledge = Column(Float)
     total_share = Column(Float)
     pledge_ratio = Column(Float)
+    updated_at = Column(String)
 
 class Repurchase(Base):
     __tablename__ = 'repurchase'
@@ -340,6 +355,7 @@ class Repurchase(Base):
     amount = Column(Float)
     high_limit = Column(Float)
     low_limit = Column(Float)
+    updated_at = Column(String)
 
 class Dividend(Base):
     __tablename__ = 'dividend'
@@ -354,12 +370,14 @@ class Dividend(Base):
     cash_div_tax_rate = Column(Float)
     record_date = Column(String)
     ex_date = Column(String)
+    updated_at = Column(String)
 
 class StockSyncStatus(Base):
     __tablename__ = 'stock_sync_status'
     ts_code = Column(String, primary_key=True)
     step4_completed_at = Column(String)
     sync_version = Column(Integer, default=1)
+    updated_at = Column(String)
 
 class FinaAudit(Base):
     __tablename__ = 'fina_audit'
@@ -369,6 +387,7 @@ class FinaAudit(Base):
     audit_result = Column(String)
     audit_fees = Column(Float)
     audit_agency = Column(String)
+    updated_at = Column(String)
 
 class MacroEconomy(Base):
     __tablename__ = 'macro_economy'
@@ -394,12 +413,14 @@ class ShiborDaily(Base):
     m6 = Column(Float, name="6m")
     m9 = Column(Float, name="9m")
     y1 = Column(Float, name="1y")
+    updated_at = Column(String)
 
 class AdjFactor(Base):
     __tablename__ = 'adj_factor'
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     adj_factor = Column(Float)
+    updated_at = Column(String)
 
 class StkHoldernumber(Base):
     __tablename__ = 'stk_holdernumber'
@@ -409,6 +430,7 @@ class StkHoldernumber(Base):
     holder_num = Column(Integer)
     holder_num_change = Column(Float)
     holder_num_ratio = Column(Float)
+    updated_at = Column(String)
 
 class Top10Holders(Base):
     __tablename__ = 'top10_holders'
@@ -419,6 +441,7 @@ class Top10Holders(Base):
     hold_amount = Column(Float)
     hold_ratio = Column(Float)
     holder_type = Column(String)
+    updated_at = Column(String)
 
 class IndexWeight(Base):
     __tablename__ = 'index_weight'
@@ -426,6 +449,7 @@ class IndexWeight(Base):
     con_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     weight = Column(Float)
+    updated_at = Column(String)
 
 class MoneyflowHsgt(Base):
     __tablename__ = 'moneyflow_hsgt'
@@ -436,6 +460,7 @@ class MoneyflowHsgt(Base):
     sgt = Column(Float)
     north_money = Column(Float)
     south_money = Column(Float)
+    updated_at = Column(String)
 
 class TaskHistory(Base):
     __tablename__ = 'task_history'

@@ -324,8 +324,10 @@ class OnboardingWizard(ft.Container):
             on_click=self._handle_quick_sync,
             style=AppStyles.accent_button()  # Use accent color for quick action
         )
+        from utils.config_handler import ConfigHandler
+        years = ConfigHandler.get_init_history_years()
         self.btn_full_sync = ft.ElevatedButton(
-            I18n.get("wizard_sync_full"),
+            I18n.get("wizard_sync_full").format(years=years),
             icon=ft.Icons.CLOUD_SYNC,
             on_click=self._handle_full_sync,
             style=AppStyles.primary_button()
@@ -345,7 +347,7 @@ class OnboardingWizard(ft.Container):
                         color=AppColors.TEXT_PRIMARY),
                 ft.Container(height=10),
                 ft.Text(
-                    I18n.get("wizard_step3_desc"),
+                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
                     size=14, color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),

@@ -3,6 +3,8 @@ import time
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from utils.thread_pool import ThreadPoolManager, TaskType
 
@@ -50,8 +52,18 @@ class BaseDao:
                 if col in df.columns:
                     df[col] = df[col].astype(str)
 
-        # Convert to list of tuples (required for SQLAlchemy/sqlite3 with some drivers)
-        return [tuple(x) for x in df[cols].replace({np.nan: None}).to_numpy()]
+        # Replace NaN/NaT with None safely
+        df_clean = df[cols].where(pd.notnull(df[cols]), None)
+        
+        # Helper to convert numpy types to native Python types for asyncpg
+        def _to_native(val):
+            if val is None: return None
+            if isinstance(val, (np.int64, np.int32, np.int16, np.int8)): return int(val)
+            if isinstance(val, (np.float64, np.float32)): return float(val)
+            if isinstance(val, (np.bool_)): return bool(val)
+            return val
+            
+        return [tuple(_to_native(v) for v in row) for row in df_clean.itertuples(index=False, name=None)]
 
     async def _write_db(self, sql, params=None, is_many=False, suppress_errors=True):
         """Generic Write using Driver SQL for '?' support"""
@@ -103,28 +115,87 @@ class BaseDao:
 
     async def _save_upsert(self, df, table_name, columns, pk_columns, suppress_errors=True):
         """
-        Generic helper for INSERT INTO ... ON CONFLICT (...) DO UPDATE SET ...
-        This optimizes write performance by avoiding DELETE+INSERT of REPLACE.
+        Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
+        Leverages SQLAlchemy Core for robust type coercion from Pandas to asyncpg natively.
         """
         if df is None or df.empty: return 0
 
-        placeholders = ",".join(["?"] * len(columns))
-        col_str = self._quote_columns(columns)
-        pk_str = self._quote_columns(pk_columns)
+        import asyncio
+        from data.models import Base
+        await self._get_maintenance_event().wait()
 
-        update_cols = [c for c in columns if c not in pk_columns]
-        if not update_cols:
-            sql = f"INSERT INTO {table_name} ({col_str}) VALUES ({placeholders}) ON CONFLICT({pk_str}) DO NOTHING"
+        table = Base.metadata.tables.get(table_name)
+        if table is None:
+            logger.error(f"[{self.__class__.__name__}] Table {table_name} not found in SQLAlchemy metadata.")
+            return 0
+
+        # Auto-inject updated_at if the table supports it
+        has_updated_at = 'updated_at' in table.columns.keys()
+        
+        # We must avoid modifying the passed 'df' in-place (SettingWithCopyWarning or outer scope side-effects).
+        # We only work on the selected columns slice.
+        if has_updated_at and 'updated_at' not in columns:
+            columns = list(columns) + ['updated_at']
+            from datetime import datetime
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Use .assign to safely create a copy with the new column for the slice we need
+            df_slice = df.assign(updated_at=now_str)[columns]
         else:
-            update_clause = ",".join(['"' + c + '"=excluded."' + c + '"' for c in update_cols])
-            sql = f"""
-                INSERT INTO {table_name} ({col_str}) 
-                VALUES ({placeholders}) 
-                ON CONFLICT({pk_str}) DO UPDATE SET {update_clause}
-            """
+            # If the dataframe already has updated_at or the table doesn't need it, just slice
+            df_slice = df[columns]
 
-        params = await ThreadPoolManager().run_async(TaskType.CPU, self._prepare_data_params, df, columns)
-        return await self._write_db(sql, params, is_many=True, suppress_errors=suppress_errors)
+        # Replace pandas nulls with None to map to SQL NULL correctly
+        df_clean = df_slice.where(pd.notnull(df_slice), None)
+        
+        # For bulk execution via SQLAlchemy, a list of dictionaries is required
+        records = df_clean.to_dict(orient='records')
+
+        # Convert numpy types in dicts to python native types
+        for record in records:
+            for k, v in record.items():
+                if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
+                    record[k] = int(v)
+                elif isinstance(v, (np.float64, np.float32)):
+                    record[k] = float(v)
+                elif isinstance(v, np.bool_):
+                    record[k] = bool(v)
+                elif pd.isna(v):  # Fallback check
+                    record[k] = None
+
+        stmt = pg_insert(table)
+        update_cols = [c for c in columns if c not in pk_columns]
+
+        if not update_cols:
+            stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
+        else:
+            update_dict = {c: getattr(stmt.excluded, c) for c in update_cols}
+            stmt = stmt.on_conflict_do_update(
+                index_elements=pk_columns,
+                set_=update_dict
+            )
+
+        start_time = time.perf_counter()
+        try:
+            async with self.engine.begin() as conn:
+                await conn.execute(stmt, records)
+            
+            elapsed = (time.perf_counter() - start_time) * 1000
+            if elapsed > 2000:
+                logger.warning(f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}")
+            else:
+                logger.debug(f"[{self.__class__.__name__}] UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}")
+                
+            return len(records)
+        except Exception as e:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            if "no active connection" in str(e) or "database is closed" in str(e):
+                 logger.warning(f"[{self.__class__.__name__}] DB Closed during upsert (Shutdown): {e}")
+                 return 0
+            
+            logger.error(f"[{self.__class__.__name__}] UPSERT Error ({elapsed:.1f}ms) on {table_name}: {e}", exc_info=True)
+            if not suppress_errors:
+                raise e
+            return 0
 
     async def _read_db(self, sql, params=None):
         """Generic Read returning DataFrame (Offloaded CSV conversion)"""
@@ -138,6 +209,7 @@ class BaseDao:
         start_time = time.perf_counter()
         try:
             async with self.engine.connect() as conn:
+                # Execute raw SQL directly via driver to support native $1, $2 placeholders
                 result = await conn.exec_driver_sql(sql, params or ())
                 # Fetch all rows
                 rows = result.fetchall()

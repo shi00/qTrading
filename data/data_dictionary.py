@@ -135,6 +135,7 @@ TABLE_DEFINITIONS = {
     },
     "stock_concepts": {
         "alias": "tab_stock_concepts",
+        "desc": "股票概念映射表 (包含传统 Tushare 原生概念，以及通过 AI 自动扫描剥离出的 AI_DOUBAO_<md5> 前缀概念)",
         "columns": {}
     },
     "daily_quotes": {
@@ -516,7 +517,7 @@ def validate_schema_definitions():
         missing_defs = db_tables - defined_tables
         
         # Known internal tables to ignore
-        IGNORED_TABLES = {'sqlite_sequence', 'stock_sync_status', 'screening_history'}
+        IGNORED_TABLES = {'stock_sync_status', 'screening_history'}
         
         missing_defs = missing_defs - IGNORED_TABLES
         

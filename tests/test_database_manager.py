@@ -30,7 +30,9 @@ class TestDatabaseManager(unittest.TestCase):
         conn.commit()
         conn.close()
         
-        self.db_manager = DatabaseManager(db_path=self.test_db_abs)
+        from data import database_manager
+        database_manager.config.DB_URL_SYNC = f"sqlite:///{self.test_db_abs}"
+        self.db_manager = DatabaseManager()
 
     def tearDown(self):
         if hasattr(self, 'db_manager'):

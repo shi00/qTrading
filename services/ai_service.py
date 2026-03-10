@@ -167,7 +167,6 @@ class AIService:
 
             async with await self._get_semaphore():
                 logger.debug(f"[AIService] Cloud | Invoking {model} ({len(messages)} messages)")
-                logger.debug(f"[AIService] Cloud | Payload preview: {str(messages)[:200]}...")
                 
                 response = await self.client.chat.completions.create(
                     model=model,
@@ -235,7 +234,8 @@ class AIService:
     @log_async_operation(operation_name="analyze_stock", log_args=False, threshold_ms=PerfThreshold.AI_INFERENCE)
     async def analyze_stock(self, stock_info: dict, tech_info: dict, news_list: list, global_context="",
                             strategy_context: str = "", capital_flow_text: str = "", financials_text: str = "",
-                            history_text: str = "", on_chunk=None, history_context: str = None) -> dict:
+                            history_text: str = "", on_chunk=None, history_context: str = None,
+                            strategy_key: str = None, ui_prompt_override: str = None) -> dict:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'ai_model_name' to be configured.
@@ -246,10 +246,8 @@ class AIService:
             return None
 
         # Build Prompt
-        # Convert dicts to XML-like string
-        stock_xml = "\n".join([f"  {k}: {v}" for k, v in stock_info.items()])
-        tech_xml = "\n".join([f"  {k}: {v}" for k, v in tech_info.items()])
-
+        import pandas as pd
+        
         # Format news
         news_text = "\n".join([
             f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}" 
@@ -258,25 +256,45 @@ class AIService:
         if not news_list:
             news_text = "No recent news found."
 
-        # Fetch Concepts (Used cached if available)
-        concepts_str = "None"
+        # Process Concepts (Used cached if available)
         try:
             # Check if concepts are already injected by Strategy (Preferred)
             injected_concepts = stock_info.get('concepts')
 
-            if injected_concepts and isinstance(injected_concepts, list):
+            if injected_concepts and isinstance(injected_concepts, list) and len(injected_concepts) > 0:
                 # Use injected
-                concepts = injected_concepts[:8]
-                concepts_str = ", ".join(concepts)
-            else:
-                # Fallback for legacy support or when data is not fully synced
-                concepts_str = "Data not synced"
+                concepts_str = ", ".join(injected_concepts[:8])
+                stock_info['concepts'] = concepts_str
+            elif isinstance(injected_concepts, list) and len(injected_concepts) == 0:
+                # If it's literally an empty list `[]`, nuke the key entirely so it doesn't appear in XML
+                stock_info.pop('concepts', None)
+            elif not injected_concepts:
+                # If it's None or empty string, remove it entirely
+                stock_info.pop('concepts', None)
 
         except Exception as e:
             logger.warning(f"[AIService] Analyze | ⚠️ Concepts processing failed: {e}")
+            stock_info.pop('concepts', None)
+        
+        # Convert dicts to XML-like string, filtering out Pandas artifacts and private injected keys like `_23` or `_rsi_period`
+        def is_valid_value(val):
+            if isinstance(val, list) and len(val) == 0:
+                return False
+            try:
+                # pandas isna throws ValueError on multi-element numpy arrays
+                if pd.isna(val):
+                    return False
+            except ValueError:
+                pass
+            return True
 
-        # Add concepts to stock_xml
-        stock_xml += f"\n  Concepts: {concepts_str}"
+        clean_stock_info = {
+            k: v for k, v in stock_info.items()
+            if not str(k).startswith('_') and is_valid_value(v)
+        }
+        
+        stock_xml = "\n".join([f"  {k}: {v}" for k, v in clean_stock_info.items()])
+        tech_xml = "\n".join([f"  {k}: {v}" for k, v in tech_info.items()])
 
         # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
         if history_context is None:
@@ -287,8 +305,18 @@ class AIService:
                 logger.warning(f"[AIService] Analyze | ⚠️ Learning context fetch failed: {e}")
                 history_context = ""
 
-        # Load System Prompt from Config
-        system_prompt = ConfigHandler.get_ai_system_prompt()
+        # Load System Prompt
+        from strategies.strategy_prompts import resolve_prompt, _UNIVERSAL_RULES
+        if ui_prompt_override and ui_prompt_override.strip():
+            system_prompt = ui_prompt_override.strip()
+            if _UNIVERSAL_RULES not in system_prompt:
+                system_prompt += "\n\n" + _UNIVERSAL_RULES
+        elif strategy_key:
+            system_prompt = resolve_prompt(strategy_key)
+        else:
+            system_prompt = ConfigHandler.get_ai_system_prompt() or ""
+            if _UNIVERSAL_RULES not in system_prompt:
+                system_prompt += "\n\n" + _UNIVERSAL_RULES
 
         # Capital flow and financials: use real data or fallback
         capital_flow_content = capital_flow_text if capital_flow_text else "(Data not available yet, assume neutral)"
@@ -334,6 +362,37 @@ class AIService:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
+
+        # [FEATURE] Dump the exact constructed prompt to a dedicated markdown file
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                import os
+                import re
+                import config
+                from utils.time_utils import get_now
+                dump_dir = os.path.join(config.APP_ROOT, "logs", "ai_prompts")
+                os.makedirs(dump_dir, exist_ok=True)
+                
+                # Sanitize components against path traversal and Windows invalid chars
+                stock_code = str(stock_info.get('ts_code', 'UNKNOWN'))
+                strat_str = str(strategy_key if strategy_key else "global")
+                
+                # Replace invalid filename characters (< > : " / \ | ? *) with underscore
+                stock_code = re.sub(r'[<>:"/\\|?*]', '_', stock_code)
+                strat_str = re.sub(r'[<>:"/\\|?*]', '_', strat_str)
+                
+                timestamp = get_now().strftime("%Y%m%d_%H%M%S")
+                
+                # Removed "prompt_" prefix as requested by user. Timestamp is up to seconds.
+                dump_file = os.path.join(dump_dir, f"{strat_str}_{stock_code}_{timestamp}.md")
+                
+                with open(dump_file, "w", encoding="utf-8") as f:
+                    f.write(f"# System Prompt\n```text\n{system_prompt}\n```\n\n")
+                    f.write(f"# User Prompt\n```xml\n{user_prompt}\n```\n")
+                    
+                logger.debug(f"[AIService] Analyze | Prepared LLM Context. Full payload saved to: {dump_file}")
+            except Exception as e:
+                logger.debug(f"[AIService] Analyze | Failed to dump prompt to file: {e}")
 
         try:
             # Analyze Stock uses Cloud by default as it requires high reasoning capability

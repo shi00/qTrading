@@ -555,9 +555,13 @@ class ScreenerView(ft.Container):
             self.params_container.update()
             return
 
+        basic_controls = []
+        advanced_controls = []
+
         for p in params_def:
             label = I18n.get(p.get("label_key", p["name"]))
             p_type = p.get("type", "number")
+            is_advanced = (p_type == "textarea" or p.get("advanced") == True)
 
             if p_type == "slider":
                 min_val = p.get("min", 0)
@@ -594,8 +598,12 @@ class ScreenerView(ft.Container):
                 )
                 slider.data = p["name"]  # Store param name for collection
 
-                self.params_container.controls.append(value_text)
-                self.params_container.controls.append(slider)
+                if is_advanced:
+                    advanced_controls.append(value_text)
+                    advanced_controls.append(slider)
+                else:
+                    basic_controls.append(value_text)
+                    basic_controls.append(slider)
 
             elif p_type == "number":
                 ctrl = ft.TextField(
@@ -609,7 +617,8 @@ class ScreenerView(ft.Container):
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
                 )
                 ctrl.data = p["name"]
-                self.params_container.controls.append(ctrl)
+                if is_advanced: advanced_controls.append(ctrl)
+                else: basic_controls.append(ctrl)
 
             elif p_type == "dropdown":
                 options = p.get("options", [])
@@ -624,27 +633,141 @@ class ScreenerView(ft.Container):
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
                 )
                 ctrl.data = p["name"]
-                self.params_container.controls.append(ctrl)
+                if is_advanced: advanced_controls.append(ctrl)
+                else: basic_controls.append(ctrl)
+
+            elif p_type == "textarea":
+                if p["name"] == "ai_system_prompt" and self.selected_strategy:
+                    from strategies.strategy_prompts import get_base_prompt
+                    current_val = get_base_prompt(self.selected_strategy) or p.get("default", "")
+                else:
+                    current_val = p.get("default", "")
+
+                ctrl = ft.TextField(
+                    label=label,
+                    value=str(current_val),
+                    multiline=True,
+                    min_lines=6,
+                    max_lines=15,
+                    border_color=AppColors.DIVIDER,
+                    focused_border_color=AppColors.PRIMARY,
+                    text_size=12,
+                    content_padding=ft.padding.symmetric(horizontal=10, vertical=10),
+                )
+
+                reset_btn = None
+                if p["name"] == "ai_system_prompt":
+                    ctrl.label = None  # Remove internal label to use custom Row label
+                    def make_restore_default(strat):
+                        def restore_default(e):
+                            from utils.config_handler import ConfigHandler
+                            from strategies.strategy_prompts import get_base_prompt
+                            ConfigHandler.set_strategy_prompt(strat, None)
+                            ctrl.value = str(get_base_prompt(strat))
+                            ctrl.update()
+                            if self.page and hasattr(self.page, "show_toast"):
+                                self.page.show_toast(I18n.get("ai_settings_restored", "系统提示词已恢复默认"), "info")
+                        return restore_default
+
+                    def make_save_prompt(strat):
+                        def save_prompt(e):
+                            from utils.config_handler import ConfigHandler
+                            ConfigHandler.set_strategy_prompt(strat, ctrl.value)
+                            UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
+                            if self.page and hasattr(self.page, "show_toast"):
+                                self.page.show_toast(I18n.get("ai_settings_saved", "系统提示词已保存"), "success")
+                        return save_prompt
+
+                    reset_btn = ft.TextButton(
+                        text=I18n.get("ai_reset_default", "恢复默认"),
+                        icon=ft.Icons.RESTORE,
+                        style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+                        height=30,
+                        on_click=make_restore_default(self.selected_strategy)
+                    )
+
+                    save_btn = ft.TextButton(
+                        text=I18n.get("ai_save_prompt", "保存修改"),
+                        icon=ft.Icons.SAVE,
+                        style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                        height=30,
+                        on_click=make_save_prompt(self.selected_strategy)
+                    )
+
+                ctrl.data = p["name"]
+                if is_advanced:
+                    if p["name"] == "ai_system_prompt" and reset_btn:
+                        wrapper = ft.Container(
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY), 
+                                    ft.Container(expand=True), 
+                                    save_btn,
+                                    reset_btn
+                                ]),
+                                ctrl
+                            ], spacing=5),
+                            margin=ft.margin.only(top=10, bottom=5)
+                        )
+                    else:
+                        wrapper = ft.Container(content=ctrl, margin=ft.margin.only(top=10, bottom=5))
+                    advanced_controls.append(wrapper)
+                else: 
+                    basic_controls.append(ctrl)
+
+        self.params_container.controls.extend(basic_controls)
+
+        if advanced_controls:
+            exp_tile = ft.ExpansionTile(
+                title=ft.Text(I18n.get("ai_advanced_settings", "⚙️ 高级设置"), size=14, weight=ft.FontWeight.W_500),
+                subtitle=ft.Text(I18n.get("ai_advanced_settings_desc", "仅供专业用户调整的底层策略参数或大模型系统提示词"), size=12, color=AppColors.TEXT_SECONDARY),
+                controls=advanced_controls,
+                collapsed_text_color=AppColors.TEXT_PRIMARY,
+                text_color=AppColors.PRIMARY,
+                initially_expanded=False,
+            )
+            self.params_container.controls.append(exp_tile)
 
         self.params_container.update()
 
     def _collect_params(self) -> dict:
         """Collect current parameter values from dynamic UI controls."""
         params = {}
-        for ctrl in self.params_container.controls:
-            if not hasattr(ctrl, 'data') or ctrl.data is None:
-                continue  # Skip labels/decorators
-            name = ctrl.data
-            if isinstance(ctrl, ft.Slider):
-                val = ctrl.value
-                params[name] = int(val) if val == int(val) else round(val, 2)
-            elif isinstance(ctrl, ft.TextField):
-                try:
-                    params[name] = float(ctrl.value)
-                except (ValueError, TypeError):
+        
+        def extract(controls_list):
+            for ctrl in controls_list:
+                if isinstance(ctrl, ft.ExpansionTile):
+                    # Recursive extraction for nested ExpansionTile
+                    extract(ctrl.controls)
+                    continue
+                if isinstance(ctrl, ft.Container) and ctrl.content:
+                    # Parse into Container wrappers (e.g. margin/padding wrappers)
+                    extract([ctrl.content])
+                    continue
+                if isinstance(ctrl, (ft.Column, ft.Row)):
+                    # Ensure we traverse layout groupings (like the custom Restore button layout)
+                    extract(ctrl.controls)
+                    continue
+                    
+                if not hasattr(ctrl, 'data') or ctrl.data is None:
+                    continue  # Skip labels/decorators
+                    
+                name = ctrl.data
+                if isinstance(ctrl, ft.Slider):
+                    val = ctrl.value
+                    params[name] = int(val) if val == int(val) else round(val, 2)
+                elif isinstance(ctrl, ft.TextField):
+                    if ctrl.multiline:
+                        params[name] = ctrl.value
+                    else:
+                        try:
+                            params[name] = float(ctrl.value)
+                        except (ValueError, TypeError):
+                            params[name] = ctrl.value
+                elif isinstance(ctrl, ft.Dropdown):
                     params[name] = ctrl.value
-            elif isinstance(ctrl, ft.Dropdown):
-                params[name] = ctrl.value
+                    
+        extract(self.params_container.controls)
         return params
 
     def _toggle_progress(self, visible):
@@ -674,12 +797,12 @@ class ScreenerView(ft.Container):
         try:
             path, error = await self.vm.export_results()
             if path:
-                # Show snackbar info
-                self.page.show_snack_bar(ft.SnackBar(content=ft.Text(I18n.get("data_export_success").format(file=path)),
-                                                     bgcolor=AppColors.SUCCESS))
+                # Show toast info
+                if hasattr(self.page, "show_toast"):
+                    self.page.show_toast(I18n.get("data_export_success").format(file=path), "success")
             else:
-                self.page.show_snack_bar(ft.SnackBar(content=ft.Text(I18n.get("data_export_fail").format(error=error)),
-                                                     bgcolor=AppColors.ERROR))
+                if hasattr(self.page, "show_toast"):
+                    self.page.show_toast(I18n.get("data_export_fail").format(error=error), "error")
         except Exception as ex:
             logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
         finally:

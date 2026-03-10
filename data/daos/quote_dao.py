@@ -18,7 +18,7 @@ class QuoteDao(BaseDao):
 
     async def check_data_exists(self, trade_date: str) -> bool:
         try:
-            df = await self._read_db("SELECT 1 as val FROM daily_quotes WHERE trade_date=? LIMIT 1", (trade_date,))
+            df = await self._read_db("SELECT 1 as val FROM daily_quotes WHERE trade_date=$1 LIMIT 1", (trade_date,))
             return df is not None and not df.empty
         except Exception:
             return False
@@ -26,33 +26,36 @@ class QuoteDao(BaseDao):
     async def get_daily_quotes(self, ts_code=None, start_date=None, end_date=None, ts_code_list=None):
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
+        idx = 1
 
         if ts_code:
-            sql += " AND ts_code = ?"
+            sql += f" AND ts_code = ${idx}"
             params.append(ts_code)
+            idx += 1
         if start_date:
-            sql += " AND trade_date >= ?"
+            sql += f" AND trade_date >= ${idx}"
             params.append(start_date)
+            idx += 1
         if end_date:
-            sql += " AND trade_date <= ?"
+            sql += f" AND trade_date <= ${idx}"
             params.append(end_date)
+            idx += 1
 
         if ts_code_list:
-            # Split into chunks of 500 to be safe (SQLite default limit is 999 variables usually)
+            # Split into chunks of 500 for large queries
             chunk_size = 500
             if len(ts_code_list) > chunk_size:
                 logger.debug(f"[QuoteDao] Chunking query for {len(ts_code_list)} codes")
                 all_results = []
-                # Remove ts_code_list from params for safe recursion or loop
-                # Actually, easier to loop here.
 
                 # Base SQL without the IN clause
                 base_sql = sql
                 base_params = params.copy()
+                base_idx = idx
 
                 for i in range(0, len(ts_code_list), chunk_size):
                     chunk = ts_code_list[i: i + chunk_size]
-                    placeholders = ','.join(['?'] * len(chunk))
+                    placeholders = ','.join([f'${base_idx + j}' for j in range(len(chunk))])
                     chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
                     chunk_params = base_params + chunk
 
@@ -65,7 +68,7 @@ class QuoteDao(BaseDao):
                 else:
                     return pd.DataFrame()
             else:
-                placeholders = ','.join(['?'] * len(ts_code_list))
+                placeholders = ','.join([f'${idx + j}' for j in range(len(ts_code_list))])
                 sql += f" AND ts_code IN ({placeholders})"
                 params.extend(ts_code_list)
 
@@ -97,11 +100,13 @@ class QuoteDao(BaseDao):
     async def get_index_daily(self, ts_code=None, trade_date=None):
         sql = "SELECT * FROM index_daily WHERE 1=1"
         p = []
+        idx = 1
         if ts_code:
-            sql += " AND ts_code=?"
+            sql += f" AND ts_code=${idx}"
             p.append(ts_code)
+            idx += 1
         if trade_date:
-            sql += " AND trade_date=?"
+            sql += f" AND trade_date=${idx}"
             p.append(trade_date)
         sql += " ORDER BY trade_date DESC"
         return await self._read_db(sql, p)
@@ -117,7 +122,7 @@ class QuoteDao(BaseDao):
         sql = "SELECT * FROM block_trade WHERE 1=1"
         p = []
         if trade_date:
-            sql += " AND trade_date=?"
+            sql += " AND trade_date=$1"
             p.append(trade_date)
         return await self._read_db(sql, p)
 
@@ -138,7 +143,7 @@ class QuoteDao(BaseDao):
         sql = "SELECT * FROM top_list WHERE 1=1"
         p = []
         if trade_date:
-            sql += " AND trade_date=?"
+            sql += " AND trade_date=$1"
             p.append(trade_date)
         return await self._read_db(sql, p)
 
@@ -162,11 +167,13 @@ class QuoteDao(BaseDao):
     async def get_moneyflow(self, trade_date=None, ts_code=None):
         sql = "SELECT * FROM moneyflow_daily WHERE 1=1"
         p = []
+        idx = 1
         if trade_date:
-            sql += " AND trade_date=?"
+            sql += f" AND trade_date=${idx}"
             p.append(trade_date)
+            idx += 1
         if ts_code:
-            sql += " AND ts_code=?"
+            sql += f" AND ts_code=${idx}"
             p.append(ts_code)
         return await self._read_db(sql, p)
 
@@ -178,11 +185,13 @@ class QuoteDao(BaseDao):
     async def get_northbound(self, trade_date=None, ts_code=None):
         sql = "SELECT * FROM northbound_holding WHERE 1=1"
         p = []
+        idx = 1
         if trade_date:
-            sql += " AND trade_date=?"
+            sql += f" AND trade_date=${idx}"
             p.append(trade_date)
+            idx += 1
         if ts_code:
-            sql += " AND ts_code=?"
+            sql += f" AND ts_code=${idx}"
             p.append(ts_code)
         return await self._read_db(sql, p)
 

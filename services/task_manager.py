@@ -352,15 +352,7 @@ class TaskManager:
 
     # --- Persistence ---
 
-    _CREATE_TABLE_SQL = """
-    CREATE TABLE IF NOT EXISTS task_history (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, task_type TEXT NOT NULL,
-        status TEXT NOT NULL, progress REAL DEFAULT 0, description TEXT,
-        error TEXT, result TEXT, created_at TEXT NOT NULL,
-        started_at TEXT, completed_at TEXT
-    )
-    """
-    _CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_task_history_created ON task_history(created_at)"
+
 
     @staticmethod
     def _safe_dt(val) -> Optional[datetime.datetime]:
@@ -382,13 +374,11 @@ class TaskManager:
         # Capture the running loop so thread-pool callers can schedule back
         self._loop = asyncio.get_running_loop()
 
-        # 1. Create table (idempotent)
-        await cache._write_db(self._CREATE_TABLE_SQL)
-        await cache._write_db(self._CREATE_INDEX_SQL)
+        # Wait for database schema to be ready (handled safely by CacheManager)
 
         # 2. Mark stale RUNNING/QUEUED from last session as INTERRUPTED
         await cache._write_db(
-            "UPDATE task_history SET status = ?, description = ? "
+            "UPDATE task_history SET status = $1, description = $2 "
             "WHERE status IN ('RUNNING', 'QUEUED')",
             (TaskStatus.INTERRUPTED.value, I18n.get("task_interrupted_desc", "应用上次异常退出，任务被中断")),
         )
@@ -419,7 +409,7 @@ class TaskManager:
 
         # 4. Purge old records (>30 days)
         await cache._write_db(
-            "DELETE FROM task_history WHERE completed_at < datetime('now', '-30 days')"
+            "DELETE FROM task_history WHERE completed_at < (NOW() - INTERVAL '30 days')::text"
         )
 
         self._db_ready = True
@@ -454,10 +444,14 @@ class TaskManager:
         try:
             from data.cache_manager import CacheManager
             sql = (
-                "INSERT OR REPLACE INTO task_history "
+                "INSERT INTO task_history "
                 "(id, name, task_type, status, progress, description, error, result, "
                 "created_at, started_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "name=EXCLUDED.name, task_type=EXCLUDED.task_type, status=EXCLUDED.status, "
+                "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
+                "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at"
             )
             await CacheManager()._write_db(sql, params)
         except Exception as e:
@@ -480,7 +474,7 @@ class TaskManager:
         """Delete specific tasks from DB using parameterized query."""
         try:
             from data.cache_manager import CacheManager
-            placeholders = ",".join(["?"] * len(task_ids))
+            placeholders = ",".join([f"${i+1}" for i in range(len(task_ids))])
             await CacheManager()._write_db(
                 f"DELETE FROM task_history WHERE id IN ({placeholders})",
                 tuple(task_ids),

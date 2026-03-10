@@ -19,8 +19,7 @@ from alembic import context
 alembic_config = context.config
 
 # Dynamically set DB URL from application configuration
-db_path = config.DB_PATH or "stock_data.db"
-db_url = f"sqlite+aiosqlite:///{db_path}"
+db_url = config.DB_URL
 alembic_config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
@@ -39,7 +38,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,  # Crucial for SQLite compatibility
     )
 
     with context.begin_transaction():
@@ -49,7 +47,6 @@ def do_run_migrations(connection: Connection) -> None:
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        render_as_batch=True  # Crucial for SQLite compatibility
     )
 
     with context.begin_transaction():

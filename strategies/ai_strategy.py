@@ -11,8 +11,10 @@ logger = logging.getLogger(__name__)
 
 @register_strategy("ai_active")
 class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
-    # ai_mixin._mixin_analyze_single fetches 60 days of history
-    required_history_days = 60
+    @property
+    def required_history_days(self):
+        from utils.config_handler import ConfigHandler
+        return ConfigHandler.get_init_history_years() * 250
 
     def __init__(self):
         super().__init__("strategy_ai_active_name", "strategy_ai_active_desc")
