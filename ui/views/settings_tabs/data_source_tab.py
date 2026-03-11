@@ -942,22 +942,7 @@ class DataSourceTab(ft.Container):
                 self.sync_button.text = I18n.get("settings_init_data")
                 self.sync_button.style = AppStyles.primary_button()
                 self.sync_button.disabled = False
-
-                # Use call_soon_threadsafe to ensure UI resets happen safely
-                def _safe_revert():
-                    try:
-                        self._set_sync_busy(False)
-                        self._safe_update()
-                    except Exception as ex:
-                        logger.error(
-                            f"[DataSourceTab] Sync | ❌ Error reverting UI on cancel: {ex}",
-                            exc_info=True,
-                        )
-
-                if self.page and self.page.loop:
-                    self.page.loop.call_soon_threadsafe(_safe_revert)
-                else:
-                    _safe_revert()
+                self._set_sync_busy(False)
 
                 raise
             except Exception as e:
@@ -979,21 +964,7 @@ class DataSourceTab(ft.Container):
                 self.sync_button.text = I18n.get("settings_init_data")
                 self.sync_button.style = AppStyles.primary_button()
                 self.sync_button.disabled = False
-
-                def _safe_revert_err():
-                    try:
-                        self._set_sync_busy(False)
-                        self._safe_update()
-                    except Exception as ex:
-                        logger.error(
-                            f"[DataSourceTab] Sync | ❌ Error reverting UI on exception: {ex}",
-                            exc_info=True,
-                        )
-
-                if self.page and self.page.loop:
-                    self.page.loop.call_soon_threadsafe(_safe_revert_err)
-                else:
-                    _safe_revert_err()
+                self._set_sync_busy(False)
 
                 raise RuntimeError(msg)
 
@@ -1042,8 +1013,6 @@ class DataSourceTab(ft.Container):
 
     def _set_sync_busy(self, is_busy: bool, active_btn: ft.Control = None):
         self.is_syncing = is_busy
-        if not self.page:
-            return
 
         controls = [
             self.action_full_sync,
@@ -1087,10 +1056,11 @@ class DataSourceTab(ft.Container):
                         )
 
         # Batch update via parent container to ensure consistency
-        try:
-            self.update()
-        except Exception:
-            pass
+        if self.page:
+            try:
+                self.update()
+            except Exception:
+                pass
 
     async def show_health_report_dialog(self, e):
         """Show full health report dialog"""

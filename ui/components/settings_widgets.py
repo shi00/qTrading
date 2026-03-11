@@ -185,7 +185,11 @@ class ActionChip(ft.Container):
             self.disabled = False
             self.opacity = 1.0
 
-        self.update()
+        if self.page:
+            try:
+                self.update()
+            except Exception:
+                pass
 
 
 class StatusBadge(ft.Container):
