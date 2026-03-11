@@ -1,11 +1,9 @@
-
 import asyncio
 import logging
 import time
 import pandas as pd
 import os
-import datetime
-from typing import Optional, Dict, List, Callable
+from typing import Optional, Dict, Callable
 
 from data.data_processor import DataProcessor
 from data.review_manager import ReviewManager
@@ -23,40 +21,41 @@ logger = logging.getLogger(__name__)
 # Must NOT be i18n'd — both sides use this as a programmatic identifier.
 TASK_NAME_PREFIX = "strategy_screening"
 
+
 class ScreenerViewModel:
     """
     ViewModel for ScreenerView.
     Handles data processing, strategy execution, sorting, and pagination.
     Offloads CPU-intensive tasks to ThreadPoolManager.
     """
-    
+
     def __init__(self):
         # Dependencies
         self.data_processor = DataProcessor()
         self.strategy_mgr = StrategyManager()
         self.review_mgr = ReviewManager()
-        
+
         # State
         self._full_results: Optional[pd.DataFrame] = None
         self.page_no = 1
         self.page_size = 50
         self.total_pages = 0
         self.total_items = 0
-        
+
         # Sorting State
         self.sort_column: Optional[str] = None
         self.sort_ascending = True
-        
+
         # AI Stream Buffer
         self._ai_buffer = []
         self._last_ai_update = 0
-        self.AI_UPDATE_INTERVAL = 0.5 # Seconds
+        self.AI_UPDATE_INTERVAL = 0.5  # Seconds
         self._flush_pending = False
-        
+
         # History Mode State
         self.mode = "REALTIME"  # "REALTIME" or "HISTORY"
         self._realtime_snapshot = None  # Snapshot for mode switching
-        
+
         # Callbacks (View binders)
         self.on_update: Optional[Callable] = None
         self.on_log: Optional[Callable[[str, int, str], None]] = None
@@ -64,7 +63,7 @@ class ScreenerViewModel:
         self.on_progress: Optional[Callable[[float], None]] = None
         self.on_log_stream_start: Optional[Callable[[str], Callable]] = None
         self._main_loop = None
-        
+
     def bind(self, on_update, on_log, on_status, on_progress, on_log_stream_start=None):
         self.on_update = on_update
         self.on_log = on_log
@@ -75,11 +74,11 @@ class ScreenerViewModel:
             self._main_loop = asyncio.get_running_loop()
         except RuntimeError:
             logger.warning("ScreenerViewModel bound freely without loop")
-        
+
     def init(self):
         """Initialize resources"""
         pass
-        
+
     def dispose(self):
         """Cleanup resources and ensure aggressive GC of large dataframes"""
         # Detach bindings
@@ -88,17 +87,17 @@ class ScreenerViewModel:
         self.on_status = None
         self.on_progress = None
         self.on_log_stream_start = None
-        
+
         # P1-11 Fix: Prevent massive Pandas DataFrame leak across component remounts
         self._full_results = None
         self._ai_buffer = []
         self._realtime_snapshot = None
-        
+
     # --- Data Actions ---
-    
+
     async def get_strategies(self) -> Dict[str, str]:
         return self.strategy_mgr.get_all_names()
-        
+
     def get_strategy_desc(self, key: str) -> str:
         st = self.strategy_mgr.get_strategy(key)
         return st.description if st else ""
@@ -107,134 +106,189 @@ class ScreenerViewModel:
         """Get dynamic parameter definitions for a strategy."""
         # Defensive copy to prevent mutating a strategy's cached class attributes
         params = list(self.strategy_mgr.get_strategy_params(key))
-        
+
         # Inject AI System Prompt override parameter globally so ALL strategies can use it.
         # Check to avoid duplicate if a strategy still happens to implement it natively.
         if not any(p.get("name") == "ai_system_prompt" for p in params):
-            params.append({
-                "name": "ai_system_prompt",
-                "label_key": "ai_system_prompt",
-                "type": "textarea",
-                "default": "" # UI uses get_base_prompt to map the value dynamically
-            })
-            
+            params.append(
+                {
+                    "name": "ai_system_prompt",
+                    "label_key": "ai_system_prompt",
+                    "type": "textarea",
+                    "default": "",  # UI uses get_base_prompt to map the value dynamically
+                }
+            )
+
         return params
-        
-    async def run_strategy(self, strategy_key: str, save_results: bool = True, params: dict = None):
+
+    async def run_strategy(
+        self, strategy_key: str, save_results: bool = True, params: dict = None
+    ):
         """Execute strategy screening via the global TaskManager."""
         strategy = self.strategy_mgr.get_strategy(strategy_key)
         if not strategy:
             logger.error(f"[ScreenerVM] Strategy not found: {strategy_key}")
-            if self.on_status: self.on_status(I18n.get("screener_strategy_not_found"), "red")
+            if self.on_status:
+                self.on_status(I18n.get("screener_strategy_not_found"), "red")
             return
-            
+
         # Define the inner coroutine for the task manager
         async def _execute_screening(task_id: str, **kwargs):
             try:
                 # 1. Prepare Context (may trigger massive data load)
-                TaskManager().update_progress(task_id, 0.05, I18n.get("task_loading_data"))
+                TaskManager().update_progress(
+                    task_id, 0.05, I18n.get("task_loading_data")
+                )
                 context = await self.data_processor.get_strategy_data()
                 if not context:
-                    TaskManager().update_progress(task_id, 0.1, I18n.get("task_cache_empty_init"))
+                    TaskManager().update_progress(
+                        task_id, 0.1, I18n.get("task_cache_empty_init")
+                    )
                     await self.data_processor.init_data()
                     context = await self.data_processor.get_strategy_data()
-                
-                if not context or 'screening_data' not in context or context['screening_data'].empty:
+
+                if (
+                    not context
+                    or "screening_data" not in context
+                    or context["screening_data"].empty
+                ):
                     raise RuntimeError("No valid screening data available")
 
-                context['data_processor'] = self.data_processor
-                context['params'] = params or {}  # Dynamic strategy parameters from UI
-                
-                # Setup AI Callbacks 
+                context["data_processor"] = self.data_processor
+                context["params"] = params or {}  # Dynamic strategy parameters from UI
+
+                # Setup AI Callbacks
                 # (Forward updates both to ViewModel local UI and Global TaskManager)
                 def _combined_ai_progress(current, total, msg):
-                    self._on_ai_progress(current, total, msg) # For local View UI
-                    TaskManager().update_progress(task_id, current / total if total > 0 else 0, f"[{current}/{total}] {msg}")
-                    
-                context['on_progress'] = _combined_ai_progress
-                context['on_result'] = self._on_ai_result_stream
+                    self._on_ai_progress(current, total, msg)  # For local View UI
+                    TaskManager().update_progress(
+                        task_id,
+                        current / total if total > 0 else 0,
+                        f"[{current}/{total}] {msg}",
+                    )
+
+                context["on_progress"] = _combined_ai_progress
+                context["on_result"] = self._on_ai_result_stream
                 if self.on_log_stream_start:
-                    context['on_stream_start'] = self.on_log_stream_start
-                
+                    context["on_stream_start"] = self.on_log_stream_start
+
                 # We inject the task_id into context so deep AI tasks can check cancellation
-                context['_task_id'] = task_id
-                
-                TaskManager().update_progress(task_id, 0.2, I18n.get("task_executing_strategy", name=strategy.name))
-                
+                context["_task_id"] = task_id
+
+                TaskManager().update_progress(
+                    task_id,
+                    0.2,
+                    I18n.get("task_executing_strategy", name=strategy.name),
+                )
+
                 if asyncio.iscoroutinefunction(strategy.filter):
                     result_df = await strategy.filter(context)
                 else:
-                    result_df = await ThreadPoolManager().run_async(TaskType.CPU, strategy.filter, context)
-                
-                TaskManager().update_progress(task_id, 0.95, I18n.get("task_aggregating_results"))
-                
+                    result_df = await ThreadPoolManager().run_async(
+                        TaskType.CPU, strategy.filter, context
+                    )
+
+                TaskManager().update_progress(
+                    task_id, 0.95, I18n.get("task_aggregating_results")
+                )
+
                 if result_df is not None and not result_df.empty:
                     self._full_results = result_df
                     self._update_pagination()
-                    
+
                     if save_results:
-                         await self.review_mgr.save_results(strategy.name, result_df)
-                         
+                        await self.review_mgr.save_results(strategy.name, result_df)
+
                     # Update Local View
-                    if self.on_update: self.on_update()
-                    if self.on_status: self.on_status(I18n.get("screener_done_saved").format(count=len(result_df)), "green")
-                    if self.on_progress: self.on_progress(False)
+                    if self.on_update:
+                        self.on_update()
+                    if self.on_status:
+                        self.on_status(
+                            I18n.get("screener_done_saved").format(
+                                count=len(result_df)
+                            ),
+                            "green",
+                        )
+                    if self.on_progress:
+                        self.on_progress(False)
                     return I18n.get("task_screening_success", count=len(result_df))
                 else:
-                     self._full_results = pd.DataFrame()
-                     if self.on_update: self.on_update()
-                     if self.on_status: self.on_status(I18n.get("screener_no_results"), "orange")
-                     if self.on_progress: self.on_progress(False)
-                     return I18n.get("screener_no_results")
-                     
+                    self._full_results = pd.DataFrame()
+                    if self.on_update:
+                        self.on_update()
+                    if self.on_status:
+                        self.on_status(I18n.get("screener_no_results"), "orange")
+                    if self.on_progress:
+                        self.on_progress(False)
+                    return I18n.get("screener_no_results")
+
             except asyncio.CancelledError:
-                 if self.on_status: self.on_status(I18n.get("screener_cancelled"), "orange")
-                 if self.on_progress: self.on_progress(False)
-                 raise
+                if self.on_status:
+                    self.on_status(I18n.get("screener_cancelled"), "orange")
+                if self.on_progress:
+                    self.on_progress(False)
+                raise
             except QualityGateError as e:
-                logger.warning(f"[ScreenerVM] Strategy execution blocked by Quality Gate: {e}")
-                if self.on_status: self.on_status(I18n.get("screener_blocked", reason=str(e)), "orange")
-                if self.on_progress: self.on_progress(False)
+                logger.warning(
+                    f"[ScreenerVM] Strategy execution blocked by Quality Gate: {e}"
+                )
+                if self.on_status:
+                    self.on_status(
+                        I18n.get("screener_blocked", reason=str(e)), "orange"
+                    )
+                if self.on_progress:
+                    self.on_progress(False)
                 return I18n.get("screener_blocked", reason=str(e))
             except Exception as e:
-                logger.error(f"[ScreenerVM] Strategy execution failed: {e}", exc_info=True)
+                logger.error(
+                    f"[ScreenerVM] Strategy execution failed: {e}", exc_info=True
+                )
                 # Show generic user-friendly message, avoid raw traceback on UI
                 safe_msg = I18n.get("screener_internal_error")
-                if self.on_status: self.on_status(I18n.get("screener_exec_error").format(error=safe_msg), "red")
-                if self.on_progress: self.on_progress(False)
+                if self.on_status:
+                    self.on_status(
+                        I18n.get("screener_exec_error").format(error=safe_msg), "red"
+                    )
+                if self.on_progress:
+                    self.on_progress(False)
                 raise RuntimeError(f"Strategy execution crashed: {e}")
 
         # Reset Local UI State
         self._full_results = None
         self.page_no = 1
         self._ai_buffer = []
-        if self.on_progress: self.on_progress(True)
-        if self.on_status: self.on_status(I18n.get("screener_running_strategy").format(name=strategy.name), "blue")
-        
+        if self.on_progress:
+            self.on_progress(True)
+        if self.on_status:
+            self.on_status(
+                I18n.get("screener_running_strategy").format(name=strategy.name), "blue"
+            )
+
         # Dispatch to TaskManager!
         TaskManager().submit_task(
             name=f"{TASK_NAME_PREFIX}: {strategy.name}",
             task_type=I18n.get("task_type_ai_screening"),
             coroutine_factory=_execute_screening,
-            cancellable=True
+            cancellable=True,
         )
 
     # --- Sorting & Pagination ---
-    
+
     async def sort_data(self, column_key: str):
         """Sort data using ThreadPool to avoid blocking UI"""
         if self._full_results is None or self._full_results.empty:
             return
-            
+
         # Toggle sort order
         if self.sort_column == column_key:
             self.sort_ascending = not self.sort_ascending
         else:
             self.sort_column = column_key
-            self.sort_ascending = False # Default desc for numbers usually
-            
-        if self.on_progress: self.on_progress(True)
-        
+            self.sort_ascending = False  # Default desc for numbers usually
+
+        if self.on_progress:
+            self.on_progress(True)
+
         try:
             # Offload sorting to thread
             sorted_df = await ThreadPoolManager().run_async(
@@ -242,45 +296,49 @@ class ScreenerViewModel:
                 self._sort_helper,
                 self._full_results,
                 column_key,
-                self.sort_ascending
+                self.sort_ascending,
             )
-            
+
             self._full_results = sorted_df
-            self.page_no = 1 # Reset to first page
-            if self.on_update: self.on_update()
-            
+            self.page_no = 1  # Reset to first page
+            if self.on_update:
+                self.on_update()
+
         except Exception as e:
             logger.error(f"Sort failed: {e}", exc_info=True)
         finally:
-            if self.on_progress: self.on_progress(False)
-            
+            if self.on_progress:
+                self.on_progress(False)
+
     @staticmethod
     def _sort_helper(df, col, ascending):
         """Static helper for pickling/thread safety"""
         try:
-            return df.sort_values(by=col, ascending=ascending, na_position='last')
+            return df.sort_values(by=col, ascending=ascending, na_position="last")
         except KeyError:
-             return df
-    
+            return df
+
     def change_page(self, delta: int):
         new_page = self.page_no + delta
         if 1 <= new_page <= self.total_pages:
             self.page_no = new_page
-            if self.on_update: self.on_update()
-            
+            if self.on_update:
+                self.on_update()
+
     def change_page_size(self, new_size: int):
         """Update pagination size and jump back to page 1."""
         if new_size > 0 and new_size != self.page_size:
             self.page_size = new_size
             self.page_no = 1
             self._update_pagination()
-            if self.on_update: self.on_update()
-            
+            if self.on_update:
+                self.on_update()
+
     def get_current_page_data(self):
         """Get data for current page (Synchronous, fast slicing)"""
         if self._full_results is None or self._full_results.empty:
             return pd.DataFrame()
-            
+
         start = (self.page_no - 1) * self.page_size
         end = start + self.page_size
         # Slicing is fast enough for main thread
@@ -295,109 +353,123 @@ class ScreenerViewModel:
             self.total_pages = 0
 
     # --- AI Streaming Handlers ---
-    
+
     def _on_ai_progress(self, current, total, msg):
         # Pass through status update
-        if self.on_status: 
-            self.on_status(I18n.get("screener_ai_analyzing").format(done=current, total=total, msg=msg), "blue")
+        if self.on_status:
+            self.on_status(
+                I18n.get("screener_ai_analyzing").format(
+                    done=current, total=total, msg=msg
+                ),
+                "blue",
+            )
 
     def _on_ai_result_stream(self, row_data):
         """Buffer incoming AI results and update in batches"""
-        if not row_data: return
-        
+        if not row_data:
+            return
+
         # 1. Update Log immediately (Log is strictly append, low cost if virtualized)
         if self.on_log:
-             name = row_data.get('name', 'Unknown')
-             score = row_data.get('ai_score', 0)
-             thinking = str(row_data.get('thinking', ''))
-             self.on_log(name, score, thinking)
-             
+            name = row_data.get("name", "Unknown")
+            score = row_data.get("ai_score", 0)
+            thinking = str(row_data.get("thinking", ""))
+            self.on_log(name, score, thinking)
+
         # 2. Buffer for Table Update
         self._ai_buffer.append(row_data)
-        
-        now = time.time()
-        if now - self._last_ai_update > self.AI_UPDATE_INTERVAL or len(self._ai_buffer) >= 20:
-             # Trigger Batch Update
-             # Note: We trigger a task to run the update on main thread context eventually,
-             # but here we are likely in a background thread from AI Strategy?
-             # Actually AI Strategy runs awaitable, so we are in async context.
-             # We can't await here directly if this is called synchronously.
-             # But on_result is usually called from async loop.
-             
-             # Schedule update if not already pending
-             if not self._flush_pending:
-                 self._flush_pending = True
-                 try:
-                     loop = asyncio.get_running_loop()
-                     loop.create_task(self._flush_ai_buffer())
-                 except RuntimeError:
-                     if self._main_loop and self._main_loop.is_running():
-                         asyncio.run_coroutine_threadsafe(self._flush_ai_buffer(), self._main_loop)
-                     else:
-                         self._flush_pending = False
-                         logger.error("Cannot schedule flush: No event loop available")
 
+        now = time.time()
+        if (
+            now - self._last_ai_update > self.AI_UPDATE_INTERVAL
+            or len(self._ai_buffer) >= 20
+        ):
+            # Trigger Batch Update
+            # Note: We trigger a task to run the update on main thread context eventually,
+            # but here we are likely in a background thread from AI Strategy?
+            # Actually AI Strategy runs awaitable, so we are in async context.
+            # We can't await here directly if this is called synchronously.
+            # But on_result is usually called from async loop.
+
+            # Schedule update if not already pending
+            if not self._flush_pending:
+                self._flush_pending = True
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._flush_ai_buffer())
+                except RuntimeError:
+                    if self._main_loop and self._main_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self._flush_ai_buffer(), self._main_loop
+                        )
+                    else:
+                        self._flush_pending = False
+                        logger.error("Cannot schedule flush: No event loop available")
 
     async def _flush_ai_buffer(self):
         """Flush buffer to main DataFrame"""
         try:
-            if not self._ai_buffer: return
+            if not self._ai_buffer:
+                return
             # Race guard: discard buffer if user has switched to history mode
             if self.mode != "REALTIME":
                 self._ai_buffer = []
                 self._flush_pending = False
                 return
-            
+
             # Swap buffer to process safely
             current_batch = self._ai_buffer
             self._ai_buffer = []
-            
+
             new_df = pd.DataFrame(current_batch)
-            
+
             # Offload Concatenation
             if self._full_results is None or self._full_results.empty:
-                 self._full_results = new_df
+                self._full_results = new_df
             else:
-                 # Append
-                 self._full_results = await ThreadPoolManager().run_async(
-                     TaskType.CPU, 
-                     pd.concat, 
-                     [self._full_results, new_df], 
-                     ignore_index=True
-                 )
-                 
+                # Append
+                self._full_results = await ThreadPoolManager().run_async(
+                    TaskType.CPU,
+                    pd.concat,
+                    [self._full_results, new_df],
+                    ignore_index=True,
+                )
+
             # Sort by Score (Best on top)
-            if 'ai_score' in self._full_results.columns:
-                 self._full_results = await ThreadPoolManager().run_async(
+            if "ai_score" in self._full_results.columns:
+                self._full_results = await ThreadPoolManager().run_async(
                     TaskType.CPU,
                     self._sort_helper,
                     self._full_results,
-                    'ai_score',
-                    False
-                 )
-                 
-                 # Pin ai_score and ai_reason to the front (after name)
-                 cols = list(self._full_results.columns)
-                 # Remove if exists
-                 if 'ai_score' in cols: cols.remove('ai_score')
-                 if 'ai_reason' in cols: cols.remove('ai_reason')
-                 
-                 # Find insertion index (after 'name', or else at idx 1)
-                 insert_idx = cols.index('name') + 1 if 'name' in cols else 1
-                 
-                 # Insert back
-                 cols.insert(insert_idx, 'ai_score')
-                 cols.insert(insert_idx + 1, 'ai_reason')
-                 
-                 self._full_results = self._full_results[cols]
-            
+                    "ai_score",
+                    False,
+                )
+
+                # Pin ai_score and ai_reason to the front (after name)
+                cols = list(self._full_results.columns)
+                # Remove if exists
+                if "ai_score" in cols:
+                    cols.remove("ai_score")
+                if "ai_reason" in cols:
+                    cols.remove("ai_reason")
+
+                # Find insertion index (after 'name', or else at idx 1)
+                insert_idx = cols.index("name") + 1 if "name" in cols else 1
+
+                # Insert back
+                cols.insert(insert_idx, "ai_score")
+                cols.insert(insert_idx + 1, "ai_reason")
+
+                self._full_results = self._full_results[cols]
+
             self._update_pagination()
-            
+
             # Notify View to Repaint and re-eval button states (like export disabled)
-            if self.on_update: self.on_update()
-            
+            if self.on_update:
+                self.on_update()
+
             self._last_ai_update = time.time()
-            
+
         except Exception as e:
             logger.error(f"Error flushing AI buffer: {e}", exc_info=True)
         finally:
@@ -411,11 +483,11 @@ class ScreenerViewModel:
             return
         # Snapshot realtime state
         self._realtime_snapshot = {
-            'full_results': self._full_results,
-            'page_no': self.page_no,
-            'sort_column': self.sort_column,
-            'sort_ascending': self.sort_ascending,
-            'ai_buffer': self._ai_buffer[:],
+            "full_results": self._full_results,
+            "page_no": self.page_no,
+            "sort_column": self.sort_column,
+            "sort_ascending": self.sort_ascending,
+            "ai_buffer": self._ai_buffer[:],
         }
         # Clear for history data
         self._full_results = None
@@ -433,11 +505,11 @@ class ScreenerViewModel:
             return
         # Restore snapshot
         if self._realtime_snapshot:
-            self._full_results = self._realtime_snapshot['full_results']
-            self.page_no = self._realtime_snapshot['page_no']
-            self.sort_column = self._realtime_snapshot['sort_column']
-            self.sort_ascending = self._realtime_snapshot['sort_ascending']
-            self._ai_buffer = self._realtime_snapshot['ai_buffer']
+            self._full_results = self._realtime_snapshot["full_results"]
+            self.page_no = self._realtime_snapshot["page_no"]
+            self.sort_column = self._realtime_snapshot["sort_column"]
+            self.sort_ascending = self._realtime_snapshot["sort_ascending"]
+            self._ai_buffer = self._realtime_snapshot["ai_buffer"]
             self._realtime_snapshot = None
             self._update_pagination()
         self.mode = "REALTIME"
@@ -454,13 +526,12 @@ class ScreenerViewModel:
         # Group by trade_date -> {date: [{strategy_name, cnt}, ...]}
         tree = {}
         for _, row in df.iterrows():
-            date = str(row['trade_date'])
+            date = str(row["trade_date"])
             if date not in tree:
                 tree[date] = []
-            tree[date].append({
-                'strategy_name': row['strategy_name'],
-                'cnt': int(row['cnt'])
-            })
+            tree[date].append(
+                {"strategy_name": row["strategy_name"], "cnt": int(row["cnt"])}
+            )
         return tree
 
     async def load_history_data(self, trade_date: str, strategy_name: str = None):
@@ -472,7 +543,7 @@ class ScreenerViewModel:
         else:
             self._full_results = pd.DataFrame()
         self.page_no = 1
-        self.sort_column = 'ai_score'
+        self.sort_column = "ai_score"
         self.sort_ascending = False
         self._update_pagination()
         if self.on_update:
@@ -482,22 +553,22 @@ class ScreenerViewModel:
         """Export current results to CSV"""
         if self._full_results is None or self._full_results.empty:
             return None, "No data to export"
-            
+
         try:
             if not os.path.exists(folder):
                 os.makedirs(folder)
-                
+
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             filename = f"screener_results_{timestamp}.csv"
             filepath = os.path.join(folder, filename)
-            
+
             # Run in thread
             await ThreadPoolManager().run_async(
                 TaskType.CPU,
                 self._full_results.to_csv,
                 filepath,
                 index=False,
-                encoding='utf-8-sig'
+                encoding="utf-8-sig",
             )
             return filepath, None
         except Exception as e:

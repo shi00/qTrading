@@ -21,13 +21,13 @@ class DataSanitizer:
     def sanitize_token(token: str) -> str:
         """
         Token脱敏处理
-        
+
         输入: "tushare_abc123xyz789"
         输出: "tus***789"
-        
+
         Args:
             token: 原始token字符串
-            
+
         Returns:
             脱敏后的token
         """
@@ -45,13 +45,13 @@ class DataSanitizer:
     def sanitize_dataframe(df: Optional[pd.DataFrame], max_cols: int = 5) -> str:
         """
         DataFrame安全摘要
-        
+
         仅记录形状和列名,不泄露实际数据
-        
+
         Args:
             df: DataFrame对象
             max_cols: 最多显示的列数
-            
+
         Returns:
             安全的摘要字符串
         """
@@ -69,10 +69,7 @@ class DataSanitizer:
         if len(df.columns) > max_cols:
             cols_display.append("...")
 
-        return (
-            f"DataFrame(shape={df.shape}, "
-            f"cols={cols_display})"
-        )
+        return f"DataFrame(shape={df.shape}, cols={cols_display})"
 
     # Pre-compile regex patterns for better performance
     # Matches Windows paths: D:\path\to\file.py, c:\users\... (Case insensitive drive)
@@ -80,37 +77,42 @@ class DataSanitizer:
 
     # Matches Unix paths: /path/to/file (broader match, not just .py)
     # Match absolute paths starting with /, containing word chars, dots, dashes, slashes
-    _PATTERN_UNIX_PATH = re.compile(r'/(?:[\w\.\-]+/)+[\w\.\-]+')
+    _PATTERN_UNIX_PATH = re.compile(r"/(?:[\w\.\-]+/)+[\w\.\-]+")
 
     @staticmethod
     def sanitize_error(exception: Exception, show_traceback: bool = False) -> str:
         """
         异常信息脱敏
-        
+
         移除文件路径,避免暴露系统结构
-        
+
         Args:
             exception: 异常对象
             show_traceback: 是否包含堆栈(仅用于DEBUG)
-            
+
         Returns:
             脱敏后的错误信息
         """
         msg = str(exception)
 
         # 移除 Windows路径
-        msg = DataSanitizer._PATTERN_WIN_PATH.sub('<PATH>', msg)
+        msg = DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", msg)
 
         # 移除 Unix路径
-        msg = DataSanitizer._PATTERN_UNIX_PATH.sub('<PATH>', msg)
+        msg = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", msg)
 
         # 如果需要堆栈,也要脱敏
-        if show_traceback and hasattr(exception, '__traceback__'):
+        if show_traceback and hasattr(exception, "__traceback__"):
             import traceback
-            tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
+
+            tb_lines = traceback.format_exception(
+                type(exception), exception, exception.__traceback__
+            )
             # 过滤敏感路径
-            tb_clean = [DataSanitizer._PATTERN_WIN_PATH.sub('<PATH>', line) for line in tb_lines]
-            return '\n'.join(tb_clean)
+            tb_clean = [
+                DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line) for line in tb_lines
+            ]
+            return "\n".join(tb_clean)
 
         return msg
 
@@ -118,16 +120,16 @@ class DataSanitizer:
     def sanitize_dict(data: dict, sensitive_keys: list = None) -> dict:
         """
         字典脱敏处理
-        
+
         Args:
             data: 原始字典
             sensitive_keys: 需要脱敏的键列表
-            
+
         Returns:
             脱敏后的字典副本
         """
         if sensitive_keys is None:
-            sensitive_keys = ['token', 'password', 'api_key', 'secret', 'key']
+            sensitive_keys = ["token", "password", "api_key", "secret", "key"]
 
         result = {}
         for k, v in data.items():
@@ -150,19 +152,19 @@ class DataSanitizer:
     def sanitize_args(*args, sensitive_patterns: list = None, **kwargs) -> tuple:
         """
         函数参数脱敏
-        
+
         用于装饰器自动脱敏参数
-        
+
         Args:
             *args: 位置参数
             sensitive_patterns: 敏感参数名模式
             **kwargs: 关键字参数
-            
+
         Returns:
             (脱敏后的args, 脱敏后的kwargs)
         """
         if sensitive_patterns is None:
-            sensitive_patterns = ['token', 'password', 'key', 'secret']
+            sensitive_patterns = ["token", "password", "key", "secret"]
 
         # 关键字参数脱敏
         clean_kwargs = DataSanitizer.sanitize_dict(kwargs, sensitive_patterns)

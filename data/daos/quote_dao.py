@@ -8,22 +8,43 @@ logger = logging.getLogger(__name__)
 
 
 class QuoteDao(BaseDao):
-
     # --- Daily Quotes ---
     async def save_daily_quotes(self, df, priority=None, suppress_errors=True):
-        cols = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'pre_close', 'change', 'pct_chg', 'vol',
-                'amount', 'adj_factor']
-        return await self._save_upsert(df, "daily_quotes", cols, pk_columns=['ts_code', 'trade_date'],
-                                       suppress_errors=suppress_errors)
+        cols = [
+            "ts_code",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+            "adj_factor",
+        ]
+        return await self._save_upsert(
+            df,
+            "daily_quotes",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
+            suppress_errors=suppress_errors,
+        )
 
     async def check_data_exists(self, trade_date: str) -> bool:
         try:
-            df = await self._read_db("SELECT 1 as val FROM daily_quotes WHERE trade_date=$1 LIMIT 1", (trade_date,))
+            df = await self._read_db(
+                "SELECT 1 as val FROM daily_quotes WHERE trade_date=$1 LIMIT 1",
+                (trade_date,),
+            )
             return df is not None and not df.empty
         except Exception:
             return False
 
-    async def get_daily_quotes(self, ts_code=None, start_date=None, end_date=None, ts_code_list=None):
+    async def get_daily_quotes(
+        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None
+    ):
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
         idx = 1
@@ -54,8 +75,10 @@ class QuoteDao(BaseDao):
                 base_idx = idx
 
                 for i in range(0, len(ts_code_list), chunk_size):
-                    chunk = ts_code_list[i: i + chunk_size]
-                    placeholders = ','.join([f'${base_idx + j}' for j in range(len(chunk))])
+                    chunk = ts_code_list[i : i + chunk_size]
+                    placeholders = ",".join(
+                        [f"${base_idx + j}" for j in range(len(chunk))]
+                    )
                     chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
                     chunk_params = base_params + chunk
 
@@ -68,7 +91,9 @@ class QuoteDao(BaseDao):
                 else:
                     return pd.DataFrame()
             else:
-                placeholders = ','.join([f'${idx + j}' for j in range(len(ts_code_list))])
+                placeholders = ",".join(
+                    [f"${idx + j}" for j in range(len(ts_code_list))]
+                )
                 sql += f" AND ts_code IN ({placeholders})"
                 params.extend(ts_code_list)
 
@@ -77,25 +102,54 @@ class QuoteDao(BaseDao):
     async def get_latest_trade_date(self):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
-            return df['max_td'].iloc[0]
+            return df["max_td"].iloc[0]
         return None
 
     async def get_cached_trade_dates(self):
-        df = await self._read_db("SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date")
+        df = await self._read_db(
+            "SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date"
+        )
         if df is None or df.empty:
             return set()
-        return set(df['trade_date'])
+        return set(df["trade_date"])
 
     # --- Index Data ---
     async def save_index_daily(self, df):
-        cols = ['ts_code', 'trade_date', 'close', 'open', 'high', 'low', 'pre_close', 'change', 'pct_chg', 'vol',
-                'amount']
-        return await self._save_upsert(df, "index_daily", cols, pk_columns=['ts_code', 'trade_date'])
+        cols = [
+            "ts_code",
+            "trade_date",
+            "close",
+            "open",
+            "high",
+            "low",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+        ]
+        return await self._save_upsert(
+            df, "index_daily", cols, pk_columns=["ts_code", "trade_date"]
+        )
 
     async def save_index_dailybasic(self, df):
-        cols = ['ts_code', 'trade_date', 'total_mv', 'float_mv', 'total_share', 'float_share', 'free_share',
-                'turnover_rate', 'turnover_rate_f', 'pe', 'pe_ttm', 'pb']
-        return await self._save_upsert(df, "index_dailybasic", cols, pk_columns=['ts_code', 'trade_date'])
+        cols = [
+            "ts_code",
+            "trade_date",
+            "total_mv",
+            "float_mv",
+            "total_share",
+            "float_share",
+            "free_share",
+            "turnover_rate",
+            "turnover_rate_f",
+            "pe",
+            "pe_ttm",
+            "pb",
+        ]
+        return await self._save_upsert(
+            df, "index_dailybasic", cols, pk_columns=["ts_code", "trade_date"]
+        )
 
     async def get_index_daily(self, ts_code=None, trade_date=None):
         sql = "SELECT * FROM index_daily WHERE 1=1"
@@ -113,10 +167,13 @@ class QuoteDao(BaseDao):
 
     # --- Block Trade ---
     async def save_block_trade(self, df):
-        cols = ['trade_date', 'ts_code', 'price', 'volume', 'amount', 'buyer', 'seller']
-        if df is not None and 'vol' in df.columns:
-            df = df.rename(columns={'vol': 'volume'})
-        return await self._save_upsert(df, "block_trade", cols, pk_columns=['ts_code', 'trade_date', 'buyer', 'seller'])
+        cols = ["trade_date", "ts_code", "price", "volume", "amount", "buyer", "seller"]
+        return await self._save_upsert(
+            df,
+            "block_trade",
+            cols,
+            pk_columns=["ts_code", "trade_date", "buyer", "seller"],
+        )
 
     async def get_block_trade(self, trade_date=None):
         sql = "SELECT * FROM block_trade WHERE 1=1"
@@ -128,16 +185,48 @@ class QuoteDao(BaseDao):
 
     # --- Limit List ---
     async def save_limit_list(self, df):
-        cols = ['trade_date', 'ts_code', 'name', 'close', 'pct_chg', 'amp', 'fc_ratio', 'fl_ratio', 'fd_amount',
-                'first_time', 'last_time', 'open_times', 'strth', 'limit_type']
-        return await self._save_upsert(df, "limit_list", cols, pk_columns=['trade_date', 'ts_code'])
+        cols = [
+            "trade_date",
+            "ts_code",
+            "name",
+            "close",
+            "pct_chg",
+            "amp",
+            "fc_ratio",
+            "fl_ratio",
+            "fd_amount",
+            "first_time",
+            "last_time",
+            "open_times",
+            "strth",
+            "limit_type",
+        ]
+        return await self._save_upsert(
+            df, "limit_list", cols, pk_columns=["trade_date", "ts_code"]
+        )
 
     # --- Top List ---
     async def save_top_list(self, df):
-        cols = ['trade_date', 'ts_code', 'name', 'close', 'pct_chg', 'turnover_rate',
-                'amount', 'l_sell', 'l_buy', 'l_amount', 'net_amount',
-                'net_rate', 'amount_rate', 'float_values', 'reason']
-        return await self._save_upsert(df, "top_list", cols, pk_columns=['trade_date', 'ts_code'])
+        cols = [
+            "trade_date",
+            "ts_code",
+            "name",
+            "close",
+            "pct_chg",
+            "turnover_rate",
+            "amount",
+            "l_sell",
+            "l_buy",
+            "l_amount",
+            "net_amount",
+            "net_rate",
+            "amount_rate",
+            "float_values",
+            "reason",
+        ]
+        return await self._save_upsert(
+            df, "top_list", cols, pk_columns=["trade_date", "ts_code"]
+        )
 
     async def get_top_list(self, trade_date=None):
         sql = "SELECT * FROM top_list WHERE 1=1"
@@ -149,20 +238,38 @@ class QuoteDao(BaseDao):
 
     # --- Margin ---
     async def save_margin_daily(self, df):
-        cols = ['ts_code', 'trade_date', 'rzye', 'rqye', 'rzmre', 'rqyl', 'rzrqye']
-        return await self._save_upsert(df, "margin_daily", cols, pk_columns=['ts_code', 'trade_date'])
+        cols = ["ts_code", "trade_date", "rzye", "rqye", "rzmre", "rqyl", "rzrqye"]
+        return await self._save_upsert(
+            df, "margin_daily", cols, pk_columns=["ts_code", "trade_date"]
+        )
 
     # --- Suspend ---
     async def save_suspend_d(self, df):
-        cols = ['ts_code', 'trade_date', 'suspend_timing', 'suspend_type_name']
-        return await self._save_upsert(df, "suspend_d", cols, pk_columns=['ts_code', 'trade_date'])
+        cols = ["ts_code", "trade_date", "suspend_timing", "suspend_type_name"]
+        return await self._save_upsert(
+            df, "suspend_d", cols, pk_columns=["ts_code", "trade_date"]
+        )
 
     # --- Moneyflow ---
     async def save_moneyflow(self, df):
-        cols = ['ts_code', 'trade_date', 'buy_sm_vol', 'buy_sm_amount', 'sell_sm_amount', 'buy_md_amount',
-                'sell_md_amount', 'buy_lg_amount', 'sell_lg_amount', 'buy_elg_amount', 'sell_elg_amount', 'net_mf_vol',
-                'net_mf_amount']
-        return await self._save_upsert(df, "moneyflow_daily", cols, pk_columns=['ts_code', 'trade_date'])
+        cols = [
+            "ts_code",
+            "trade_date",
+            "buy_sm_vol",
+            "buy_sm_amount",
+            "sell_sm_amount",
+            "buy_md_amount",
+            "sell_md_amount",
+            "buy_lg_amount",
+            "sell_lg_amount",
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "net_mf_vol",
+            "net_mf_amount",
+        ]
+        return await self._save_upsert(
+            df, "moneyflow_daily", cols, pk_columns=["ts_code", "trade_date"]
+        )
 
     async def get_moneyflow(self, trade_date=None, ts_code=None):
         sql = "SELECT * FROM moneyflow_daily WHERE 1=1"
@@ -179,8 +286,10 @@ class QuoteDao(BaseDao):
 
     # --- Northbound ---
     async def save_northbound(self, df):
-        cols = ['ts_code', 'trade_date', 'name', 'vol', 'ratio', 'exchange']
-        return await self._save_upsert(df, "northbound_holding", cols, pk_columns=['ts_code', 'trade_date'])
+        cols = ["ts_code", "trade_date", "name", "vol", "ratio", "exchange"]
+        return await self._save_upsert(
+            df, "northbound_holding", cols, pk_columns=["ts_code", "trade_date"]
+        )
 
     async def get_northbound(self, trade_date=None, ts_code=None):
         sql = "SELECT * FROM northbound_holding WHERE 1=1"
@@ -196,9 +305,11 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, p)
 
     async def get_latest_northbound(self):
-        df = await self._read_db("SELECT MAX(trade_date) as max_td FROM northbound_holding")
+        df = await self._read_db(
+            "SELECT MAX(trade_date) as max_td FROM northbound_holding"
+        )
         if df is not None and not df.empty:
-            td = df['max_td'].iloc[0]
+            td = df["max_td"].iloc[0]
         else:
             td = None
         if not td:

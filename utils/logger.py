@@ -1,4 +1,3 @@
-import datetime
 import logging
 import os
 import sys
@@ -37,7 +36,7 @@ def setup_logging(name="astock_screener"):
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR
+        "ERROR": logging.ERROR,
     }
     logging_level = level_map.get(current_level, logging.INFO)
 
@@ -63,8 +62,8 @@ def setup_logging(name="astock_screener"):
 
     # Formatter
     formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        "%(asctime)s [%(levelname)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     # Load config limits
@@ -96,7 +95,7 @@ def setup_logging(name="astock_screener"):
                         log_file_path,
                         maxBytes=max_bytes,
                         backupCount=backup_count,
-                        encoding='utf-8'
+                        encoding="utf-8",
                     )
                     temp_handler.doRollover()
                     temp_handler.close()
@@ -107,7 +106,7 @@ def setup_logging(name="astock_screener"):
                 log_file_path,
                 maxBytes=max_bytes,
                 backupCount=backup_count,
-                encoding='utf-8'
+                encoding="utf-8",
             )
             file_handler.setLevel(logging_level)
             file_handler.setFormatter(formatter)
@@ -126,7 +125,7 @@ def setup_logging(name="astock_screener"):
                         error_log_path,
                         maxBytes=max_bytes,
                         backupCount=backup_count,
-                        encoding='utf-8'
+                        encoding="utf-8",
                     )
                     temp_err_handler.doRollover()
                     temp_err_handler.close()
@@ -137,7 +136,7 @@ def setup_logging(name="astock_screener"):
                 error_log_path,
                 maxBytes=max_bytes,
                 backupCount=backup_count,
-                encoding='utf-8'
+                encoding="utf-8",
             )
             error_handler.setLevel(logging.ERROR)
             error_handler.setFormatter(formatter)
@@ -146,7 +145,16 @@ def setup_logging(name="astock_screener"):
             pass
 
     # 6. Suppress noisy third-party logs
-    noisy_libs = ["urllib3", "requests", "asyncio", "flet", "apscheduler", "matplotlib", "PIL", "websockets"]
+    noisy_libs = [
+        "urllib3",
+        "requests",
+        "asyncio",
+        "flet",
+        "apscheduler",
+        "matplotlib",
+        "PIL",
+        "websockets",
+    ]
     for lib in noisy_libs:
         logging.getLogger(lib).setLevel(logging.WARNING)
 
@@ -162,7 +170,7 @@ def update_log_level(level_str):
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR
+        "ERROR": logging.ERROR,
     }
     new_level = level_map.get(level_str.upper(), logging.INFO)
     logger = logging.getLogger()

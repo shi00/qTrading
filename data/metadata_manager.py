@@ -20,7 +20,7 @@ class MetaDataManager:
 
         table_def = TABLE_DEFINITIONS.get(table_name)
         if table_def and "alias" in table_def:
-            alias_key = table_def['alias']
+            alias_key = table_def["alias"]
             return f"{table_name} ({I18n.get(alias_key)})"
 
         return table_name
@@ -49,7 +49,7 @@ class MetaDataManager:
             return f"{col_name} ({I18n.get(alias_key)})"
 
         # 3. Dynamic prefix matching for technical indicators (e.g., rsi_14 → "RSI(14)")
-        if col_name.startswith('rsi_'):
+        if col_name.startswith("rsi_"):
             period = col_name[4:]  # Extract the number after 'rsi_'
             return f"RSI({period})"
 

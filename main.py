@@ -31,12 +31,12 @@ async def main(page: ft.Page):
 
     I18n.initialize()  # Initialize Locale
 
-
     # Start Cache Manager explicitly on Main Loop
     await CacheManager().init_db()
 
     # Initialize TaskManager persistence (load history, mark interrupted tasks)
     from services.task_manager import TaskManager
+
     await TaskManager().init_db()
 
     # Start background scheduler
@@ -60,10 +60,11 @@ async def main(page: ft.Page):
         try:
             logger.info("[Main] Step 0: Cancelling all TaskManager tasks...")
             from services.task_manager import TaskManager
+
             await TaskManager().cancel_all_running_async()
 
             logger.info("[Main] Step 1: Stopping Background Services...")
-            
+
             logger.info("[Main] - Stopping Scheduler...")
             scheduler.stop()
 
@@ -72,12 +73,13 @@ async def main(page: ft.Page):
 
             logger.info("[Main] - Stopping Market Data Service...")
             MarketDataService().stop()
-            
-            # Give services a moment to stop internal loops
-            await asyncio.sleep(0.5)
+
+            # Give services a moment to stop internal loops and let in-flight DB queries finish
+            await asyncio.sleep(1.5)
 
             logger.info("[Main] Step 2: Signaling Global Cancellation...")
             from data.data_processor import DataProcessor
+
             dp = DataProcessor()
             await dp.stop()
 
@@ -86,6 +88,7 @@ async def main(page: ft.Page):
             if hasattr(page, "toast") and page.toast:
                 try:
                     import inspect
+
                     # Robust shutdown: handle sync or async stop_all
                     if hasattr(page.toast, "stop_all"):
                         res = page.toast.stop_all()
@@ -100,25 +103,27 @@ async def main(page: ft.Page):
             await dp.close()
             logger.info("[Main] DB Writer flushed and closed.")
 
+            logger.info("[Main] Step 4.5: Closing async DB connection pool...")
+            try:
+                from data.cache_manager import CacheManager
+                await CacheManager().close()
+            except Exception:
+                pass
+            logger.info("[Main] Async DB pool closed.")
+
             logger.info("[Main] Step 5: Shutting down Thread Pools...")
             from utils.thread_pool import ThreadPoolManager
+
             ThreadPoolManager().shutdown(wait=False)
 
         except Exception as ex:
             logger.error(f"[Main] Error during cleanup: {ex}", exc_info=True)
 
         logger.info("[Main] All resources released. Exiting process immediately.")
-        
+
         # Give logs a split second to flush
         import time
         import os
-
-        # WAL checkpoint before forced exit to prevent data loss
-        try:
-            from data.cache_manager import CacheManager
-            CacheManager().checkpoint_wal()
-        except Exception:
-            pass
 
         time.sleep(0.1)
         os._exit(0)
@@ -143,7 +148,6 @@ async def main(page: ft.Page):
     page.padding = 0
     apply_page_theme(page)
 
-
     # --- Toast Manager (Proposal A) ---
     page.toast = ToastManager(page)
 
@@ -159,17 +163,18 @@ async def main(page: ft.Page):
 
     async def start_app():
         """Start the main app layout"""
+
         # Register Global News Alert (Decoupled from AppLayout)
         def on_news_alert(msg):
             if hasattr(page, "toast") and page.toast:
                 page.toast.show(f"📰 {msg}", type="info")
 
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
-        
+
         # Start Background Services (Moved from AppLayout)
         NewsSubscriptionService().start()
         MarketDataService().start()
-        
+
         # Show UI
         app_layout.show()
 

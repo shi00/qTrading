@@ -24,11 +24,15 @@ def register_strategy(key: str):
     Decorator to auto-register a strategy class.
     The key is used as the strategy identifier in StrategyManager.
     """
+
     def decorator(cls):
         if key in _STRATEGY_REGISTRY:
-            logger.warning(f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}")
+            logger.warning(
+                f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}"
+            )
         _STRATEGY_REGISTRY[key] = cls
         return cls
+
     return decorator
 
 
@@ -44,7 +48,7 @@ class BaseStrategy(ABC):
     @property
     def name(self) -> str:
         return I18n.get(self._name_key)
-    
+
     @property
     def description(self) -> str:
         return I18n.get(self._desc_key)
@@ -61,7 +65,7 @@ class BaseStrategy(ABC):
         """
         Declare dynamic parameters for this strategy.
         Override in subclasses to expose tunable parameters to the UI.
-        
+
         Returns a list of parameter definitions, e.g.:
         [
             {
@@ -74,7 +78,7 @@ class BaseStrategy(ABC):
                 "step": 1,                     # For slider
             }
         ]
-        
+
         Default: returns empty list (no tunable parameters).
         """
         return []

@@ -35,6 +35,7 @@ class OnboardingWizard(ft.Container):
 
         # Add background color to match theme
         from ui.theme import AppColors
+
         self.bgcolor = AppColors.BACKGROUND
 
         # Step 1: Token input
@@ -46,7 +47,7 @@ class OnboardingWizard(ft.Container):
             hint_text=I18n.get("wizard_token_hint"),
             on_submit=self._verify_token,
             border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY)
+            label_style=ft.TextStyle(color=AppColors.PRIMARY),
         )
         self.token_status = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
 
@@ -58,14 +59,14 @@ class OnboardingWizard(ft.Container):
             width=AppStyles.CONTROL_WIDTH_LG,
             hint_text="sk-...",
             border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY)
+            label_style=ft.TextStyle(color=AppColors.PRIMARY),
         )
         self.ai_base_url_input = ft.TextField(
             label=I18n.get("settings_ai_base_url_label"),
             value="https://api.deepseek.com",
             width=AppStyles.CONTROL_WIDTH_LG,
             border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY)
+            label_style=ft.TextStyle(color=AppColors.PRIMARY),
         )
         self.ai_model_dropdown = ft.Dropdown(
             label=I18n.get("wizard_ai_model_label"),
@@ -75,14 +76,17 @@ class OnboardingWizard(ft.Container):
             label_style=ft.TextStyle(color=AppColors.PRIMARY),
             options=[
                 ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
-                ft.dropdown.Option("deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)"),
+                ft.dropdown.Option(
+                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)"
+                ),
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
                 ft.dropdown.Option("gpt-4o", "OpenAI GPT-4o"),
-            ]
+            ],
         )
 
         from utils.config_handler import DEFAULT_AI_PROMPT
+
         self.ai_prompt_input = ft.TextField(
             label=I18n.get("wizard_ai_prompt_label"),
             value=DEFAULT_AI_PROMPT,
@@ -92,14 +96,21 @@ class OnboardingWizard(ft.Container):
             text_size=12,
             border_color=AppColors.PRIMARY,
             label_style=ft.TextStyle(color=AppColors.PRIMARY),
-            hint_text=I18n.get("wizard_ai_prompt_hint")
+            hint_text=I18n.get("wizard_ai_prompt_hint"),
         )
 
         self.ai_status = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
 
         # Step 3: Sync progress
-        self.sync_progress = ft.ProgressBar(width=AppStyles.CONTROL_WIDTH_LG, value=0, color=AppColors.ACCENT, bgcolor=AppColors.BORDER)
-        self.sync_status = ft.Text(I18n.get("wizard_status_ready"), size=12, color=AppColors.TEXT_SECONDARY)
+        self.sync_progress = ft.ProgressBar(
+            width=AppStyles.CONTROL_WIDTH_LG,
+            value=0,
+            color=AppColors.ACCENT,
+            bgcolor=AppColors.BORDER,
+        )
+        self.sync_status = ft.Text(
+            I18n.get("wizard_status_ready"), size=12, color=AppColors.TEXT_SECONDARY
+        )
 
         # Step 4: Schedule options
         self.schedule_enabled = ft.Checkbox(
@@ -133,10 +144,19 @@ class OnboardingWizard(ft.Container):
             scroll=ft.ScrollMode.AUTO,
             controls=[
                 ft.Container(height=40),  # More top spacing
-                ft.Text(I18n.get("wizard_welcome_title"), size=32, weight=ft.FontWeight.BOLD,
-                        color=AppColors.PRIMARY, text_align=ft.TextAlign.CENTER),
-                ft.Text(I18n.get("wizard_welcome_desc"), size=16, color=AppColors.TEXT_SECONDARY,
-                        text_align=ft.TextAlign.CENTER),
+                ft.Text(
+                    I18n.get("wizard_welcome_title"),
+                    size=32,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.PRIMARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Text(
+                    I18n.get("wizard_welcome_desc"),
+                    size=16,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
                 ft.Container(height=30),
                 self.step_indicators,
                 ft.Divider(height=40, color=ft.Colors.TRANSPARENT),
@@ -153,12 +173,13 @@ class OnboardingWizard(ft.Container):
     def _build_step_indicators(self):
         """Build the list of controls for step indicators including arrows"""
         from ui.theme import AppColors
+
         labels = [
             I18n.get("wizard_step_label_token"),
             I18n.get("wizard_step_label_ai"),
             I18n.get("wizard_step_label_sync"),
             I18n.get("wizard_step_label_schedule"),
-            I18n.get("wizard_step_label_done")
+            I18n.get("wizard_step_label_done"),
         ]
         controls = []
         for i in range(5):
@@ -173,7 +194,7 @@ class OnboardingWizard(ft.Container):
                     ft.Container(
                         content=ft.Icon(ft.Icons.ARROW_RIGHT_ALT, color=color, size=24),
                         padding=ft.padding.symmetric(horizontal=10),
-                        offset=ft.Offset(0, -0.2)
+                        offset=ft.Offset(0, -0.2),
                     )
                 )
         return controls
@@ -202,8 +223,12 @@ class OnboardingWizard(ft.Container):
 
         return ft.Column(
             [
-                ft.Text(I18n.get("wizard_step_prefix").format(index=index + 1), size=12, color=text_color,
-                        weight=font_weight),
+                ft.Text(
+                    I18n.get("wizard_step_prefix").format(index=index + 1),
+                    size=12,
+                    color=text_color,
+                    weight=font_weight,
+                ),
                 ft.Icon(icon, color=color, size=32),
                 ft.Text(labels[index], size=13, color=text_color, weight=font_weight),
             ],
@@ -240,29 +265,38 @@ class OnboardingWizard(ft.Container):
     def _build_step1(self):
         """Step 1: Token Configuration"""
         from ui.theme import AppColors, AppStyles
+
         return ft.Column(
             [
                 ft.Icon(ft.Icons.KEY, size=64, color=AppColors.PRIMARY),
-                ft.Text(I18n.get("wizard_step1_title"), size=24, weight=ft.FontWeight.W_500,
-                        color=AppColors.TEXT_PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step1_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step1_desc"),
-                    size=14, color=AppColors.TEXT_SECONDARY,
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=30),
                 self.token_input,
                 self.token_status,
                 ft.Container(height=30),
-                ft.Row([
-                    ft.ElevatedButton(
-                        I18n.get("wizard_btn_verify_next"),
-                        icon=ft.Icons.ARROW_FORWARD,
-                        on_click=self._verify_token,
-                        style=AppStyles.primary_button()
-                    ),
-                ], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row(
+                    [
+                        ft.ElevatedButton(
+                            I18n.get("wizard_btn_verify_next"),
+                            icon=ft.Icons.ARROW_FORWARD,
+                            on_click=self._verify_token,
+                            style=AppStyles.primary_button(),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -273,15 +307,21 @@ class OnboardingWizard(ft.Container):
     def _build_step_ai(self):
         """Step 2: AI Configuration"""
         from ui.theme import AppColors, AppStyles
+
         return ft.Column(
             [
                 ft.Icon(ft.Icons.SMART_TOY, size=64, color=AppColors.PRIMARY),
-                ft.Text(I18n.get("wizard_step2_title"), size=24, weight=ft.FontWeight.W_500,
-                        color=AppColors.TEXT_PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step2_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step2_desc"),
-                    size=14, color=AppColors.TEXT_SECONDARY,
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=30),
@@ -290,27 +330,36 @@ class OnboardingWizard(ft.Container):
                 self.ai_model_dropdown,
                 ft.Container(height=10),
                 ft.ExpansionTile(
-                    title=ft.Text(I18n.get("wizard_ai_advanced"), size=14, color=AppColors.PRIMARY),
-                    subtitle=ft.Text(I18n.get("wizard_ai_advanced_subtitle"), size=12, color=AppColors.TEXT_SECONDARY),
+                    title=ft.Text(
+                        I18n.get("wizard_ai_advanced"), size=14, color=AppColors.PRIMARY
+                    ),
+                    subtitle=ft.Text(
+                        I18n.get("wizard_ai_advanced_subtitle"),
+                        size=12,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
                     controls=[self.ai_prompt_input],
                     collapsed_text_color=AppColors.TEXT_SECONDARY,
                     text_color=AppColors.PRIMARY,
                 ),
                 self.ai_status,
                 ft.Container(height=30),
-                ft.Row([
-                    ft.ElevatedButton(
-                        I18n.get("wizard_btn_verify_next"),
-                        icon=ft.Icons.ARROW_FORWARD,
-                        on_click=self._verify_ai_config,
-                        style=AppStyles.primary_button()
-                    ),
-                    ft.TextButton(
-                        I18n.get("wizard_btn_skip"),
-                        on_click=self._skip_ai_config,
-                        style=ft.ButtonStyle(color=AppColors.TEXT_HINT)
-                    ),
-                ], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row(
+                    [
+                        ft.ElevatedButton(
+                            I18n.get("wizard_btn_verify_next"),
+                            icon=ft.Icons.ARROW_FORWARD,
+                            on_click=self._verify_ai_config,
+                            style=AppStyles.primary_button(),
+                        ),
+                        ft.TextButton(
+                            I18n.get("wizard_btn_skip"),
+                            on_click=self._skip_ai_config,
+                            style=ft.ButtonStyle(color=AppColors.TEXT_HINT),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -318,37 +367,46 @@ class OnboardingWizard(ft.Container):
     def _build_step2(self):
         """Step 3: Data Sync"""
         from ui.theme import AppColors, AppStyles
+
         self.btn_quick_sync = ft.ElevatedButton(
             I18n.get("wizard_sync_quick"),
             icon=ft.Icons.FLASH_ON,
             on_click=self._handle_quick_sync,
-            style=AppStyles.accent_button()  # Use accent color for quick action
+            style=AppStyles.accent_button(),  # Use accent color for quick action
         )
         from utils.config_handler import ConfigHandler
+
         years = ConfigHandler.get_init_history_years()
         self.btn_full_sync = ft.ElevatedButton(
             I18n.get("wizard_sync_full").format(years=years),
             icon=ft.Icons.CLOUD_SYNC,
             on_click=self._handle_full_sync,
-            style=AppStyles.primary_button()
+            style=AppStyles.primary_button(),
         )
         self.btn_cancel_sync = ft.ElevatedButton(
             I18n.get("wizard_btn_cancel"),
             icon=ft.Icons.CANCEL,
             color=AppColors.ERROR,
             visible=False,
-            on_click=self._handle_cancel_sync
+            on_click=self._handle_cancel_sync,
         )
 
         return ft.Column(
             [
                 ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
-                ft.Text(I18n.get("wizard_step3_title"), size=24, weight=ft.FontWeight.W_500,
-                        color=AppColors.TEXT_PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step3_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
                 ft.Container(height=10),
                 ft.Text(
-                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
-                    size=14, color=AppColors.TEXT_SECONDARY,
+                    I18n.get("wizard_step3_desc").format(
+                        years=years, hours=int(years * 1.5)
+                    ),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=30),
@@ -361,8 +419,11 @@ class OnboardingWizard(ft.Container):
                 self.sync_progress,
                 self.sync_status,
                 ft.Container(height=10),
-                ft.TextButton(I18n.get("wizard_btn_skip_step"), on_click=self._skip_sync,
-                              style=ft.ButtonStyle(color=AppColors.TEXT_HINT)),
+                ft.TextButton(
+                    I18n.get("wizard_btn_skip_step"),
+                    on_click=self._skip_sync,
+                    style=ft.ButtonStyle(color=AppColors.TEXT_HINT),
+                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -370,32 +431,40 @@ class OnboardingWizard(ft.Container):
     def _build_step3(self):
         """Step 4: Scheduled Task"""
         from ui.theme import AppColors, AppStyles
+
         return ft.Column(
             [
                 ft.Icon(ft.Icons.SCHEDULE, size=64, color=AppColors.PRIMARY),
-                ft.Text(I18n.get("wizard_step4_title"), size=24, weight=ft.FontWeight.W_500,
-                        color=AppColors.TEXT_PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step4_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step4_desc"),
-                    size=14, color=AppColors.TEXT_SECONDARY,
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=30),
-                ft.Row(
-                    [self.schedule_enabled],
-                    alignment=ft.MainAxisAlignment.CENTER
+                ft.Row([self.schedule_enabled], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Text(
+                    I18n.get("wizard_schedule_note"), size=12, color=AppColors.TEXT_HINT
                 ),
-                ft.Text(I18n.get("wizard_schedule_note"), size=12, color=AppColors.TEXT_HINT),
                 ft.Container(height=30),
-                ft.Row([
-                    ft.ElevatedButton(
-                        I18n.get("wizard_btn_finish"),
-                        icon=ft.Icons.CHECK,
-                        on_click=self._finish_setup,
-                        style=AppStyles.primary_button()
-                    ),
-                ], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row(
+                    [
+                        ft.ElevatedButton(
+                            I18n.get("wizard_btn_finish"),
+                            icon=ft.Icons.CHECK,
+                            on_click=self._finish_setup,
+                            style=AppStyles.primary_button(),
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -403,23 +472,33 @@ class OnboardingWizard(ft.Container):
     def _build_step4(self):
         """Step 5: Complete"""
         from ui.theme import AppColors
+
         return ft.Column(
             [
                 ft.Icon(ft.Icons.CELEBRATION, size=80, color=AppColors.SUCCESS),
-                ft.Text(I18n.get("wizard_step5_title"), size=32, weight=ft.FontWeight.BOLD,
-                        color=AppColors.TEXT_PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step5_title"),
+                    size=32,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step5_desc"),
-                    size=16, color=AppColors.TEXT_SECONDARY,
+                    size=16,
+                    color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Container(height=40),
                 ft.ElevatedButton(
                     I18n.get("wizard_btn_start"),
                     icon=ft.Icons.ROCKET_LAUNCH,
-                    style=ft.ButtonStyle(bgcolor=AppColors.SUCCESS, color=AppColors.TEXT_ON_PRIMARY,
-                                         icon_color=AppColors.TEXT_ON_PRIMARY, padding=20),
+                    style=ft.ButtonStyle(
+                        bgcolor=AppColors.SUCCESS,
+                        color=AppColors.TEXT_ON_PRIMARY,
+                        icon_color=AppColors.TEXT_ON_PRIMARY,
+                        padding=20,
+                    ),
                     on_click=self._complete_wizard,
                 ),
             ],
@@ -429,6 +508,7 @@ class OnboardingWizard(ft.Container):
     async def _verify_token(self, e):
         """Verify token and proceed to next step"""
         from ui.theme import AppColors
+
         token = self.token_input.value.strip()
         if not token:
             self.token_status.value = I18n.get("wizard_err_token_empty")
@@ -449,7 +529,7 @@ class OnboardingWizard(ft.Container):
 
             # Verify by fetching calendar (lightweight)
             # TushareClient expects YYYYMMDD string dates
-            dates = client.get_trade_dates(start_date='20250101', end_date='20250101')
+            client.get_trade_dates(start_date="20250101", end_date="20250101")
 
             # Save token if successful
             ConfigHandler.save_config({"ts_token": token, "onboarding_complete": False})
@@ -462,7 +542,9 @@ class OnboardingWizard(ft.Container):
             await self._next_step()
 
         except Exception as ex:
-            self.token_status.value = I18n.get("wizard_err_verify_failed").format(error=str(ex)[:40])
+            self.token_status.value = I18n.get("wizard_err_verify_failed").format(
+                error=str(ex)[:40]
+            )
             self.token_status.color = AppColors.ERROR
             self.update()
 
@@ -497,8 +579,10 @@ class OnboardingWizard(ft.Container):
                 self.sync_status.color = ft.Colors.GREEN
             else:
                 _last_update_ts = [0]
+
                 def update_progress(current, total, msg):
                     import time
+
                     now = time.time()
                     if current == total or (now - _last_update_ts[0] > 0.1):
                         # Clamp ratio to 1.0
@@ -510,10 +594,12 @@ class OnboardingWizard(ft.Container):
 
                 # Ensure DB is initialized before sync
                 # initialize_system handles DB init internally
-                
+
                 # Use unified initialization workflow
                 # This ensures Stock List -> Calendar -> History -> Financials -> Health Check
-                result = await processor.initialize_system(progress_callback=update_progress)
+                result = await processor.initialize_system(
+                    progress_callback=update_progress
+                )
 
                 if processor.is_cancelled():
                     self.sync_status.value = I18n.get("wizard_msg_sync_cancelled")
@@ -521,7 +607,9 @@ class OnboardingWizard(ft.Container):
                     self.sync_progress.value = 0
                 elif result is None:
                     # Critical failure without explicit cancellation
-                    raise Exception("Initialization task failed unexpectedly. Check logs.")
+                    raise Exception(
+                        "Initialization task failed unexpectedly. Check logs."
+                    )
                 else:
                     self.sync_status.value = I18n.get("wizard_msg_history_done")
                     self.sync_status.color = ft.Colors.GREEN
@@ -538,8 +626,10 @@ class OnboardingWizard(ft.Container):
             self.sync_status.value = I18n.get("wizard_msg_sync_cancelled")
             self.sync_status.color = ft.Colors.ORANGE
         except Exception as ex:
-            logger.error(f"Sync error: {traceback.format_exc()}")
-            self.sync_status.value = I18n.get("wizard_msg_sync_failed").format(error=str(ex)[:40])
+            logger.error(f"Sync error: {ex}", exc_info=True)
+            self.sync_status.value = I18n.get("wizard_msg_sync_failed").format(
+                error=str(ex)[:40]
+            )
             self.sync_status.color = ft.Colors.RED
             self.sync_progress.value = 0
             self.update()
@@ -575,6 +665,7 @@ class OnboardingWizard(ft.Container):
 
     async def _verify_ai_config(self, e):
         from ui.theme import AppColors
+
         api_key = self.ai_api_key_input.value.strip()
         base_url = self.ai_base_url_input.value.strip()
         model = self.ai_model_dropdown.value
@@ -595,6 +686,7 @@ class OnboardingWizard(ft.Container):
 
         try:
             from services.ai_service import AIService
+
             success = await AIService.test_connection(api_key, base_url, model)
 
             if success:
@@ -609,7 +701,9 @@ class OnboardingWizard(ft.Container):
                 self.update()
 
         except Exception as ex:
-            self.ai_status.value = I18n.get("wizard_ai_error").format(error=str(ex)[:30])
+            self.ai_status.value = I18n.get("wizard_ai_error").format(
+                error=str(ex)[:30]
+            )
             self.ai_status.color = AppColors.ERROR
             self.update()
 
@@ -624,6 +718,7 @@ class OnboardingWizard(ft.Container):
         """Cancel the running sync task"""
         from ui.theme import AppColors
         from data.data_processor import DataProcessor
+
         try:
             processor = DataProcessor()
             self.page.run_task(processor.request_cancel)

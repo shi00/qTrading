@@ -1,4 +1,4 @@
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 import pandas as pd
 import polars as pl
 import logging
@@ -6,6 +6,7 @@ from strategies.base_strategy import BaseStrategy
 from data.quality_gate import require_quality, QualityTier, QualityGateError
 
 logger = logging.getLogger(__name__)
+
 
 class PolarsBaseStrategy(BaseStrategy):
     """
@@ -16,37 +17,36 @@ class PolarsBaseStrategy(BaseStrategy):
     3. Error handling
     4. collecting back to Pandas
     """
-    
-    
+
     @require_quality(QualityTier.BRONZE)
     async def filter(self, context):
         """
         Template method that handles boilerplates.
         Subclasses should implement `_filter_logic(lazy_frame, context) -> LazyFrame`.
         """
-        df = context.get('screening_data')
+        df = context.get("screening_data")
         # Fallback for legacy contexts
         if df is None:
-            df = context.get('data')
+            df = context.get("data")
 
         if df is None or df.empty:
             return pd.DataFrame()
-            
+
         try:
             # Convert to LazyFrame for optimization
             lf = pl.from_pandas(df).lazy()
-            
+
             # Execute specific strategy logic
             result_lf = self._filter_logic(lf, context)
-            
+
             # Collect result
             return result_lf.collect().to_pandas()
-            
+
         except QualityGateError as e:
             # Handle Quality Gate rejection (graceful exit)
             logger.warning(f"[Strategy] {self.name} Blocked: {e}")
             # Raising it up allows UI to show specific error
-            raise e 
+            raise e
         except Exception as e:
             logger.error(f"[Strategy] {self.name} failed: {e}", exc_info=True)
             return pd.DataFrame()

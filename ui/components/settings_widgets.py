@@ -28,7 +28,9 @@ class MetricCard(ft.Container):
     Standard colors use semantic tokens. UP/DOWN colors are custom (Layer 2).
     """
 
-    def __init__(self, label, value, icon=None, status_color=None, trend=None, trend_up=True):
+    def __init__(
+        self, label, value, icon=None, status_color=None, trend=None, trend_up=True
+    ):
         super().__init__()
         self.expand = True
 
@@ -39,19 +41,24 @@ class MetricCard(ft.Container):
         self.trend_text = trend
         self.trend_up_val = trend_up
 
-        self.label_view = ft.Text(self.label_text.upper(), size=11, weight=ft.FontWeight.BOLD,
-                                  color=ft.Colors.ON_SURFACE_VARIANT)
-        self.value_view = ft.Text(self.value_text, size=22, weight=ft.FontWeight.BOLD,
-                                  color=ft.Colors.PRIMARY)
-        self.status_row_view = ft.Row([], spacing=4, alignment=ft.MainAxisAlignment.START)
+        self.label_view = ft.Text(
+            self.label_text.upper(),
+            size=11,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        self.value_view = ft.Text(
+            self.value_text, size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY
+        )
+        self.status_row_view = ft.Row(
+            [], spacing=4, alignment=ft.MainAxisAlignment.START
+        )
 
         self._build_status_row()
 
-        self.content = ft.Column([
-            self.label_view,
-            self.value_view,
-            self.status_row_view
-        ], spacing=4)
+        self.content = ft.Column(
+            [self.label_view, self.value_view, self.status_row_view], spacing=4
+        )
 
         self.padding = 15
         self.border_radius = 12
@@ -61,14 +68,23 @@ class MetricCard(ft.Container):
     def _build_status_row(self):
         """Build status row controls (uses custom colors for UP/DOWN)."""
         controls = []
-        resolved_color = self.status_color_val if self.status_color_val else ft.Colors.PRIMARY
+        resolved_color = (
+            self.status_color_val if self.status_color_val else ft.Colors.PRIMARY
+        )
         if self.icon_name:
             controls.append(ft.Icon(self.icon_name, size=14, color=resolved_color))
 
         if self.trend_text:
             # UP/DOWN are Layer 2 custom colors
             trend_color = AppColors.UP if self.trend_up_val else AppColors.DOWN
-            controls.append(ft.Text(self.trend_text, size=11, color=trend_color, weight=ft.FontWeight.BOLD))
+            controls.append(
+                ft.Text(
+                    self.trend_text,
+                    size=11,
+                    color=trend_color,
+                    weight=ft.FontWeight.BOLD,
+                )
+            )
 
         self.status_row_view.controls = controls if controls else [ft.Container()]
 
@@ -96,12 +112,7 @@ class ActionChip(ft.Container):
     """
 
     def __init__(self, icon, title, subtitle, on_click, is_primary=False):
-        super().__init__(
-            on_click=on_click,
-            ink=True,
-            border_radius=12,
-            padding=15
-        )
+        super().__init__(on_click=on_click, ink=True, border_radius=12, padding=15)
 
         self.icon_name = icon
         self.title_text = title
@@ -123,33 +134,54 @@ class ActionChip(ft.Container):
 
         sub_color = ft.Colors.with_opacity(0.8, text_color)
 
-        return ft.Row([
-            ft.Container(
-                content=ft.Icon(self.icon_name, color=text_color, size=24),
-                padding=10,
-                bgcolor=ft.Colors.with_opacity(0.1 if self.is_primary else 0.05,
-                                               text_color if self.is_primary else ft.Colors.SHADOW),
-                border_radius=10,
-            ),
-            ft.Column([
-                ft.Text(self.title_text, size=14, weight=ft.FontWeight.BOLD, color=text_color),
-                ft.Text(self.subtitle_text, size=11, color=sub_color),
-            ], spacing=2, expand=True),
-            ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16)
-        ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        return ft.Row(
+            [
+                ft.Container(
+                    content=ft.Icon(self.icon_name, color=text_color, size=24),
+                    padding=10,
+                    bgcolor=ft.Colors.with_opacity(
+                        0.1 if self.is_primary else 0.05,
+                        text_color if self.is_primary else ft.Colors.SHADOW,
+                    ),
+                    border_radius=10,
+                ),
+                ft.Column(
+                    [
+                        ft.Text(
+                            self.title_text,
+                            size=14,
+                            weight=ft.FontWeight.BOLD,
+                            color=text_color,
+                        ),
+                        ft.Text(self.subtitle_text, size=11, color=sub_color),
+                    ],
+                    spacing=2,
+                    expand=True,
+                ),
+                ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16),
+            ],
+            alignment=ft.MainAxisAlignment.START,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
     def set_loading(self, is_loading: bool):
         """Visual update for loading state"""
         if is_loading:
             # Show Spinner
             color = ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.PRIMARY
-            self.content.controls[-1] = ft.ProgressRing(width=16, height=16, stroke_width=2, color=color)
+            self.content.controls[-1] = ft.ProgressRing(
+                width=16, height=16, stroke_width=2, color=color
+            )
             self.disabled = True
             self.opacity = 0.8  # Slight dim but clearer than disabled
         else:
             # Restore Icon
-            sub_color = ft.Colors.with_opacity(0.8, ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.ON_SURFACE)
-            self.content.controls[-1] = ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16)
+            sub_color = ft.Colors.with_opacity(
+                0.8, ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.ON_SURFACE
+            )
+            self.content.controls[-1] = ft.Icon(
+                ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16
+            )
             self.disabled = False
             self.opacity = 1.0
 
@@ -167,8 +199,12 @@ class StatusBadge(ft.Container):
         if icon:
             content_row.insert(0, ft.Icon(icon, size=10, color=color))
 
-        self.content = ft.Row(content_row, spacing=4, alignment=ft.MainAxisAlignment.CENTER,
-                              vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        self.content = ft.Row(
+            content_row,
+            spacing=4,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         self.padding = ft.padding.symmetric(horizontal=8, vertical=4)
         self.bgcolor = ft.Colors.with_opacity(0.1, color)
         self.border_radius = 20
@@ -184,10 +220,20 @@ class SectionHeader(ft.Row):
     def __init__(self, title, action=None):
         super().__init__()
         controls = [
-            ft.Row([
-                ft.Container(width=4, height=18, bgcolor=ft.Colors.SECONDARY, border_radius=2),
-                ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE)
-            ], spacing=10),
+            ft.Row(
+                [
+                    ft.Container(
+                        width=4, height=18, bgcolor=ft.Colors.SECONDARY, border_radius=2
+                    ),
+                    ft.Text(
+                        title,
+                        size=16,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE,
+                    ),
+                ],
+                spacing=10,
+            ),
         ]
         if action:
             controls.append(action)
@@ -195,14 +241,14 @@ class SectionHeader(ft.Row):
         super().__init__(
             controls=controls,
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
 
 class SettingRow(ft.ResponsiveRow):
     """
     Standard setting row with icon, title, subtitle, and control.
-    Uses responsive layout: aligns strictly on desktop via grids, 
+    Uses responsive layout: aligns strictly on desktop via grids,
     and gracefully wraps to next line on mobile.
     """
 
@@ -220,29 +266,36 @@ class SettingRow(ft.ResponsiveRow):
             border_radius=10,
             bgcolor=ft.Colors.with_opacity(0.1, color),
         )
-        self.title_view = ft.Text(title, size=16, weight=ft.FontWeight.BOLD,
-                                  color=ft.Colors.ON_SURFACE)
-        self.subtitle_view = ft.Text(subtitle, size=12,
-                                     color=ft.Colors.ON_SURFACE_VARIANT)
+        self.title_view = ft.Text(
+            title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE
+        )
+        self.subtitle_view = ft.Text(
+            subtitle, size=12, color=ft.Colors.ON_SURFACE_VARIANT
+        )
 
         # --- Left Side (Icon + Text) ---
-        left_side = ft.Row([
-            self.icon_container,
-            ft.Container(width=10),
-            ft.Column([
-                self.title_view,
-                self.subtitle_view
-            ], spacing=2, expand=True) # Text wraps or expands
-        ], alignment=ft.MainAxisAlignment.START, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        
+        left_side = ft.Row(
+            [
+                self.icon_container,
+                ft.Container(width=10),
+                ft.Column(
+                    [self.title_view, self.subtitle_view], spacing=2, expand=True
+                ),  # Text wraps or expands
+            ],
+            alignment=ft.MainAxisAlignment.START,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
         # --- Right Side (Control) ---
-        # On mobile (xs): wrap to next line, take full width. 
+        # On mobile (xs): wrap to next line, take full width.
         # On desktop (sm/md): stay on same line, align right, take strict grid width.
-        right_side = ft.Row([
-            control
-        ], alignment=ft.MainAxisAlignment.END, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        right_side = ft.Row(
+            [control],
+            alignment=ft.MainAxisAlignment.END,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
         self.controls = [
             ft.Container(content=left_side, col={"xs": 12, "sm": 7, "md": 7}),
-            ft.Container(content=right_side, col={"xs": 12, "sm": 5, "md": 5})
+            ft.Container(content=right_side, col={"xs": 12, "sm": 5, "md": 5}),
         ]

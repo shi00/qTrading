@@ -14,29 +14,29 @@ class TechnicalAnalysis:
         Adjusts open, high, low, close.
         Target: Normalize to the LATEST available date in the dataframe.
         """
-        if df is None or df.empty or 'adj_factor' not in df.columns:
+        if df is None or df.empty or "adj_factor" not in df.columns:
             return df
 
         try:
             # Check if factors are valid
-            latest_factor = df['adj_factor'].iloc[-1]
+            latest_factor = df["adj_factor"].iloc[-1]
             if pd.isna(latest_factor) or latest_factor == 0:
                 return df
 
             # If all factors are 1.0 or same, no need to adjust
-            if (df['adj_factor'] == latest_factor).all():
+            if (df["adj_factor"] == latest_factor).all():
                 return df
 
             df_adj = df.copy()
-            ratio = df_adj['adj_factor'] / latest_factor
+            ratio = df_adj["adj_factor"] / latest_factor
 
-            df_adj['close'] = df_adj['close'] * ratio
-            df_adj['high'] = df_adj['high'] * ratio
-            df_adj['low'] = df_adj['low'] * ratio
-            df_adj['open'] = df_adj['open'] * ratio
+            df_adj["close"] = df_adj["close"] * ratio
+            df_adj["high"] = df_adj["high"] * ratio
+            df_adj["low"] = df_adj["low"] * ratio
+            df_adj["open"] = df_adj["open"] * ratio
 
             return df_adj
-        except Exception as e:
+        except Exception:
             # Fallback to raw if calculation fails
             return df
 
@@ -52,8 +52,8 @@ class TechnicalAnalysis:
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
         # Standard MACD
-        exp1 = df_calc['close'].ewm(span=fast, adjust=False).mean()
-        exp2 = df_calc['close'].ewm(span=slow, adjust=False).mean()
+        exp1 = df_calc["close"].ewm(span=fast, adjust=False).mean()
+        exp2 = df_calc["close"].ewm(span=slow, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=sign, adjust=False).mean()
         hist = macd - signal
@@ -85,12 +85,12 @@ class TechnicalAnalysis:
         # Use Adjusted Prices
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
-        low_list = df_calc['low'].rolling(window=n, min_periods=n).min()
-        low_list = low_list.fillna(value=df_calc['low'].expanding().min())
-        high_list = df_calc['high'].rolling(window=n, min_periods=n).max()
-        high_list = high_list.fillna(value=df_calc['high'].expanding().max())
+        low_list = df_calc["low"].rolling(window=n, min_periods=n).min()
+        low_list = low_list.fillna(value=df_calc["low"].expanding().min())
+        high_list = df_calc["high"].rolling(window=n, min_periods=n).max()
+        high_list = high_list.fillna(value=df_calc["high"].expanding().max())
 
-        rsv = (df_calc['close'] - low_list) / (high_list - low_list) * 100
+        rsv = (df_calc["close"] - low_list) / (high_list - low_list) * 100
 
         k = rsv.ewm(com=m1 - 1, adjust=False).mean()
         d = k.ewm(com=m2 - 1, adjust=False).mean()
@@ -119,8 +119,8 @@ class TechnicalAnalysis:
         # Use Adjusted Prices
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
-        ma5 = df_calc['close'].rolling(window=5).mean().iloc[-1]
-        ma20 = df_calc['close'].rolling(window=20).mean().iloc[-1]
+        ma5 = df_calc["close"].rolling(window=5).mean().iloc[-1]
+        ma20 = df_calc["close"].rolling(window=20).mean().iloc[-1]
 
         if ma5 > ma20:
             return "UP"
@@ -142,7 +142,7 @@ class TechnicalAnalysis:
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
         # Calculate price changes
-        delta = df_calc['close'].diff()
+        delta = df_calc["close"].diff()
 
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)
@@ -164,7 +164,7 @@ class TechnicalAnalysis:
     # Polars Expression Factories
     # ==========================
     @staticmethod
-    def get_rsi_expr(col_name='close', period=6, alias='rsi'):
+    def get_rsi_expr(col_name="close", period=6, alias="rsi"):
         """
         Returns a Polars Expression for RSI calculation.
         Use with .over('ts_code') for grouped calculation.
@@ -178,13 +178,13 @@ class TechnicalAnalysis:
         up = delta.clip(lower_bound=0)
         down = delta.clip(upper_bound=0).abs()
 
-        roll_up = up.ewm_mean(com=period - 1, adjust=False, min_periods=0)
-        roll_down = down.ewm_mean(com=period - 1, adjust=False, min_periods=0)
+        roll_up = up.ewm_mean(com=period - 1, adjust=False, min_samples=0)
+        roll_down = down.ewm_mean(com=period - 1, adjust=False, min_samples=0)
 
         rs = roll_up / roll_down
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # Handle division by zero (inf) -> 100? 
+        # Handle division by zero (inf) -> 100?
         # Polars handles inf arithmetic usually?
         # If roll_down is 0, rs is inf. 100/(1+inf) is 0. 100-0 = 100. Correct.
         # But if both are 0? Nan.
@@ -192,29 +192,35 @@ class TechnicalAnalysis:
         return rsi.fill_nan(50.0).fill_null(50.0).alias(alias)
 
     @staticmethod
-    def get_macd_expr(col_name='close', fast=12, slow=26, sign=9):
+    def get_macd_expr(col_name="close", fast=12, slow=26, sign=9):
         import polars as pl
+
         # EMA
-        ema_fast = pl.col(col_name).ewm_mean(span=fast, adjust=False, min_periods=0)
-        ema_slow = pl.col(col_name).ewm_mean(span=slow, adjust=False, min_periods=0)
+        ema_fast = pl.col(col_name).ewm_mean(span=fast, adjust=False, min_samples=0)
+        ema_slow = pl.col(col_name).ewm_mean(span=slow, adjust=False, min_samples=0)
         dif = ema_fast - ema_slow
-        dea = dif.ewm_mean(span=sign, adjust=False, min_periods=0)
+        dea = dif.ewm_mean(span=sign, adjust=False, min_samples=0)
         macd = (dif - dea) * 2  # Typical MACD histogram
 
-        return pl.struct([
-            dif.fill_null(0.0).alias("dif"),
-            dea.fill_null(0.0).alias("dea"),
-            macd.fill_null(0.0).alias("macd")
-        ]).alias("macd_struct")
+        return pl.struct(
+            [
+                dif.fill_null(0.0).alias("dif"),
+                dea.fill_null(0.0).alias("dea"),
+                macd.fill_null(0.0).alias("macd"),
+            ]
+        ).alias("macd_struct")
 
     @staticmethod
-    def get_kdj_expr(high='high', low='low', close='close', n=9, m1=3, m2=3):
+    def get_kdj_expr(high="high", low="low", close="close", n=9, m1=3, m2=3):
         import polars as pl
+
         # RSV
-        llv = pl.col(low).rolling_min(window_size=n, min_periods=1)  # min_periods not fully supported in old polars?
+        llv = pl.col(low).rolling_min(
+            window_size=n, min_samples=1
+        )  # min_samples not fully supported in old polars?
         # rolling_min in Polars usually requires window_size.
         # Handle dynamic window? No, just standard rolling.
-        hhv = pl.col(high).rolling_max(window_size=n, min_periods=1)
+        hhv = pl.col(high).rolling_max(window_size=n, min_samples=1)
 
         rsv = (pl.col(close) - llv) / (hhv - llv) * 100
         # Check div by zero
@@ -226,12 +232,8 @@ class TechnicalAnalysis:
         # This is exactly EWM with alpha=1/3 => com=2.
         # m1=3 => com=2.
 
-        k = rsv.ewm_mean(com=m1 - 1, adjust=False, min_periods=0)
-        d = k.ewm_mean(com=m2 - 1, adjust=False, min_periods=0)
+        k = rsv.ewm_mean(com=m1 - 1, adjust=False, min_samples=0)
+        d = k.ewm_mean(com=m2 - 1, adjust=False, min_samples=0)
         j = 3 * k - 2 * d
 
-        return pl.struct([
-            k.alias("k"),
-            d.alias("d"),
-            j.alias("j")
-        ]).alias("kdj_struct")
+        return pl.struct([k.alias("k"), d.alias("d"), j.alias("j")]).alias("kdj_struct")

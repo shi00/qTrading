@@ -44,7 +44,7 @@ class ScreenerView(ft.Container):
             I18n.get("screener_no_strategy_hint"),
             size=13,
             color=AppColors.TEXT_PRIMARY,
-            no_wrap=False
+            no_wrap=False,
         )
 
         self.run_btn = ft.ElevatedButton(
@@ -53,7 +53,7 @@ class ScreenerView(ft.Container):
             on_click=self._on_run_click,
             disabled=True,
             style=AppStyles.primary_button(),
-            height=45
+            height=45,
         )
         self.export_btn = ft.ElevatedButton(
             text=I18n.get("screener_export"),
@@ -61,43 +61,54 @@ class ScreenerView(ft.Container):
             on_click=self._on_export_click,
             disabled=True,
             style=AppStyles.outline_button(),
-            height=45
+            height=45,
         )
         self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)
-        self.progress_ring = ft.ProgressRing(visible=False, width=20, height=20, color=AppColors.ACCENT)
-
-        self.result_table = VirtualTable(
-            on_sort=self._on_virtual_sort
+        self.progress_ring = ft.ProgressRing(
+            visible=False, width=20, height=20, color=AppColors.ACCENT
         )
+
+        self.result_table = VirtualTable(on_sort=self._on_virtual_sort)
 
         # 3. Dynamic Strategy Parameters Panel
         self.params_container = ft.Column(spacing=8)
 
         # 4. Logs (Virtualized via Column for auto-scrolling)
         self.log_view = ft.Column(
-            expand=True,
-            spacing=4,
-            scroll=ft.ScrollMode.ALWAYS,
-            auto_scroll=True
+            expand=True, spacing=4, scroll=ft.ScrollMode.ALWAYS, auto_scroll=True
         )
 
         # 5. Pagination
         self.page_info_text = ft.Text(
             I18n.get("screener_page_info").format(current=1, total=1),
-            color=AppColors.TEXT_PRIMARY
+            color=AppColors.TEXT_PRIMARY,
         )
-        self.prev_btn = ft.IconButton(ft.Icons.CHEVRON_LEFT, on_click=lambda e: self.vm.change_page(-1),
-                                      icon_color=AppColors.PRIMARY)
-        self.next_btn = ft.IconButton(ft.Icons.CHEVRON_RIGHT, on_click=lambda e: self.vm.change_page(1),
-                                      icon_color=AppColors.PRIMARY)
+        self.prev_btn = ft.IconButton(
+            ft.Icons.CHEVRON_LEFT,
+            on_click=lambda e: self.vm.change_page(-1),
+            icon_color=AppColors.PRIMARY,
+        )
+        self.next_btn = ft.IconButton(
+            ft.Icons.CHEVRON_RIGHT,
+            on_click=lambda e: self.vm.change_page(1),
+            icon_color=AppColors.PRIMARY,
+        )
 
         # Page size dropdown
         self.page_size_dropdown = ft.Dropdown(
             options=[
-                ft.dropdown.Option("10", text=f"10 {I18n.get('screener_per_page', '条/页')}"),
-                ft.dropdown.Option("20", text=f"20 {I18n.get('screener_per_page', '条/页')}"),
-                ft.dropdown.Option("50", text=f"50 {I18n.get('screener_per_page', '条/页')}"),
-                ft.dropdown.Option("100", text=f"100 {I18n.get('screener_per_page', '条/页')}")
+                ft.dropdown.Option(
+                    "10", text=f"10 {I18n.get('screener_per_page', '条/页')}"
+                ),
+                ft.dropdown.Option(
+                    "20", text=f"20 {I18n.get('screener_per_page', '条/页')}"
+                ),
+                ft.dropdown.Option(
+                    "50", text=f"50 {I18n.get('screener_per_page', '条/页')}"
+                ),
+                ft.dropdown.Option(
+                    "100", text=f"100 {I18n.get('screener_per_page', '条/页')}"
+                ),
             ],
             value="50",
             width=120,
@@ -112,8 +123,16 @@ class ScreenerView(ft.Container):
         # 7. Mode Toggle (Realtime / History)
         self.mode_toggle = ft.SegmentedButton(
             segments=[
-                ft.Segment(value="REALTIME", label=ft.Text(I18n.get("screener_mode_run", "执行选股")), icon=ft.Icon(ft.Icons.ELECTRIC_BOLT)),
-                ft.Segment(value="HISTORY", label=ft.Text(I18n.get("screener_mode_history", "历史档案")), icon=ft.Icon(ft.Icons.HISTORY)),
+                ft.Segment(
+                    value="REALTIME",
+                    label=ft.Text(I18n.get("screener_mode_run", "执行选股")),
+                    icon=ft.Icon(ft.Icons.ELECTRIC_BOLT),
+                ),
+                ft.Segment(
+                    value="HISTORY",
+                    label=ft.Text(I18n.get("screener_mode_history", "历史档案")),
+                    icon=ft.Icon(ft.Icons.HISTORY),
+                ),
             ],
             selected={"REALTIME"},
             on_change=self._on_mode_change,
@@ -131,15 +150,24 @@ class ScreenerView(ft.Container):
             visible=False,  # shown after first load
         )
         self.history_tree_container = ft.Container(
-            content=ft.Column([
-                ft.Container(
-                    content=ft.Text(I18n.get("screener_mode_history", "历史档案"), weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY, size=14),
-                    padding=ft.padding.only(left=12, top=10, bottom=5),
-                ),
-                ft.Divider(height=1, color=AppColors.DIVIDER),
-                self.history_tree_list,
-                self.history_load_more_btn,
-            ], spacing=0, expand=True),
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Text(
+                            I18n.get("screener_mode_history", "历史档案"),
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.TEXT_PRIMARY,
+                            size=14,
+                        ),
+                        padding=ft.padding.only(left=12, top=10, bottom=5),
+                    ),
+                    ft.Divider(height=1, color=AppColors.DIVIDER),
+                    self.history_tree_list,
+                    self.history_load_more_btn,
+                ],
+                spacing=0,
+                expand=True,
+            ),
             width=0,
             visible=False,
             bgcolor=ft.Colors.SURFACE,
@@ -157,9 +185,9 @@ class ScreenerView(ft.Container):
             on_log=self._append_log,
             on_status=self._update_status,
             on_progress=self._toggle_progress,
-            on_log_stream_start=self._on_log_stream_start
+            on_log_stream_start=self._on_log_stream_start,
         )
-        
+
         # Subscribe to TaskManager to unlock UI on background task completion
         TaskManager().subscribe(self._on_tasks_updated)
 
@@ -169,11 +197,11 @@ class ScreenerView(ft.Container):
     def will_unmount(self):
         TaskManager().unsubscribe(self._on_tasks_updated)
         self.vm.dispose()
-        
+
         # P1-11 Fix: Detach the thousands of Flet Row references inside the VirtualTable
-        if hasattr(self, 'result_table') and self.result_table:
+        if hasattr(self, "result_table") and self.result_table:
             self.result_table.list_view.controls.clear()
-            
+
         # Cleanup overlay to prevent memory leak
         if self.detail_dialog and self.page:
             try:
@@ -181,42 +209,51 @@ class ScreenerView(ft.Container):
             except ValueError:
                 pass  # Already removed
             self.detail_dialog = None
-        
+
     def _on_tasks_updated(self, tasks):
         """Monitor TaskManager for the currently running AI Strategy execution"""
-        if not self.page: return
+        if not self.page:
+            return
 
         # Determine if we have any running strategy task
-        running_strategy_tasks = [t for t in tasks if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")]
+        running_strategy_tasks = [
+            t
+            for t in tasks
+            if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")
+        ]
 
         # If there are no active strategy tasks, unlock the UI
         # Only unlock if we actually disabled it previously
-        if not running_strategy_tasks and getattr(self, 'selected_strategy', None):
+        if not running_strategy_tasks and getattr(self, "selected_strategy", None):
+
             async def _unlock():
                 if self.run_btn.disabled:
                     self.run_btn.disabled = False
                     self.run_btn.update()
-                
+
                 if self.progress_ring.visible:
                     self.progress_ring.visible = False
                     self.progress_ring.update()
-                    
+
             self.page.run_task(_unlock)
 
     async def _load_strategies(self):
         try:
             strategies = await self.vm.get_strategies()
-            if not self.page: return
+            if not self.page:
+                return
 
             # Use Name (value) for display, Key for ID
             # strategies is Dict[key, name]
             self.strategy_dropdown.options = [
-                ft.dropdown.Option(k, v)
-                for k, v in strategies.items()
+                ft.dropdown.Option(k, v) for k, v in strategies.items()
             ]
             self.strategy_dropdown.update()
         except Exception as e:
-            logger.error(f"[ScreenerView] Strategy | ❌ Failed to load strategies: {e}", exc_info=True)
+            logger.error(
+                f"[ScreenerView] Strategy | ❌ Failed to load strategies: {e}",
+                exc_info=True,
+            )
             self.status_text.value = I18n.get("screener_load_failed").format(error=e)
             self.status_text.color = AppColors.ERROR
             self.status_text.update()
@@ -224,14 +261,18 @@ class ScreenerView(ft.Container):
 
         # Handle Pending Deep Link
         if self._pending_strategy_key:
-            logger.debug(f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}")
+            logger.debug(
+                f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}"
+            )
             await self.select_and_run_strategy(self._pending_strategy_key)
             self._pending_strategy_key = None
 
     async def select_and_run_strategy(self, strategy_key: str):
         """Public API to select and run a strategy (Deep Link)"""
         if not self.strategy_dropdown.options:
-            logger.debug(f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}")
+            logger.debug(
+                f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}"
+            )
             self._pending_strategy_key = strategy_key
             return
 
@@ -267,112 +308,152 @@ class ScreenerView(ft.Container):
         # 1. Top Control Deck (Card Layout)
         # ==========================================
         # Left side: Title + Mode Toggle + Dropdown + Desc
-        title_row = ft.Row([
-            ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),
-            ft.Text(I18n.get("screener_title"), size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-            ft.Container(width=20),  # Spacer
-            self.mode_toggle,
-        ], alignment=ft.MainAxisAlignment.START, spacing=10)
+        title_row = ft.Row(
+            [
+                ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),
+                ft.Text(
+                    I18n.get("screener_title"),
+                    size=20,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(width=20),  # Spacer
+                self.mode_toggle,
+            ],
+            alignment=ft.MainAxisAlignment.START,
+            spacing=10,
+        )
 
-        self.realtime_controls = ft.Column([
-            ft.Row([self.strategy_dropdown], spacing=10),
-            self.strategy_desc_text,
-            self.params_container
-        ], spacing=10, visible=True)
+        self.realtime_controls = ft.Column(
+            [
+                ft.Row([self.strategy_dropdown], spacing=10),
+                self.strategy_desc_text,
+                self.params_container,
+            ],
+            spacing=10,
+            visible=True,
+        )
 
-        left_controls = ft.Column([
-            title_row,
-            self.realtime_controls,
-        ], spacing=10, expand=True)
+        left_controls = ft.Column(
+            [
+                title_row,
+                self.realtime_controls,
+            ],
+            spacing=10,
+            expand=True,
+        )
 
         # Right side: Status + Buttons
-        status_row = ft.Row([
-            self.progress_ring,
-            self.status_text
-        ], alignment=ft.MainAxisAlignment.END, spacing=10)
+        status_row = ft.Row(
+            [self.progress_ring, self.status_text],
+            alignment=ft.MainAxisAlignment.END,
+            spacing=10,
+        )
 
-        right_controls = ft.Column([
-            status_row,
-            ft.Row([self.export_btn, self.run_btn], spacing=15, alignment=ft.MainAxisAlignment.END)
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, horizontal_alignment=ft.CrossAxisAlignment.END)
+        right_controls = ft.Column(
+            [
+                status_row,
+                ft.Row(
+                    [self.export_btn, self.run_btn],
+                    spacing=15,
+                    alignment=ft.MainAxisAlignment.END,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            horizontal_alignment=ft.CrossAxisAlignment.END,
+        )
 
         # Combine into a floating Card
         control_card = ft.Container(
-            content=ft.Row([left_controls, right_controls], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.START),
-            **AppStyles.dashboard_card(padding=20)
+            content=ft.Row(
+                [left_controls, right_controls],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            **AppStyles.dashboard_card(padding=20),
         )
 
         # ==========================================
         # 2. Middle Data Grid
         # ==========================================
-        pagination_row = ft.Row([
-            self.prev_btn,
-            self.page_info_text,
-            self.next_btn,
-            ft.Container(width=20), # Spacer
-            self.page_size_dropdown
-        ], alignment=ft.MainAxisAlignment.CENTER)
+        pagination_row = ft.Row(
+            [
+                self.prev_btn,
+                self.page_info_text,
+                self.next_btn,
+                ft.Container(width=20),  # Spacer
+                self.page_size_dropdown,
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
 
         table_card = ft.Container(
-            content=ft.Column([
-                self.result_table,
-                ft.Divider(height=1, color=AppColors.DIVIDER),
-                pagination_row
-            ], spacing=0, expand=True),
+            content=ft.Column(
+                [
+                    self.result_table,
+                    ft.Divider(height=1, color=AppColors.DIVIDER),
+                    pagination_row,
+                ],
+                spacing=0,
+                expand=True,
+            ),
             **AppStyles.dashboard_card(padding=0),
-            expand=True  # Fill all available vertical space (sole child in Row)
+            expand=True,  # Fill all available vertical space (sole child in Row)
         )
 
         # ==========================================
         # 3. Bottom AI Analysis View (Streamed Cards)
         # ==========================================
         self.log_title_text = ft.Text(
-            I18n.get("ai_analysis_report", "深度分析简报"), 
-            font_family="Roboto", 
-            weight=ft.FontWeight.BOLD, 
-            color=AppColors.TEXT_PRIMARY
+            I18n.get("ai_analysis_report", "深度分析简报"),
+            font_family="Roboto",
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
         )
-        
+
         # AI Stream Container Styling
         self.log_view_container = ft.Container(
-            content=self.log_view,
-            border_radius=8,
-            padding=5,
-            expand=True
+            content=self.log_view, border_radius=8, padding=5, expand=True
         )
 
         self.log_card = ft.Container(
-            content=ft.Column([
-                self.log_title_text,
-                self.log_view_container
-            ], spacing=5),
+            content=ft.Column(
+                [self.log_title_text, self.log_view_container], spacing=5
+            ),
             expand=True,
-            padding=ft.padding.only(top=10)
+            padding=ft.padding.only(top=10),
         )
 
         # ==========================================
         # 4. Right content column (table + log)
         # ==========================================
-        right_content = ft.Column([
-            table_card,
-            self.log_card
-        ], expand=True, spacing=10)
+        right_content = ft.Column([table_card, self.log_card], expand=True, spacing=10)
 
         # ==========================================
         # 5. Main Layout: Row(left_tree + right_content)
         # ==========================================
-        main_body = ft.Row([
-            self.history_tree_container,
-            right_content,
-        ], expand=True, spacing=0, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
+        main_body = ft.Row(
+            [
+                self.history_tree_container,
+                right_content,
+            ],
+            expand=True,
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
 
         # ==========================================
         # Final Assembly
         # ==========================================
-        self.content = ft.Column([
-            control_card,
-            main_body,
-        ], expand=True, spacing=15, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.content = ft.Column(
+            [
+                control_card,
+                main_body,
+            ],
+            expand=True,
+            spacing=15,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
 
     # --- Mode Switching & History ---
 
@@ -382,7 +463,11 @@ class ScreenerView(ft.Container):
         All UI mutations must be routed through page.run_task() to avoid
         cross-thread races with _do_update() on the async event loop.
         """
-        UILogger.log_action("ScreenerView", "Toggle", f"mode={list(e.control.selected)[0] if e.control.selected else 'unknown'}")
+        UILogger.log_action(
+            "ScreenerView",
+            "Toggle",
+            f"mode={list(e.control.selected)[0] if e.control.selected else 'unknown'}",
+        )
         selected = e.control.selected
         if not selected:
             return
@@ -406,7 +491,8 @@ class ScreenerView(ft.Container):
         self.result_table.set_rows([], sort_col=None, sort_asc=True)
         # Load tree
         self._history_tree_offset = 0
-        if self.page: self.page.update()
+        if self.page:
+            self.page.update()
         await self._load_history_tree(append=False)
 
     async def _switch_to_realtime_mode(self):
@@ -419,12 +505,15 @@ class ScreenerView(ft.Container):
         self.log_card.visible = True
         self.run_btn.visible = True
         self._render_table()
-        if self.page: self.page.update()
+        if self.page:
+            self.page.update()
 
     async def _load_history_tree(self, append=False):
         """Fetch and render the history tree from DB."""
         try:
-            tree_data = await self.vm.load_history_tree(offset=self._history_tree_offset)
+            tree_data = await self.vm.load_history_tree(
+                offset=self._history_tree_offset
+            )
             if not self.page:
                 return
 
@@ -435,55 +524,94 @@ class ScreenerView(ft.Container):
                 if not append:
                     self.history_tree_list.controls.append(
                         ft.Container(
-                            content=ft.Text(I18n.get("screener_no_results", "暂无历史数据"), color=AppColors.TEXT_SECONDARY, size=13),
+                            content=ft.Text(
+                                I18n.get("screener_no_results", "暂无历史数据"),
+                                color=AppColors.TEXT_SECONDARY,
+                                size=13,
+                            ),
                             padding=20,
                         )
                     )
                 self.history_load_more_btn.visible = False
             else:
                 for date_str, strategies in tree_data.items():
-                    total_cnt = sum(s['cnt'] for s in strategies)
+                    total_cnt = sum(s["cnt"] for s in strategies)
                     # Format date for display
-                    display_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}" if len(date_str) == 8 else date_str
+                    display_date = (
+                        f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+                        if len(date_str) == 8
+                        else date_str
+                    )
 
                     # Build subtiles (strategy items)
                     subtiles = []
                     # "All strategies" option
                     subtiles.append(
                         ft.ListTile(
-                            leading=ft.Icon(ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT),
-                            title=ft.Text(f"{I18n.get('screener_all_strategies', '全部策略')} ({total_cnt})", size=13),
-                            on_click=lambda e, d=date_str: self._on_tree_item_click(d, None),
+                            leading=ft.Icon(
+                                ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT
+                            ),
+                            title=ft.Text(
+                                f"{I18n.get('screener_all_strategies', '全部策略')} ({total_cnt})",
+                                size=13,
+                            ),
+                            on_click=lambda e, d=date_str: self._on_tree_item_click(
+                                d, None
+                            ),
                             dense=True,
                         )
                     )
                     for s in strategies:
                         subtiles.append(
                             ft.ListTile(
-                                leading=ft.Icon(ft.Icons.TRENDING_UP, size=16, color=AppColors.TEXT_SECONDARY),
-                                title=ft.Text(f"{s['strategy_name']} ({s['cnt']})", size=13),
-                                on_click=lambda e, d=date_str, sn=s['strategy_name']: self._on_tree_item_click(d, sn),
+                                leading=ft.Icon(
+                                    ft.Icons.TRENDING_UP,
+                                    size=16,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                                title=ft.Text(
+                                    f"{s['strategy_name']} ({s['cnt']})", size=13
+                                ),
+                                on_click=lambda e, d=date_str, sn=s["strategy_name"]: (
+                                    self._on_tree_item_click(d, sn)
+                                ),
                                 dense=True,
                             )
                         )
 
                     tile = ft.ExpansionTile(
-                        title=ft.Text(f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500),
-                        subtitle=ft.Text(I18n.get("history_total", "共 {count} 条").format(count=total_cnt), size=11, color=AppColors.TEXT_SECONDARY),
+                        title=ft.Text(
+                            f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500
+                        ),
+                        subtitle=ft.Text(
+                            I18n.get("history_total", "共 {count} 条").format(
+                                count=total_cnt
+                            ),
+                            size=11,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
                         controls=subtiles,
-                        initially_expanded=(self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0),
+                        initially_expanded=(
+                            self._history_tree_offset == 0
+                            and self.history_tree_list.controls.__len__() == 0
+                        ),
                         collapsed_icon_color=AppColors.TEXT_SECONDARY,
                     )
                     self.history_tree_list.controls.append(tile)
 
-                self.history_load_more_btn.visible = len(tree_data) >= 5  # Show if likely more data
+                self.history_load_more_btn.visible = (
+                    len(tree_data) >= 5
+                )  # Show if likely more data
                 self._history_tree_offset += len(tree_data) * 5  # Advance offset
 
             self.history_tree_list.update()
             self.history_load_more_btn.update()
 
         except Exception as ex:
-            logger.error(f"[ScreenerView] History | ❌ Failed to load history tree: {ex}", exc_info=True)
+            logger.error(
+                f"[ScreenerView] History | ❌ Failed to load history tree: {ex}",
+                exc_info=True,
+            )
 
     def _on_tree_item_click(self, trade_date: str, strategy_name=None):
         """Handle click on a tree node to load historical records."""
@@ -494,7 +622,11 @@ class ScreenerView(ft.Container):
     async def _load_history_for_date(self, trade_date, strategy_name):
         """Load historical data for a specific date/strategy and refresh table."""
         self._toggle_progress(True)
-        display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}" if len(trade_date) == 8 else trade_date
+        display = (
+            f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+            if len(trade_date) == 8
+            else trade_date
+        )
         label = strategy_name or I18n.get("screener_all_strategies", "全部策略")
         self._update_status(f"{display} / {label}", "blue")
         await self.vm.load_history_data(trade_date, strategy_name)
@@ -508,7 +640,9 @@ class ScreenerView(ft.Container):
     # --- Event Handlers ---
 
     def _on_strategy_change(self, e):
-        UILogger.log_action("ScreenerView", "Select", f"strategy={self.strategy_dropdown.value}")
+        UILogger.log_action(
+            "ScreenerView", "Select", f"strategy={self.strategy_dropdown.value}"
+        )
         self.selected_strategy = self.strategy_dropdown.value
         self.run_btn.disabled = not self.selected_strategy
 
@@ -517,7 +651,9 @@ class ScreenerView(ft.Container):
             # Gather default params before rendering to push initial dynamic desc
             strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
             if strategy_obj:
-                defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
+                defaults = {
+                    p["name"]: p.get("default") for p in strategy_obj.get_parameters()
+                }
                 desc = strategy_obj.get_dynamic_description(defaults)
             else:
                 desc = self.vm.get_strategy_desc(self.selected_strategy)
@@ -532,8 +668,11 @@ class ScreenerView(ft.Container):
         self._render_strategy_params()
 
     def _on_run_click(self, e):
-        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}")
-        if not self.selected_strategy: return
+        UILogger.log_action(
+            "ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}"
+        )
+        if not self.selected_strategy:
+            return
         self.run_btn.disabled = True
         self.run_btn.update()
         self.log_view.controls.clear()
@@ -561,7 +700,7 @@ class ScreenerView(ft.Container):
         for p in params_def:
             label = I18n.get(p.get("label_key", p["name"]))
             p_type = p.get("type", "number")
-            is_advanced = (p_type == "textarea" or p.get("advanced") == True)
+            is_advanced = p_type == "textarea" or p.get("advanced")
 
             if p_type == "slider":
                 min_val = p.get("min", 0)
@@ -571,8 +710,12 @@ class ScreenerView(ft.Container):
                 divisions = int((max_val - min_val) / step) if step > 0 else 10
 
                 # Value display text — format consistently with on_change handler
-                init_display = int(default) if default == int(default) else round(default, 1)
-                value_text = ft.Text(f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY)
+                init_display = (
+                    int(default) if default == int(default) else round(default, 1)
+                )
+                value_text = ft.Text(
+                    f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY
+                )
 
                 def make_on_change(vt, lbl):
                     def handler(e):
@@ -580,18 +723,27 @@ class ScreenerView(ft.Container):
                         display = int(val) if val == int(val) else round(val, 1)
                         vt.value = f"{lbl}: {display}"
                         vt.update()
-                        
+
                         # Trigger dynamic strategy description update
                         if self.selected_strategy:
-                            strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
-                            if strategy_obj and hasattr(strategy_obj, 'get_dynamic_description'):
+                            strategy_obj = self.vm.strategy_mgr.get_strategy(
+                                self.selected_strategy
+                            )
+                            if strategy_obj and hasattr(
+                                strategy_obj, "get_dynamic_description"
+                            ):
                                 params = self._collect_params()
-                                self.strategy_desc_text.value = strategy_obj.get_dynamic_description(params)
+                                self.strategy_desc_text.value = (
+                                    strategy_obj.get_dynamic_description(params)
+                                )
                                 self.strategy_desc_text.update()
+
                     return handler
 
                 slider = ft.Slider(
-                    min=min_val, max=max_val, value=default,
+                    min=min_val,
+                    max=max_val,
+                    value=default,
                     divisions=divisions,
                     active_color=AppColors.PRIMARY,
                     on_change=make_on_change(value_text, label),
@@ -617,8 +769,10 @@ class ScreenerView(ft.Container):
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
                 )
                 ctrl.data = p["name"]
-                if is_advanced: advanced_controls.append(ctrl)
-                else: basic_controls.append(ctrl)
+                if is_advanced:
+                    advanced_controls.append(ctrl)
+                else:
+                    basic_controls.append(ctrl)
 
             elif p_type == "dropdown":
                 options = p.get("options", [])
@@ -633,13 +787,18 @@ class ScreenerView(ft.Container):
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
                 )
                 ctrl.data = p["name"]
-                if is_advanced: advanced_controls.append(ctrl)
-                else: basic_controls.append(ctrl)
+                if is_advanced:
+                    advanced_controls.append(ctrl)
+                else:
+                    basic_controls.append(ctrl)
 
             elif p_type == "textarea":
                 if p["name"] == "ai_system_prompt" and self.selected_strategy:
                     from strategies.strategy_prompts import get_base_prompt
-                    current_val = get_base_prompt(self.selected_strategy) or p.get("default", "")
+
+                    current_val = get_base_prompt(self.selected_strategy) or p.get(
+                        "default", ""
+                    )
                 else:
                     current_val = p.get("default", "")
 
@@ -658,24 +817,39 @@ class ScreenerView(ft.Container):
                 reset_btn = None
                 if p["name"] == "ai_system_prompt":
                     ctrl.label = None  # Remove internal label to use custom Row label
+
                     def make_restore_default(strat):
                         def restore_default(e):
                             from utils.config_handler import ConfigHandler
                             from strategies.strategy_prompts import get_base_prompt
+
                             ConfigHandler.set_strategy_prompt(strat, None)
                             ctrl.value = str(get_base_prompt(strat))
                             ctrl.update()
                             if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(I18n.get("ai_settings_restored", "系统提示词已恢复默认"), "info")
+                                self.page.show_toast(
+                                    I18n.get(
+                                        "ai_settings_restored", "系统提示词已恢复默认"
+                                    ),
+                                    "info",
+                                )
+
                         return restore_default
 
                     def make_save_prompt(strat):
                         def save_prompt(e):
                             from utils.config_handler import ConfigHandler
+
                             ConfigHandler.set_strategy_prompt(strat, ctrl.value)
-                            UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
+                            UILogger.log_action(
+                                "ScreenerView", "SavePrompt", f"strategy={strat}"
+                            )
                             if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(I18n.get("ai_settings_saved", "系统提示词已保存"), "success")
+                                self.page.show_toast(
+                                    I18n.get("ai_settings_saved", "系统提示词已保存"),
+                                    "success",
+                                )
+
                         return save_prompt
 
                     reset_btn = ft.TextButton(
@@ -683,7 +857,7 @@ class ScreenerView(ft.Container):
                         icon=ft.Icons.RESTORE,
                         style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
                         height=30,
-                        on_click=make_restore_default(self.selected_strategy)
+                        on_click=make_restore_default(self.selected_strategy),
                     )
 
                     save_btn = ft.TextButton(
@@ -691,36 +865,58 @@ class ScreenerView(ft.Container):
                         icon=ft.Icons.SAVE,
                         style=ft.ButtonStyle(color=AppColors.PRIMARY),
                         height=30,
-                        on_click=make_save_prompt(self.selected_strategy)
+                        on_click=make_save_prompt(self.selected_strategy),
                     )
 
                 ctrl.data = p["name"]
                 if is_advanced:
                     if p["name"] == "ai_system_prompt" and reset_btn:
                         wrapper = ft.Container(
-                            content=ft.Column([
-                                ft.Row([
-                                    ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY), 
-                                    ft.Container(expand=True), 
-                                    save_btn,
-                                    reset_btn
-                                ]),
-                                ctrl
-                            ], spacing=5),
-                            margin=ft.margin.only(top=10, bottom=5)
+                            content=ft.Column(
+                                [
+                                    ft.Row(
+                                        [
+                                            ft.Text(
+                                                label,
+                                                size=12,
+                                                color=AppColors.TEXT_SECONDARY,
+                                            ),
+                                            ft.Container(expand=True),
+                                            save_btn,
+                                            reset_btn,
+                                        ]
+                                    ),
+                                    ctrl,
+                                ],
+                                spacing=5,
+                            ),
+                            margin=ft.margin.only(top=10, bottom=5),
                         )
                     else:
-                        wrapper = ft.Container(content=ctrl, margin=ft.margin.only(top=10, bottom=5))
+                        wrapper = ft.Container(
+                            content=ctrl, margin=ft.margin.only(top=10, bottom=5)
+                        )
                     advanced_controls.append(wrapper)
-                else: 
+                else:
                     basic_controls.append(ctrl)
 
         self.params_container.controls.extend(basic_controls)
 
         if advanced_controls:
             exp_tile = ft.ExpansionTile(
-                title=ft.Text(I18n.get("ai_advanced_settings", "⚙️ 高级设置"), size=14, weight=ft.FontWeight.W_500),
-                subtitle=ft.Text(I18n.get("ai_advanced_settings_desc", "仅供专业用户调整的底层策略参数或大模型系统提示词"), size=12, color=AppColors.TEXT_SECONDARY),
+                title=ft.Text(
+                    I18n.get("ai_advanced_settings", "⚙️ 高级设置"),
+                    size=14,
+                    weight=ft.FontWeight.W_500,
+                ),
+                subtitle=ft.Text(
+                    I18n.get(
+                        "ai_advanced_settings_desc",
+                        "仅供专业用户调整的底层策略参数或大模型系统提示词",
+                    ),
+                    size=12,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
                 controls=advanced_controls,
                 collapsed_text_color=AppColors.TEXT_PRIMARY,
                 text_color=AppColors.PRIMARY,
@@ -733,7 +929,7 @@ class ScreenerView(ft.Container):
     def _collect_params(self) -> dict:
         """Collect current parameter values from dynamic UI controls."""
         params = {}
-        
+
         def extract(controls_list):
             for ctrl in controls_list:
                 if isinstance(ctrl, ft.ExpansionTile):
@@ -748,10 +944,10 @@ class ScreenerView(ft.Container):
                     # Ensure we traverse layout groupings (like the custom Restore button layout)
                     extract(ctrl.controls)
                     continue
-                    
-                if not hasattr(ctrl, 'data') or ctrl.data is None:
+
+                if not hasattr(ctrl, "data") or ctrl.data is None:
                     continue  # Skip labels/decorators
-                    
+
                 name = ctrl.data
                 if isinstance(ctrl, ft.Slider):
                     val = ctrl.value
@@ -766,12 +962,14 @@ class ScreenerView(ft.Container):
                             params[name] = ctrl.value
                 elif isinstance(ctrl, ft.Dropdown):
                     params[name] = ctrl.value
-                    
+
         extract(self.params_container.controls)
         return params
 
     def _toggle_progress(self, visible):
-        if not self.page: return
+        if not self.page:
+            return
+
         async def _do_toggle():
             self.progress_ring.visible = visible
             self.run_btn.disabled = visible
@@ -779,10 +977,8 @@ class ScreenerView(ft.Container):
             self.progress_ring.update()
             self.run_btn.update()
             self.strategy_dropdown.update()
+
         self.page.run_task(_do_toggle)
-
-
-
 
     def _on_virtual_sort(self, col_id, ascending):
         # Trigger sorting via ViewModel
@@ -799,10 +995,14 @@ class ScreenerView(ft.Container):
             if path:
                 # Show toast info
                 if hasattr(self.page, "show_toast"):
-                    self.page.show_toast(I18n.get("data_export_success").format(file=path), "success")
+                    self.page.show_toast(
+                        I18n.get("data_export_success").format(file=path), "success"
+                    )
             else:
                 if hasattr(self.page, "show_toast"):
-                    self.page.show_toast(I18n.get("data_export_fail").format(error=error), "error")
+                    self.page.show_toast(
+                        I18n.get("data_export_fail").format(error=error), "error"
+                    )
         except Exception as ex:
             logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
         finally:
@@ -815,35 +1015,39 @@ class ScreenerView(ft.Container):
             self.vm.change_page_size(new_size)
         except ValueError:
             pass
-            
+
     def _on_row_click(self, row_data):
         """Handler passed down to VirtualTable for row clicks.
         row_data here is the FORMATTED dict (for display). We look up the
         RAW dict (with numeric values) for StockDetailDialog."""
-        if not self.page: return
-        
+        if not self.page:
+            return
+
         # Look up raw row data by ts_code for the detail dialog
-        ts_code = row_data.get('ts_code', '')
-        raw_data = getattr(self, '_raw_row_lookup', {}).get(ts_code, row_data)
-        
+        ts_code = row_data.get("ts_code", "")
+        raw_data = getattr(self, "_raw_row_lookup", {}).get(ts_code, row_data)
+
         # Instantiate or update dialog
         if not self.detail_dialog:
-            self.detail_dialog = StockDetailDialog(stock_data=raw_data, data_processor=self.vm.data_processor)
+            self.detail_dialog = StockDetailDialog(
+                stock_data=raw_data, data_processor=self.vm.data_processor
+            )
             self.page.overlay.append(self.detail_dialog)
         else:
             self.detail_dialog.update_data(raw_data)
-            
+
         self.detail_dialog.open = True
         self.page.update()
-        
-        # Trigger async chart load 
+
+        # Trigger async chart load
         if ts_code:
             self.page.run_task(self.detail_dialog.load_chart, ts_code)
 
     # --- UI Update Callbacks ---
 
     def _update_ui(self):
-        if not self.page: return
+        if not self.page:
+            return
 
         async def _do_update():
             # 1. Update Table
@@ -851,17 +1055,18 @@ class ScreenerView(ft.Container):
 
             # 2. Update Pagination
             self.page_info_text.value = I18n.get("screener_page_info").format(
-                current=self.vm.page_no,
-                total=getattr(self.vm, 'total_pages', 0)
+                current=self.vm.page_no, total=getattr(self.vm, "total_pages", 0)
             )
             self.prev_btn.disabled = self.vm.page_no <= 1
-            self.next_btn.disabled = self.vm.page_no >= getattr(self.vm, 'total_pages', 0)
+            self.next_btn.disabled = self.vm.page_no >= getattr(
+                self.vm, "total_pages", 0
+            )
 
             # 3. Enable Export if data exists
-            self.export_btn.disabled = getattr(self.vm, 'total_items', 0) == 0
+            self.export_btn.disabled = getattr(self.vm, "total_items", 0) == 0
 
             self.page.update()
-            
+
         self.page.run_task(_do_update)
 
     def _render_table(self):
@@ -871,7 +1076,9 @@ class ScreenerView(ft.Container):
         if df is None or df.empty:
             # Clear table explicitly to remove old results
             self.result_table.set_columns([])
-            self.result_table.set_rows([], sort_col=self.vm.sort_column, sort_asc=self.vm.sort_ascending)
+            self.result_table.set_rows(
+                [], sort_col=self.vm.sort_column, sort_asc=self.vm.sort_ascending
+            )
             self._raw_row_lookup = {}  # Clear lookup
             return
 
@@ -879,28 +1086,53 @@ class ScreenerView(ft.Container):
         # (formatted strings like '1.20万' would break StockDetailDialog._format_val)
         self._raw_row_lookup = {}
         for _, row in df.iterrows():
-            key = str(row.get('ts_code', ''))
+            key = str(row.get("ts_code", ""))
             self._raw_row_lookup[key] = row.to_dict()
 
         # Columns to hide from the main table view to save space (details available on click)
         HIDDEN_COLS = {
-            'symbol', 'id', 'list_status', 'list_date', 'trade_date', 'ann_date', 
-            'open', 'high', 'low', 'pre_close', 'change',
-            'pe', 'pe_ttm', 'pb', 'ps', 'ps_ttm', 'dv_ratio', 'dv_ttm',
-            'circ_mv', 'float_share', 'free_share', 'total_share', 'area', 'market',
+            "symbol",
+            "id",
+            "list_status",
+            "list_date",
+            "trade_date",
+            "ann_date",
+            "open",
+            "high",
+            "low",
+            "pre_close",
+            "change",
+            "pe",
+            "pe_ttm",
+            "pb",
+            "ps",
+            "ps_ttm",
+            "dv_ratio",
+            "dv_ttm",
+            "circ_mv",
+            "float_share",
+            "free_share",
+            "total_share",
+            "area",
+            "market",
             # History-specific: hide verbose/review-only fields
-            'thinking', 'prediction_result', 'created_at',
-            't1_price', 't1_pct', 't5_price', 't5_pct',
+            "thinking",
+            "prediction_result",
+            "created_at",
+            "t1_price",
+            "t1_pct",
+            "t5_price",
+            "t5_pct",
         }
 
         # Column width overrides (default: 80px for numeric columns)
         COLUMN_WIDTHS = {
-            'ts_code': 100,
-            'name': 120,
-            'ai_score': 80,
-            'ai_reason': 250,
-            'industry': 120,
-            'strategy_name': 120,
+            "ts_code": 100,
+            "name": 120,
+            "ai_score": 80,
+            "ai_reason": 250,
+            "industry": 120,
+            "strategy_name": 120,
         }
 
         # Define Columns (Dynamic based on data)
@@ -911,18 +1143,14 @@ class ScreenerView(ft.Container):
             if col in HIDDEN_COLS:
                 continue
             visible_cols.append(col)
-            
+
             width = COLUMN_WIDTHS.get(col, 80)
 
             # Use MetaDataManager to get I18n label directly, the data dictionary manager
             # handles English fallback.
             label = MetaDataManager.get_column_alias("screening_history", col)
 
-            vt_columns.append({
-                "id": col,
-                "label": label,
-                "width": width
-            })
+            vt_columns.append({"id": col, "label": label, "width": width})
 
         self.result_table.on_row_click = self._on_row_click
         self.result_table.set_columns(vt_columns)
@@ -931,26 +1159,26 @@ class ScreenerView(ft.Container):
             """Helper to consistently format cell values."""
             if pd.isna(val):
                 return "-"
-            
+
             # Format Dates safely
-            if col in ['list_date', 'trade_date']:
-                 date_str = str(val).split('.')[0] # handle 20240101.0
-                 if len(date_str) == 8:
-                     return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-                 return str(val)
+            if col in ["list_date", "trade_date"]:
+                date_str = str(val).split(".")[0]  # handle 20240101.0
+                if len(date_str) == 8:
+                    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+                return str(val)
 
             # Format Numerics
-            if isinstance(val, (float, int)) and col not in ['ts_code', 'symbol']:  
-                if col in ['vol', 'volume', 'amount']:
+            if isinstance(val, (float, int)) and col not in ["ts_code", "symbol"]:
+                if col in ["vol", "volume", "amount"]:
                     # Human readable large numbers
                     if val > 1_000_000_000:
-                        return f"{val/1_000_000_000:.2f}{I18n.get('unit_yi', '亿')}"
+                        return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi', '亿')}"
                     elif val > 10_000:
-                        return f"{val/10_000:.2f}{I18n.get('unit_wan', '万')}"
+                        return f"{val / 10_000:.2f}{I18n.get('unit_wan', '万')}"
                     return f"{val:,.0f}"
                 elif isinstance(val, float):
                     return f"{val:.2f}"
-            
+
             return str(val)
 
         formatted_rows = []
@@ -961,33 +1189,49 @@ class ScreenerView(ft.Container):
         self.result_table.set_rows(
             formatted_rows,
             sort_col=self.vm.sort_column,
-            sort_asc=self.vm.sort_ascending
+            sort_asc=self.vm.sort_ascending,
         )
 
     def _append_log(self, name, score, thinking):
-        if not self.page: return
-        
+        if not self.page:
+            return
+
         async def _do_log():
-            line = f"[{name}] {I18n.get('screener_score')}: {score} | {thinking[:80]}..."
+            line = (
+                f"[{name}] {I18n.get('screener_score')}: {score} | {thinking[:80]}..."
+            )
 
             # Colors based on score
-            color = AppColors.ACCENT if score > 80 else "#FFB86C" if score > 50 else "#FF5555"
+            color = (
+                AppColors.ACCENT
+                if score > 80
+                else "#FFB86C"
+                if score > 50
+                else "#FF5555"
+            )
 
             # Limit total logs to avoid memory leak (aligned with stream card cap)
             if len(self.log_view.controls) > 10:
                 self.log_view.controls.pop(0)
 
             self.log_view.controls.append(
-                ft.Text(line, color=color, size=12, no_wrap=False, font_family="Roboto Mono, Consolas, monospace")
+                ft.Text(
+                    line,
+                    color=color,
+                    size=12,
+                    no_wrap=False,
+                    font_family="Roboto Mono, Consolas, monospace",
+                )
             )
             self.log_view.update()
-            
+
         self.page.run_task(_do_log)
 
     def _on_log_stream_start(self, name):
         """Creates a streaming Markdown card and returns a throttled chunk receiver closure."""
-        if not self.page: return None
-        
+        if not self.page:
+            return None
+
         # 1. Component initialization
         reasoning_md = ft.Markdown(
             "",
@@ -995,7 +1239,7 @@ class ScreenerView(ft.Container):
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
             code_theme="atom-one-dark",
         )
-        
+
         content_md = ft.Markdown(
             "",
             selectable=True,
@@ -1005,99 +1249,111 @@ class ScreenerView(ft.Container):
 
         reasoning_tile = ft.ExpansionTile(
             title=ft.Text(f"💡 {I18n.get('ai_thinking', '推演思考过程')}..."),
-            subtitle=ft.Text(I18n.get('ai_expand_reasoning', '点击展开/折叠思考过程'), size=10, color=AppColors.TEXT_SECONDARY),
+            subtitle=ft.Text(
+                I18n.get("ai_expand_reasoning", "点击展开/折叠思考过程"),
+                size=10,
+                color=AppColors.TEXT_SECONDARY,
+            ),
             controls=[
                 ft.Container(
                     content=reasoning_md,
                     padding=10,
                     bgcolor=AppColors.BACKGROUND,
-                    border_radius=4
+                    border_radius=4,
                 )
             ],
             initially_expanded=True,
-            visible=False # Hidden until reasoning text arrives
+            visible=False,  # Hidden until reasoning text arrives
         )
-        
+
         # Main stock Card
-        card_content = ft.Column([
-            ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
-            reasoning_tile,
-            ft.Container(content=content_md, padding=ft.padding.only(left=5, right=5))
-        ], spacing=10)
-        
+        card_content = ft.Column(
+            [
+                ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
+                reasoning_tile,
+                ft.Container(
+                    content=content_md, padding=ft.padding.only(left=5, right=5)
+                ),
+            ],
+            spacing=10,
+        )
+
         card = ft.Container(
             content=card_content,
             border=ft.border.all(1, AppColors.DIVIDER),
             border_radius=8,
             padding=15,
             bgcolor=AppColors.SURFACE,
-            margin=ft.margin.only(bottom=10)
+            margin=ft.margin.only(bottom=10),
         )
-        
+
         async def _add_line_task():
             # optional: limit max cards to avoid memory explosion if analyzing 100 stocks
             if len(self.log_view.controls) > 10:
                 self.log_view.controls.pop(0)
             self.log_view.controls.append(card)
             self.log_view.update()
-            
+
         self.page.run_task(_add_line_task)
-        
+
         state = {"reasoning": "", "content": "", "last_flush": 0.0, "pending": False}
         THROTTLE_INTERVAL = 0.15  # 150ms — smooth but not flooding
-        
+
         def _flush_display():
             """Snapshot current text and schedule a UI update."""
-            
+
             # Snapshots for closure safety
             snap_reas = state["reasoning"]
             snap_cont = state["content"]
-            
+
             async def _update_line_task():
-                if not card.page: return
-                
+                if not card.page:
+                    return
+
                 # Update reasoning
                 if snap_reas:
                     reasoning_md.value = snap_reas
                     reasoning_tile.visible = True
-                        
+
                 # Update content
                 if snap_cont:
                     content_md.value = snap_cont
-                    
+
                 self.log_view.update()
-                
+
             if self.page:
                 self.page.run_task(_update_line_task)
             state["last_flush"] = time.time()
             state["pending"] = False
-        
+
         def _on_chunk(chunk_text, is_reasoning=False):
-            if not self.page: return
+            if not self.page:
+                return
             if is_reasoning:
                 state["reasoning"] += chunk_text
             else:
                 state["content"] += chunk_text
-                
+
             now = time.time()
             if now - state["last_flush"] >= THROTTLE_INTERVAL:
                 _flush_display()
             else:
                 state["pending"] = True
-        
+
         # Attach final_flush so caller can drain last pending chunk
         _on_chunk.final_flush = lambda: _flush_display() if state["pending"] else None
-            
+
         return _on_chunk
 
     def _update_status(self, msg, color=None):
-        if not self.page: return
-        
+        if not self.page:
+            return
+
         async def _do_status():
             self.status_text.value = msg
             self.status_text.color = color or AppColors.TEXT_PRIMARY
             self.status_text.update()
-            
+
         self.page.run_task(_do_status)
 
     def update_theme(self):
@@ -1120,7 +1376,7 @@ class ScreenerView(ft.Container):
 
         # 3. Logs (Use modern card style)
         try:
-            if hasattr(self, 'log_title_text'):
+            if hasattr(self, "log_title_text"):
                 self.log_title_text.color = AppColors.TEXT_PRIMARY
         except Exception as e:
             logger.warning(f"Failed to update log area theme: {e}")
@@ -1136,6 +1392,8 @@ class ScreenerView(ft.Container):
             try:
                 self._render_table()
             except Exception as e:
-                logger.error(f"[ScreenerView] Theme | ❌ Re-render failed: {e}", exc_info=True)
+                logger.error(
+                    f"[ScreenerView] Theme | ❌ Re-render failed: {e}", exc_info=True
+                )
 
             self.page.update()

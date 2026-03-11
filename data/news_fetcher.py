@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 
 import akshare as ak
@@ -9,12 +9,13 @@ import pandas as pd
 from utils.thread_pool import ThreadPoolManager, TaskType
 from ui.i18n import I18n
 
-logger = logging.getLogger(__name__)
-
-import requests
 import json
 import threading
+
+import requests
 from utils.time_utils import get_now
+
+logger = logging.getLogger(__name__)
 
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
@@ -26,22 +27,21 @@ class NewsFetcher:
     Replaces blocked EastMoney interfaces.
     """
 
-
     @staticmethod
     async def get_stock_news(ts_code, limit=5):
         """
         Fetch specific stock news using a dual-layer strategy:
         1. 巨潮公告 (stock_zh_a_disclosure_report_cninfo) - Official exchange filings (Highest quality)
         2. 东财搜索 (stock_news_em) - Fallback to keyword search (Lower quality, more noise)
-        
+
         Both use a pyarrow string_storage workaround for pandas compatibility.
         """
         if not ts_code:
             return []
 
         # Extract symbol without suffix suffix for standard AKShare calls
-        symbol = ts_code.split('.')[0]
-        
+        symbol = ts_code.split(".")[0]
+
         # dynamic market key resolution:
         # Instead of guessing "上交所"/"深交所"/"北交所" and hitting KeyErrors in akshare,
         # akshare actually consolidates all of them under a single key in its column_map.
@@ -50,10 +50,11 @@ class NewsFetcher:
         market = ""
         try:
             import akshare.stock_feature.stock_disclosure_cninfo as mod
+
             market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]
         except Exception:
             market = "沪深京"  # Fallback to standard standard UTF-8 key
-            
+
         # Run the IO bound akshare calls in the thread pool
         def _fetch():
             # Apply PyArrow Workaround with thread-safety lock:
@@ -61,8 +62,8 @@ class NewsFetcher:
             # Multiple threads calling this concurrently could clobber each other.
             with _pd_options_lock:
                 old_storage = pd.options.mode.string_storage
-                pd.options.mode.string_storage = 'python'
-            
+                pd.options.mode.string_storage = "python"
+
             try:
                 # -------------------------------------------------------------
                 # Layer 1: 巨潮资讯公告 (CNINFO Official Filings)
@@ -71,78 +72,97 @@ class NewsFetcher:
                     # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
                     end_date = get_now().strftime("%Y%m%d")
                     start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
-                    
+
                     df_cninfo = ak.stock_zh_a_disclosure_report_cninfo(
                         symbol=symbol,
                         market=market,
                         start_date=start_date,
-                        end_date=end_date
+                        end_date=end_date,
                     )
-                    
+
                     if df_cninfo is not None and not df_cninfo.empty:
                         # Column names may vary by akshare version or encoding.
                         # Known structure: [代码, 简称, 公告标题, 公告时间, 公告链接]
                         # We use name-based lookup with positional fallback.
                         cols = list(df_cninfo.columns)
-                        title_col = '公告标题' if '公告标题' in cols else (cols[2] if len(cols) > 2 else None)
-                        time_col = '公告时间' if '公告时间' in cols else (cols[3] if len(cols) > 3 else None)
-                        
+                        title_col = (
+                            "公告标题"
+                            if "公告标题" in cols
+                            else (cols[2] if len(cols) > 2 else None)
+                        )
+                        time_col = (
+                            "公告时间"
+                            if "公告时间" in cols
+                            else (cols[3] if len(cols) > 3 else None)
+                        )
+
                         if title_col:
                             news_list = []
                             for _, row in df_cninfo.head(limit).iterrows():
-                                title = str(row.get(title_col, '')).strip()
-                                pub_date = str(row.get(time_col, '')) if time_col else ''
+                                title = str(row.get(title_col, "")).strip()
+                                pub_date = (
+                                    str(row.get(time_col, "")) if time_col else ""
+                                )
                                 pub_time = f"{pub_date} 00:00:00" if pub_date else ""
-                                
-                                news_list.append({
-                                    'title': title,
-                                    'publish_time': pub_time,
-                                    'source': '巨潮公告'
-                                })
-                            
+
+                                news_list.append(
+                                    {
+                                        "title": title,
+                                        "publish_time": pub_time,
+                                        "source": "巨潮公告",
+                                    }
+                                )
+
                             if news_list:
                                 return news_list
                 except Exception as e:
-                    logger.warning(f"[News] CNINFO disclosure failed for {ts_code}: {e}", exc_info=True)
+                    logger.warning(
+                        f"[News] CNINFO disclosure failed for {ts_code}: {e}",
+                        exc_info=True,
+                    )
 
                 # -------------------------------------------------------------
                 # Layer 2: 东财新闻搜索 (EastMoney News Search) - Fallback
                 # -------------------------------------------------------------
                 try:
                     df_em = ak.stock_news_em(symbol=symbol)
-                    
+
                     if df_em is not None and not df_em.empty:
                         news_list = []
                         # EastMoney returns '新闻内容' as title, '新闻链接', '新闻时间', etc.
                         for _, row in df_em.head(limit).iterrows():
-                            title = row.get('新闻标题', row.get('新闻内容', ''))
-                            pub_time = row.get('新闻时间', row.get('发布时间', ''))
-                            source = row.get('文章来源', '东财新闻')
-                            
+                            title = row.get("新闻标题", row.get("新闻内容", ""))
+                            pub_time = row.get("新闻时间", row.get("发布时间", ""))
+                            source = row.get("文章来源", "东财新闻")
+
                             # Clean up title: 東方财富 often adds "[XXX]" prefixes or suffixes
                             title_str = str(title).strip()
-                            
-                            news_list.append({
-                                'title': title_str,
-                                'publish_time': str(pub_time),
-                                'source': str(source)
-                            })
-                        
+
+                            news_list.append(
+                                {
+                                    "title": title_str,
+                                    "publish_time": str(pub_time),
+                                    "source": str(source),
+                                }
+                            )
+
                         return news_list
                 except Exception as e:
                     logger.warning(f"[News] EM search failed for {ts_code}: {e}")
-                
+
             except Exception as outer_e:
-                logger.error(f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}")
+                logger.error(
+                    f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}"
+                )
             finally:
                 # Always restore global pandas settings (inside lock for thread-safety)
                 with _pd_options_lock:
                     pd.options.mode.string_storage = old_storage
-                
+
             return []
 
         try:
-            # We use the IO Thread Pool with a 15-second timeout via asyncio.wait_for 
+            # We use the IO Thread Pool with a 15-second timeout via asyncio.wait_for
             # to prevent hanging the AI pipeline if the APIs are slow/dead.
             future = ThreadPoolManager().run_async(TaskType.IO, _fetch)
             return await asyncio.wait_for(future, timeout=15.0)
@@ -175,52 +195,59 @@ class NewsFetcher:
 
             news_list = []
             now = get_now()
-            today_str = now.strftime('%Y-%m-%d')
-            
+            today_str = now.strftime("%Y-%m-%d")
+
             for _, row in df.head(limit).iterrows():
                 # Extract raw time string
-                raw_time = row.get('发布时间') or row.get('时间') or row.get('time', '')
+                raw_time = row.get("发布时间") or row.get("时间") or row.get("time", "")
                 final_time = raw_time
-                
+
                 # Handle time-only string (e.g. "09:30:00") -> Prepend Date
-                if raw_time and len(str(raw_time)) <= 8 and ':' in str(raw_time):
+                if raw_time and len(str(raw_time)) <= 8 and ":" in str(raw_time):
                     try:
                         # Parse time to determine if it's today or yesterday
                         # e.g. If now is 00:05 and news is 23:55 -> Yesterday
-                        t_parts = list(map(int, str(raw_time).split(':')))
+                        t_parts = list(map(int, str(raw_time).split(":")))
                         # Handle HH:MM or HH:MM:SS
                         if len(t_parts) >= 2:
-                            news_dt = now.replace(hour=t_parts[0], minute=t_parts[1], second=t_parts[2] if len(t_parts)>2 else 0)
-                            
+                            news_dt = now.replace(
+                                hour=t_parts[0],
+                                minute=t_parts[1],
+                                second=t_parts[2] if len(t_parts) > 2 else 0,
+                            )
+
                             # If news time is significantly in the future (> 30 mins), it's likely yesterday's news
                             # (e.g. Now 10:00, News 23:00 -> Yesterday 23:00)
                             if news_dt > now + timedelta(minutes=30):
                                 news_dt -= timedelta(days=1)
-                                
+
                             final_time = news_dt.strftime("%Y-%m-%d %H:%M:%S")
                         else:
                             final_time = f"{today_str} {raw_time}"
-                    except Exception as e:
+                    except Exception:
                         # Fallback
                         final_time = f"{today_str} {raw_time}"
-                
+
                 # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
                 try:
-                     # Try parsing with pandas for robustness (handles multiple formats)
+                    # Try parsing with pandas for robustness (handles multiple formats)
                     dt_obj = pd.to_datetime(final_time)
                     final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     # Fallback: if pandas fails, try to ensure at least string format
                     final_time = str(final_time)
 
-                news_list.append({
-                    'title': row.get('标题') or row.get('title', I18n.get('news_no_title')),
-                    'content': row.get('内容') or row.get('content', ''),
-                    'time': final_time
-                })
-            
+                news_list.append(
+                    {
+                        "title": row.get("标题")
+                        or row.get("title", I18n.get("news_no_title")),
+                        "content": row.get("内容") or row.get("content", ""),
+                        "time": final_time,
+                    }
+                )
+
             # Ensure we sort by time DESC so news_list[0] is truly the latest
-            news_list.sort(key=lambda x: x['time'], reverse=True)
+            news_list.sort(key=lambda x: x["time"], reverse=True)
             return news_list
 
         except Exception as e:
@@ -244,10 +271,11 @@ class NewsFetcher:
                     "sort": "mktcap",  # Sort by market cap to get giants
                     "asc": "0",
                     "market": "",
-                    "id": ""
+                    "id": "",
                 }
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                }
 
                 resp = requests.get(url, params=params, headers=headers, timeout=10)
                 content = resp.text
@@ -256,10 +284,10 @@ class NewsFetcher:
                 start = content.find("(")
                 end = content.rfind(")")
                 if start != -1 and end != -1 and start < end:
-                    json_str = content[start + 1: end]
+                    json_str = content[start + 1 : end]
                     try:
                         data = json.loads(json_str)
-                        return data.get('data', [])
+                        return data.get("data", [])
                     except json.JSONDecodeError:
                         logger.warning("[News] Failed to decode JSON from Sina US API")
                         return []
@@ -271,13 +299,22 @@ class NewsFetcher:
                 return "Global data unavailable."
 
             # Key mappings (Sina Names -> Ticker/English)
-            key_tickers = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AMD']
+            key_tickers = [
+                "NVDA",
+                "TSLA",
+                "AAPL",
+                "MSFT",
+                "GOOGL",
+                "AMZN",
+                "META",
+                "AMD",
+            ]
 
             summary = []
             for item in data_list:
                 # Sina structure: {name: "NVDA", cname: "英伟达", price: "135.2", diff: "3.2", chg: "2.45", ...}
-                ticker = item.get('name', '')
-                cname = item.get('cname', '')
+                ticker = item.get("name", "")
+                cname = item.get("cname", "")
 
                 matched = False
                 if ticker in key_tickers:
@@ -285,7 +322,7 @@ class NewsFetcher:
 
                 # Safe float conversion
                 try:
-                    pct = float(item.get('chg', 0))
+                    pct = float(item.get("chg", 0))
                 except (ValueError, TypeError):
                     pct = 0.0
 
@@ -296,8 +333,8 @@ class NewsFetcher:
             # If no giants found (unlikely with mktcap sort), take top 3 movers
             if not summary and data_list:
                 for item in data_list[:5]:
-                    name = item.get('name', 'Unknown')
-                    chg = item.get('chg', '0')
+                    name = item.get("name", "Unknown")
+                    chg = item.get("chg", "0")
                     summary.append(f"{name}: {chg}%")
 
             return ", ".join(summary)
@@ -330,17 +367,17 @@ class NewsFetcher:
                 return []
 
             # Sina returns: 板块, 涨跌幅
-            if '涨跌幅' in df.columns:
-                df = df.sort_values('涨跌幅', ascending=False)
+            if "涨跌幅" in df.columns:
+                df = df.sort_values("涨跌幅", ascending=False)
 
             results = []
             for _, row in df.head(limit).iterrows():
-                name = row.get('板块', '')
+                name = row.get("板块", "")
                 if not name:
                     continue
 
                 try:
-                    raw_val = row.get('涨跌幅', 0)
+                    raw_val = row.get("涨跌幅", 0)
                     # Handle NaN from pandas
                     if pd.isna(raw_val):
                         change_val = 0.0
@@ -353,17 +390,13 @@ class NewsFetcher:
 
                 # Color: red=up, green=down, gray=flat
                 if change_val > 0:
-                    color = 'red'
+                    color = "red"
                 elif change_val < 0:
-                    color = 'green'
+                    color = "green"
                 else:
-                    color = 'grey'
+                    color = "grey"
 
-                results.append({
-                    'name': name,
-                    'change': change_str,
-                    'color': color
-                })
+                results.append({"name": name, "change": change_str, "color": color})
 
             return results
 

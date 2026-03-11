@@ -35,8 +35,7 @@ class AutomationTab(ft.Container):
         auto_update_time = ConfigHandler.get_auto_update_time()
 
         self.schedule_enabled = ft.Switch(
-            value=auto_update_enabled,
-            on_change=self.on_schedule_toggle
+            value=auto_update_enabled, on_change=self.on_schedule_toggle
         )
         self.schedule_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
@@ -44,13 +43,34 @@ class AutomationTab(ft.Container):
             value=auto_update_time,
             options=self._build_time_options(),
             on_change=self.on_schedule_time_change,
-            disabled=not auto_update_enabled
+            disabled=not auto_update_enabled,
         )
 
         self.schedule_status = ft.Text(
             self._get_schedule_status_text(auto_update_enabled),
             size=_FONT_SIZE_SMALL,
-            color=AppColors.SUCCESS if auto_update_enabled else AppColors.TEXT_HINT
+            color=AppColors.SUCCESS if auto_update_enabled else AppColors.TEXT_HINT,
+        )
+
+        doubao_enabled = ConfigHandler.is_doubao_schedule_enabled()
+        doubao_time = ConfigHandler.get_doubao_schedule_time()
+
+        self.doubao_enabled = ft.Switch(
+            value=doubao_enabled, on_change=self.on_doubao_toggle
+        )
+        self.doubao_time = ft.Dropdown(
+            label=I18n.get("settings_update_time"),
+            width=_DROPDOWN_WIDTH,
+            value=doubao_time,
+            options=self._build_time_options(),
+            on_change=self.on_doubao_time_change,
+            disabled=not doubao_enabled,
+        )
+
+        self.doubao_status = ft.Text(
+            self._get_schedule_status_text(doubao_enabled),
+            size=_FONT_SIZE_SMALL,
+            color=AppColors.SUCCESS if doubao_enabled else AppColors.TEXT_HINT,
         )
 
         self._build_content()
@@ -68,54 +88,115 @@ class AutomationTab(ft.Container):
 
     def _build_content(self):
         """构建 UI 内容"""
-        self.txt_title_main = ft.Text(I18n.get("settings_auto_update"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
-                        color=AppColors.TEXT_PRIMARY)
-        self.txt_desc_main = ft.Text(I18n.get("settings_auto_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
-        
+        self.txt_title_main = ft.Text(
+            I18n.get("settings_auto_update"),
+            size=_FONT_SIZE_TITLE,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        )
+        self.txt_desc_main = ft.Text(
+            I18n.get("settings_auto_desc"),
+            size=_FONT_SIZE_BODY,
+            color=AppColors.TEXT_SECONDARY,
+        )
+
         self.row_schedule = SettingRow(
             icon=ft.Icons.SCHEDULE,
             title=I18n.get("settings_auto_update"),
             subtitle=I18n.get("settings_auto_desc"),
             control=self.schedule_enabled,
-            icon_color=AppColors.PRIMARY
+            icon_color=AppColors.PRIMARY,
         )
-        
+
         self.row_time = SettingRow(
             icon=ft.Icons.ACCESS_TIME,
             title=I18n.get("settings_update_time"),
             subtitle=I18n.get("settings_trading_days"),
             control=self.schedule_time,
-            icon_color=AppColors.ACCENT
+            icon_color=AppColors.ACCENT,
         )
-        
+
         self.card_main = DashboardCard(
-            content=ft.Column([
-                self.row_schedule,
-                
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-
-                self.row_time,
-
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                
-                ft.Row([
-                    ft.Icon(ft.Icons.INFO_OUTLINE, size=_ICON_SIZE_SMALL, color=AppColors.TEXT_SECONDARY),
-                    self.schedule_status,
-                ]),
-            ])
+            content=ft.Column(
+                [
+                    self.row_schedule,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self.row_time,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.INFO_OUTLINE,
+                                size=_ICON_SIZE_SMALL,
+                                color=AppColors.TEXT_SECONDARY,
+                            ),
+                            self.schedule_status,
+                        ]
+                    ),
+                ]
+            )
         )
-        
-        self.txt_hint_bg = ft.Text(I18n.get("settings_hint_bg_run"), size=_FONT_SIZE_HINT, color=AppColors.TEXT_HINT)
-        
+
+        self.row_doubao_schedule = SettingRow(
+            icon=ft.Icons.AUTO_AWESOME,
+            title=I18n.get("settings_doubao_update", "自动重塑豆包概念"),
+            subtitle=I18n.get(
+                "settings_doubao_desc",
+                "开启后将定时自动清空并重建全市场的大模型专属概念体系",
+            ),
+            control=self.doubao_enabled,
+            icon_color=AppColors.PRIMARY,
+        )
+
+        self.row_doubao_time = SettingRow(
+            icon=ft.Icons.ACCESS_TIME,
+            title=I18n.get("settings_update_time"),
+            subtitle=I18n.get("settings_saturdays", "限定每个周六执行"),
+            control=self.doubao_time,
+            icon_color=AppColors.ACCENT,
+        )
+
+        self.card_doubao = DashboardCard(
+            content=ft.Column(
+                [
+                    self.row_doubao_schedule,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self.row_doubao_time,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.INFO_OUTLINE,
+                                size=_ICON_SIZE_SMALL,
+                                color=AppColors.TEXT_SECONDARY,
+                            ),
+                            self.doubao_status,
+                        ]
+                    ),
+                ]
+            )
+        )
+
+        self.txt_hint_bg = ft.Text(
+            I18n.get("settings_hint_bg_run"),
+            size=_FONT_SIZE_HINT,
+            color=AppColors.TEXT_HINT,
+        )
+
         self.inner_container = ft.Container(
-            content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
-                self.txt_title_main,
-                self.txt_desc_main,
-                ft.Container(height=_SPACING_SMALL),
-                self.card_main,
-                self.txt_hint_bg,
-            ], spacing=_SPACING_DEFAULT),
-            **AppStyles.card()
+            content=ft.Column(
+                scroll=ft.ScrollMode.AUTO,
+                controls=[
+                    self.txt_title_main,
+                    self.txt_desc_main,
+                    ft.Container(height=_SPACING_SMALL),
+                    self.card_main,
+                    self.card_doubao,
+                    self.txt_hint_bg,
+                ],
+                spacing=_SPACING_DEFAULT,
+            ),
+            **AppStyles.card(),
         )
         self.content = self.inner_container
 
@@ -128,9 +209,20 @@ class AutomationTab(ft.Container):
 
         # Status color (custom)
         enabled = self.schedule_enabled.value
-        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        self.schedule_status.color = (
+            AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        )
 
-        if self.page: self.update()
+        self.doubao_time.bgcolor = AppColors.INPUT_BG
+        self.doubao_time.color = AppColors.INPUT_TEXT
+        self.doubao_time.border_color = AppColors.INPUT_BORDER
+        doubao_enabled = self.doubao_enabled.value
+        self.doubao_status.color = (
+            AppColors.SUCCESS if doubao_enabled else ft.Colors.ON_SURFACE_VARIANT
+        )
+
+        if self.page:
+            self.update()
 
     def did_mount(self):
         """组件挂载后订阅语言变更"""
@@ -146,7 +238,7 @@ class AutomationTab(ft.Container):
 
     def _on_locale_change(self, new_locale: str):
         """语言变更回调
-        
+
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
         """
         try:
@@ -154,7 +246,18 @@ class AutomationTab(ft.Container):
             self.schedule_enabled.label = I18n.get("settings_auto_update")
             self.schedule_time.label = I18n.get("settings_update_time")
             self.schedule_time.options = self._build_time_options()
-            self.schedule_status.value = self._get_schedule_status_text(self.schedule_enabled.value)
+            self.schedule_status.value = self._get_schedule_status_text(
+                self.schedule_enabled.value
+            )
+
+            self.doubao_enabled.label = I18n.get(
+                "settings_doubao_update", "自动重塑豆包概念"
+            )
+            self.doubao_time.label = I18n.get("settings_update_time")
+            self.doubao_time.options = self._build_time_options()
+            self.doubao_status.value = self._get_schedule_status_text(
+                self.doubao_enabled.value
+            )
 
             # 重建整个内容以确保所有文本更新
             self._build_content()
@@ -172,18 +275,28 @@ class AutomationTab(ft.Container):
 
     def _get_schedule_status_text(self, enabled):
         """获取调度状态文本"""
-        return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
+        return (
+            I18n.get("settings_status_auto_on")
+            if enabled
+            else I18n.get("settings_status_auto_off")
+        )
 
     def on_schedule_toggle(self, e):
         """处理自动更新开关切换"""
         enabled = self.schedule_enabled.value
         ConfigHandler.save_config({"auto_update_enabled": enabled})
         self.schedule_status.value = self._get_schedule_status_text(enabled)
-        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        self.schedule_status.color = (
+            AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        )
         self.schedule_time.disabled = not enabled
         self.update()
         if self.show_snack:
-            self.show_snack(I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"))
+            self.show_snack(
+                I18n.get("settings_snack_auto_on")
+                if enabled
+                else I18n.get("settings_snack_auto_off")
+            )
 
     def on_schedule_time_change(self, e):
         """处理更新时间变更"""
@@ -191,7 +304,34 @@ class AutomationTab(ft.Container):
         ConfigHandler.save_config({"auto_update_time": selected_time})
         self.update()
         if self.show_snack:
-            self.show_snack(I18n.get("settings_snack_time_set").format(time=selected_time))
+            self.show_snack(
+                I18n.get("settings_snack_time_set").format(time=selected_time)
+            )
+
+    def on_doubao_toggle(self, e):
+        enabled = self.doubao_enabled.value
+        ConfigHandler.set_doubao_schedule_enabled(enabled)
+        self.doubao_status.value = self._get_schedule_status_text(enabled)
+        self.doubao_status.color = (
+            AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        )
+        self.doubao_time.disabled = not enabled
+        self.update()
+        if self.show_snack:
+            self.show_snack(
+                I18n.get("settings_snack_auto_on")
+                if enabled
+                else I18n.get("settings_snack_auto_off")
+            )
+
+    def on_doubao_time_change(self, e):
+        selected_time = self.doubao_time.value
+        ConfigHandler.set_doubao_schedule_time(selected_time)
+        self.update()
+        if self.show_snack:
+            self.show_snack(
+                I18n.get("settings_snack_time_set").format(time=selected_time)
+            )
 
 
 class NotificationsTab(ft.Container):
@@ -210,16 +350,16 @@ class NotificationsTab(ft.Container):
         self.news_alerts_enabled = ft.Switch(
             label=I18n.get("settings_news_alerts"),
             value=enable_news,
-            on_change=self.on_news_toggle
+            on_change=self.on_news_toggle,
         )
-        
+
         self.news_interval = ft.Dropdown(
             label=I18n.get("settings_news_interval"),
             width=AppStyles.CONTROL_WIDTH_MD,
             value=str(news_interval),
             options=self._build_interval_options(),
             on_change=self.on_interval_change,
-            disabled=not enable_news
+            disabled=not enable_news,
         )
 
         self._build_content()
@@ -234,48 +374,60 @@ class NotificationsTab(ft.Container):
 
     def _build_content(self):
         """构建 UI 内容"""
-        self.txt_notify_title = ft.Text(I18n.get("settings_notify_title"), size=_FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD,
-                        color=AppColors.TEXT_PRIMARY)
-                        
+        self.txt_notify_title = ft.Text(
+            I18n.get("settings_notify_title"),
+            size=_FONT_SIZE_TITLE,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        )
+
         self.row_alerts = SettingRow(
             icon=ft.Icons.NOTIFICATIONS_ACTIVE,
             title=I18n.get("settings_news_alerts"),
             subtitle=I18n.get("settings_notify_desc"),
             control=self.news_alerts_enabled,
-            icon_color=AppColors.WARNING
+            icon_color=AppColors.WARNING,
         )
-        
+
         self.row_interval = SettingRow(
             icon=ft.Icons.TIMER,
             title=I18n.get("settings_news_interval"),
             subtitle=I18n.get("settings_news_interval_desc"),
             control=self.news_interval,
-            icon_color=AppColors.INFO
+            icon_color=AppColors.INFO,
         )
-        
+
         self.card_notify = DashboardCard(
-            content=ft.Column([
-                self.row_alerts,
-
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-
-                self.row_interval,
-            ])
+            content=ft.Column(
+                [
+                    self.row_alerts,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self.row_interval,
+                ]
+            )
         )
-        
-        self.txt_notify_desc = ft.Text(I18n.get("settings_notify_desc"), size=_FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY)
-        
+
+        self.txt_notify_desc = ft.Text(
+            I18n.get("settings_notify_desc"),
+            size=_FONT_SIZE_BODY,
+            color=AppColors.TEXT_SECONDARY,
+        )
+
         self.inner_container = ft.Container(
-            content=ft.Column(scroll=ft.ScrollMode.AUTO, controls=[
-                self.txt_notify_title,
-                ft.Container(height=_SPACING_SMALL),
-                self.card_notify,
-                self.txt_notify_desc
-            ], spacing=_SPACING_DEFAULT),
-            **AppStyles.card()
+            content=ft.Column(
+                scroll=ft.ScrollMode.AUTO,
+                controls=[
+                    self.txt_notify_title,
+                    ft.Container(height=_SPACING_SMALL),
+                    self.card_notify,
+                    self.txt_notify_desc,
+                ],
+                spacing=_SPACING_DEFAULT,
+            ),
+            **AppStyles.card(),
         )
         self.content = self.inner_container
-        
+
     def update_theme(self):
         """Update styles on theme change — only Layer 2 custom colors."""
         # Input fields
@@ -283,7 +435,8 @@ class NotificationsTab(ft.Container):
         self.news_interval.color = AppColors.INPUT_TEXT
         self.news_interval.border_color = AppColors.INPUT_BORDER
 
-        if self.page: self.update()
+        if self.page:
+            self.update()
 
     def did_mount(self):
         """组件挂载后订阅语言变更"""
@@ -299,7 +452,7 @@ class NotificationsTab(ft.Container):
 
     def _on_locale_change(self, new_locale: str):
         """语言变更回调
-        
+
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
         """
         try:
@@ -323,7 +476,7 @@ class NotificationsTab(ft.Container):
         """处理新闻推送开关切换"""
         enabled = self.news_alerts_enabled.value
         ConfigHandler.save_config({"enable_news_alerts": enabled})
-        
+
         # Update visibility -> disabled state for UI consistency
         self.news_interval.disabled = not enabled
         self.update()
@@ -341,6 +494,8 @@ class NotificationsTab(ft.Container):
             val = int(self.news_interval.value)
             ConfigHandler.save_config({"news_poll_interval": val})
             if self.show_snack:
-                self.show_snack(I18n.get("settings_snack_interval_set").format(interval=val))
+                self.show_snack(
+                    I18n.get("settings_snack_interval_set").format(interval=val)
+                )
         except ValueError:
             pass

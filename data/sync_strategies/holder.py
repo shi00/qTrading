@@ -34,7 +34,9 @@ class HolderSyncStrategy(ISyncStrategy):
         self._cancelled = True
         logger.debug("[HolderSync] Stop | Cancellation requested.")
 
-    @log_async_operation(operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO)
+    @log_async_operation(
+        operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO
+    )
     async def run(self, **kwargs) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
@@ -43,7 +45,9 @@ class HolderSyncStrategy(ISyncStrategy):
         try:
             # Determine the latest 2 quarter-end dates to ensure coverage
             quarter_ends = self._get_recent_quarter_ends(count=2)
-            logger.debug(f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}")
+            logger.debug(
+                f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}"
+            )
 
             for qe in quarter_ends:
                 if self._cancelled:
@@ -54,8 +58,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 count = await self._sync_one_table(
                     api_func=self.context.api.get_stk_holdernumber,
                     save_func=self.context.cache.save_holder_number,
-                    table_name='stk_holdernumber',
-                    end_date=qe
+                    table_name="stk_holdernumber",
+                    end_date=qe,
                 )
                 if count < 0:
                     errors += 1
@@ -69,8 +73,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 count = await self._sync_one_table(
                     api_func=self.context.api.get_top10_holders,
                     save_func=self.context.cache.save_top10_holders,
-                    table_name='top10_holders',
-                    end_date=qe
+                    table_name="top10_holders",
+                    end_date=qe,
                 )
                 if count < 0:
                     errors += 1
@@ -94,7 +98,9 @@ class HolderSyncStrategy(ISyncStrategy):
                 result.status = "partial"
                 result.errors.append(f"Aborted after {errors} errors")
 
-            logger.info(f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}")
+            logger.info(
+                f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}"
+            )
 
         except Exception as e:
             logger.error(f"[HolderSync] Run | ❌ Top-level failure: {e}", exc_info=True)
@@ -109,21 +115,28 @@ class HolderSyncStrategy(ISyncStrategy):
         Returns row count on success, -1 on error.
         """
         try:
-            df = await api_func(end_date=end_date
-            )
+            df = await api_func(end_date=end_date)
             if df is not None and not df.empty:
                 await save_func(df)
-                logger.debug(f"[HolderSync] Table | {table_name} end_date={end_date}: {len(df)} records")
+                logger.debug(
+                    f"[HolderSync] Table | {table_name} end_date={end_date}: {len(df)} records"
+                )
                 return len(df)
             else:
-                logger.debug(f"[HolderSync] Table | {table_name} end_date={end_date}: no data")
+                logger.debug(
+                    f"[HolderSync] Table | {table_name} end_date={end_date}: no data"
+                )
                 return 0
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
-                logger.warning(f"[HolderSync] ⛔ Permission denied for {table_name}: {e}")
+                logger.warning(
+                    f"[HolderSync] ⛔ Permission denied for {table_name}: {e}"
+                )
             else:
-                logger.warning(f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}")
+                logger.warning(
+                    f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}"
+                )
             return -1
 
     async def _sync_pledge_stat(self):
@@ -139,22 +152,26 @@ class HolderSyncStrategy(ISyncStrategy):
             today = datetime.date.today()
             days_since_friday = (today.weekday() - 4) % 7
             last_friday = today - datetime.timedelta(days=days_since_friday)
-            end_date = last_friday.strftime('%Y%m%d')
+            end_date = last_friday.strftime("%Y%m%d")
 
-            df = await self.context.api.get_pledge_stat(
-                end_date=end_date
-            )
+            df = await self.context.api.get_pledge_stat(end_date=end_date)
             if df is not None and not df.empty:
                 await self.context.cache.save_pledge_stat(df)
-                logger.debug(f"[HolderSync] Table | pledge_stat end_date={end_date}: {len(df)} records")
+                logger.debug(
+                    f"[HolderSync] Table | pledge_stat end_date={end_date}: {len(df)} records"
+                )
                 return len(df)
             else:
-                logger.debug(f"[HolderSync] Table | pledge_stat end_date={end_date}: no data")
+                logger.debug(
+                    f"[HolderSync] Table | pledge_stat end_date={end_date}: no data"
+                )
                 return 0
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
-                logger.warning(f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}")
+                logger.warning(
+                    f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}"
+                )
             else:
                 logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")
             return -1
@@ -173,7 +190,7 @@ class HolderSyncStrategy(ISyncStrategy):
             for month, day in [(12, 31), (9, 30), (6, 30), (3, 31)]:
                 qe = datetime.date(year, month, day)
                 if qe < today:
-                    quarter_ends.append(qe.strftime('%Y%m%d'))
+                    quarter_ends.append(qe.strftime("%Y%m%d"))
                     if len(quarter_ends) >= count:
                         return quarter_ends
         return quarter_ends

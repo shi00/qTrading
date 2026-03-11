@@ -4,12 +4,12 @@ import sys
 from unittest.mock import patch
 
 # Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from utils.config_handler import ConfigHandler
 
+
 class TestConfigHandler(unittest.TestCase):
-    
     def setUp(self):
         # Reset cache (redundant with conftest but harmless for standalone runs)
         ConfigHandler._config_cache = None
@@ -24,7 +24,7 @@ class TestConfigHandler(unittest.TestCase):
         test_data = {"test_key": "test_value"}
         result = ConfigHandler.save_config(test_data)
         self.assertTrue(result)
-        
+
         loaded_data = ConfigHandler.load_config()
         self.assertEqual(loaded_data.get("test_key"), "test_value")
 
@@ -38,7 +38,7 @@ class TestConfigHandler(unittest.TestCase):
         """Test onboarding status"""
         # Default should be False
         self.assertFalse(ConfigHandler.is_onboarding_complete())
-        
+
         # Set to True
         ConfigHandler.set_onboarding_complete(True)
         self.assertTrue(ConfigHandler.is_onboarding_complete())
@@ -48,13 +48,12 @@ class TestConfigHandler(unittest.TestCase):
         # Default
         self.assertEqual(ConfigHandler.get_auto_update_time(), "16:30")
         self.assertFalse(ConfigHandler.is_auto_update_enabled())
-        
+
         # Change settings via generic save
-        ConfigHandler.save_config({
-            "auto_update_enabled": True,
-            "auto_update_time": "18:00"
-        })
-        
+        ConfigHandler.save_config(
+            {"auto_update_enabled": True, "auto_update_time": "18:00"}
+        )
+
         self.assertTrue(ConfigHandler.is_auto_update_enabled())
         self.assertEqual(ConfigHandler.get_auto_update_time(), "18:00")
 
@@ -65,19 +64,17 @@ class TestConfigHandler(unittest.TestCase):
 
     def test_log_settings_custom(self):
         """Test custom log settings"""
-        ConfigHandler.save_config({
-            "log_max_mb": 10,
-            "log_backup_count": 3
-        })
+        ConfigHandler.save_config({"log_max_mb": 10, "log_backup_count": 3})
         self.assertEqual(ConfigHandler.get_log_max_mb(), 10)
         self.assertEqual(ConfigHandler.get_log_backup_count(), 3)
 
     def test_load_config_error(self):
         """Test handling of corrupt config file"""
         from utils.config_handler import CONFIG_FILE
-        with open(CONFIG_FILE, 'w') as f:
+
+        with open(CONFIG_FILE, "w") as f:
             f.write("{invalid_json")
-            
+
         # Should return empty dict on error
         ConfigHandler._config_cache = None  # force re-read from disk
         config_data = ConfigHandler.load_config()
@@ -86,9 +83,10 @@ class TestConfigHandler(unittest.TestCase):
     def test_save_config_error(self):
         """Test handling of save error (e.g. permission denied)"""
         # Mock open to raise exception
-        with patch('builtins.open', side_effect=PermissionError("Denied")):
+        with patch("builtins.open", side_effect=PermissionError("Denied")):
             result = ConfigHandler.save_config({"a": 1})
             self.assertFalse(result)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

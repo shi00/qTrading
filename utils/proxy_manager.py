@@ -34,20 +34,26 @@ class ProxyManager:
         if not current_no_proxy:
             current_no_proxy = os.environ.get("no_proxy", "")
 
-        final_domains = set(
-            [d.strip() for d in current_no_proxy.split(",") if d.strip()]) if current_no_proxy else set()
+        final_domains = (
+            set([d.strip() for d in current_no_proxy.split(",") if d.strip()])
+            if current_no_proxy
+            else set()
+        )
 
         # Load User Configured Domains ONLY
         target_domains = ConfigHandler.get_no_proxy_domains()
 
         # Safety Filter: Ensure all items are strings
-        target_domains = list(set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]))
+        target_domains = list(
+            set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()])
+        )
 
         if not target_domains:
             logger.info("[ProxyManager] No cache/whitelist domains configured.")
         else:
             logger.info(
-                f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist.")
+                f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist."
+            )
             final_domains.update(target_domains)
 
         # Apply updates
@@ -58,6 +64,8 @@ class ProxyManager:
 
             os.environ["NO_PROXY"] = new_no_proxy
             os.environ["no_proxy"] = new_no_proxy
-            logger.info(f"[ProxyManager] Configuration applied. NO_PROXY={new_no_proxy}")
+            logger.info(
+                f"[ProxyManager] Configuration applied. NO_PROXY={new_no_proxy}"
+            )
         else:
             logger.info("[ProxyManager] Configuration applied. No changes.")

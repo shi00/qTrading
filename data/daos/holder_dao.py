@@ -12,27 +12,45 @@ class HolderDao(BaseDao):
         if df is None or df.empty:
             return 0
         columns = [
-            'ts_code', 'end_date', 'ann_date',
-            'holder_num', 'holder_num_change', 'holder_num_ratio'
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "holder_num",
+            "holder_num_change",
+            "holder_num_ratio",
         ]
-        return await self._save_upsert(df, 'stk_holdernumber', columns, pk_columns=['ts_code', 'end_date'])
+        return await self._save_upsert(
+            df, "stk_holdernumber", columns, pk_columns=["ts_code", "end_date"]
+        )
 
     async def save_top10_holders(self, df):
         """Save Top 10 Holders. Table: top10_holders"""
         if df is None or df.empty:
             return 0
         columns = [
-            'ts_code', 'end_date', 'ann_date',
-            'holder_name', 'hold_amount', 'hold_ratio', 'holder_type'
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "holder_name",
+            "hold_amount",
+            "hold_ratio",
+            "holder_type",
         ]
-        return await self._save_upsert(df, 'top10_holders', columns, pk_columns=['ts_code', 'end_date', 'holder_name'])
+        return await self._save_upsert(
+            df,
+            "top10_holders",
+            columns,
+            pk_columns=["ts_code", "end_date", "holder_name"],
+        )
 
     async def get_latest_holder_date(self, ts_code):
         """Get latest end_date for a specific stock."""
-        sql = "SELECT MAX(end_date) as max_date FROM stk_holdernumber WHERE ts_code = $1"
+        sql = (
+            "SELECT MAX(end_date) as max_date FROM stk_holdernumber WHERE ts_code = $1"
+        )
         df = await self._read_db(sql, (ts_code,))
-        if not df.empty and df.iloc[0]['max_date']:
-            return df.iloc[0]['max_date']
+        if not df.empty and df.iloc[0]["max_date"]:
+            return df.iloc[0]["max_date"]
         return None
 
     async def check_holder_data_coverage(self, ts_code_list):
@@ -51,4 +69,4 @@ class HolderDao(BaseDao):
         df = await self._read_db(sql)
         if df.empty:
             return {}
-        return dict(zip(df['ts_code'], df['last_date']))
+        return dict(zip(df["ts_code"], df["last_date"]))

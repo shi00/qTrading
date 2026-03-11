@@ -7,16 +7,15 @@ from typing import Dict
 import flet as ft
 
 from ui.i18n import I18n
-from ui.theme import AppColors, apply_page_theme
+from ui.theme import AppColors
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SettingsView
+from ui.views.task_center_view import TaskCenterView
 
 logger = logging.getLogger(__name__)
 
-
-from ui.views.task_center_view import TaskCenterView
 
 class NavTabs(IntEnum):
     MARKET = 0
@@ -74,11 +73,21 @@ class AppLayout(ft.Container):
 
         # 2. Brand Header — uses semantic token, auto-updates with theme
         brand_header = ft.Container(
-            content=ft.Column([
-                ft.Image(src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN),
-                ft.Text(I18n.get("app_brand"), size=14, weight=ft.FontWeight.BOLD,
-                        color=ft.Colors.ON_SURFACE),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=5),
+            content=ft.Column(
+                [
+                    ft.Image(
+                        src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN
+                    ),
+                    ft.Text(
+                        I18n.get("app_brand"),
+                        size=14,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=5,
+            ),
             padding=ft.padding.only(top=20, bottom=10),
         )
 
@@ -97,31 +106,43 @@ class AppLayout(ft.Container):
                     icon=ft.Icons.DASHBOARD_OUTLINED,
                     selected_icon=ft.Icons.DASHBOARD,
                     label=I18n.get("nav_market"),
-                    label_content=ft.Text(I18n.get("nav_market"), size=12, weight=ft.FontWeight.BOLD),
+                    label_content=ft.Text(
+                        I18n.get("nav_market"), size=12, weight=ft.FontWeight.BOLD
+                    ),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.FILTER_ALT_OUTLINED,
                     selected_icon=ft.Icons.FILTER_ALT,
                     label=I18n.get("nav_screener"),
-                    label_content=ft.Text(I18n.get("nav_screener"), size=12, weight=ft.FontWeight.BOLD),
+                    label_content=ft.Text(
+                        I18n.get("nav_screener"), size=12, weight=ft.FontWeight.BOLD
+                    ),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.STORAGE_OUTLINED,
                     selected_icon=ft.Icons.STORAGE_ROUNDED,
                     label=I18n.get("nav_data"),
-                    label_content=ft.Text(I18n.get("nav_data"), size=12, weight=ft.FontWeight.BOLD),
+                    label_content=ft.Text(
+                        I18n.get("nav_data"), size=12, weight=ft.FontWeight.BOLD
+                    ),
                 ),
                 ft.NavigationRailDestination(
-                    icon=ft.Icons.FORMAT_LIST_BULLETED_OUTLINED, 
-                    selected_icon=ft.Icons.FORMAT_LIST_BULLETED, 
+                    icon=ft.Icons.FORMAT_LIST_BULLETED_OUTLINED,
+                    selected_icon=ft.Icons.FORMAT_LIST_BULLETED,
                     label=I18n.get("nav_tasks", "任务"),
-                    label_content=ft.Text(I18n.get("nav_tasks", "任务"), size=12, weight=ft.FontWeight.BOLD),
+                    label_content=ft.Text(
+                        I18n.get("nav_tasks", "任务"),
+                        size=12,
+                        weight=ft.FontWeight.BOLD,
+                    ),
                 ),
                 ft.NavigationRailDestination(
                     icon=ft.Icons.SETTINGS_OUTLINED,
                     selected_icon=ft.Icons.SETTINGS,
                     label=I18n.get("nav_settings"),
-                    label_content=ft.Text(I18n.get("nav_settings"), size=12, weight=ft.FontWeight.BOLD),
+                    label_content=ft.Text(
+                        I18n.get("nav_settings"), size=12, weight=ft.FontWeight.BOLD
+                    ),
                 ),
             ],
             on_change=self._on_nav_change,
@@ -139,11 +160,7 @@ class AppLayout(ft.Container):
 
         # 5. Main Layout Row
         self.content = ft.Row(
-            [
-                self.nav_rail,
-                ft.VerticalDivider(width=1),
-                self.body
-            ],
+            [self.nav_rail, ft.VerticalDivider(width=1), self.body],
             expand=True,
         )
 
@@ -170,7 +187,9 @@ class AppLayout(ft.Container):
             view = ft.Text(I18n.get("view_unknown"))
 
         self._view_cache[index] = view
-        logger.debug(f"[AppLayout] View {index} loaded in {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(
+            f"[AppLayout] View {index} loaded in {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+        )
         return view
 
     def show(self):
@@ -187,7 +206,13 @@ class AppLayout(ft.Container):
         """Handle i18n locale change"""
         self.page.title = I18n.get("app_title")
         if self.nav_rail:
-            nav_keys = ["nav_market", "nav_screener", "nav_data", "nav_tasks", "nav_settings"]
+            nav_keys = [
+                "nav_market",
+                "nav_screener",
+                "nav_data",
+                "nav_tasks",
+                "nav_settings",
+            ]
             for i, key in enumerate(nav_keys):
                 if i < len(self.nav_rail.destinations):
                     text = I18n.get(key)
@@ -221,7 +246,9 @@ class AppLayout(ft.Container):
                 try:
                     view.update_theme()
                 except Exception as e:
-                    logger.error(f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}")
+                    logger.error(
+                        f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}"
+                    )
 
         # 3. Single page update — Flet redraws all semantic-token-based colors automatically
         self.page.update()
@@ -256,7 +283,7 @@ class AppLayout(ft.Container):
 
         # Optimize HomeView visibility for background resource saving
         home_view = self._get_view(NavTabs.MARKET)
-        if hasattr(home_view, 'set_visible'):
+        if hasattr(home_view, "set_visible"):
             home_view.set_visible(index == NavTabs.MARKET)
 
         # Switch Content (Lazy Load here)
@@ -269,13 +296,16 @@ class AppLayout(ft.Container):
         self.body.update()
         self.nav_rail.update()
 
-        logger.debug(f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+        logger.debug(
+            f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+        )
 
     async def run_strategy_from_home(self, strategy_key):
         """Callback to switch to Screener and run strategy"""
         self.change_tab(NavTabs.SCREENER)
 
-        if self._debounce_task: self._debounce_task.cancel()
+        if self._debounce_task:
+            self._debounce_task.cancel()
 
         self._pending_tab_index = NavTabs.SCREENER
         await self._execute_tab_switch()

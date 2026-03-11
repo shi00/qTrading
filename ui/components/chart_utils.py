@@ -4,6 +4,7 @@ K-Line Chart utilities using mplfinance.
 Generates professional candlestick charts with volume subplots and
 moving averages, rendered as in-memory PNG for inline display via ft.Image.
 """
+
 import io
 import base64
 import logging
@@ -11,6 +12,7 @@ import logging
 import pandas as pd
 import mplfinance as mpf
 import matplotlib
+
 matplotlib.use("Agg")  # Non-interactive backend, safe for threading
 
 import flet as ft
@@ -19,8 +21,9 @@ from ui.theme import AppColors
 logger = logging.getLogger(__name__)
 
 # ── A-share market style: red rise / green fall ──────────────────────
-_RISE_COLOR = "#F44336"   # Red for rise (China convention)
-_FALL_COLOR = "#26A69A"   # Green for fall
+_RISE_COLOR = "#F44336"  # Red for rise (China convention)
+_FALL_COLOR = "#26A69A"  # Green for fall
+
 
 def _build_market_colors(is_dark: bool):
     """Build mplfinance MarketColors matching the app theme."""
@@ -32,6 +35,7 @@ def _build_market_colors(is_dark: bool):
         volume="in",
         ohlc="inherit",
     )
+
 
 def _build_style(is_dark: bool):
     """Build a full mplfinance style dict."""
@@ -46,7 +50,7 @@ def _build_style(is_dark: bool):
             "xtick.labelsize": 8,
             "ytick.labelsize": 8,
             "font.family": ["Microsoft YaHei", "SimHei", "sans-serif"],
-            "axes.unicode_minus": False
+            "axes.unicode_minus": False,
         },
     )
 
@@ -135,6 +139,7 @@ def generate_kline_png(
 
     # ── 6. Cleanup matplotlib figures to prevent memory leak ─────
     import matplotlib.pyplot as plt
+
     plt.close("all")
 
     return b64
@@ -142,9 +147,11 @@ def generate_kline_png(
 
 # ── Legacy compatibility wrappers (kept for any external callers) ──
 
+
 def create_kline_chart(df, title="", theme_mode=None):
     """Legacy wrapper — returns base64 PNG string instead of Plotly Figure."""
     return generate_kline_png(df, title=title, theme_mode=theme_mode)
+
 
 def generate_kline_html(df, title="", theme_mode=None):
     """Legacy wrapper — returns an <img> HTML tag with embedded base64 PNG."""

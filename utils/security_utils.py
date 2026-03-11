@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class DecryptionError(Exception):
     """Raised when data cannot be decrypted (wrong key or corrupted data)"""
+
     pass
 
 
@@ -21,12 +22,13 @@ class SecurityManager:
     """
     Manages AES-GCM encryption for sensitive data.
     Key is stored in .secret.key file in APP_ROOT.
-    
+
     Improvements:
     - Atomic writes to prevent key corruption.
     - Automatic backup (.secret.key.bak).
     - Strict error handling (no accidental overwrites).
     """
+
     KEY_FILE = os.path.join(APP_ROOT, ".secret.key")
     KEY_FILE_BAK = os.path.join(APP_ROOT, ".secret.key.bak")
     _key = None
@@ -63,7 +65,9 @@ class SecurityManager:
                 return cls._key
             except Exception as e:
                 logger.critical(f"Failed to load backup key file: {e}")
-                raise RuntimeError("CRITICAL: Both primary and backup key files are corrupt. Cannot proceed.")
+                raise RuntimeError(
+                    "CRITICAL: Both primary and backup key files are corrupt. Cannot proceed."
+                )
 
         # 3. If neither exists, and we are sure main file doesn't exist (not just failed to load), generate new.
         # Note: The first check 'os.path.exists(cls.KEY_FILE)' handles the "file exists" case.
@@ -73,9 +77,11 @@ class SecurityManager:
             # We failed to read it above, so it must be corrupt.
             # Check file size. If 0, maybe safe to overwrite?
             # But safer to bail out and let user decide.
-            raise RuntimeError("CRITICAL: Key file exists but is unreadable (and no backup found). "
-                               "Manual intervention required to prevent data loss. "
-                               "Delete '.secret.key' manually to reset (WARNING: All encrypted data will be lost).")
+            raise RuntimeError(
+                "CRITICAL: Key file exists but is unreadable (and no backup found). "
+                "Manual intervention required to prevent data loss. "
+                "Delete '.secret.key' manually to reset (WARNING: All encrypted data will be lost)."
+            )
 
         # Generate new key
         logger.info("Generating new security key...")
@@ -111,9 +117,13 @@ class SecurityManager:
             cls._copy_file(cls.KEY_FILE, cls.KEY_FILE_BAK)
 
             # Hide the file on Windows
-            if os.name == 'nt':
-                subprocess.run(['attrib', '+h', cls.KEY_FILE], check=False, capture_output=True)
-                subprocess.run(['attrib', '+h', cls.KEY_FILE_BAK], check=False, capture_output=True)
+            if os.name == "nt":
+                subprocess.run(
+                    ["attrib", "+h", cls.KEY_FILE], check=False, capture_output=True
+                )
+                subprocess.run(
+                    ["attrib", "+h", cls.KEY_FILE_BAK], check=False, capture_output=True
+                )
         except Exception as e:
             logger.error(f"Error saving key: {e}")
             if os.path.exists(tmp_file):
@@ -145,10 +155,10 @@ class SecurityManager:
             nonce = secrets.token_bytes(12)  # NIST recommended 96-bit nonce
 
             # encrypt() returns ciphertext + tag
-            data = plaintext.encode('utf-8')
+            data = plaintext.encode("utf-8")
             ciphertext = aesgcm.encrypt(nonce, data, None)
 
-            return base64.b64encode(nonce + ciphertext).decode('utf-8')
+            return base64.b64encode(nonce + ciphertext).decode("utf-8")
         except Exception as e:
             # We log but return empty to be fail-safe for UI
             logger.error(f"Encryption error: {e}")
@@ -166,7 +176,7 @@ class SecurityManager:
         try:
             # Basic validation
             try:
-                decoded = base64.b64decode(encrypted_text.encode('utf-8'))
+                decoded = base64.b64decode(encrypted_text.encode("utf-8"))
             except Exception:
                 raise DecryptionError("Invalid Base64 encoding")
 
@@ -180,7 +190,7 @@ class SecurityManager:
             aesgcm = AESGCM(key)
 
             plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-            return plaintext.decode('utf-8')
+            return plaintext.decode("utf-8")
 
         except (ValueError, TypeError) as e:
             raise DecryptionError(f"Data corruption: {e}")

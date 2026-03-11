@@ -10,13 +10,13 @@ class I18n:
     Internationalization support.
     Manages locale state and provides translated strings.
     """
+
     _locale = "zh"  # Default locale
     _listeners = None  # Lazily initialized to avoid class-level mutable sharing
     _initialized = False  # Track initialization status
 
     STRINGS = {
         "zh": {
-
             "app_title": "A股智能选股助手",
             "app_brand": "A股智选",
             "nav_market": "市场概览",
@@ -26,7 +26,6 @@ class I18n:
             "data_tab_explorer": "数据浏览",
             "data_tab_sql": "SQL 控制台",
             "nav_settings": "系统设置",
-
             # --- Task Center ---
             "nav_tasks": "任务中心",
             "task_clear_finished": "清除已完成",
@@ -52,6 +51,8 @@ class I18n:
             "task_type_data_sync": "数据同步",
             "task_name_health_check": "全局系统数据健康自检",
             "task_name_init_sync": "全量历史数据补齐",
+            "task_name_daily_sync": "完整日更新",
+            "task_name_clear_cache": "清空全部缓存",
             "task_progress_checking": "检查本地缓存健康度...",
             "task_progress_analyzing": "完成数据质量分析，更新指标卡...",
             "task_result_health_done": "数据体检完毕",
@@ -74,7 +75,6 @@ class I18n:
             "sched_task_prediction": "AI 夜间自动预测 ({date})",
             "common_prev_page": "上一页",
             "common_next_page": "下一页",
-
             "home_welcome": "欢迎使用 A股智能选股助手",
             "home_market_status": "市场状态",
             "home_indices": "主要指数",
@@ -91,16 +91,13 @@ class I18n:
             "screener_mode_run": "执行选股",
             "screener_mode_history": "历史档案",
             "screener_all_strategies": "全部策略",
-            
             # --- AI Prompts ---
             "ai_save_prompt": "保存修改",
             "ai_reset_default": "恢复默认",
             "ai_settings_saved": "系统提示词已保存",
             "ai_settings_restored": "系统提示词已恢复默认",
-
             "history_load_more": "加载更早记录",
             "history_total": "共 {count} 条",
-
             "settings_title": "设置",
             "settings_general": "基本设置",
             "settings_language": "语言 / Language",
@@ -108,11 +105,9 @@ class I18n:
             "settings_api": "API 设置",
             "settings_token": "Tushare Token",
             "settings_save": "保存设置",
-
             "status_ready": "就绪",
             "status_running": "运行中...",
             "status_error": "错误",
-
             # Screener
             "select_strategy": "选择策略",
             "run_screening": "执行选股",
@@ -126,27 +121,21 @@ class I18n:
             "screener_log_title": "执行日志",
             "screener_page_info": "第 {current} 页 / 共 {total} 页",
             "screener_per_page": "条/页",
-
             # Columns
-
             "col_version_num": "系统版本",
             "col_ai_score": "AI 评分",
             "col_ai_reason": "AI 分析理由",
             "col_thinking": "AI 思考链",
             "col_rsi_6": "RSI(6)",
-
             "col_chg": "涨跌幅",
-
             "col_turnover": "换手率",
             "col_details": "详情",
-
             # Screener Status Messages
             "screener_no_strategy_hint": "请选择策略以查看逻辑说明",
             "screener_loading_data": "正在初始化/重载数据库...",
             "screener_data_loaded": "数据加载完成",
             "screener_load_failed": "加载失败: {error}",
             "screener_please_select": "请先选择策略！",
-            
             # Units
             "unit_year": "年",
             "unit_years": "年",
@@ -168,7 +157,6 @@ class I18n:
             "screener_internal_error": "内部系统错误，请查看日志获取详细信息。",
             "screener_score": "评分",
             "screener_view_details": "查看详情",
-
             # Strategy Names & Descriptions
             "strategy_ai_active_name": "AI 深度精选 (Beta)",
             "strategy_ai_active_desc": "AI 全自动选股：先用量化筛选活跃股，再由 DeepSeek/AI 深度阅读新闻和财报进行最终评分。",
@@ -195,7 +183,6 @@ class I18n:
             "strategy_cashflow_desc": "标准：资产负债率 < 50% | ROE > 10% (稳健经营)",
             "strategy_large_pe_name": "大盘低估",
             "strategy_large_pe_desc": "标准：总市值 > 500亿 | 市盈率 < 15倍 (核心资产)",
-
             # Dynamic Strategy Parameters
             "param_rsi_threshold": "RSI 阈值",
             "param_rsi_threshold_oversold": "RSI 阈值 (常用 20-30)",
@@ -230,7 +217,6 @@ class I18n:
             "task_aggregating_results": "处理并聚合返回的结果集...",
             "task_screening_success": "成功筛选出 {count} 只标的",
             "task_type_ai_screening": "AI 智能选股",
-
             # Home View
             "home_title": "市场概览",
             "home_data_date": "数据日期: {date}",
@@ -253,10 +239,6 @@ class I18n:
             "home_strategy_dividend": "高股息",
             "home_strategy_dividend_desc": "稳健收息精选",
             "home_run": "运行",
-
-
-
-
             # Data Explorer
             "data_select_table": "选择数据表",
             "data_filter_col": "过滤列",
@@ -265,10 +247,8 @@ class I18n:
             "data_export_current": "导出当前页",
             "data_export_all": "导出全部 (CSV)",
             "data_tab_viewer": "表格查看器",
-            "data_tab_sql": "SQL 控制台",
             "data_page_num": "第 {current} 页 / 共 {total} 页",
             "data_total_rows": "共 {count} 条记录",
-
             "data_sql_label": "SQL 查询语句",
             "data_sql_hint": "输入 SELECT 查询 (例如: SELECT * FROM stock_basic LIMIT 10)",
             "data_sql_execute": "执行 (Ctrl+Enter)",
@@ -285,7 +265,6 @@ class I18n:
             "data_export_fail": "导出失败: {error}",
             "data_export_no_data": "无数据可导出",
             "data_export_success": "已导出至 {file}",
-
             # Settings - Tabs
             "settings_tab_general": "基本配置",
             "settings_tab_data": "数据管理",
@@ -293,7 +272,6 @@ class I18n:
             "settings_tab_tasks": "定时任务",
             "settings_tab_notify": "消息提醒",
             "settings_tab_system": "系统优化",
-
             # Settings - Sections
             "settings_sec_api": "API 连接配置",
             "settings_sec_ai": "AI 模型配置",
@@ -305,7 +283,6 @@ class I18n:
             "settings_notify_title": "消息推送设置",
             "settings_notify_desc": "开启后，当有重大利好消息或AI选出牛股时，会通过系统通知提醒您。",
             "settings_sec_health": "健康检查",
-
             # Settings - Labels & Descriptions
             "settings_token_desc": "请输入您的 Tushare Pro Token 以获取数据权限。",
             "settings_save_token": "保存 Tushare Token",
@@ -329,12 +306,14 @@ class I18n:
             "settings_news_interval_15m": "15分钟 (极低)",
             "settings_snack_interval_set": "新闻拉取间隔已更新: {interval}秒",
             "settings_update_time": "更新时间",
+            "settings_doubao_update": "自动重塑豆包概念",
+            "settings_doubao_desc": "开启后将定时自动清空并重建全市场的大模型专属概念体系",
+            "settings_saturdays": "限定每个周六执行",
             "settings_log_level": "日志级别",
             "settings_sync_heavy": "重型同步并发数",
             "settings_sync_desc": "控制历史行情/财务数据的并发下载 (建议 3-5)",
             "settings_db_pool": "数据库连接池",
             "settings_pool_desc": "调整数据库最大常驻连接数 (需重启生效)",
-
             # Confirmation Dialogs
             "dialog_confirm_init_title": "确认初始化",
             "dialog_confirm_init_content": "将拉取配置范围内的所有行情、财务和宏观数据。此操作耗时较长，是否继续？",
@@ -355,7 +334,6 @@ class I18n:
             "settings_cache_desc": "当数据出现异常时，可尝试清除缓存重新同步。",
             "settings_auto_desc": "设置每日自动同步数据，无需手动操作。",
             "settings_save_ai": "保存 AI 配置",
-
             # Settings - Options & Hints
             "settings_opt_1530": "15:30 (收盘后)",
             "settings_opt_1600": "16:00",
@@ -370,7 +348,6 @@ class I18n:
             "settings_hint_ai_model": "控制同时分析几只股票。过高可能触语速限制。",
             "settings_hint_sync_full": "同步行情、估值、资金流、北向持股",
             "settings_hint_first_run": "首次使用需拉取历史数据",
-
             # AI Settings Dialog
             "ai_system_prompt": "系统提示词",
             "ai_settings_title": "AI 助手配置",
@@ -378,9 +355,7 @@ class I18n:
             "ai_prompt_label": "系统提示词配置 (A股专家模式)",
             "ai_advanced_settings": "⚙️ 高级设置",
             "ai_advanced_settings_desc": "仅供专业用户调整的底层策略参数或大模型系统提示词",
-            "ai_reset_default": "恢复默认",
             "ai_key_required": "API Key 不能为空",
-            "ai_settings_saved": "AI 配置已更新!",
             "ai_local_model_changed": "本地模型配置已保存，需重启程序才能生效",
             "ai_verifying_model": "正在验证模型文件...",
             "ai_model_file_not_found": "模型文件不存在，请检查路径",
@@ -416,14 +391,12 @@ class I18n:
             "common_quotes": "行情",
             "common_more_actions": "更多操作",
             "font_family": "Microsoft YaHei",
-
             # Units
             "unit_yuan": "元",
             "unit_yi": "亿",
             "unit_wan": "万",
             "unit_wanshou": "万手",
             "unit_shou": "手",
-
             # Stock Details
             "detail_loading_chart": "正在加载 K 线图...",
             "detail_sec_price": "行情数据",
@@ -460,9 +433,7 @@ class I18n:
             "detail_chart_browser_hint": "由于平台限制，请在浏览器中查看完整图表",
             "detail_open_browser": "打开图表 (浏览器)",
             "detail_err_load_chart": "加载图表失败: {error}",
-
             "chart_kline": "K线",
-
             # Onboarding Wizard
             "wizard_welcome_title": "欢迎使用 A股智能选股助手",
             "wizard_welcome_desc": "首次使用需要完成以下配置",
@@ -472,7 +443,6 @@ class I18n:
             "wizard_step_label_sync": "数据同步",
             "wizard_step_label_schedule": "定时任务",
             "wizard_step_label_done": "完成",
-
             "wizard_token_label": "请输入您的 Tushare Pro Token",
             "wizard_token_hint": "可在 tushare.pro 个人中心获取",
             "wizard_step1_title": "步骤 1: 配置 Tushare Token",
@@ -482,7 +452,6 @@ class I18n:
             "wizard_err_token_empty": "❌ 请输入Token",
             "wizard_msg_token_success": "✅ Token验证成功",
             "wizard_err_verify_failed": "❌ 验证失败: {error}",
-
             "wizard_ai_key_label": "AI API Key (DeepSeek/OpenAI)",
             "wizard_ai_model_label": "模型名称",
             "wizard_ai_prompt_label": "系统提示词 (专家设定)",
@@ -497,7 +466,6 @@ class I18n:
             "wizard_ai_success": "✅ 验证成功",
             "wizard_ai_failed": "❌ 验证失败: 连接被拒绝",
             "wizard_ai_error": "❌ 验证出错: {error}",
-
             "wizard_sync_quick": "仅同步今日 (快)",
             "wizard_sync_full": "完整同步 ({years}年)",
             "wizard_btn_cancel": "取消",
@@ -514,7 +482,6 @@ class I18n:
             "wizard_msg_sync_cancelled": "❌ 同步已取消",
             "wizard_msg_history_done": "✅ 历史数据同步完成",
             "wizard_msg_sync_failed": "❌ 同步失败: {error}",
-
             # 5-Step Init Progress
             "init_step_1": "步骤 1/6: 同步股票列表",
             "init_step_2": "步骤 2/6: 同步交易日历",
@@ -535,20 +502,16 @@ class I18n:
             "health_type_global": "全局",
             "health_global_count": "{count} 条",
             "health_global_no_data": "无数据",
-
             "wizard_schedule_label": "启用每日自动更新 (16:30)",
             "wizard_step4_title": "步骤 4: 设置自动更新",
             "wizard_step4_desc": "建议在每个交易日收盘后自动更新数据。\n程序将在后台静默更新，不会打扰您的使用。",
             "wizard_schedule_note": "* 需要程序在后台运行",
             "wizard_btn_finish": "完成配置",
-
             "wizard_step5_title": "🎉 配置完成！",
             "wizard_step5_desc": "您已完成所有初始配置。\n现在可以开始使用智能选股功能了！",
             "wizard_btn_start": "开始使用",
-
             "settings_hint_bg_run": "* 需要程序在后台持续运行",
             "settings_hint_cpu": "根据网络和CPU性能调整，默认5。过高可能触语速限制。",
-
             # Settings - Status & Messages
             "settings_status_auto_on": "✅ 自动更新已启用，将在每个交易日指定时间自动同步数据",
             "settings_status_auto_off": "自动更新已关闭",
@@ -570,7 +533,6 @@ class I18n:
             "settings_trading_days": "(交易日)",
             "settings_snack_concurrency_set": "并发数已设置为 {val} (下次同步生效)",
             "settings_snack_log_level": "日志级别已切换为 {level}",
-
             # Dialogs & Snacks
             "dialog_confirm_clear_title": "确认清理缓存",
             "dialog_confirm_clear_content": "这将删除所有已缓存的历史数据。\n清理后需要重新同步数据。\n\n确定要继续吗？",
@@ -588,7 +550,6 @@ class I18n:
             "progress_sync_finance": "正在同步财务: {date}",
             "progress_sync_moneyflow": "正在同步资金流: {date}",
             "progress_sync_done": "同步完成",
-
             # System Initialization (Step 1-5)
             "init_stock_list": "正在同步股票列表...",
             "init_stock_list_done": "股票列表同步完成",
@@ -599,11 +560,9 @@ class I18n:
             "init_health_check": "正在执行系统健康检查...",
             "init_complete": "初始化完成! 健康度: {status} (财报覆盖: {coverage})",
             "progress_sync_fundamentals": "基本面: {current}/{total} ({stock})",
-
             # --- Settings: System Tab ---
             "sys_core_config": "核心配置",
             "sys_log_label": "控制系统日志详细程度 (Info/Debug)",
-
             "sys_sync_heavy": "重型同步并发数",
             "sys_sync_heavy_hint": "控制历史行情/财务数据的并发下载 (建议 3-5)",
             "sys_tushare_limit": "Tushare流控",
@@ -626,7 +585,6 @@ class I18n:
             "settings_no_proxy_desc": "绕过代理直接连接的域名列表 (Direct Connection)",
             "settings_no_proxy_hint": "域名之间请用英文逗号分隔 (例如: example.com, .cn)",
             "settings_snack_no_proxy_saved": "直连域名配置已保存",
-
             # Thread Pool & Advanced
             "sys_thread_pool_title": "线程池配置",
             "sys_thread_pool_desc": "调整 IO (网络/数据库) 和 CPU 任务的最大并发线程数",
@@ -684,7 +642,6 @@ class I18n:
             "health_days": "天",
             "health_sample_size": "样本数量",
             "scan_title": "深度扫描进度",
-            "ai_progress_skipped": "已跳过 {name}",
             # --- Settings: Data Source Tab ---
             "ds_last_update": "最后更新",
             "ds_data_coverage": "数据覆盖",
@@ -698,6 +655,13 @@ class I18n:
             "ds_action_today": "快速同步今日行情数据",
             "ds_action_full": "完整遍历修复缺失数据",
             "ds_action_clear": "清除缓存并重新校验",
+            "ds_btn_doubao_rebuild": "重塑豆包",
+            "ds_btn_doubao_rebuild_desc": "清空所有豆包专属概念并触发全量重新打标",
+            "dialog_doubao_rebuild_title": "确认重塑豆包概念",
+            "dialog_doubao_rebuild_content": "这将清空全市场所有大模型相关概念，并触发后台流水线重新推理打标。\n此操作可能需要运行数十分钟至数小时，在此期间应用可正常使用，后台将静默打标。\n\n确定要继续吗？",
+            "btn_confirm_rebuild": "确认重塑",
+            "task_name_doubao_rebuild": "豆包概念手工重塑",
+            "snack_doubao_done": "豆包概念已全部重塑！",
             "ds_health_lag": "数据滞后",
             "ds_health_error": "数据异常/缺失",
             "ds_health_ok": "数据健康",
@@ -706,7 +670,6 @@ class I18n:
             "ds_repair_progress": "正在修复... 请勿关闭",
             "ds_repair_done": "✅ 修复完成！已补充 {count} 条记录",
             "ds_repair_fail": "修复失败: {error}",
-
             # --- Settings: AI Tab ---
             "ai_status_disconnected": "未连接",
             "ai_status_connected": "已连接",
@@ -714,7 +677,6 @@ class I18n:
             "ai_btn_testing": "测试中...",
             "ai_tuning_desc": "调整AI分析的深度与广度，平衡成本与性能",
             "ai_hint_default": "默认: {val}",
-
             # --- Missed Keys (Round 2) ---
             "time_today": "今日",
             "common_items": "条",
@@ -733,12 +695,10 @@ class I18n:
             "health_err_calendar": "无法获取官方交易日历",
             "common_op_cancelled": "操作已取消",
             "health_err_concept": "概念板块检查失败",
-
             # System Tab Dropdowns
             "sys_opt_debug": "调试 (DEBUG)",
             "sys_opt_info": "信息 (INFO)",
             "sys_opt_error": "错误 (ERROR)",
-
             # Theme
             "theme_dark": "现代深色 (默认)",
             "theme_light": "专业浅色",
@@ -746,10 +706,8 @@ class I18n:
             "theme_dracula": "Dracula (吸血鬼)",
             "settings_snack_theme_updated": "主题已更新 (立即生效)",
             "settings_local_gpu_auto": "自动卸载所有层 (推荐)",
-
             # Health Report Inner
             "health_missing_sample": "未覆盖股票示例",
-
             # Data Source Tab
             "ds_val_placeholder_count": "5000+ 股票",
             "ds_sync_in_progress": "后台数据同步或处理中，请等待当前操作完成",
@@ -765,7 +723,6 @@ class I18n:
             "ds_clean_fail": "清理失败: {error}",
             "ds_verify_fail_fmt": "验证失败: {error}",
             "ds_init_fail_fmt": "初始化失败: {error}",
-
             "ds_init_fail_generic": "初始化失败 (请检查日志)",
             "ds_progress_cancelled_fmt": "❌ {msg}",
             "ds_progress_failed_fmt": "❌ {msg}",
@@ -779,7 +736,6 @@ class I18n:
             "ai_snack_invalid_range": "{field}超出有效范围 (允许: {min}-{max})",
             "ai_snack_fields_empty": "请填写候选数量和换手率阈值",
             "ai_snack_invalid_url": "API地址必须以 http:// 或 https:// 开头",
-
             # News Tags
             "tag_stock": "个股",
             "tag_policy": "政策",
@@ -787,12 +743,10 @@ class I18n:
             "tag_global": "外盘",
             "tag_international": "国际",
             "tag_macro": "宏观",
-
             # Data View - Missing Keys
             "data_date_fmt_hint": "💡 日期格式: YYYYMMDD (如 '20260203')",
             "data_status_executing": "正在执行查询...",
             "data_sys_error": "系统错误: {error}",
-
             # Financial Reports & Status
             "report_last_year": "去年年报 ({year})",
             "report_interim": "中报 ({year})",
@@ -801,46 +755,21 @@ class I18n:
             "status_days_ago": "上次同步于 {days} 天前",
             "status_earnings_season": "财报季需更新",
             "status_recent": "数据已是最新",
-
             # Phase 3 New
             "view_unknown": "未知视图",
             "sem_no_data": "无数据",
-            "screener_score": "评分",
-
-            # AI Progress
-            "param_rsi_threshold": "RSI 阈",
-            "param_rsi_threshold_oversold": "RSI 阈值 (常用 20-30)",
-            "param_rsi_period": "RSI 周期",
-            "ai_progress_init": "正在初始化 AI...",
-            "ai_progress_skipped": "跳过 {name}",
-            "ai_progress_analyzed": "已分析 {name} (评分: {score})",
-            "ai_stream_init": "深度引擎初始化...",
-            "ai_analyzing_stock": "深入分析: {name}...",
-            "ai_thinking": "AI 思维链",
-            "ai_analysis_report": "分析报告",
-            "ai_expand_reasoning": "点击展开/折叠思考过程",
-            "task_loading_data": "加载策略数据...",
-            "task_cache_empty_init": "缓存为空，初始化中...",
-            "task_executing_strategy": "执行筛选: {name}",
-            "task_aggregating_results": "聚合结果...",
-            "task_screening_success": "筛出 {count} 只标的",
-            "task_type_ai_screening": "AI 选股",
-
             "sys_concurrency": "系统并发数",
             "sys_concurrency_hint": "并发线程数",
             "settings_sync_concurrency": "同步并发",
             "sys_opt_warn": "警告",
-
             "tab_stock_basic": "股票列表",
             "tab_alembic_version": "数据库版本",
             "tab_daily_quotes": "日线行情",
-
             "tab_financial_reports": "财务报表",
             "tab_daily_indicators": "每日指标",
             "tab_fina_forecast": "业绩预告",
             "tab_fina_audit": "财务审计",
             "tab_stock_concepts": "概念板块",
-
             "col_concept_name": "概念名称",
             "col_concept_id": "概念ID",
             "tab_fina_mainbz": "主营业务",
@@ -869,13 +798,9 @@ class I18n:
             "tab_index_weight": "指数成分权重",
             "tab_moneyflow_hsgt": "沪深港通资金流",
             "tab_task_history": "系统任务记录",
-
             "col_ts_code": "代码",
             "col_symbol": "股票代码",
             "col_name": "名称",
-            "col_version_num": "DB版本号",
-            "col_ai_score": "AI评分",
-            "col_ai_reason": "AI研判简报",
             "col_id": "ID",
             "col_trade_date": "交易日期",
             "col_ann_date": "公告日期",
@@ -979,7 +904,6 @@ class I18n:
             "col_source": "来源",
             "col_tags": "标签",
             "col_is_open": "是否开市",
-            "col_status": "状态",
             "col_exchange": "交易所",
             "col_type": "预告类型",
             "col_p_change_min": "预告幅度下限",
@@ -1000,7 +924,6 @@ class I18n:
             "col_reason": "上榜原因",
             "col_l_sell": "卖出额",
             "col_l_buy": "买入额",
-
             # AI Data Columns
             "col_m2": "M2供应量",
             "col_m2_yoy": "M2同比",
@@ -1066,7 +989,6 @@ class I18n:
             "col_strth": "强度",
             "col_limit_type": "类型",
             "col_suspend_type_name": "停牌原因",
-            "col_ai_reason": "AI理由",
             "col_strategy_name": "策略名称",
             "col_prediction_result": "预测结果",
             "col_t1_price": "T+1价格",
@@ -1089,7 +1011,6 @@ class I18n:
             "nav_data": "Data Center",
             "data_tab_explorer": "Data Explorer",
             "nav_settings": "Settings",
-
             # --- Task Center ---
             "nav_tasks": "Task Center",
             "task_clear_finished": "Clear Finished",
@@ -1115,6 +1036,8 @@ class I18n:
             "task_type_data_sync": "Data Sync",
             "task_name_health_check": "System Data Health Check",
             "task_name_init_sync": "Full Historical Data Sync",
+            "task_name_daily_sync": "Full Daily Update",
+            "task_name_clear_cache": "Clear All Cache",
             "task_progress_checking": "Checking local cache health...",
             "task_progress_analyzing": "Analyzing data quality, updating metrics...",
             "task_result_health_done": "Health check completed",
@@ -1135,7 +1058,6 @@ class I18n:
             "sched_pred_done_found": "AI prediction complete, {count} candidates found",
             "sched_pred_done_empty": "AI prediction complete, no candidates found",
             "sched_task_prediction": "AI Nightly Prediction ({date})",
-
             "home_welcome": "Welcome to A-Share Intelligent Screener",
             "home_market_status": "Market Status",
             "home_indices": "Key Indices",
@@ -1152,16 +1074,13 @@ class I18n:
             "screener_mode_run": "Run Screener",
             "screener_mode_history": "History Archive",
             "screener_all_strategies": "All Strategies",
-            
             # --- AI Prompts ---
             "ai_save_prompt": "Save Modifications",
             "ai_reset_default": "Restore Default",
             "ai_settings_saved": "System prompt saved",
             "ai_settings_restored": "System prompt restored to default",
-
             "history_load_more": "Load More",
             "history_total": "{count} records",
-
             "settings_title": "Settings",
             "settings_general": "General",
             "settings_language": "Language",
@@ -1169,11 +1088,9 @@ class I18n:
             "settings_api": "API Settings",
             "settings_token": "Tushare Token",
             "settings_save": "Save Settings",
-
             "status_ready": "Ready",
             "status_running": "Running...",
             "status_error": "Error",
-
             # Screener
             "select_strategy": "Select Strategy",
             "run_screening": "Run Screening",
@@ -1187,7 +1104,6 @@ class I18n:
             "screener_log_title": "Execution Log",
             "screener_page_info": "Page {current} of {total}",
             "screener_per_page": "/ page",
-
             # Data Dictionary - Table Aliases
             "tab_stock_basic": "Stock List",
             "tab_alembic_version": "DB Version",
@@ -1197,7 +1113,6 @@ class I18n:
             "tab_fina_forecast": "Performance Forecast",
             "tab_fina_audit": "Financial Audit",
             "tab_stock_concepts": "Stock Concepts",
-
             "col_concept_name": "Concept Name",
             "col_concept_id": "Concept ID",
             "tab_fina_mainbz": "Main Business",
@@ -1226,7 +1141,6 @@ class I18n:
             "tab_index_weight": "Index Weights",
             "tab_moneyflow_hsgt": "Northbound Money Flow",
             "tab_task_history": "System Task History",
-
             # Columns
             "col_version_num": "DB Version",
             "col_ts_code": "Code",
@@ -1240,14 +1154,12 @@ class I18n:
             "col_pe": "PE",
             "col_turnover": "Turnover",
             "col_details": "Details",
-
             # Screener Status Messages
             "screener_no_strategy_hint": "Select a strategy to view its logic",
             "screener_loading_data": "Initializing/Reloading Database...",
             "screener_data_loaded": "Data Loaded",
             "screener_load_failed": "Load Failed: {error}",
             "screener_please_select": "Please select a strategy first!",
-            
             # Units
             "unit_year": "Year",
             "unit_years": "Years",
@@ -1260,7 +1172,6 @@ class I18n:
             "screener_no_results": "No stocks found matching criteria",
             "screener_no_data_context": "No data available for screening",
             "screener_running_strategy": "Running {name}...",
-
             # Dynamic Strategy Parameters
             "param_rsi_threshold": "RSI Threshold",
             "param_rsi_threshold_oversold": "RSI Threshold (Common: 20-30)",
@@ -1304,7 +1215,6 @@ class I18n:
             "screener_internal_error": "Internal system error, check logs for details.",
             "screener_score": "Score",
             "screener_view_details": "View Details",
-
             # Strategy Names & Descriptions
             "strategy_ai_active_name": "AI Deep Dive (Beta)",
             "strategy_ai_active_desc": "AI Auto-Selection: Quant filter for active stocks + DeepSeek/AI analysis of news and reports.",
@@ -1331,7 +1241,6 @@ class I18n:
             "strategy_cashflow_desc": "Criteria: Debt Ratio < 50% | ROE > 10% (Robust Ops)",
             "strategy_large_pe_name": "Large Cap Low PE",
             "strategy_large_pe_desc": "Criteria: Mkt Cap > 50B | PE < 15x (Core Assets)",
-
             # Home View
             "home_title": "Market Overview",
             "home_data_date": "Data Date: {date}",
@@ -1355,7 +1264,6 @@ class I18n:
             "home_run": "Run",
             "home_hot_concepts_empty": "No hot concepts data available",
             "home_news_empty": "No news available",
-
             # News Tags
             "tag_stock": "Stock",
             "tag_policy": "Policy",
@@ -1363,7 +1271,6 @@ class I18n:
             "tag_global": "Global",
             "tag_international": "Intl",
             "tag_macro": "Macro",
-
             # Data Explorer
             "data_select_table": "Select Table",
             "data_filter_col": "Filter Col",
@@ -1375,7 +1282,6 @@ class I18n:
             "data_tab_sql": "SQL Console",
             "data_page_num": "Page {current} / {total}",
             "data_total_rows": "Total {count} rows",
-
             "data_sql_label": "SQL Query",
             "data_sql_hint": "Enter SELECT query (e.g. SELECT * FROM stock_basic LIMIT 10)",
             "data_sql_execute": "Execute (Ctrl+Enter)",
@@ -1392,7 +1298,6 @@ class I18n:
             "data_export_fail": "Export failed: {error}",
             "data_export_no_data": "No data to export",
             "data_export_success": "Exported to {file}",
-
             # Confirmation Dialogs
             "dialog_confirm_init_title": "Confirm Initialization",
             "dialog_confirm_init_content": "Fetch all market, financial, and macro data for the configured history range. This may take a while. Continue?",
@@ -1400,7 +1305,6 @@ class I18n:
             "dialog_confirm_full_sync_content": "Attempt to fully fetch the latest daily market data for all stocks. Continue?",
             "btn_confirm_init": "Start Init",
             "btn_confirm_sync": "Start Sync",
-
             # Settings - Tabs
             "settings_tab_general": "General",
             "settings_tab_data": "Data Mgmt",
@@ -1408,7 +1312,6 @@ class I18n:
             "settings_tab_tasks": "Tasks",
             "settings_tab_notify": "Notifications",
             "settings_tab_system": "System",
-
             # Settings - Sections
             "settings_sec_api": "API Connection",
             "settings_sec_ai": "AI Model Config",
@@ -1426,7 +1329,6 @@ class I18n:
             "settings_notify_title": "Push Notifications",
             "settings_notify_desc": "Receive alerts for major news or AI picks.",
             "settings_sec_health": "Health Check",
-
             # Settings - Labels & Descriptions
             "settings_token_desc": "Enter your Tushare Pro Token for data access.",
             "settings_save_token": "Save Token",
@@ -1452,6 +1354,9 @@ class I18n:
             "settings_news_interval_15m": "15min (Very Low)",
             "settings_snack_interval_set": "News poll interval updated: {interval}s",
             "settings_update_time": "Update Time",
+            "settings_doubao_update": "Auto-Rebuild Doubao Concepts",
+            "settings_doubao_desc": "Schedule automatic rebuild of market-wide AI concepts",
+            "settings_saturdays": "Saturdays Only",
             "settings_log_level": "Log Level",
             "settings_sync_concurrency": "Sync Concurrency",
             "settings_sync_desc": "Adjust based on network/CPU. Default 5. High values may trigger bans.",
@@ -1459,11 +1364,9 @@ class I18n:
             "settings_pool_desc": "Max resident DB connections (Restart required)",
             "settings_save_config": "Save Config",
             "settings_init_done": "History Data Init Complete!",
-
             "settings_no_proxy_desc": "Domains to bypass proxy (Direct Connection)",
             "settings_no_proxy_hint": "Separate domains with commas (e.g. example.com, .cn)",
             "settings_snack_no_proxy_saved": "No-Proxy settings saved!",
-
             # Thread Pool & Advanced
             "sys_thread_pool_title": "Thread Pool Config",
             "sys_thread_pool_desc": "Adjust max concurrent threads for IO (Net/DB) and CPU tasks",
@@ -1487,9 +1390,15 @@ class I18n:
             "settings_cache_manage": "Cache Management",
             "settings_clear_cache": "Clear All Cache",
             "settings_cache_desc": "Clear cache and resync if data is anomalous.",
+            "ds_btn_doubao_rebuild": "Rebuild Doubao",
+            "ds_btn_doubao_rebuild_desc": "Clear all Doubao concepts and re-tag entire market",
+            "dialog_doubao_rebuild_title": "Confirm Rebuild Doubao Concepts",
+            "dialog_doubao_rebuild_content": "This will clear all Doubao AI concepts and run the background pipeline to re-tag the entire market.\nIt may take minutes to hours to complete. The app remains usable during this time.\n\nContinue?",
+            "btn_confirm_rebuild": "Confirm Rebuild",
+            "task_name_doubao_rebuild": "Manual Doubao Concept Rebuild",
+            "snack_doubao_done": "Doubao concepts have been fully rebuilt!",
             "settings_auto_desc": "Auto-sync data daily without manual intervention.",
             "settings_save_ai": "Save AI Config",
-
             # Settings - Options & Hints
             "settings_opt_1530": "15:30 (Post-Market)",
             "settings_opt_1600": "16:00",
@@ -1504,15 +1413,12 @@ class I18n:
             "settings_hint_ai_model": "Concurrent analysis threads. Too high may hit rate limits.",
             "settings_hint_sync_full": "Syncs quotes, valuation, moneyflow, holdings",
             "settings_hint_first_run": "First run requires pulling historical data",
-
             # AI Settings Dialog
             "ai_system_prompt": "System Prompt",
             "ai_settings_title": "AI Assistant Config",
             "ai_settings_desc": "Configure AI API (DeepSeek recommended)",
             "ai_prompt_label": "System Prompt Config (Expert Mode)",
-            "ai_reset_default": "Reset Default",
             "ai_key_required": "API Key cannot be empty",
-            "ai_settings_saved": "AI Config Updated!",
             "ai_local_model_changed": "Local model config saved. Restart required to take effect.",
             "ai_verifying_model": "Verifying model file...",
             "ai_model_file_not_found": "Model file not found. Please check the path.",
@@ -1538,14 +1444,12 @@ class I18n:
             "common_quotes": "Quotes",
             "common_more_actions": "More Actions",
             "font_family": "Inter, Roboto, sans-serif",
-
             # Units
             "unit_yuan": "CYN",
             "unit_yi": "100M",
             "unit_wan": "10k",
             "unit_wanshou": "10k Lots",
             "unit_shou": "Lots",
-
             # Stock Details
             "detail_loading_chart": "Loading Chart...",
             "detail_sec_price": "Market Data",
@@ -1594,9 +1498,7 @@ class I18n:
             "detail_chart_browser_hint": "Please view full chart in browser",
             "detail_open_browser": "Open Chart (Browser)",
             "detail_err_load_chart": "Chart load failed: {error}",
-
             "chart_kline": "Candlestick",
-
             # Onboarding Wizard
             "wizard_welcome_title": "Welcome to A-Share Intelligent Screener",
             "wizard_welcome_desc": "Initial configuration required",
@@ -1606,7 +1508,6 @@ class I18n:
             "wizard_step_label_sync": "Data Sync",
             "wizard_step_label_schedule": "Schedule",
             "wizard_step_label_done": "Done",
-
             "wizard_token_label": "Enter Tushare Pro Token",
             "wizard_token_hint": "Get from tushare.pro",
             "wizard_step1_title": "Step 1: Configure Tushare Token",
@@ -1616,7 +1517,6 @@ class I18n:
             "wizard_err_token_empty": "❌ Please enter Token",
             "wizard_msg_token_success": "✅ Token Verified",
             "wizard_err_verify_failed": "❌ Verification Failed: {error}",
-
             "wizard_ai_key_label": "AI API Key",
             "wizard_ai_model_label": "Model Name",
             "wizard_ai_prompt_label": "System Prompt",
@@ -1631,7 +1531,6 @@ class I18n:
             "wizard_ai_success": "✅ Connected",
             "wizard_ai_failed": "❌ Connection Refused",
             "wizard_ai_error": "❌ Error: {error}",
-
             "wizard_sync_quick": "Today Only (Fast)",
             "wizard_sync_full": "Full Sync ({years} Years)",
             "wizard_btn_cancel": "Cancel",
@@ -1648,7 +1547,6 @@ class I18n:
             "wizard_msg_sync_cancelled": "❌ Sync Cancelled",
             "wizard_msg_history_done": "✅ History synced",
             "wizard_msg_sync_failed": "❌ Sync Failed: {error}",
-
             # 6-Step Init Progress
             "init_step_1": "Step 1/6: Syncing Stock List",
             "init_step_2": "Step 2/6: Syncing Trade Calendar",
@@ -1663,20 +1561,16 @@ class I18n:
             "init_step_5_done": "AI Data Sync Done",
             "health_market_lag": "Market data {days} days behind",
             "health_financial_missing": "Financial data missing (coverage {ratio})",
-
             "wizard_schedule_label": "Enable Auto-Update (16:30)",
             "wizard_step4_title": "Step 4: Auto-Update",
             "wizard_step4_desc": "Recommended: Auto-update after market close.",
             "wizard_schedule_note": "* Requires app running in background",
             "wizard_btn_finish": "Finish",
-
             "wizard_step5_title": "🎉 Setup Complete!",
             "wizard_step5_desc": "You are ready to use the screener.",
             "wizard_btn_start": "Get Started",
-
             "settings_hint_bg_run": "* App must run in background",
             "settings_hint_cpu": "Adjust thread count based on CPU. Too high = Ban risk.",
-
             # Settings - Status & Messages
             "settings_status_auto_on": "✅ Auto-update enabled",
             "settings_status_auto_off": "Auto-update disabled",
@@ -1698,7 +1592,6 @@ class I18n:
             "settings_trading_days": "(Trading Days)",
             "settings_snack_concurrency_set": "Concurrency set to {val} (Effective next sync)",
             "settings_snack_log_level": "Log level changed to {level}",
-
             # Dialogs & Snacks
             "dialog_confirm_clear_title": "Confirm Clear Cache",
             "dialog_confirm_clear_content": "This will delete all cached history.\nResync required.\n\nContinue?",
@@ -1716,7 +1609,6 @@ class I18n:
             "progress_sync_finance": "Syncing finance: {date}",
             "progress_sync_moneyflow": "Syncing moneyflow: {date}",
             "progress_sync_done": "Sync Complete",
-
             # System Initialization (Step 1-5)
             "init_stock_list": "Syncing Stock List...",
             "init_stock_list_done": "Stock list complete",
@@ -1727,7 +1619,6 @@ class I18n:
             "init_health_check": "Running Health Check...",
             "init_complete": "Init Complete! Health: {status} (Coverage: {coverage})",
             "progress_sync_fundamentals": "Fundamentals: {current}/{total} ({stock})",
-
             # Data Source Tab
             "ds_val_placeholder_count": "5000+ Stocks",
             "ds_health_summary_sys": "System: Coverage {cov} | Lag {lag} days",
@@ -1738,7 +1629,6 @@ class I18n:
             "ds_text_cov_detail": "Coverage: {cov} | Fin: {fin_cov} (Recent: {recent}) | Lag: {lag} days",
             "ds_health_check_error": "Health check failed: internal error, see logs.",
             "ds_repair_start_snack": "Starting targeted repair...",
-
             # --- Settings: System Tab ---
             "sys_core_config": "Core Config",
             "sys_log_label": "System Log Level",
@@ -1778,7 +1668,6 @@ class I18n:
             "health_scan_title": "Deep Health Scan",
             "health_scan_desc": "Scanning {current}/{total} stocks...",
             "health_btn_deep_scan": "Deep Scan",
-            "health_financial_missing": "Financial Data Coverage Low ({ratio})",
             "scan_step_init": "Initializing Scan...",
             "scan_scanning": "Scanning {code}...",
             "scan_complete": "Scan Complete",
@@ -1792,7 +1681,6 @@ class I18n:
             "health_days": "Days",
             "health_sample_size": "Sample Size",
             "scan_title": "Deep Scan Progress",
-            "ai_progress_skipped": "Skipped {name}",
             "health_coverage": "Coverage & Freshness",
             "health_section_stock": "Stock Coverage",
             "health_section_global": "Global Data",
@@ -1800,11 +1688,6 @@ class I18n:
             "health_type_global": "Global",
             "health_global_count": "{count} records",
             "health_global_no_data": "No Data",
-            "health_continuity": "Continuity",
-            "health_avg_recency": "Avg Recency",
-            "health_days": "days",
-            "health_sample_size": "Sample Size",
-
             # --- Settings: Data Source Tab ---
             "ds_last_update": "Last Update",
             "ds_data_coverage": "Coverage",
@@ -1826,7 +1709,6 @@ class I18n:
             "ds_repair_progress": "Repairing... Do not close",
             "ds_repair_done": "✅ Repair Complete! Added {count} records",
             "ds_repair_fail": "Repair Failed: {error}",
-
             # --- Settings: AI Tab ---
             "ai_status_disconnected": "Disconnected",
             "ai_status_connected": "Connected",
@@ -1834,7 +1716,6 @@ class I18n:
             "ai_btn_testing": "Testing...",
             "ai_tuning_desc": "Tune analysis depth vs cost",
             "ai_hint_default": "Default: {val}",
-
             # --- Missed Keys (Round 2) ---
             "time_today": "Today",
             "common_items": "items",
@@ -1853,27 +1734,14 @@ class I18n:
             "health_err_calendar": "Cannot get official trade calendar",
             "common_op_cancelled": "Operation cancelled",
             "health_err_concept": "Concept check failed",
-
             # System Tab Dropdowns
             "sys_opt_debug": "DEBUG",
             "sys_opt_info": "INFO",
             "sys_opt_warn": "WARN",
             "sys_opt_error": "ERROR",
-
             # Health Report Inner
             "health_missing_sample": "Missing Samples",
-
-            # Data Source Tab
-            "ds_val_placeholder_count": "5000+ Stocks",
             "ds_sync_in_progress": "System is busy processing data. Please wait for completion.",
-            "ds_text_cov_detail": "Cov: {cov} | Fin Cmd: {fin_cov} (Recent: {recent}) | Lag: {lag}d",
-            "ds_health_summary_sys": "System: Coverage {cov} | Lag {lag} days",
-            "ds_health_summary_core": "Integrity: {miss} core missing",
-            "ds_health_summary_core_ok": "Integrity: Core covered",
-            "ds_health_summary_depth": "Low Depth: {miss}",
-            "ds_health_summary_breadth": "Low Breadth: {miss}",
-            "ds_health_check_error": "Health check error: internal error, see logs.",
-            "ds_repair_start_snack": "Repairing...",
             "ds_cache_cleared": "Cache Cleared!",
             "ds_clean_fail": "Clean Failed: {error}",
             "ds_verify_fail_fmt": "Verify Failed: {error}",
@@ -1891,12 +1759,10 @@ class I18n:
             "ai_snack_invalid_range": "{field} out of valid range (Allowed: {min}-{max})",
             "ai_snack_fields_empty": "Please fill in candidate count and turnover threshold",
             "ai_snack_invalid_url": "API URL must start with http:// or https://",
-
             # Data View - Missing Keys
             "data_date_fmt_hint": "💡 Date Fmt: YYYYMMDD (e.g. '20260203')",
             "data_status_executing": "Executing Query...",
             "data_sys_error": "System Error: {error}",
-
             # Financial Reports & Status
             "report_last_year": "Annual Report ({year})",
             "report_interim": "Interim Report ({year})",
@@ -1905,31 +1771,9 @@ class I18n:
             "status_days_ago": "Last synced {days} days ago",
             "status_earnings_season": "Earnings season update needed",
             "status_recent": "Up to date",
-
             # Phase 3 New
             "view_unknown": "Unknown View",
             "sem_no_data": "No Data",
-            "screener_score": "Score",
-
-            # AI Progress
-            "param_rsi_threshold": "RSI Threshold",
-            "param_rsi_threshold_oversold": "RSI Threshold (Common: 20-30)",
-            "param_rsi_period": "RSI Period",
-            "ai_progress_init": "Initializing AI...",
-            "ai_progress_skipped": "Skipped {name}",
-            "ai_progress_analyzed": "Analyzed {name} (Score: {score})",
-            "ai_stream_init": "Initializing deep analysis...",
-            "ai_analyzing_stock": "Analyzing: {name}...",
-            "ai_thinking": "Reasoning Process",
-            "ai_analysis_report": "Analysis Report",
-            "ai_expand_reasoning": "Click to expand/collapse reasoning",
-            "task_loading_data": "Loading strategy data...",
-            "task_cache_empty_init": "Cache empty, syncing...",
-            "task_executing_strategy": "Running screening: {name}",
-            "task_aggregating_results": "Processing results...",
-            "task_screening_success": "Screened {count} stocks",
-            "task_type_ai_screening": "AI Screening",
-
             "settings_local_gpu_auto": "Auto Offload All Layers",
             # Theme
             "theme_dark": "Modern Dark (Default)",
@@ -1937,7 +1781,6 @@ class I18n:
             "theme_navy": "Nordic Navy",
             "theme_dracula": "Dracula",
             "settings_snack_theme_updated": "Theme updated (Effective immediately)",
-
             # AI Data Columns
             "col_m2": "M2 Supply",
             "col_m2_yoy": "M2 YoY",
@@ -1973,10 +1816,8 @@ class I18n:
             "col_ggt_sz": "GGT-SZ",
             "col_hgt_north_money": "SH-North",
             "col_sgt_north_money": "SZ-North",
-
             # Missing Columns (Auto-generated)
             "col_adj_factor": "Adj Factor",
-            "col_ai_reason": "Ai Reason",
             "col_amount": "Amount",
             "col_amount_rate": "Amount Rate",
             "col_amp": "Amp",
@@ -2005,8 +1846,6 @@ class I18n:
             "col_circ_mv": "Circ Mv",
             "col_close": "Close",
             "col_comp_type": "Comp Type",
-
-
             "col_content": "Content",
             "col_created_at": "Created At",
             "col_task_type": "Task Type",
@@ -2070,7 +1909,6 @@ class I18n:
             "col_p_change_min": "P Change Min",
             "col_pb": "Pb",
             "col_pct_chg": "Pct Chg",
-
             "col_pe_ttm": "PE(TTM)",
             "col_pledge_count": "Pledge Count",
             "col_pledge_ratio": "Pledge Ratio",
@@ -2109,7 +1947,6 @@ class I18n:
             "col_sell_sm_vol": "Sell Sm Vol",
             "col_seller": "Seller",
             "col_source": "Source",
-            "col_status": "Status",
             "col_step4_completed_at": "Step4 Completed At",
             "col_stk_bo_rate": "Stk Bo Rate",
             "col_stk_co_rate": "Stk Co Rate",
@@ -2153,7 +1990,7 @@ class I18n:
             "settings_sync_heavy": "Heavy Sync Threads",
             "sys_sync_heavy": "Heavy Sync Threads",
             "sys_sync_heavy_hint": "Concurrency for history/financial data (3-5)",
-        }
+        },
     }
 
     @classmethod
@@ -2169,15 +2006,15 @@ class I18n:
     def get(cls, key, default=None, **kwargs):
         """
         Get translated string by key with optional formatting.
-        
+
         Args:
             key: Translation key
             default: Optional fallback string if key is not found
             **kwargs: Optional format arguments (e.g., error="...", count=5)
-        
+
         Returns:
             Translated and formatted string, or key itself if not found.
-        
+
         Example:
             I18n.get("screener_done", count=10)  # Returns "筛选完成，共 10 只股票"
         """
@@ -2186,16 +2023,20 @@ class I18n:
             cls.initialize()
 
         # I18-01: Log warning on missing keys (deduplicated)
-        if not hasattr(cls, '_missing_keys'):
+        if not hasattr(cls, "_missing_keys"):
             cls._missing_keys = set()
 
         locale_map = cls.STRINGS.get(cls._locale, {})
         if key not in locale_map:
             if key not in cls._missing_keys:
                 if default is not None:
-                    logger.debug(f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {cls._locale})")
+                    logger.debug(
+                        f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {cls._locale})"
+                    )
                 else:
-                    logger.warning(f"[I18n] Missing translation for key: '{key}' (Locale: {cls._locale})")
+                    logger.warning(
+                        f"[I18n] Missing translation for key: '{key}' (Locale: {cls._locale})"
+                    )
                 cls._missing_keys.add(key)
             return default if default is not None else key
 

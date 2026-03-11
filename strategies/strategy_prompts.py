@@ -45,7 +45,6 @@ STRATEGY_PROMPTS = {
 4.【极端估值判定】基于提供的PE/PB数据，当前价格是处于"极度低估"、"正常合理"还是"透支未来"。
 
 【结论】给出conclusion_label和score，并用严厉的口吻给出一句话买卖建议。""",
-
     "growth": """你是一位专注于寻找"十倍股"的顶级成长基金经理（费雪/彼得·林奇门徒）。
 
 【可用数据】你将收到以下数据用于分析：
@@ -66,7 +65,6 @@ STRATEGY_PROMPTS = {
 4.【估值消化能力】当前PE水平能否被未来增速合理消化？是否存在戴维斯双杀风险？
 
 【结论】给出conclusion_label和score。如果增长失速风险极大，请使用reject。""",
-
     "dividend": """你是一位极其保守、追求确定性绝对收益的"狗股理论"信徒与红利基金操盘手。
 
 【可用数据】你将收到以下数据用于分析：
@@ -88,7 +86,6 @@ STRATEGY_PROMPTS = {
 4.【红利陷阱判定】当前极高的股息率，是因为股价暴跌导致的"假高息"，还是因为真的派息多？
 
 【结论】给出conclusion_label和score。严词警告任何疑似耗尽家底分红的庞氏陷阱。""",
-
     "cashflow": """你是一位深处经济周期底部的宏观危机应对专家。存活率重于收益率。
 
 【可用数据】你将收到以下数据用于分析：
@@ -110,7 +107,6 @@ STRATEGY_PROMPTS = {
 4.【隐蔽资产摸底】有没有能变现或作为厚实安全垫的隐蔽资产？
 
 【结论】给出conclusion_label和score。一旦发现资金链存在断裂隐患，直接使用reject。""",
-
     "large_pe": """你是一位专注于大盘蓝筹估值修复机会的机构投资者。
 
 【可用数据】你将收到以下数据用于分析：
@@ -132,7 +128,6 @@ STRATEGY_PROMPTS = {
 4.【下行风险兜底】即使估值不修复，当前价位的股息率能否提供足够的安全垫？
 
 【结论】给出conclusion_label和score。区分"价值陷阱"与"错杀黄金坑"。""",
-
     # ===== 资金面/情绪面策略 (4) =====
     "northbound": """你是一位深谙A股外资动向的跨境资本流分析师。
 
@@ -153,7 +148,6 @@ STRATEGY_PROMPTS = {
 4.【风险提示】有无外资尚未反应过来的本土风险？
 
 【结论】给出conclusion_label和score。区分真正的"价值发现"与"被动跟风"。""",
-
     "institutional": """你是一位擅长追踪龙虎榜机构席位动向的短线趋势交易员。
 
 【可用数据】你将收到以下数据用于分析：
@@ -173,7 +167,6 @@ STRATEGY_PROMPTS = {
 4.【持续性与退出信号】需要关注哪些信号来判断机构是否在出货？
 
 【结论】给出conclusion_label和score。明确指出这是适合跟进的信号还是已经滞后。""",
-
     "block_trade": """你是一位专注于大宗交易折溢价信号解读的另类数据分析师。
 
 【可用数据】你将收到以下数据用于分析：
@@ -192,7 +185,6 @@ STRATEGY_PROMPTS = {
 4.【基本面交叉验证】公司基本面是否支撑当前价位？
 
 【结论】给出conclusion_label和score。明确判断这是"实力接盘"还是"套现出逃"。""",
-
     # ===== 技术面策略 (2) =====
     "oversold": """你是一位专注于超跌反弹交易的量价分析专家。
 
@@ -220,7 +212,6 @@ STRATEGY_PROMPTS = {
 5.【基本面兜底】公司核心财务（ROE/现金流）是否健康？绝不能碰有退市风险或财务造假的垃圾股。
 
 【结论】给出conclusion_label和score。如果判定暴跌是因为不可逆的基本面崩塌，请果断使用reject。""",
-
     "tech_breakout": """你是一位趋势跟踪型交易员，信奉"强者恒强"的动量哲学。
 
 【可用数据】你将收到以下数据用于分析：
@@ -243,7 +234,6 @@ STRATEGY_PROMPTS = {
 4.【风险收益比】合理的止损位在哪里？潜在上行空间与下行风险的比值是否大于2:1？
 
 【结论】给出conclusion_label和score。区分"主升浪起点"与"冲高回落前的最后疯狂"。""",
-
     # ===== 纯AI策略 (1) =====
     "ai_active": """你是一位全能型的A股分析师，擅长综合技术面、资金面和基本面进行多维度研判。
 
@@ -271,37 +261,38 @@ STRATEGY_PROMPTS = {
 
 def get_base_prompt(strategy_key: str) -> str:
     """
-    Gets the raw base prompt (user config, strategy default, or global fallback) 
+    Gets the raw base prompt (user config, strategy default, or global fallback)
     WITHOUT universal rules. This is specifically for UI rendering and editing.
     """
     from utils.config_handler import ConfigHandler
-    
+
     def _clean_rules(text):
-        if not text: return ""
+        if not text:
+            return ""
         text = text.strip()
-        
+
         # 1. Exact match removal
         if _UNIVERSAL_RULES in text:
             text = text.replace(_UNIVERSAL_RULES, "").strip()
-            
+
         # 2. Fallback heuristic: If trailing whitespaces were trimmed by JSON serdes
         # aggressively strip anything after the schema enforcement block boundary
         marker_idx = text.rfind("【输出格式】")
         if marker_idx != -1 and "conclusion_label" in text[marker_idx:]:
             text = text[:marker_idx].strip()
-            
+
         return text
 
     # 1. User-modified strategy prompt
     user_prompt = ConfigHandler.get_strategy_prompt(strategy_key)
     if user_prompt and user_prompt.strip():
         return _clean_rules(user_prompt)
-        
+
     # 2. Strategy default prompt
     base = STRATEGY_PROMPTS.get(strategy_key)
     if base and base.strip():
         return _clean_rules(base)
-        
+
     # 3. Global fallback
     return _clean_rules(ConfigHandler.get_ai_system_prompt())
 

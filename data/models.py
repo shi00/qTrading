@@ -3,7 +3,7 @@ SQLAlchemy ORM models for A-Stock Screener.
 These models represent the database schema previously defined in schema.sql.
 """
 
-from sqlalchemy import Column, String, Float, Integer, UniqueConstraint, Index
+from sqlalchemy import Column, String, Float, Integer, BigInteger, UniqueConstraint, Index
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
 
@@ -14,14 +14,15 @@ naming_convention = {
     "uq": "uq_%(table_name)s_%(column_0_name)s",
     "ck": "ck_%(table_name)s_%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
-    "pk": "pk_%(table_name)s"
+    "pk": "pk_%(table_name)s",
 }
 
 metadata = MetaData(naming_convention=naming_convention)
 Base = declarative_base(metadata=metadata)
 
+
 class StockBasic(Base):
-    __tablename__ = 'stock_basic'
+    __tablename__ = "stock_basic"
     ts_code = Column(String, primary_key=True)
     symbol = Column(String)
     name = Column(String)
@@ -32,15 +33,17 @@ class StockBasic(Base):
     list_status = Column(String)
     updated_at = Column(String)
 
+
 class StockConcepts(Base):
-    __tablename__ = 'stock_concepts'
+    __tablename__ = "stock_concepts"
     ts_code = Column(String, primary_key=True, index=True)
     concept_name = Column(String)
     concept_id = Column(String, primary_key=True)
     updated_at = Column(String)
 
+
 class DailyQuotes(Base):
-    __tablename__ = 'daily_quotes'
+    __tablename__ = "daily_quotes"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     open = Column(Float)
@@ -59,8 +62,9 @@ class DailyQuotes(Base):
     qfq_close = Column(Float)
     updated_at = Column(String)
 
+
 class DailyIndicators(Base):
-    __tablename__ = 'daily_indicators'
+    __tablename__ = "daily_indicators"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     pe = Column(Float)
@@ -80,42 +84,45 @@ class DailyIndicators(Base):
     volume_ratio = Column(Float)
     updated_at = Column(String)
 
+
 class MoneyflowDaily(Base):
-    __tablename__ = 'moneyflow_daily'
+    __tablename__ = "moneyflow_daily"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
-    buy_sm_vol = Column(Integer)
+    buy_sm_vol = Column(BigInteger)
     buy_sm_amount = Column(Float)
-    sell_sm_vol = Column(Integer)
+    sell_sm_vol = Column(BigInteger)
     sell_sm_amount = Column(Float)
-    buy_md_vol = Column(Integer)
+    buy_md_vol = Column(BigInteger)
     buy_md_amount = Column(Float)
-    sell_md_vol = Column(Integer)
+    sell_md_vol = Column(BigInteger)
     sell_md_amount = Column(Float)
-    buy_lg_vol = Column(Integer)
+    buy_lg_vol = Column(BigInteger)
     buy_lg_amount = Column(Float)
-    sell_lg_vol = Column(Integer)
+    sell_lg_vol = Column(BigInteger)
     sell_lg_amount = Column(Float)
-    buy_elg_vol = Column(Integer)
+    buy_elg_vol = Column(BigInteger)
     buy_elg_amount = Column(Float)
-    sell_elg_vol = Column(Integer)
+    sell_elg_vol = Column(BigInteger)
     sell_elg_amount = Column(Float)
-    net_mf_vol = Column(Integer)
+    net_mf_vol = Column(BigInteger)
     net_mf_amount = Column(Float)
     updated_at = Column(String)
 
+
 class NorthboundHolding(Base):
-    __tablename__ = 'northbound_holding'
+    __tablename__ = "northbound_holding"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     name = Column(String)
-    vol = Column(Integer)
+    vol = Column(BigInteger)
     ratio = Column(Float)
     exchange = Column(String)
     updated_at = Column(String)
 
+
 class TopList(Base):
-    __tablename__ = 'top_list'
+    __tablename__ = "top_list"
     trade_date = Column(String, primary_key=True)
     ts_code = Column(String, primary_key=True, index=True)
     name = Column(String)
@@ -133,8 +140,9 @@ class TopList(Base):
     reason = Column(String)
     updated_at = Column(String)
 
+
 class SyncStatus(Base):
-    __tablename__ = 'sync_status'
+    __tablename__ = "sync_status"
     table_name = Column(String, primary_key=True)
     last_sync_date = Column(String)
     last_data_date = Column(String)
@@ -142,8 +150,9 @@ class SyncStatus(Base):
     status = Column(String)
     updated_at = Column(String)
 
+
 class ScreeningHistory(Base):
-    __tablename__ = 'screening_history'
+    __tablename__ = "screening_history"
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_date = Column(String, nullable=False)
     strategy_name = Column(String, nullable=False)
@@ -175,14 +184,20 @@ class ScreeningHistory(Base):
     thinking = Column(String)
     prediction_result = Column(String)
     created_at = Column(String)
-    
+
     __table_args__ = (
-        UniqueConstraint('trade_date', 'strategy_name', 'ts_code', name='uq_screening_history_date_strategy_code'),
-        Index('idx_sh_date_strategy', 'trade_date', 'strategy_name')
+        UniqueConstraint(
+            "trade_date",
+            "strategy_name",
+            "ts_code",
+            name="uq_screening_history_date_strategy_code",
+        ),
+        Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
     )
 
+
 class BlockTrade(Base):
-    __tablename__ = 'block_trade'
+    __tablename__ = "block_trade"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True)
     price = Column(Float)
@@ -193,29 +208,32 @@ class BlockTrade(Base):
     reason = Column(String)
     updated_at = Column(String)
 
+
 class MarketNews(Base):
-    __tablename__ = 'market_news'
+    __tablename__ = "market_news"
     id = Column(Integer, primary_key=True, autoincrement=True)
     content = Column(String)
     tags = Column(String)
     publish_time = Column(String)
     source = Column(String)
     created_at = Column(String)
-    
+
     __table_args__ = (
-        UniqueConstraint('content', 'publish_time', name='uq_market_news_content_pub'),
+        UniqueConstraint("content", "publish_time", name="uq_market_news_content_pub"),
     )
 
+
 class TradeCal(Base):
-    __tablename__ = 'trade_cal'
+    __tablename__ = "trade_cal"
     cal_date = Column(String, primary_key=True)
     exchange = Column(String)
     is_open = Column(Integer)
     pretrade_date = Column(String)
     updated_at = Column(String)
 
+
 class FinancialReports(Base):
-    __tablename__ = 'financial_reports'
+    __tablename__ = "financial_reports"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True, index=True)
     ann_date = Column(String)
@@ -237,12 +255,13 @@ class FinancialReports(Base):
     goodwill = Column(Float)
     audit_result = Column(String)
     __table_args__ = (
-        Index('ix_financial_reports_ts_code_ann_date', 'ts_code', 'ann_date'),
+        Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
     )
     updated_at = Column(String)
 
+
 class IndexDaily(Base):
-    __tablename__ = 'index_daily'
+    __tablename__ = "index_daily"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     close = Column(Float)
@@ -256,8 +275,9 @@ class IndexDaily(Base):
     amount = Column(Float)
     updated_at = Column(String)
 
+
 class IndexDailyBasic(Base):
-    __tablename__ = 'index_dailybasic'
+    __tablename__ = "index_dailybasic"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True)
     total_mv = Column(Float)
@@ -272,8 +292,9 @@ class IndexDailyBasic(Base):
     pb = Column(Float)
     updated_at = Column(String)
 
+
 class MarginDaily(Base):
-    __tablename__ = 'margin_daily'
+    __tablename__ = "margin_daily"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     rzye = Column(Float)
@@ -283,16 +304,18 @@ class MarginDaily(Base):
     rzrqye = Column(Float)
     updated_at = Column(String)
 
+
 class SuspendD(Base):
-    __tablename__ = 'suspend_d'
+    __tablename__ = "suspend_d"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     suspend_timing = Column(String)
     suspend_type_name = Column(String)
     updated_at = Column(String)
 
+
 class LimitList(Base):
-    __tablename__ = 'limit_list'
+    __tablename__ = "limit_list"
     trade_date = Column(String, primary_key=True)
     ts_code = Column(String, primary_key=True, index=True)
     name = Column(String)
@@ -309,8 +332,9 @@ class LimitList(Base):
     limit_type = Column(String)
     updated_at = Column(String)
 
+
 class FinaForecast(Base):
-    __tablename__ = 'fina_forecast'
+    __tablename__ = "fina_forecast"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True)
     ann_date = Column(String, primary_key=True, index=True)
@@ -321,8 +345,9 @@ class FinaForecast(Base):
     net_profit_max = Column(Float)
     updated_at = Column(String)
 
+
 class FinaMainbz(Base):
-    __tablename__ = 'fina_mainbz'
+    __tablename__ = "fina_mainbz"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True, index=True)
     bz_item = Column(String, primary_key=True)
@@ -333,8 +358,9 @@ class FinaMainbz(Base):
     update_flag = Column(String)
     updated_at = Column(String)
 
+
 class PledgeStat(Base):
-    __tablename__ = 'pledge_stat'
+    __tablename__ = "pledge_stat"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True)
     pledge_count = Column(Integer)
@@ -344,8 +370,9 @@ class PledgeStat(Base):
     pledge_ratio = Column(Float)
     updated_at = Column(String)
 
+
 class Repurchase(Base):
-    __tablename__ = 'repurchase'
+    __tablename__ = "repurchase"
     ts_code = Column(String, primary_key=True)
     ann_date = Column(String, primary_key=True, index=True)
     end_date = Column(String)
@@ -357,8 +384,9 @@ class Repurchase(Base):
     low_limit = Column(Float)
     updated_at = Column(String)
 
+
 class Dividend(Base):
-    __tablename__ = 'dividend'
+    __tablename__ = "dividend"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True)
     ann_date = Column(String, primary_key=True, index=True)
@@ -372,15 +400,17 @@ class Dividend(Base):
     ex_date = Column(String)
     updated_at = Column(String)
 
+
 class StockSyncStatus(Base):
-    __tablename__ = 'stock_sync_status'
+    __tablename__ = "stock_sync_status"
     ts_code = Column(String, primary_key=True)
     step4_completed_at = Column(String)
     sync_version = Column(Integer, default=1)
     updated_at = Column(String)
 
+
 class FinaAudit(Base):
-    __tablename__ = 'fina_audit'
+    __tablename__ = "fina_audit"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True)
     ann_date = Column(String)
@@ -389,8 +419,9 @@ class FinaAudit(Base):
     audit_agency = Column(String)
     updated_at = Column(String)
 
+
 class MacroEconomy(Base):
-    __tablename__ = 'macro_economy'
+    __tablename__ = "macro_economy"
     period = Column(String, primary_key=True)
     m2 = Column(Float)
     m2_yoy = Column(Float)
@@ -402,8 +433,9 @@ class MacroEconomy(Base):
     ppi = Column(Float)
     created_at = Column(String)
 
+
 class ShiborDaily(Base):
-    __tablename__ = 'shibor_daily'
+    __tablename__ = "shibor_daily"
     date = Column(String, primary_key=True)
     on = Column(Float)
     w1 = Column(Float, name="1w")
@@ -415,15 +447,17 @@ class ShiborDaily(Base):
     y1 = Column(Float, name="1y")
     updated_at = Column(String)
 
+
 class AdjFactor(Base):
-    __tablename__ = 'adj_factor'
+    __tablename__ = "adj_factor"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     adj_factor = Column(Float)
     updated_at = Column(String)
 
+
 class StkHoldernumber(Base):
-    __tablename__ = 'stk_holdernumber'
+    __tablename__ = "stk_holdernumber"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True, index=True)
     ann_date = Column(String)
@@ -432,8 +466,9 @@ class StkHoldernumber(Base):
     holder_num_ratio = Column(Float)
     updated_at = Column(String)
 
+
 class Top10Holders(Base):
-    __tablename__ = 'top10_holders'
+    __tablename__ = "top10_holders"
     ts_code = Column(String, primary_key=True)
     end_date = Column(String, primary_key=True)
     ann_date = Column(String)
@@ -443,16 +478,18 @@ class Top10Holders(Base):
     holder_type = Column(String)
     updated_at = Column(String)
 
+
 class IndexWeight(Base):
-    __tablename__ = 'index_weight'
+    __tablename__ = "index_weight"
     index_code = Column(String, primary_key=True)
     con_code = Column(String, primary_key=True)
     trade_date = Column(String, primary_key=True, index=True)
     weight = Column(Float)
     updated_at = Column(String)
 
+
 class MoneyflowHsgt(Base):
-    __tablename__ = 'moneyflow_hsgt'
+    __tablename__ = "moneyflow_hsgt"
     trade_date = Column(String, primary_key=True)
     ggt_ss = Column(Float)
     ggt_sz = Column(Float)
@@ -462,8 +499,9 @@ class MoneyflowHsgt(Base):
     south_money = Column(Float)
     updated_at = Column(String)
 
+
 class TaskHistory(Base):
-    __tablename__ = 'task_history'
+    __tablename__ = "task_history"
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     task_type = Column(String, nullable=False)

@@ -8,11 +8,14 @@ from utils.security_utils import SecurityManager
 # ---------------------------------------------------------------------------
 _MOCK_KEYRING = {}
 
+
 def _mock_set(service, username, password):
     _MOCK_KEYRING[(service, username)] = password
 
+
 def _mock_get(service, username):
     return _MOCK_KEYRING.get((service, username))
+
 
 def _mock_del(service, username):
     _MOCK_KEYRING.pop((service, username), None)
@@ -36,12 +39,16 @@ def isolate_environment(tmp_path):
     SecurityManager._key = None
     _MOCK_KEYRING.clear()
 
-    with patch('utils.config_handler.CONFIG_FILE', str(tmp_path / "test_settings.json")), \
-         patch.object(SecurityManager, 'KEY_FILE', str(tmp_path / ".secret.key")), \
-         patch.object(SecurityManager, 'KEY_FILE_BAK', str(tmp_path / ".secret.key.bak")), \
-         patch('keyring.set_password', side_effect=_mock_set), \
-         patch('keyring.get_password', side_effect=_mock_get), \
-         patch('keyring.delete_password', side_effect=_mock_del):
+    with (
+        patch("utils.config_handler.CONFIG_FILE", str(tmp_path / "test_settings.json")),
+        patch.object(SecurityManager, "KEY_FILE", str(tmp_path / ".secret.key")),
+        patch.object(
+            SecurityManager, "KEY_FILE_BAK", str(tmp_path / ".secret.key.bak")
+        ),
+        patch("keyring.set_password", side_effect=_mock_set),
+        patch("keyring.get_password", side_effect=_mock_get),
+        patch("keyring.delete_password", side_effect=_mock_del),
+    ):
         yield
 
     # --- 清扫 ---

@@ -11,7 +11,6 @@ COMMON_COLUMNS = {
     "symbol": "col_symbol",
     "name": "col_name",
     "id": "col_id",
-
     # Date & Time
     "trade_date": "col_trade_date",
     "ann_date": "col_ann_date",
@@ -27,7 +26,6 @@ COMMON_COLUMNS = {
     "exp_date": "col_exp_date",
     "record_date": "col_record_date",
     "ex_date": "col_ex_date",
-
     # Market Data (Price & Volume)
     "open": "col_open",
     "high": "col_high",
@@ -43,13 +41,11 @@ COMMON_COLUMNS = {
     "turnover_rate_f": "col_turnover_rate_f",
     "volume_ratio": "col_volume_ratio",
     "adj_factor": "col_adj_factor",
-    
     # Adjusted Prices
     "qfq_open": "col_qfq_open",
     "qfq_high": "col_qfq_high",
     "qfq_low": "col_qfq_low",
     "qfq_close": "col_qfq_close",
-
     # Valuation
     "pe": "col_pe",
     "pe_ttm": "col_pe_ttm",
@@ -62,12 +58,10 @@ COMMON_COLUMNS = {
     "circ_mv": "col_circ_mv",
     "float_mv": "col_float_mv",
     "float_values": "col_float_values",
-
     # Share Capital
     "total_share": "col_total_share",
     "float_share": "col_float_share",
     "free_share": "col_free_share",
-
     # Financial Basics
     "revenue": "col_revenue",
     "total_revenue": "col_total_revenue",
@@ -78,7 +72,6 @@ COMMON_COLUMNS = {
     "total_assets": "col_total_assets",
     "total_liab": "col_total_liab",
     "total_hldr_eqy_exc_min_int": "col_total_hldr_eqy_exc_min_int",
-    
     # Financial Ratios
     "roe": "col_roe",
     "roe_dt": "col_roe_dt",
@@ -88,19 +81,25 @@ COMMON_COLUMNS = {
     "or_yoy": "col_or_yoy",
     "netprofit_yoy": "col_netprofit_yoy",
     "goodwill": "col_goodwill",
-    
     # Money Flow
-    "buy_sm_vol": "col_buy_sm_vol", "sell_sm_vol": "col_sell_sm_vol",
-    "buy_sm_amount": "col_buy_sm_amount", "sell_sm_amount": "col_sell_sm_amount",
-    "buy_md_vol": "col_buy_md_vol", "sell_md_vol": "col_sell_md_vol",
-    "buy_md_amount": "col_buy_md_amount", "sell_md_amount": "col_sell_md_amount",
-    "buy_lg_vol": "col_buy_lg_vol", "sell_lg_vol": "col_sell_lg_vol",
-    "buy_lg_amount": "col_buy_lg_amount", "sell_lg_amount": "col_sell_lg_amount",
-    "buy_elg_vol": "col_buy_elg_vol", "sell_elg_vol": "col_sell_elg_vol",
-    "buy_elg_amount": "col_buy_elg_amount", "sell_elg_amount": "col_sell_elg_amount",
+    "buy_sm_vol": "col_buy_sm_vol",
+    "sell_sm_vol": "col_sell_sm_vol",
+    "buy_sm_amount": "col_buy_sm_amount",
+    "sell_sm_amount": "col_sell_sm_amount",
+    "buy_md_vol": "col_buy_md_vol",
+    "sell_md_vol": "col_sell_md_vol",
+    "buy_md_amount": "col_buy_md_amount",
+    "sell_md_amount": "col_sell_md_amount",
+    "buy_lg_vol": "col_buy_lg_vol",
+    "sell_lg_vol": "col_sell_lg_vol",
+    "buy_lg_amount": "col_buy_lg_amount",
+    "sell_lg_amount": "col_sell_lg_amount",
+    "buy_elg_vol": "col_buy_elg_vol",
+    "sell_elg_vol": "col_sell_elg_vol",
+    "buy_elg_amount": "col_buy_elg_amount",
+    "sell_elg_amount": "col_sell_elg_amount",
     "net_mf_amount": "col_net_mf_amount",
     "net_mf_vol": "col_net_mf_vol",
-
     # Others
     "area": "col_area",
     "industry": "col_industry",
@@ -117,51 +116,58 @@ COMMON_COLUMNS = {
     "exchange": "col_exchange",
     "concept_name": "col_concept_name",
     "concept_id": "col_concept_id",
-
     # AI Analysis Results (used by screener results table)
     "ai_score": "col_ai_score",
     "ai_reason": "col_ai_reason",
     "thinking": "col_thinking",
-
     # Technical Indicators (dynamic columns)
     "rsi_6": "col_rsi_6",
 }
 
 # Table Definitions with Table-Specific Column Overrides
 TABLE_DEFINITIONS = {
-    "stock_basic": {
-        "alias": "tab_stock_basic",
-        "columns": {}
-    },
+    "stock_basic": {"alias": "tab_stock_basic", "columns": {}},
     "stock_concepts": {
         "alias": "tab_stock_concepts",
         "desc": "股票概念映射表 (包含传统 Tushare 原生概念，以及通过 AI 自动扫描剥离出的 AI_DOUBAO_<md5> 前缀概念)",
-        "columns": {}
+        "columns": {},
     },
     "daily_quotes": {
         "alias": "tab_daily_quotes",
-        "quality_config": {"tier": 3, "monitor": True, "critical": True, "frequency": "daily"},
-        "columns": {}
+        "quality_config": {
+            "tier": 3,
+            "monitor": True,
+            "critical": True,
+            "frequency": "daily",
+        },
+        "columns": {},
     },
     "financial_reports": {
         "alias": "tab_financial_reports",
         "desc": "财务报表(主表)",
         "sync_config": {"strategy": "specialized_financial"},
         "quality_config": {"tier": 3, "monitor": True, "critical": True},
-        "columns": {}
+        "columns": {},
     },
     "daily_indicators": {
         "alias": "tab_daily_indicators",
         "desc": "每日指标(PE/PB)",
-        "quality_config": {"tier": 3, "monitor": True, "critical": True, "frequency": "daily"},
-        "columns": {}
+        "quality_config": {
+            "tier": 3,
+            "monitor": True,
+            "critical": True,
+            "frequency": "daily",
+        },
+        "columns": {},
     },
     "fina_forecast": {
         "alias": "tab_fina_forecast",
         "desc": "业绩预告",
         "sync_config": {
-            "strategy": "batch", "api": "get_forecast", 
-            "date_col": "ann_date", "keys": ["ts_code", "end_date", "ann_date"]
+            "strategy": "batch",
+            "api": "get_forecast",
+            "date_col": "ann_date",
+            "keys": ["ts_code", "end_date", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
@@ -170,28 +176,32 @@ TABLE_DEFINITIONS = {
             "p_change_max": "col_p_change_max",
             "net_profit_min": "col_net_profit_min",
             "net_profit_max": "col_net_profit_max",
-        }
+        },
     },
     "fina_audit": {
         "alias": "tab_fina_audit",
         "desc": "审计意见",
         "sync_config": {
-            "strategy": "stock", "api": "get_fina_audit", 
-            "date_col": "end_date", "keys": ["ts_code", "end_date"]
+            "strategy": "stock",
+            "api": "get_fina_audit",
+            "date_col": "end_date",
+            "keys": ["ts_code", "end_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "audit_result": "col_audit_result",
             "audit_fees": "col_audit_fees",
             "audit_agency": "col_audit_agency",
-        }
+        },
     },
     "fina_mainbz": {
         "alias": "tab_fina_mainbz",
         "desc": "主营业务",
         "sync_config": {
-            "strategy": "stock", "api": "get_fina_mainbz", 
-            "date_col": "end_date", "keys": ["ts_code", "end_date"]
+            "strategy": "stock",
+            "api": "get_fina_mainbz",
+            "date_col": "end_date",
+            "keys": ["ts_code", "end_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
@@ -200,14 +210,16 @@ TABLE_DEFINITIONS = {
             "bz_profit": "col_bz_profit",
             "bz_cost": "col_bz_cost",
             "curr_type": "col_curr_type",
-        }
+        },
     },
     "dividend": {
         "alias": "tab_dividend",
         "desc": "分红送转",
         "sync_config": {
-            "strategy": "batch", "api": "get_dividend", 
-            "date_col": "ann_date", "keys": ["ts_code", "ann_date"]
+            "strategy": "batch",
+            "api": "get_dividend",
+            "date_col": "ann_date",
+            "keys": ["ts_code", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
@@ -217,7 +229,7 @@ TABLE_DEFINITIONS = {
             "stk_co_rate": "col_stk_co_rate",
             "cash_div_tax": "col_cash_div_tax",
             "cash_div_tax_rate": "col_cash_div_tax_rate",
-        }
+        },
     },
     "top_list": {
         "alias": "tab_top_list",
@@ -229,7 +241,7 @@ TABLE_DEFINITIONS = {
             "net_amount": "col_net_amount",
             "net_rate": "col_net_rate",
             "amount_rate": "col_amount_rate",
-        }
+        },
     },
     "block_trade": {
         "alias": "tab_block_trade",
@@ -238,28 +250,27 @@ TABLE_DEFINITIONS = {
             "buyer": "col_buyer",
             "seller": "col_seller",
             "reason": "col_reason",
-        }
+        },
     },
     "moneyflow_daily": {
         "alias": "tab_moneyflow_daily",
         "desc": "日资金流",
-        "quality_config": {"tier": 2, "monitor": True, "critical": True, "frequency": "daily"},
-        "columns": {}
+        "quality_config": {
+            "tier": 2,
+            "monitor": True,
+            "critical": True,
+            "frequency": "daily",
+        },
+        "columns": {},
     },
-    "index_daily": {
-        "alias": "tab_index_daily",
-        "columns": {}
-    },
-    "index_dailybasic": {
-        "alias": "tab_index_dailybasic",
-        "columns": {}
-    },
+    "index_daily": {"alias": "tab_index_daily", "columns": {}},
+    "index_dailybasic": {"alias": "tab_index_dailybasic", "columns": {}},
     "northbound_holding": {
         "alias": "tab_northbound_holding",
         "columns": {
             "ratio": "col_ratio",
             "exchange": "col_exchange",
-        }
+        },
     },
     "margin_daily": {
         "alias": "tab_margin_daily",
@@ -272,14 +283,16 @@ TABLE_DEFINITIONS = {
             "rzmre": "col_rzmre",
             "rqyl": "col_rqyl",
             "rzrqye": "col_rzrqye",
-        }
+        },
     },
     "pledge_stat": {
         "alias": "tab_pledge_stat",
         "desc": "股权质押",
         "sync_config": {
-            "strategy": "stock", "api": "get_pledge_stat", 
-            "date_col": "end_date", "keys": ["ts_code", "end_date"]
+            "strategy": "stock",
+            "api": "get_pledge_stat",
+            "date_col": "end_date",
+            "keys": ["ts_code", "end_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
@@ -287,21 +300,23 @@ TABLE_DEFINITIONS = {
             "unrest_pledge": "col_unrest_pledge",
             "rest_pledge": "col_rest_pledge",
             "pledge_ratio": "col_pledge_ratio",
-        }
+        },
     },
     "repurchase": {
         "alias": "tab_repurchase",
         "desc": "股票回购",
         "sync_config": {
-            "strategy": "batch", "api": "get_repurchase", 
-            "date_col": "ann_date", "keys": ["ts_code", "ann_date"]
+            "strategy": "batch",
+            "api": "get_repurchase",
+            "date_col": "ann_date",
+            "keys": ["ts_code", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
-             "proc": "col_proc",
-             "high_limit": "col_high_limit",
-             "low_limit": "col_low_limit",
-        }
+            "proc": "col_proc",
+            "high_limit": "col_high_limit",
+            "low_limit": "col_low_limit",
+        },
     },
     "limit_list": {
         "alias": "tab_limit_list",
@@ -315,7 +330,7 @@ TABLE_DEFINITIONS = {
             "open_times": "col_open_times",
             "strth": "col_strth",
             "limit_type": "col_limit_type",
-        }
+        },
     },
     "suspend_d": {
         "alias": "tab_suspend_d",
@@ -325,16 +340,10 @@ TABLE_DEFINITIONS = {
         "columns": {
             "suspend_timing": "col_suspend_timing",
             "suspend_type_name": "col_suspend_type_name",
-        }
+        },
     },
-    "market_news": {
-        "alias": "tab_market_news",
-        "columns": {}
-    },
-    "trade_cal": {
-        "alias": "tab_trade_cal",
-        "columns": {}
-    },
+    "market_news": {"alias": "tab_market_news", "columns": {}},
+    "trade_cal": {"alias": "tab_trade_cal", "columns": {}},
     "screening_history": {
         "alias": "tab_screening_history",
         "columns": {
@@ -342,11 +351,11 @@ TABLE_DEFINITIONS = {
             "ai_reason": "col_ai_reason",
             "strategy_name": "col_strategy_name",
             "prediction_result": "col_prediction_result",
-             "t1_price": "col_t1_price",
-             "t5_price": "col_t5_price",
-             "t1_pct": "col_t1_pct",
-             "t5_pct": "col_t5_pct",
-        }
+            "t1_price": "col_t1_price",
+            "t5_price": "col_t5_price",
+            "t1_pct": "col_t1_pct",
+            "t5_pct": "col_t5_pct",
+        },
     },
     "sync_status": {
         "alias": "tab_sync_status",
@@ -355,16 +364,15 @@ TABLE_DEFINITIONS = {
             "last_sync_date": "col_last_sync_date",
             "last_data_date": "col_last_data_date",
             "record_count": "col_record_count",
-        }
+        },
     },
     "stock_sync_status": {
         "alias": "tab_stock_sync_status",
         "columns": {
             "step4_completed_at": "col_step4_completed_at",
             "sync_version": "col_sync_version",
-        }
+        },
     },
-
     # --- Phase 3: Policy-Driven AI Architecture ---
     "macro_economy": {
         "alias": "tab_macro_economy",
@@ -382,7 +390,7 @@ TABLE_DEFINITIONS = {
             "m0_yoy": "col_m0_yoy",
             "cpi": "col_cpi",
             "ppi": "col_ppi",
-        }
+        },
     },
     "shibor_daily": {
         "alias": "tab_shibor_daily",
@@ -400,7 +408,7 @@ TABLE_DEFINITIONS = {
             "6m": "col_6m",
             "9m": "col_9m",
             "1y": "col_1y",
-        }
+        },
     },
     "adj_factor": {
         "alias": "tab_adj_factor",
@@ -408,7 +416,7 @@ TABLE_DEFINITIONS = {
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "adj_factor": "col_adj_factor",
-        }
+        },
     },
     "stk_holdernumber": {
         "alias": "tab_stk_holdernumber",
@@ -419,7 +427,7 @@ TABLE_DEFINITIONS = {
             "holder_num": "col_holder_num",
             "holder_num_change": "col_holder_num_change",
             "holder_num_ratio": "col_holder_num_ratio",
-        }
+        },
     },
     "top10_holders": {
         "alias": "tab_top10_holders",
@@ -431,7 +439,7 @@ TABLE_DEFINITIONS = {
             "hold_ratio": "col_hold_ratio",
             "hold_change": "col_hold_change",
             "holder_type": "col_holder_type",
-        }
+        },
     },
     "index_weight": {
         "alias": "tab_index_weight",
@@ -439,7 +447,7 @@ TABLE_DEFINITIONS = {
             "index_code": "col_index_code",
             "con_code": "col_ts_code",
             "weight": "col_weight",
-        }
+        },
     },
     "moneyflow_hsgt": {
         "alias": "tab_moneyflow_hsgt",
@@ -454,14 +462,12 @@ TABLE_DEFINITIONS = {
             "sgt": "col_sgt_north_money",
             "north_money": "col_north_money",
             "south_money": "col_south_money",
-        }
+        },
     },
     "alembic_version": {
         "alias": "tab_alembic_version",
         "desc": "数据库版本",
-        "columns": {
-            "version_num": "col_version_num"
-        }
+        "columns": {"version_num": "col_version_num"},
     },
     "task_history": {
         "alias": "tab_task_history",
@@ -477,55 +483,53 @@ TABLE_DEFINITIONS = {
             "result": "col_result",
             "created_at": "col_created_at",
             "started_at": "col_started_at",
-            "completed_at": "col_completed_at"
-        }
+            "completed_at": "col_completed_at",
+        },
     },
 }
 
+
 def validate_schema_definitions():
     """
-    Validates that all tables defined in schema.sql have a corresponding entry in TABLE_DEFINITIONS.
+    Validates that all SQLAlchemy ORM models have a corresponding entry in TABLE_DEFINITIONS.
     Logs warnings for any missing definitions to help maintain data dictionary consistency.
     """
-    import os
-    import re
     import logging
 
     logger = logging.getLogger(__name__)
-    
+
     try:
-        # Locate schema.sql relative to this file
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        schema_path = os.path.join(current_dir, 'schema.sql')
-        
-        if not os.path.exists(schema_path):
-            logger.warning(f"[DataDict] schema.sql not found at {schema_path}, skipping validation.")
-            return
+        from data.models import Base
 
-        with open(schema_path, 'r', encoding='utf-8') as f:
-            sql_content = f.read()
-
-        # Extract table names: CREATE TABLE [IF NOT EXISTS] table_name
-        # Case insensitive for SQL keywords, consistent for table names
-        pattern = re.compile(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)', re.IGNORECASE)
-        matches = pattern.findall(sql_content)
-        
-        db_tables = set(matches)
+        # 1. Extract database tables defined dynamically via SQLAlchemy ORM
+        # This replaces the obsolete schema.sql physical file parsing.
+        db_tables = set(Base.metadata.tables.keys())
         defined_tables = set(TABLE_DEFINITIONS.keys())
-        
-        # Tables in schema but not in dictionary
+
+        # 2. Find tables in ORM models missing from our localized dictionary
         missing_defs = db_tables - defined_tables
-        
-        # Known internal tables to ignore
-        IGNORED_TABLES = {'stock_sync_status', 'screening_history'}
-        
+
+        # 3. Filter out known internal/system tables
+        IGNORED_TABLES = {
+            "stock_sync_status",
+            "screening_history",
+            "task_history",
+            "alembic_version",
+        }
+
         missing_defs = missing_defs - IGNORED_TABLES
-        
+
         if missing_defs:
-            logger.warning(f"[DataDict] The following tables are in schema.sql but missing from TABLE_DEFINITIONS: {missing_defs}")
-            logger.warning("[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.")
+            logger.warning(
+                f"[DataDict] The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}"
+            )
+            logger.warning(
+                "[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly."
+            )
         else:
-            logger.info(f"[DataDict] Schema validation passed. {len(db_tables)} tables verified.")
-            
+            logger.info(
+                f"[DataDict] Schema validation passed. {len(db_tables)} tables verified via SQLAlchemy Metadata."
+            )
+
     except Exception as e:
-        logger.error(f"[DataDict] Validation failed: {e}")
+        logger.error(f"[DataDict] ORM validation failed: {e}")

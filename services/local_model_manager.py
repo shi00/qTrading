@@ -17,11 +17,16 @@ try:
     _HAS_LLAMA_CPP = True
 except ImportError:
     _HAS_LLAMA_CPP = False
-    logger.warning("llama-cpp-python not installed. Embedded AI features will be disabled.")
+    logger.warning(
+        "llama-cpp-python not installed. Embedded AI features will be disabled."
+    )
 
 if _HAS_LLAMA_CPP:
     try:
-        from llama_cpp.llama_types import ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage
+        from llama_cpp.llama_types import (
+            ChatCompletionRequestSystemMessage,
+            ChatCompletionRequestUserMessage,
+        )
     except ImportError:
         # Fallback or handle older versions if strictly necessary, but requirements say >=0.3.2
         ChatCompletionRequestSystemMessage = dict
@@ -34,8 +39,9 @@ class LocalModelManager:
     - Singleton instance of Llama model.
     - Thread-safe inference using ThreadPoolManager (CPU/GPU bound).
     """
-    _instance: Optional['LocalModelManager'] = None
-    _llm: Optional['Llama'] = None
+
+    _instance: Optional["LocalModelManager"] = None
+    _llm: Optional["Llama"] = None
     _model_path: str = ""
     _model_md5: str = ""  # MD5 hash of loaded model file
     _model_stat: tuple = (0, 0)  # (mtime, size)
@@ -48,16 +54,23 @@ class LocalModelManager:
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("[LocalModel] No running event loop for load lock. Using dummy lock.")
+            logger.warning(
+                "[LocalModel] No running event loop for load lock. Using dummy lock."
+            )
+
             class DummyLock:
-                async def __aenter__(self): return
-                async def __aexit__(self, *args): return
+                async def __aenter__(self):
+                    return
+
+                async def __aexit__(self, *args):
+                    return
+
             return DummyLock()
 
-        if not hasattr(current_loop, '_local_load_lock'):
-            setattr(current_loop, '_local_load_lock', asyncio.Lock())
-            
-        return getattr(current_loop, '_local_load_lock')
+        if not hasattr(current_loop, "_local_load_lock"):
+            setattr(current_loop, "_local_load_lock", asyncio.Lock())
+
+        return getattr(current_loop, "_local_load_lock")
 
     @classmethod
     async def get_instance(cls):
@@ -84,7 +97,7 @@ class LocalModelManager:
         """
         hash_md5 = hashlib.md5()
         try:
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 for chunk in iter(lambda: f.read(8192 * 1024), b""):  # 8MB chunks
                     hash_md5.update(chunk)
             return hash_md5.hexdigest()
@@ -92,7 +105,9 @@ class LocalModelManager:
             logger.error(f"[LocalModel] Failed to calculate MD5: {e}")
             return ""
 
-    async def load_model(self, model_path: str, config: Optional[Dict[str, Any]] = None) -> bool:
+    async def load_model(
+        self, model_path: str, config: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """
         Load the model from GGUF file.
         Run in CPU thread pool to avoid blocking main loop.
@@ -117,7 +132,11 @@ class LocalModelManager:
             except OSError:
                 current_stat = (0, 0)
 
-            if self._llm and self._model_path == model_path and self._model_stat == current_stat:
+            if (
+                self._llm
+                and self._model_path == model_path
+                and self._model_stat == current_stat
+            ):
                 # Path is same AND file matches cached timestamp/size -> Skip reload
                 return True
 
@@ -125,25 +144,26 @@ class LocalModelManager:
             # We calculate MD5 during load for integrity logging, but don't rely on it for "change detection"
             # because calculating it is the bottleneck we want to avoid.
 
-            logger.info(f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})...")
+            logger.info(
+                f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})..."
+            )
 
             self._is_loading = True
             start_time = asyncio.get_event_loop().time()
 
             try:
                 # 1. Calculate MD5 (Async IO) - Optional but good for logs
-                # We do this in parallel or before loading? 
+                # We do this in parallel or before loading?
                 # Let's do it before, as verification. It takes time, but only happens ONCE per file change now.
                 logger.info("[LocalModel] Verifying file integrity (MD5)...")
-                target_md5 = await ThreadPoolManager().run_async(TaskType.IO, self.calculate_file_md5, model_path)
+                target_md5 = await ThreadPoolManager().run_async(
+                    TaskType.IO, self.calculate_file_md5, model_path
+                )
 
                 # 2. Load Model (Async CPU)
-                logger.info(f"[LocalModel] Scheduling model load on TaskType.CPU...")
+                logger.info("[LocalModel] Scheduling model load on TaskType.CPU...")
                 self._llm = await ThreadPoolManager().run_async(
-                    TaskType.CPU,
-                    self._create_llama_instance,
-                    model_path,
-                    config
+                    TaskType.CPU, self._create_llama_instance, model_path, config
                 )
 
                 # Update State
@@ -152,7 +172,9 @@ class LocalModelManager:
                 self._model_stat = current_stat
 
                 elapsed = asyncio.get_event_loop().time() - start_time
-                logger.info(f"[LocalModel] Model loaded successfully in {elapsed:.2f}s.")
+                logger.info(
+                    f"[LocalModel] Model loaded successfully in {elapsed:.2f}s."
+                )
                 return True
             except Exception as e:
                 self._llm = None
@@ -164,24 +186,31 @@ class LocalModelManager:
                 self._is_loading = False
 
     @staticmethod
-    def _create_llama_instance(model_path: str, config: Dict[str, Any]) -> 'Llama':
+    def _create_llama_instance(model_path: str, config: Dict[str, Any]) -> "Llama":
         """
         Sync factory method to create Llama instance with config.
         """
-        logger.info(f"[LocalModel] Initializing Llama in thread: {threading.current_thread().name}")
+        logger.info(
+            f"[LocalModel] Initializing Llama in thread: {threading.current_thread().name}"
+        )
 
         return Llama(
             model_path=model_path,
-            n_threads=config.get('n_threads', 4),
-            n_batch=config.get('n_batch', 1024),
-            n_ctx=config.get('n_ctx', 4096),
-            n_gpu_layers=config.get('n_gpu_layers', 0),
-            flash_attn=config.get('flash_attn', True),
-            verbose=False
+            n_threads=config.get("n_threads", 4),
+            n_batch=config.get("n_batch", 1024),
+            n_ctx=config.get("n_ctx", 4096),
+            n_gpu_layers=config.get("n_gpu_layers", 0),
+            flash_attn=config.get("flash_attn", True),
+            verbose=False,
         )
 
-    async def run_inference(self, prompt: str, max_tokens: int = 150, temperature: float = 0.7,
-                            system_prompt: str = "You are a helpful assistant.") -> str:
+    async def run_inference(
+        self,
+        prompt: str,
+        max_tokens: int = 150,
+        temperature: float = 0.7,
+        system_prompt: str = "You are a helpful assistant.",
+    ) -> str:
         """
         Run inference on the loaded model.
         Blocking call, must run in Executor.
@@ -209,10 +238,11 @@ class LocalModelManager:
             raise RuntimeError("No model loaded.")
 
         # Get timeout from config (default 90s)
-        timeout_val = config.get('local_model_timeout', 90) or 90
+        timeout_val = config.get("local_model_timeout", 90) or 90
 
         logger.info(
-            f"[LocalModel] Scheduling inference on TaskType.CPU. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}, Timeout: {timeout_val}s")
+            f"[LocalModel] Scheduling inference on TaskType.CPU. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}, Timeout: {timeout_val}s"
+        )
         start_time = asyncio.get_event_loop().time()
 
         # Serialize inference to prevent native crash (Llama instance is not thread-safe)
@@ -226,22 +256,29 @@ class LocalModelManager:
                         prompt,
                         max_tokens,
                         temperature,
-                        system_prompt
+                        system_prompt,
                     ),
-                    timeout=float(timeout_val)
+                    timeout=float(timeout_val),
                 )
                 elapsed = asyncio.get_event_loop().time() - start_time
-                logger.info(f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}")
+                logger.info(
+                    f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}"
+                )
                 return output
             except asyncio.TimeoutError as te:
-                logger.error(f"[LocalModel] Inference timed out after {timeout_val}s.", exc_info=False)
+                logger.error(
+                    f"[LocalModel] Inference timed out after {timeout_val}s.",
+                    exc_info=False,
+                )
                 # FATAL: The underlying thread is still running _generate_sync synchronously!
                 # We MUST destroy the model instance to free memory and forcefully crash the C++ generation loop,
                 # otherwise we leak a fully-loaded CPU thread that will spin until it finishes.
                 self.unload_model()
                 self._model_path = ""
                 self._model_stat = (0, 0)
-                raise RuntimeError(f"Local inference timed out ({timeout_val}s). Memory freed.") from te
+                raise RuntimeError(
+                    f"Local inference timed out ({timeout_val}s). Memory freed."
+                ) from te
             except Exception as e:
                 logger.error(f"[LocalModel] Inference error: {e}", exc_info=True)
                 # Cleanup on unexpected errors as well just to be safe
@@ -250,11 +287,15 @@ class LocalModelManager:
                 self._model_stat = (0, 0)
                 raise RuntimeError(f"Inference execution failed: {e}") from e
 
-    def _generate_sync(self, prompt: str, max_tokens: int, temperature: float, system_prompt: str) -> str:
+    def _generate_sync(
+        self, prompt: str, max_tokens: int, temperature: float, system_prompt: str
+    ) -> str:
         """
         Sync generation logic.
         """
-        logger.info(f"[LocalModel] Running generation in thread: {threading.current_thread().name}")
+        logger.info(
+            f"[LocalModel] Running generation in thread: {threading.current_thread().name}"
+        )
 
         if not self._llm:
             raise ValueError("Model is None inside worker thread")
@@ -262,18 +303,18 @@ class LocalModelManager:
         # Using create_chat_completion is safer for instruction tuned models if we follow OpenAI format
         messages = [
             ChatCompletionRequestSystemMessage(role="system", content=system_prompt),
-            ChatCompletionRequestUserMessage(role="user", content=prompt)
+            ChatCompletionRequestUserMessage(role="user", content=prompt),
         ]
 
         response = self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
-            temperature=temperature
-            # Removed dangerous custom stop words (like "```" or "\n\n") 
+            temperature=temperature,
+            # Removed dangerous custom stop words (like "```" or "\n\n")
             # which caused valid JSON truncation and len=0 outputs.
         )
 
-        return response['choices'][0]['message']['content']
+        return response["choices"][0]["message"]["content"]
 
     def unload_model(self):
         """Free memory"""

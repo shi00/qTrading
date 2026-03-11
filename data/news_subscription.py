@@ -2,7 +2,6 @@ import asyncio
 import logging
 import threading
 
-from datetime import datetime
 import hashlib
 from utils.config_handler import ConfigHandler
 from data.cache_manager import CacheManager
@@ -16,6 +15,7 @@ class NewsSubscriptionService:
     """
     Background service to poll real-time news.
     """
+
     _instance = None
     _lock = threading.Lock()  # Thread-safe singleton
 
@@ -46,7 +46,9 @@ class NewsSubscriptionService:
         # Observer Pattern: List of callbacks
         # Format: set of callables
         self._listeners = set()
-        self._alert_listeners = set()  # Special listeners for popups (controlled by config)
+        self._alert_listeners = (
+            set()
+        )  # Special listeners for popups (controlled by config)
 
         self._current_fetch_task = None
         self._processing_task = None
@@ -61,7 +63,7 @@ class NewsSubscriptionService:
         """
         Add a listener for news updates.
         Args:
-            callback: Callable to be executed on update. 
+            callback: Callable to be executed on update.
             Signature: () for normal, (msg) for alert.
             is_alert: If True, this is an alert listener (e.g. snackbar)
         """
@@ -137,7 +139,7 @@ class NewsSubscriptionService:
 
         while self._running:
             # Read config dynamically
-            base_interval = ConfigHandler.get_config('news_poll_interval', 60)
+            base_interval = ConfigHandler.get_config("news_poll_interval", 60)
 
             # Fire and forget but track for cleanup and GC prevention.
             self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())
@@ -158,8 +160,10 @@ class NewsSubscriptionService:
         try:
             await self._fetch_and_notify()
         except Exception as e:
-            logger.error(f"[NewsService] Error in background fetch task: {e}", exc_info=True)
-            # Optional: Implement retry logic here if needed, but for periodic polling, 
+            logger.error(
+                f"[NewsService] Error in background fetch task: {e}", exc_info=True
+            )
+            # Optional: Implement retry logic here if needed, but for periodic polling,
             # just failing and waiting for next interval is often cleaner.
 
     async def _generate_tags(self, content):
@@ -172,8 +176,8 @@ class NewsSubscriptionService:
             ai_result = await self.ai_client.classify_news(clean_content)
             if ai_result:
                 # AI Success
-                emoji = ai_result.get('emoji', '[NEWS]')
-                category = ai_result.get('category', 'News')
+                emoji = ai_result.get("emoji", "[NEWS]")
+                category = ai_result.get("category", "News")
 
                 # Map AI category to I18n key if possible
                 i18n_key = f"tag_{category.lower()}"
@@ -181,7 +185,9 @@ class NewsSubscriptionService:
 
                 # If key missing or matches fallback (English), use it, otherwise use original if not found
                 if localized_category == i18n_key:
-                    localized_category = category  # Fallback to original if I18n key missing
+                    localized_category = (
+                        category  # Fallback to original if I18n key missing
+                    )
 
                 tag = f"【{emoji} {localized_category}】"
                 return tag
@@ -189,11 +195,19 @@ class NewsSubscriptionService:
             logger.warning(f"[NewsService] AI Tagging failed: {e}")
 
         # Fallback to Rule-based
-        if any(k in clean_content for k in ['央行', '证监会', '国务院', '财政部', '政策', '立案', '违规']):
+        if any(
+            k in clean_content
+            for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]
+        ):
             tag = f"【🏛️ {I18n.get('tag_policy')}】"
-        elif any(k in clean_content for k in ['美联储', '欧佩克', '纳斯达克', '汇率', '外盘', '美元']):
+        elif any(
+            k in clean_content
+            for k in ["美联储", "欧佩克", "纳斯达克", "汇率", "外盘", "美元"]
+        ):
             tag = f"【🌍 {I18n.get('tag_global')}】"
-        elif any(k in clean_content for k in ['GDP', 'CPI', 'PPI', 'PMI', '社融', '通胀']):
+        elif any(
+            k in clean_content for k in ["GDP", "CPI", "PPI", "PMI", "社融", "通胀"]
+        ):
             tag = f"【📈 {I18n.get('tag_macro')}】"
 
         return tag
@@ -208,12 +222,14 @@ class NewsSubscriptionService:
             try:
                 # Wait for item with timeout to allow checking self._running
                 try:
-                    item = await asyncio.wait_for(self.processing_queue.get(), timeout=1.0)
+                    item = await asyncio.wait_for(
+                        self.processing_queue.get(), timeout=1.0
+                    )
                 except asyncio.TimeoutError:
                     continue
 
                 # Process Item
-                content = item.get('content', '')
+                content = item.get("content", "")
                 if not content:
                     self.processing_queue.task_done()
                     continue
@@ -221,11 +237,13 @@ class NewsSubscriptionService:
                 # 1. Generate Tags (AI call happens here, correctly managed by ThreadPool in ai_service)
                 # This could take a few seconds
                 tags = await self._generate_tags(content)
-                item['tags'] = tags
+                item["tags"] = tags
 
                 # 2. Update DB with tags
                 # Normalize again to ensure consistent keys
-                normalized = CacheManager.normalize_news_item(item, default_source='CLS')
+                normalized = CacheManager.normalize_news_item(
+                    item, default_source="CLS"
+                )
                 await self.cache.save_market_news(normalized, wait=True)
 
                 # 3. Notify Listeners (Optional: to refresh UI with tags)
@@ -241,7 +259,9 @@ class NewsSubscriptionService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[NewsService] Error in processing loop: {e}", exc_info=True)
+                logger.error(
+                    f"[NewsService] Error in processing loop: {e}", exc_info=True
+                )
                 # Prevent tight error loop logging
                 await asyncio.sleep(5.0)
 
@@ -251,7 +271,7 @@ class NewsSubscriptionService:
             return
 
         # CC-05: Track listener errors to prevent log flooding
-        if not hasattr(self, '_listener_errors'):
+        if not hasattr(self, "_listener_errors"):
             self._listener_errors = {}
 
         for listener in list(target):
@@ -265,7 +285,9 @@ class NewsSubscriptionService:
                 self._listener_errors[listener] = count
 
                 if count >= 3:
-                    logger.error(f"[NewsService] Listener {listener} failed {count} times. Removing. Last error: {e}")
+                    logger.error(
+                        f"[NewsService] Listener {listener} failed {count} times. Removing. Last error: {e}"
+                    )
                     if listener in self._listeners:
                         self._listeners.remove(listener)
                     if listener in self._listener_errors:
@@ -288,23 +310,27 @@ class NewsSubscriptionService:
 
             def get_hash(item):
                 # Combined hash of content and optionally time
-                content = item.get('content', '').strip()
-                time_str = item.get('time', '')
-                return hashlib.md5(f"{time_str}_{content}".encode('utf-8')).hexdigest()
+                content = item.get("content", "").strip()
+                time_str = item.get("time", "")
+                return hashlib.md5(f"{time_str}_{content}".encode("utf-8")).hexdigest()
 
             if not news_list:
                 return
 
             # Initial Sync: Batch save all news (RAW)
             if is_initial_sync:
-                logger.info(f"[NewsService] Initial sync: saving {len(news_list)} news items")
+                logger.info(
+                    f"[NewsService] Initial sync: saving {len(news_list)} news items"
+                )
                 for item in reversed(news_list):
                     h = get_hash(item)
                     if h not in self._seen_hashes:
                         self._seen_hashes.add(h)
 
                         # Save RAW content first for immediate UI display
-                        normalized = CacheManager.normalize_news_item(item, default_source='CLS')
+                        normalized = CacheManager.normalize_news_item(
+                            item, default_source="CLS"
+                        )
                         await self.cache.save_market_news(normalized)
 
                         # Queue for AI tagging
@@ -312,14 +338,16 @@ class NewsSubscriptionService:
 
                 # Maintain bounds
                 if len(self._seen_hashes) > self._MAX_SEEN:
-                    self._seen_hashes = set(list(self._seen_hashes)[-self._MAX_SEEN:])
+                    self._seen_hashes = set(list(self._seen_hashes)[-self._MAX_SEEN :])
 
                 # 设置初始状态（用最新一条作为基准）
                 latest_item = news_list[0]
-                self._last_news_time = latest_item.get('time', '')
-                self._last_news_content = latest_item.get('content', '')
+                self._last_news_time = latest_item.get("time", "")
+                self._last_news_content = latest_item.get("content", "")
 
-                logger.info("[NewsService] Initial sync complete, queued for AI processing...")
+                logger.info(
+                    "[NewsService] Initial sync complete, queued for AI processing..."
+                )
 
                 # Notify listeners immediately (shows raw news)
                 self._notify_listeners()
@@ -335,20 +363,26 @@ class NewsSubscriptionService:
 
                     # Maintain bounds
                     if len(self._seen_hashes) > self._MAX_SEEN:
-                        self._seen_hashes = set(list(self._seen_hashes)[-self._MAX_SEEN:])
+                        self._seen_hashes = set(
+                            list(self._seen_hashes)[-self._MAX_SEEN :]
+                        )
 
-                    current_news_content = item.get('content', '')
-                    current_news_time = item.get('time', '')
-                    logger.info(f"[NewsService] Found NEW update! Time: {current_news_time}")
+                    current_news_content = item.get("content", "")
+                    current_news_time = item.get("time", "")
+                    logger.info(
+                        f"[NewsService] Found NEW update! Time: {current_news_time}"
+                    )
 
                     # PERSISTENCE: Save to DB for AI
                     clean_content = current_news_content.strip()
-                    normalized = CacheManager.normalize_news_item({
-                        'content': clean_content,
-                        'tags': "",
-                        'publish_time': current_news_time,
-                        'source': 'CLS'
-                    })
+                    normalized = CacheManager.normalize_news_item(
+                        {
+                            "content": clean_content,
+                            "tags": "",
+                            "publish_time": current_news_time,
+                            "source": "CLS",
+                        }
+                    )
                     await self.cache.save_market_news(normalized, wait=True)
 
                     # Queue for AI
@@ -356,7 +390,7 @@ class NewsSubscriptionService:
 
                     # Handle Alerts (Popup)
                     display_msg = clean_content
-                    enable_alerts = ConfigHandler.get_config('enable_news_alerts', True)
+                    enable_alerts = ConfigHandler.get_config("enable_news_alerts", True)
                     if enable_alerts:
                         for listener in list(self._alert_listeners):
                             try:

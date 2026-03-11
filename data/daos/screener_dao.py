@@ -2,18 +2,19 @@ import functools
 import logging
 import pandas as pd
 from .base_dao import BaseDao
-from utils.thread_pool import ThreadPoolManager, TaskType
 from data.models import ScreeningHistory
 
 logger = logging.getLogger(__name__)
 
-class ScreenerDao(BaseDao):
 
+class ScreenerDao(BaseDao):
     @functools.cached_property
     def SH_BASE_COLS(self):
         """Dynamically generate base columns excluding heavy fields like 'thinking'."""
         # Reflection using SQLAlchemy Core Table columns (runs once, cached per instance)
-        cols = [c.name for c in ScreeningHistory.__table__.columns if c.name != 'thinking']
+        cols = [
+            c.name for c in ScreeningHistory.__table__.columns if c.name != "thinking"
+        ]
         return ", ".join(cols)
 
     @functools.cached_property
@@ -48,7 +49,9 @@ class ScreenerDao(BaseDao):
             ORDER BY trade_date DESC 
             LIMIT $1 OFFSET $2
         """
-        return await self._read_db(sql, (limit * 5, offset))  # limit*5 to cover multiple strategies per date
+        return await self._read_db(
+            sql, (limit * 5, offset)
+        )  # limit*5 to cover multiple strategies per date
 
     async def get_history_records(self, trade_date, strategy_name=None):
         """
@@ -67,7 +70,7 @@ class ScreenerDao(BaseDao):
         df = await self._read_db(sql)
         if df is None or df.empty:
             return []
-        return df.to_dict('records')
+        return df.to_dict("records")
 
     async def update_screening_performance(self, updates):
         # updates = list of tuples (t1_price, t1_pct, t5_price, t5_pct, id)
@@ -77,13 +80,13 @@ class ScreenerDao(BaseDao):
         await self._write_db(sql, updates, is_many=True)
 
     async def get_learning_examples(self, limit=3):
-        
+
         sql_win = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT $1"
         sql_loss = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT $1"
-        
+
         wins = await self._read_db(sql_win, (limit,))
         losses = await self._read_db(sql_loss, (limit,))
-        
+
         return wins, losses
 
     # --- Internal: Resolve latest trade date from DB (Defense in Depth) ---
@@ -93,7 +96,7 @@ class ScreenerDao(BaseDao):
         preventing callers from accidentally injecting future dates."""
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
-            return df['max_td'].iloc[0]
+            return df["max_td"].iloc[0]
         return None
 
     # --- Screening Data Fetch for Logic ---
@@ -101,7 +104,7 @@ class ScreenerDao(BaseDao):
         if not trade_date:
             trade_date = await self._get_latest_closed_trade_date()
 
-        sql = '''
+        sql = """
               SELECT b.ts_code,
                      b.name,
                      b.industry,
@@ -140,36 +143,36 @@ class ScreenerDao(BaseDao):
                                    )) f
                                   ON b.ts_code = f.ts_code
                WHERE q.close IS NOT NULL \
-              '''
+              """
         return await self._read_db(sql, (trade_date, trade_date, trade_date))
 
     # --- Review Manager Methods (P2-S3 Abstracting raw SQL) ---
 
     async def get_pending_predictions(self, date_threshold: str):
         """Get predictions that have no result yet since the date_threshold."""
-        sql = f'''
+        sql = """
             SELECT id, trade_date, ts_code, ai_score, ai_reason 
             FROM screening_history 
             WHERE trade_date >= $1 
               AND prediction_result IS NULL
               AND ai_score > 0
             ORDER BY trade_date DESC
-        '''
+        """
         df = await self._read_db(sql, (date_threshold,))
         return df if df is not None else pd.DataFrame()
 
     async def get_learning_context(self, limit: int = 3, is_win: bool = True):
         """Extract 'Best Wins' or 'Worst Losses' for Learning Context."""
-        label = 'WIN' if is_win else 'LOSS'
-        order = 'DESC' if is_win else 'ASC'
-        
-        sql = f'''
+        label = "WIN" if is_win else "LOSS"
+        order = "DESC" if is_win else "ASC"
+
+        sql = f"""
             SELECT ts_code, name, t1_pct, ai_score, ai_reason
             FROM screening_history 
             WHERE prediction_result = $1 AND t1_pct IS NOT NULL
             ORDER BY t1_pct {order}
             LIMIT $2
-        '''
+        """
         df = await self._read_db(sql, (label, limit))
         return df if df is not None else pd.DataFrame()
 
@@ -183,25 +186,45 @@ class ScreenerDao(BaseDao):
         Save screening results to history using BaseDao UPSERT.
         Replaces manual 24-column SQL string.
         """
-        if not records: return
-        
+        if not records:
+            return
+
         # Determine cols based on the raw record length mapped from ReviewManager
         # The tuple has 24 items aligning with SH_FULL_COLS minus id + t1/t5/result/created_at
         cols = [
-            "trade_date", "strategy_name", "ts_code", "name", "close", "pct_chg", 
-            "industry", "vol", "amount", "turnover_rate", 
-            "pe_ttm", "pb", "ps_ttm", "dv_ttm", "total_mv", "circ_mv", 
-            "roe", "grossprofit_margin", "debt_to_assets", "or_yoy", "netprofit_yoy", 
-            "ai_score", "ai_reason", "thinking"
+            "trade_date",
+            "strategy_name",
+            "ts_code",
+            "name",
+            "close",
+            "pct_chg",
+            "industry",
+            "vol",
+            "amount",
+            "turnover_rate",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ttm",
+            "total_mv",
+            "circ_mv",
+            "roe",
+            "grossprofit_margin",
+            "debt_to_assets",
+            "or_yoy",
+            "netprofit_yoy",
+            "ai_score",
+            "ai_reason",
+            "thinking",
         ]
-        
+
         # Convert list of tuples to list of dicts for _save_upsert
         dict_records = [dict(zip(cols, r)) for r in records]
         df = pd.DataFrame(dict_records)
-        
+
         await self._save_upsert(
             df=df,
-            table_name='screening_history',
+            table_name="screening_history",
             columns=cols,
-            pk_columns=['trade_date', 'strategy_name', 'ts_code']
+            pk_columns=["trade_date", "strategy_name", "ts_code"],
         )

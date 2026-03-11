@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from utils.log_decorators import UILogger
@@ -13,61 +12,74 @@ from ui.components.news_feed import NewsFeed
 
 logger = logging.getLogger(__name__)
 
+
 class HomeView(ft.Container):
     """
     HomeView with MVVM Architecture.
     Responsibility: Rendering and User Interaction.
     State & Logic: Delegated to HomeViewModel.
     """
-    
+
     def __init__(self, on_run_strategy=None):
         super().__init__()
         self.expand = True
         self.on_run_strategy = on_run_strategy
-        
+
         # Dependency Injection
         self.vm = HomeViewModel()
-        
+
         # View State (UI only)
         self._init_task = None
         self._is_mounted = False
         self._is_visible = True
         self._pubsub_subscribed = False
-        
+
         # --- Initialize Components ---
-        self.header_title = ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD)
+        self.header_title = ft.Text(
+            I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD
+        )
         self.header = self._build_header()
         self.dashboard = MarketDashboard()
         self.news_feed = NewsFeed(on_load_more_click=self._on_load_more_click)
-        self.news_header = ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD)
-        
+        self.news_header = ft.Text(
+            I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD
+        )
+
         # Assemble Layout
         self.content = ft.Column(
-            scroll=None, 
+            scroll=None,
             expand=True,
             controls=[
                 self.header,
                 ft.Divider(),
                 self.dashboard,
                 self.news_header,
-                self.news_feed
-            ]
+                self.news_feed,
+            ],
         )
 
     def _build_header(self):
         self.date_text = ft.Text("--", size=12, color=ft.Colors.GREY)
-        return ft.Row([
-            self.header_title,
-            ft.Container(expand=True),
-            self.date_text,
-            ft.IconButton(ft.Icons.REFRESH, on_click=self._refresh_clicked, tooltip=I18n.get("home_refresh"))
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        return ft.Row(
+            [
+                self.header_title,
+                ft.Container(expand=True),
+                self.date_text,
+                ft.IconButton(
+                    ft.Icons.REFRESH,
+                    on_click=self._refresh_clicked,
+                    tooltip=I18n.get("home_refresh"),
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
     # --- Lifecycle ---
-    
+
     def did_mount(self):
         self._is_mounted = True
-        
+
         # Subscribe to PubSub (Global Events)
         if self.page and not self._pubsub_subscribed:
             self.page.pubsub.subscribe(self._on_broadcast_message)
@@ -78,9 +90,9 @@ class HomeView(ft.Container):
         logger.debug("[HomeView] Initializing ViewModel and Listeners")
         self.vm.init(
             on_news_update=self.refresh_news_if_visible,
-            on_market_update=self.refresh_market_if_visible
+            on_market_update=self.refresh_market_if_visible,
         )
-        
+
         # Subscribe to I18n
         I18n.subscribe(self.refresh_locale)
 
@@ -104,7 +116,7 @@ class HomeView(ft.Container):
             pass
         if self._init_task:
             self._init_task.cancel()
-            
+
     # --- Event Handlers & Callbacks ---
 
     def set_visible(self, visible: bool):
@@ -114,7 +126,7 @@ class HomeView(ft.Container):
 
     def refresh_news_if_visible(self):
         self._run_if_visible(self._refresh_news_data, "Refreshing news list")
-    
+
     def refresh_market_if_visible(self):
         self._run_if_visible(self._refresh_market_data, "Refreshing market data")
 
@@ -164,11 +176,11 @@ class HomeView(ft.Container):
             # 1. Update sub-components
             self.dashboard.update_theme()
             self.news_feed.update_theme()
-            
+
             # 2. Update local controls
-            self.header_title.color = None # Default
-            self.date_text.color = AppColors.TEXT_SECONDARY 
-            
+            self.header_title.color = None  # Default
+            self.date_text.color = AppColors.TEXT_SECONDARY
+
             # Refresh button icon?
             # It's an IconButton, default icon color might need refresh if not set?
             # It usually picks up theme primary/on_surface.
@@ -179,9 +191,11 @@ class HomeView(ft.Container):
 
     async def _init_and_load(self):
         try:
-            if not self._is_mounted: return
+            if not self._is_mounted:
+                return
             await self.vm.init_data()
-            if not self._is_mounted: return
+            if not self._is_mounted:
+                return
             await self._load_data()
         except asyncio.CancelledError:
             pass
@@ -200,10 +214,10 @@ class HomeView(ft.Container):
             if data:
                 # Update UI
                 # DEBUG: Log indices count to investigate RangeError
-                indices = data.get('indices', [])
+                indices = data.get("indices", [])
                 logger.debug(f"[HomeView] Market Data Indices: {len(indices)}")
-                
-                date_str = data.get('date', '--')
+
+                date_str = data.get("date", "--")
                 self.date_text.value = I18n.get("home_data_date").format(date=date_str)
                 self.date_text.update()
                 self.dashboard.update_data(data)

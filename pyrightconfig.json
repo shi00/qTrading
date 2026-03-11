@@ -1,0 +1,18 @@
+{
+  "include": ["."],
+  "exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.venv",
+    "venv",
+    "alembic"
+  ],
+  "typeCheckingMode": "basic",
+  "reportUnknownVariableType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportGeneralTypeIssues": "warning",
+  "reportMissingParameterType": "none",
+  "reportMissingTypeArgument": "none",
+  "reportMissingTypeStubs": "none"
+}

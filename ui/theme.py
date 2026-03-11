@@ -8,6 +8,7 @@ A-Share Quantitative Screener - Unified Theme Configuration
 
 支持三主题 (Dark / Light / Navy)
 """
+
 import logging
 from typing import TypedDict
 
@@ -19,10 +20,10 @@ from utils.config_handler import ConfigHandler
 logger = logging.getLogger(__name__)
 
 
-
 # ============================================================================
 # 常量定义
 # ============================================================================
+
 
 class ThemeName:
     DARK = "dark"
@@ -35,8 +36,10 @@ class ThemeName:
 # 类型定义
 # ============================================================================
 
+
 class CardStyle(TypedDict, total=False):
     """卡片容器样式类型定义"""
+
     bgcolor: str
     border_radius: int
     padding: int
@@ -46,6 +49,7 @@ class CardStyle(TypedDict, total=False):
 
 class DashboardCardStyle(TypedDict):
     """仪表盘卡片样式类型定义"""
+
     bgcolor: str
     border_radius: int
     padding: int
@@ -55,6 +59,7 @@ class DashboardCardStyle(TypedDict):
 
 class ThemeColors(TypedDict):
     """主题配色定义 (必须包含所有业务色 key)"""
+
     UP_RED: str
     DOWN_GREEN: str
     UP: str
@@ -151,25 +156,25 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.DRACULA: {
         "UP_RED": "#F44336",
         "DOWN_GREEN": "#4CAF50",
-        "UP": "#FF5555",      # Red
-        "DOWN": "#50FA7B",    # Green
+        "UP": "#FF5555",  # Red
+        "DOWN": "#50FA7B",  # Green
         "SUCCESS": "#50FA7B",
-        "WARNING": "#FFB86C", # Orange
-        "INFO": "#8BE9FD",    # Cyan
-        "TABLE_HEADER_BG": "#44475A", # Current Line
+        "WARNING": "#FFB86C",  # Orange
+        "INFO": "#8BE9FD",  # Cyan
+        "TABLE_HEADER_BG": "#44475A",  # Current Line
         "TABLE_HEADER_TEXT": "#F8F8F2",
-        "TABLE_ROW_ODD": "#282A36",   # Background
+        "TABLE_ROW_ODD": "#282A36",  # Background
         "TABLE_ROW_EVEN": "#44475A",  # Current Line (Alternating)
         "TABLE_CELL_TEXT": "#F8F8F2",
-        "TABLE_CELL_NUMERIC": "#BD93F9", # Purple
-        "TABLE_BORDER": "#6272A4",    # Comment (Grey-ish)
+        "TABLE_CELL_NUMERIC": "#BD93F9",  # Purple
+        "TABLE_BORDER": "#6272A4",  # Comment (Grey-ish)
         "TABLE_GRID": "#6272A4",
         "INPUT_BG": "#44475A",
         "INPUT_BORDER": "#6272A4",
         "INPUT_TEXT": "#F8F8F2",
         "LOG_BG": "#282A36",
         "LOG_TEXT": "#F8F8F2",
-    }
+    },
 }
 
 # ============================================================================
@@ -259,22 +264,22 @@ THEME_COLOR_SCHEMES = {
         scrim="#000000",
     ),
     ThemeName.DRACULA: ft.ColorScheme(
-        primary="#BD93F9",           # Purple
-        primary_container="#44475A", # Current Line
-        secondary="#FF79C6",         # Pink
+        primary="#BD93F9",  # Purple
+        primary_container="#44475A",  # Current Line
+        secondary="#FF79C6",  # Pink
         secondary_container="#44475A",
-        tertiary="#8BE9FD",          # Cyan
-        surface="#282A36",           # Background
-        surface_variant="#44475A",   # Current Line
-        background="#282A36",        # Background
-        error="#FF5555",             # Red
+        tertiary="#8BE9FD",  # Cyan
+        surface="#282A36",  # Background
+        surface_variant="#44475A",  # Current Line
+        background="#282A36",  # Background
+        error="#FF5555",  # Red
         error_container="#44475A",
         on_primary="#282A36",
         on_primary_container="#BD93F9",
         on_secondary="#282A36",
         on_secondary_container="#FF79C6",
-        on_surface="#F8F8F2",        # Foreground
-        on_surface_variant="#6272A4", # Comment
+        on_surface="#F8F8F2",  # Foreground
+        on_surface_variant="#6272A4",  # Comment
         on_background="#F8F8F2",
         on_error="#282A36",
         outline="#6272A4",
@@ -314,7 +319,9 @@ class AppColors:
     # ====================================================================
     BACKGROUND = "background"  # Use string token to access scheme background
     SURFACE = ft.Colors.SURFACE
-    SURFACE_VARIANT = ft.Colors.SURFACE_CONTAINER_HIGHEST  # ft.Colors.SURFACE_VARIANT doesn't exist
+    SURFACE_VARIANT = (
+        ft.Colors.SURFACE_CONTAINER_HIGHEST
+    )  # ft.Colors.SURFACE_VARIANT doesn't exist
     PRIMARY = ft.Colors.PRIMARY
     PRIMARY_DARK = ft.Colors.PRIMARY_CONTAINER
     PRIMARY_LIGHT = ft.Colors.INVERSE_PRIMARY
@@ -386,13 +393,15 @@ class AppColors:
 
         # 加载自定义色
         # 使用 TypedDict key 确保完整性 (防止主题缺键导致旧值残留)
-        preset = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK])
-        
+        preset = CUSTOM_COLOR_PRESETS.get(
+            theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK]
+        )
+
         # 强制遍历 ThemeColors 的所有字段，而不是 preset 的 keys
         # 这样如果 preset 缺字段， IDE 会首先报错 (mypy)，运行时 getattr 会报错或我们应该提供默认值
         # 但由于 preset 是 ThemeColors 类型，我们假设它是完整的。
         # 为了运行时安全，我们遍历 preset.items() 并确保覆盖所有 AppColors 对应属性
-        
+
         for key, value in preset.items():
             if hasattr(cls, key):
                 setattr(cls, key, value)
@@ -416,16 +425,16 @@ class AppStyles:
     """应用组件样式工厂 — 全部使用语义 Token"""
 
     # --- Size Tokens (统一控件宽度，消除魔术数字) ---
-    CONTROL_WIDTH_SM = 120   # 小型控件：数字输入、线程数、连接池
-    CONTROL_WIDTH_MD = 200   # 中型控件：Dropdown 下拉框、单行选择
-    CONTROL_WIDTH_LG = 400   # 大型控件：Token/URL 输入框
+    CONTROL_WIDTH_SM = 120  # 小型控件：数字输入、线程数、连接池
+    CONTROL_WIDTH_MD = 200  # 中型控件：Dropdown 下拉框、单行选择
+    CONTROL_WIDTH_LG = 400  # 大型控件：Token/URL 输入框
 
     @staticmethod
     def card(
-            padding: int = 15,
-            border_radius: int = 4,
-            with_shadow: bool = False,
-            with_border: bool = True
+        padding: int = 15,
+        border_radius: int = 4,
+        with_shadow: bool = False,
+        with_border: bool = True,
     ) -> CardStyle:
         """标准卡片容器"""
         style: CardStyle = {
@@ -517,30 +526,30 @@ def _build_theme(theme_name: str) -> ft.Theme:
     根据主题名构建 ft.Theme 对象。
     包含 ColorScheme + 全局组件样式（滚动条、分割线、数据表）。
     """
-    color_scheme = THEME_COLOR_SCHEMES.get(theme_name, THEME_COLOR_SCHEMES[ThemeName.DARK])
+    color_scheme = THEME_COLOR_SCHEMES.get(
+        theme_name, THEME_COLOR_SCHEMES[ThemeName.DARK]
+    )
     custom = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK])
 
     return ft.Theme(
         color_scheme=color_scheme,
         font_family=I18n.get("font_family"),
-
         scrollbar_theme=ft.ScrollbarTheme(
             track_visibility=False,
             thumb_visibility=True,
             thumb_color={
-                ft.ControlState.HOVERED: ft.Colors.with_opacity(0.4, ft.Colors.ON_SURFACE_VARIANT),
-                ft.ControlState.DEFAULT: ft.Colors.with_opacity(0.2, ft.Colors.ON_SURFACE_VARIANT),
+                ft.ControlState.HOVERED: ft.Colors.with_opacity(
+                    0.4, ft.Colors.ON_SURFACE_VARIANT
+                ),
+                ft.ControlState.DEFAULT: ft.Colors.with_opacity(
+                    0.2, ft.Colors.ON_SURFACE_VARIANT
+                ),
             },
             thickness=6,
             radius=3,
             interactive=True,
         ),
-
-        divider_theme=ft.DividerTheme(
-            color=ft.Colors.OUTLINE_VARIANT,
-            thickness=1
-        ),
-
+        divider_theme=ft.DividerTheme(color=ft.Colors.OUTLINE_VARIANT, thickness=1),
         data_table_theme=ft.DataTableTheme(
             heading_row_color=custom["TABLE_HEADER_BG"],
             data_row_color={
@@ -552,12 +561,12 @@ def _build_theme(theme_name: str) -> ft.Theme:
             ),
             data_text_style=ft.TextStyle(
                 color=custom["TABLE_CELL_TEXT"],
-                font_family="Roboto Mono, Consolas, monospace"
+                font_family="Roboto Mono, Consolas, monospace",
             ),
             horizontal_margin=10,
             column_spacing=20,
             divider_thickness=0,
-        )
+        ),
     )
 
 

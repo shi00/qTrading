@@ -25,8 +25,12 @@ class SettingsView(ft.Container):
         self.expand = True
 
         # 1. Header
-        self.header_title = ft.Text(I18n.get("settings_title"), size=24, weight=ft.FontWeight.BOLD,
-                                    color=AppColors.TEXT_PRIMARY)
+        self.header_title = ft.Text(
+            I18n.get("settings_title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        )
 
         # 2. Init Tabs (order must match TAB_CONFIG)
         self.tab_contents = [
@@ -36,8 +40,9 @@ class SettingsView(ft.Container):
             NotificationsTab(self.show_snack, self),  # Pass self as page_ref holder
             SystemTab(self.show_snack),
         ]
-        assert len(self.TAB_CONFIG) == len(self.tab_contents), \
+        assert len(self.TAB_CONFIG) == len(self.tab_contents), (
             f"TAB_CONFIG ({len(self.TAB_CONFIG)}) and tab_contents ({len(self.tab_contents)}) length mismatch!"
+        )
 
         self.tab_buttons = []
         self.current_tab_index = 0
@@ -45,25 +50,32 @@ class SettingsView(ft.Container):
         # 3. Build Tab Bar from config
         tab_bar = ft.Container(
             content=ft.Row(
-                [self._build_tab_button(I18n.get(key), icon, i) for i, (key, icon) in enumerate(self.TAB_CONFIG)],
-                alignment=ft.MainAxisAlignment.START, spacing=10, scroll=ft.ScrollMode.HIDDEN
+                [
+                    self._build_tab_button(I18n.get(key), icon, i)
+                    for i, (key, icon) in enumerate(self.TAB_CONFIG)
+                ],
+                alignment=ft.MainAxisAlignment.START,
+                spacing=10,
+                scroll=ft.ScrollMode.HIDDEN,
             ),
-            padding=ft.padding.only(bottom=10)
+            padding=ft.padding.only(bottom=10),
         )
 
         # 4. Tab Body
-        self.tab_body = ft.Container(
-            content=self.tab_contents[0],
-            expand=True
-        )
+        self.tab_body = ft.Container(content=self.tab_contents[0], expand=True)
 
         # 5. Main Layout
-        self.content = ft.Column([
-            self.header_title,
-            tab_bar,
-            ft.Divider(height=1, thickness=1), # Color defaults to DIVIDER (Outline Variant) which is correct
-            self.tab_body
-        ], expand=True)
+        self.content = ft.Column(
+            [
+                self.header_title,
+                tab_bar,
+                ft.Divider(
+                    height=1, thickness=1
+                ),  # Color defaults to DIVIDER (Outline Variant) which is correct
+                self.tab_body,
+            ],
+            expand=True,
+        )
 
         self.did_mount = self._on_mount
         self.will_unmount = self._on_unmount
@@ -80,7 +92,7 @@ class SettingsView(ft.Container):
         I18n.unsubscribe(self.refresh_locale)
         # Cascade cleanup to child tabs
         for tab in self.tab_contents:
-            if hasattr(tab, '_on_unmount'):
+            if hasattr(tab, "_on_unmount"):
                 try:
                     tab._on_unmount()
                 except Exception as e:
@@ -101,8 +113,12 @@ class SettingsView(ft.Container):
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:
         """Centralized tab button style factory."""
         return ft.ButtonStyle(
-            color=AppColors.TEXT_ON_PRIMARY if is_selected else AppColors.TEXT_SECONDARY,
-            icon_color=AppColors.TEXT_ON_PRIMARY if is_selected else AppColors.TEXT_SECONDARY,
+            color=AppColors.TEXT_ON_PRIMARY
+            if is_selected
+            else AppColors.TEXT_SECONDARY,
+            icon_color=AppColors.TEXT_ON_PRIMARY
+            if is_selected
+            else AppColors.TEXT_SECONDARY,
             bgcolor=AppColors.PRIMARY if is_selected else ft.Colors.TRANSPARENT,
             elevation=0,
             shape=ft.RoundedRectangleBorder(radius=8),
@@ -115,7 +131,7 @@ class SettingsView(ft.Container):
             icon=icon,
             data=str(index),
             on_click=self._on_tab_click,
-            style=self._get_tab_button_style(is_selected=(index == 0))
+            style=self._get_tab_button_style(is_selected=(index == 0)),
         )
         self.tab_buttons.append(btn)
         return btn
@@ -141,7 +157,8 @@ class SettingsView(ft.Container):
 
     def show_snack(self, message, color=None, **kwargs):
         """Centralized snackbar handler"""
-        if not self.page: return
+        if not self.page:
+            return
 
         if hasattr(self.page, "show_toast"):
             msg_type = "info"
@@ -154,25 +171,31 @@ class SettingsView(ft.Container):
             self.page.show_toast(message, type=msg_type)
         else:
             # Clean up old snackbars to prevent overlay bloat
-            self.page.overlay = [o for o in self.page.overlay if not isinstance(o, ft.SnackBar)]
-            snack = ft.SnackBar(content=ft.Text(message), open=True, bgcolor=color, **kwargs)
+            self.page.overlay = [
+                o for o in self.page.overlay if not isinstance(o, ft.SnackBar)
+            ]
+            snack = ft.SnackBar(
+                content=ft.Text(message), open=True, bgcolor=color, **kwargs
+            )
             self.page.overlay.append(snack)
             self.page.update()
 
     def _safe_update(self):
         try:
-            if self.page: self.update()
+            if self.page:
+                self.update()
         except Exception as e:
             logger.error(f"[SettingsView] Update failed: {e}")
-
 
     def update_theme(self):
         """Propagate custom color updates to child tabs (INPUT_*, UP/DOWN)."""
         for tab in self.tab_contents:
-            if hasattr(tab, 'update_theme'):
+            if hasattr(tab, "update_theme"):
                 try:
                     tab.update_theme()
                 except Exception as e:
-                    logger.warning(f"Failed to update theme for tab {type(tab).__name__}: {e}")
+                    logger.warning(
+                        f"Failed to update theme for tab {type(tab).__name__}: {e}"
+                    )
 
         self._safe_update()

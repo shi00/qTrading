@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class TokenBucket:
     """
     A thread-safe Token Bucket rate limiter.
-    
+
     Attributes:
         rate (float): The rate at which tokens are added to the bucket (tokens per second).
         capacity (float): The maximum number of tokens the bucket can hold.
@@ -45,7 +45,7 @@ class TokenBucket:
             wait_time = 0
             if self.tokens < tokens:
                 wait_time = (tokens - self.tokens) / self.rate
-            
+
             self.tokens -= tokens
             return wait_time
 

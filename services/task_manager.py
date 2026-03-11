@@ -28,12 +28,18 @@ class TaskStatus(Enum):
 
 
 # Terminal statuses — used for clear/evict/UI filtering
-TERMINAL_STATUSES = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED)
+TERMINAL_STATUSES = (
+    TaskStatus.COMPLETED,
+    TaskStatus.FAILED,
+    TaskStatus.CANCELLED,
+    TaskStatus.INTERRUPTED,
+)
 
 
 @dataclass
 class AppTask:
     """Represents a long-running asynchronous operation in the application."""
+
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
     name: str = "Unknown Task"
     task_type: str = "System"
@@ -41,14 +47,14 @@ class AppTask:
     status: TaskStatus = TaskStatus.QUEUED
     progress: float = 0.0  # 0.0 to 1.0
     cancellable: bool = False
-    
+
     created_at: datetime.datetime = field(default_factory=get_now)
     started_at: Optional[datetime.datetime] = None
     completed_at: Optional[datetime.datetime] = None
-    
+
     result: Any = None
     error: str = ""
-    
+
     # Internal fields for execution
     _coroutine_gen: Callable = None  # Function that returns a coroutine
     _asyncio_task: Optional[asyncio.Task] = None
@@ -67,6 +73,7 @@ class TaskManager:
         The concurrency semaphore here is coordinated with ThreadPoolManager's CPU pool
         capacity to avoid over-subscription.
     """
+
     _instance = None
     _lock = threading.Lock()
 
@@ -79,17 +86,17 @@ class TaskManager:
 
     def __init__(self):
         with self._lock:
-            if getattr(self, '_initialized', False):
+            if getattr(self, "_initialized", False):
                 return
-                
+
             self._tasks: Dict[str, AppTask] = {}
             self._subscribers: List[Callable[[List[AppTask]], None]] = []
-            self._background_tasks = set() # Strong references to prevent GC
-            
+            self._background_tasks = set()  # Strong references to prevent GC
+
             # Semaphore is created lazily inside the event loop to avoid
             # DeprecationWarning on Python 3.10+ when no loop is running.
             self._semaphore_instance: Optional[asyncio.Semaphore] = None
-            
+
             # Throttle for update_progress notifications (seconds)
             self._last_notify_time: float = 0.0
             self._NOTIFY_THROTTLE_S: float = 0.2  # Max 5 pushes per second
@@ -97,7 +104,9 @@ class TaskManager:
             # History loaded from DB (read-only, separate from active _tasks)
             self._history: List[AppTask] = []
             self._db_ready = False
-            self._loop: Optional[asyncio.AbstractEventLoop] = None  # Captured in init_db
+            self._loop: Optional[asyncio.AbstractEventLoop] = (
+                None  # Captured in init_db
+            )
 
             self._initialized = True
             logger.info("[TaskManager] Initialized global task manager.")
@@ -135,7 +144,7 @@ class TaskManager:
     def _notify_subscribers(self):
         """Broadcast current tasks snapshot to all listeners. Safe to call from UI tread if using page.run_task."""
         tasks_snapshot = self.get_all_tasks()
-        for cb in self._subscribers[:]: # Iterate copy
+        for cb in self._subscribers[:]:  # Iterate copy
             try:
                 cb(tasks_snapshot)
             except Exception as e:
@@ -152,8 +161,15 @@ class TaskManager:
     def get_task(self, task_id: str) -> Optional[AppTask]:
         return self._tasks.get(task_id)
 
-    def submit_task(self, name: str, task_type: str, coroutine_factory: Callable, 
-                    cancellable: bool = False, unique_key: str = None, **kwargs) -> Optional[str]:
+    def submit_task(
+        self,
+        name: str,
+        task_type: str,
+        coroutine_factory: Callable,
+        cancellable: bool = False,
+        unique_key: str = None,
+        **kwargs,
+    ) -> Optional[str]:
         """
         Submit a new background task.  Thread-safe: may be called from either
         the event-loop thread or a worker thread (Flet dispatches sync on_click
@@ -166,8 +182,13 @@ class TaskManager:
         # Deduplication: reject if a task with same unique_key is already active
         if unique_key:
             for t in self._tasks.values():
-                if t.unique_key == unique_key and t.status in (TaskStatus.QUEUED, TaskStatus.RUNNING):
-                    logger.warning(f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})")
+                if t.unique_key == unique_key and t.status in (
+                    TaskStatus.QUEUED,
+                    TaskStatus.RUNNING,
+                ):
+                    logger.warning(
+                        f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})"
+                    )
                     return None
 
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
@@ -177,7 +198,9 @@ class TaskManager:
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._register_and_run, task)
         else:
-            logger.error(f"[TaskManager] Cannot submit task '{name}': no event loop captured.")
+            logger.error(
+                f"[TaskManager] Cannot submit task '{name}': no event loop captured."
+            )
 
         return task.id
 
@@ -206,7 +229,9 @@ class TaskManager:
 
             # Throttle: only broadcast to subscribers at most every _NOTIFY_THROTTLE_S seconds
             now = _time.monotonic()
-            if (now - self._last_notify_time) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
+            if (
+                now - self._last_notify_time
+            ) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
                 self._last_notify_time = now
                 self._notify_subscribers()
 
@@ -220,24 +245,26 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if not task:
             return
-            
+
         if task.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
-            return # Already finished
-            
+            return  # Already finished
+
         if not task.cancellable:
-            logger.warning(f"[TaskManager] Attempted to cancel non-cancellable task: {task.id}")
+            logger.warning(
+                f"[TaskManager] Attempted to cancel non-cancellable task: {task.id}"
+            )
             return
-            
+
         logger.info(f"[TaskManager] Cancelling task: [{task.id}] {task.name}")
         task.status = TaskStatus.CANCELLED
         task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
-        
+
         if task._cancel_event:
             task._cancel_event.set()
-            
+
         if task._asyncio_task and not task._asyncio_task.done():
             task._asyncio_task.cancel()
-            
+
         task.completed_at = get_now()
         self._persist_task(task)
         self._notify_subscribers()
@@ -249,12 +276,16 @@ class TaskManager:
 
     def _clear_finished_impl(self):
         """Actual clearing logic. Runs on event loop thread."""
-        to_delete = [tid for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
+        to_delete = [
+            tid for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES
+        ]
         for tid in to_delete:
             del self._tasks[tid]
         # Also clear matching items from history
         delete_set = set(to_delete)
-        history_to_clear = [h.id for h in self._history if h.status in TERMINAL_STATUSES]
+        history_to_clear = [
+            h.id for h in self._history if h.status in TERMINAL_STATUSES
+        ]
         self._history = [h for h in self._history if h.status not in TERMINAL_STATUSES]
         all_clear_ids = list(delete_set | set(history_to_clear))
         # DB cleanup
@@ -265,8 +296,11 @@ class TaskManager:
     async def cancel_all_running_async(self):
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes."""
-        active_ids = [tid for tid, t in self._tasks.items()
-                      if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)]
+        active_ids = [
+            tid
+            for tid, t in self._tasks.items()
+            if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)
+        ]
         for tid in active_ids:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
@@ -278,20 +312,26 @@ class TaskManager:
                 task._asyncio_task.cancel()
             await self._persist_task_async(task)
         if active_ids:
-            logger.info(f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).")
+            logger.info(
+                f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s)."
+            )
             self._notify_subscribers()
 
     _MAX_FINISHED_HISTORY = 200
 
     def _auto_evict_old(self):
         """Prevent unbounded memory growth by evicting oldest finished tasks when history exceeds limit."""
-        finished = [(tid, t) for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
+        finished = [
+            (tid, t) for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES
+        ]
         if len(finished) > self._MAX_FINISHED_HISTORY:
             finished.sort(key=lambda x: x[1].completed_at or datetime.datetime.min)
-            to_evict = finished[:len(finished) - self._MAX_FINISHED_HISTORY]
+            to_evict = finished[: len(finished) - self._MAX_FINISHED_HISTORY]
             for tid, _ in to_evict:
                 del self._tasks[tid]
-            logger.debug(f"[TaskManager] Auto-evicted {len(to_evict)} old finished task(s).")
+            logger.debug(
+                f"[TaskManager] Auto-evicted {len(to_evict)} old finished task(s)."
+            )
 
     # --- Internal Runner ---
 
@@ -300,7 +340,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if not task:
             return
-            
+
         if task.status == TaskStatus.CANCELLED:
             return
 
@@ -313,35 +353,41 @@ class TaskManager:
         task.description = "Starting..."
         self._persist_task(task)
         self._notify_subscribers()
-        
+
         try:
             # Rehydrate the coroutine inside the semaphore
             async with self._get_semaphore():
                 # Capture the current asyncio task to allow forceful cancellation
                 task._asyncio_task = asyncio.current_task()
                 logger.debug(f"[TaskManager] Running: [{task.id}] {task.name}")
-                
+
                 # Execute user logic
                 coro = task._coroutine_gen()
                 task.result = await coro
-                
+
                 # If we made it here without CancelledError, it's a success
                 task.status = TaskStatus.COMPLETED
                 task.progress = 1.0
-                task.description = str(task.result) if task.result else I18n.get("task_status_completed", "已完成")
+                task.description = (
+                    str(task.result)
+                    if task.result
+                    else I18n.get("task_status_completed", "已完成")
+                )
                 logger.info(f"[TaskManager] Completed: [{task.id}]")
-                
+
         except asyncio.CancelledError:
             if task.status != TaskStatus.CANCELLED:
                 task.status = TaskStatus.CANCELLED
             task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
             logger.info(f"[TaskManager] Cancelled processing for: [{task.id}]")
-            raise # Important to re-raise CancelledError for proper asyncio teardown
+            raise  # Important to re-raise CancelledError for proper asyncio teardown
         except Exception as e:
             task.status = TaskStatus.FAILED
             task.error = str(e)
             task.description = f"Failed: {type(e).__name__}"
-            logger.error(f"[TaskManager] Task {task.id} Failed: {e}\n{traceback.format_exc()}")
+            logger.error(
+                f"[TaskManager] Task {task.id} Failed: {e}\n{traceback.format_exc()}"
+            )
         finally:
             task._asyncio_task = None
             if task.completed_at is None:
@@ -351,8 +397,6 @@ class TaskManager:
             self._auto_evict_old()
 
     # --- Persistence ---
-
-
 
     @staticmethod
     def _safe_dt(val) -> Optional[datetime.datetime]:
@@ -369,6 +413,7 @@ class TaskManager:
     async def init_db(self):
         """Initialize persistence layer. Called once from main.py after CacheManager.init_db()."""
         from data.cache_manager import CacheManager
+
         cache = CacheManager()
 
         # Capture the running loop so thread-pool callers can schedule back
@@ -380,7 +425,10 @@ class TaskManager:
         await cache._write_db(
             "UPDATE task_history SET status = $1, description = $2 "
             "WHERE status IN ('RUNNING', 'QUEUED')",
-            (TaskStatus.INTERRUPTED.value, I18n.get("task_interrupted_desc", "应用上次异常退出，任务被中断")),
+            (
+                TaskStatus.INTERRUPTED.value,
+                I18n.get("task_interrupted_desc", "应用上次异常退出，任务被中断"),
+            ),
         )
 
         # 3. Load recent history (_read_db returns pd.DataFrame)
@@ -391,7 +439,8 @@ class TaskManager:
             for _, row in df.iterrows():
                 try:
                     t = AppTask(
-                        id=row.get("id", ""), name=row.get("name", ""),
+                        id=row.get("id", ""),
+                        name=row.get("name", ""),
                         task_type=row.get("task_type", "System"),
                         status=TaskStatus(row.get("status", "COMPLETED")),
                         progress=float(row.get("progress", 0) or 0),
@@ -405,7 +454,9 @@ class TaskManager:
                     self._history.append(t)
                 except Exception as e:
                     logger.warning(f"[TaskManager] Skipping malformed history row: {e}")
-            logger.info(f"[TaskManager] Loaded {len(self._history)} historical task(s) from DB.")
+            logger.info(
+                f"[TaskManager] Loaded {len(self._history)} historical task(s) from DB."
+            )
 
         # 4. Purge old records (>30 days)
         await cache._write_db(
@@ -421,9 +472,13 @@ class TaskManager:
         if not self._db_ready:
             return
         snapshot = (
-            task.id, task.name, task.task_type,
-            task.status.value, task.progress,
-            task.description, task.error,
+            task.id,
+            task.name,
+            task.task_type,
+            task.status.value,
+            task.progress,
+            task.description,
+            task.error,
             str(task.result)[:500] if task.result else None,
             task.created_at.isoformat() if task.created_at else None,
             task.started_at.isoformat() if task.started_at else None,
@@ -443,6 +498,7 @@ class TaskManager:
         """Write a pre-captured snapshot tuple to DB."""
         try:
             from data.cache_manager import CacheManager
+
             sql = (
                 "INSERT INTO task_history "
                 "(id, name, task_type, status, progress, description, error, result, "
@@ -460,9 +516,13 @@ class TaskManager:
     async def _persist_task_async(self, task: AppTask):
         """Upsert task record (reads current state — use for await-based callers only)."""
         params = (
-            task.id, task.name, task.task_type,
-            task.status.value, task.progress,
-            task.description, task.error,
+            task.id,
+            task.name,
+            task.task_type,
+            task.status.value,
+            task.progress,
+            task.description,
+            task.error,
             str(task.result)[:500] if task.result else None,
             task.created_at.isoformat() if task.created_at else None,
             task.started_at.isoformat() if task.started_at else None,
@@ -474,7 +534,8 @@ class TaskManager:
         """Delete specific tasks from DB using parameterized query."""
         try:
             from data.cache_manager import CacheManager
-            placeholders = ",".join([f"${i+1}" for i in range(len(task_ids))])
+
+            placeholders = ",".join([f"${i + 1}" for i in range(len(task_ids))])
             await CacheManager()._write_db(
                 f"DELETE FROM task_history WHERE id IN ({placeholders})",
                 tuple(task_ids),

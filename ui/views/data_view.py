@@ -3,7 +3,6 @@ import functools
 import logging
 import re
 import time
-import traceback
 
 import flet as ft
 
@@ -53,7 +52,9 @@ class TableViewerTab(ft.Container):
         )
 
         # Loading Indicator
-        self.progress_bar = ft.ProgressBar(width=None, visible=False, color=AppColors.PRIMARY)
+        self.progress_bar = ft.ProgressBar(
+            width=None, visible=False, color=AppColors.PRIMARY
+        )
 
         # Filtering
         self.filter_col = ft.Dropdown(
@@ -83,8 +84,8 @@ class TableViewerTab(ft.Container):
             text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         )
         self.filter_val = ft.TextField(
-            label=I18n.get("data_filter_val"), 
-            width=200, 
+            label=I18n.get("data_filter_val"),
+            width=200,
             on_submit=self._on_query_click,
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
@@ -98,13 +99,13 @@ class TableViewerTab(ft.Container):
             tooltip=I18n.get("common_query"),
             on_click=self._on_query_click,
             icon_color=AppColors.PRIMARY,
-            icon_size=20
+            icon_size=20,
         )
         self.btn_refresh = ft.IconButton(
             ft.Icons.REFRESH,
             tooltip=I18n.get("common_refresh"),
             on_click=self._on_refresh_click,
-            icon_size=20
+            icon_size=20,
         )
 
         # Professional Financial DataTable
@@ -114,33 +115,29 @@ class TableViewerTab(ft.Container):
             I18n.get("data_loading"),
             size=16,
             weight=ft.FontWeight.W_500,
-            color=AppColors.TEXT_PRIMARY
+            color=AppColors.TEXT_PRIMARY,
         )
         self._loading_hint = ft.Text(
-            I18n.get("data_loading_hint"),
-            size=13,
-            color=AppColors.TEXT_SECONDARY
+            I18n.get("data_loading_hint"), size=13, color=AppColors.TEXT_SECONDARY
         )
         self._loading_widget = ft.Container(
-            content=ft.Column([
-                # Animated spinner with glow effect
-                ft.Container(
-                    content=ft.ProgressRing(
-                        width=48,
-                        height=48,
-                        stroke_width=4,
-                        color=AppColors.PRIMARY
+            content=ft.Column(
+                [
+                    # Animated spinner with glow effect
+                    ft.Container(
+                        content=ft.ProgressRing(
+                            width=48, height=48, stroke_width=4, color=AppColors.PRIMARY
+                        ),
+                        padding=20,
+                        border_radius=50,
+                        bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
                     ),
-                    padding=20,
-                    border_radius=50,
-                    bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
-                ),
-                ft.Container(height=16),
-                # Main loading text
-                self._loading_text,
-                # Hint text
-                self._loading_hint,
-            ],
+                    ft.Container(height=16),
+                    # Main loading text
+                    self._loading_text,
+                    # Hint text
+                    self._loading_hint,
+                ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
             ),
@@ -153,7 +150,9 @@ class TableViewerTab(ft.Container):
         )
 
         self.data_table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Text(I18n.get("data_loading")))],  # Initial placeholder
+            columns=[
+                ft.DataColumn(ft.Text(I18n.get("data_loading")))
+            ],  # Initial placeholder
             rows=[],
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),
             horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),
@@ -173,7 +172,7 @@ class TableViewerTab(ft.Container):
         self._table_scroll_wrapper = ft.Column(
             [ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS)],
             expand=True,
-            scroll=ft.ScrollMode.AUTO
+            scroll=ft.ScrollMode.AUTO,
         )
 
         # Conditional content container - swaps between loading and table
@@ -183,8 +182,12 @@ class TableViewerTab(ft.Container):
         )
 
         # Pagination
-        self.btn_prev = ft.IconButton(ft.Icons.CHEVRON_LEFT, on_click=self._on_prev_page, disabled=True)
-        self.btn_next = ft.IconButton(ft.Icons.CHEVRON_RIGHT, on_click=self._on_next_page, disabled=True)
+        self.btn_prev = ft.IconButton(
+            ft.Icons.CHEVRON_LEFT, on_click=self._on_prev_page, disabled=True
+        )
+        self.btn_next = ft.IconButton(
+            ft.Icons.CHEVRON_RIGHT, on_click=self._on_next_page, disabled=True
+        )
         self.txt_page = ft.Text(I18n.get("data_page_num").format(current=1, total=1))
         self.txt_count_info = ft.Text("", size=12, color=ft.Colors.GREY)
 
@@ -192,100 +195,136 @@ class TableViewerTab(ft.Container):
 
     def _build_layout(self):
         # Toolbar
-        toolbar_content = ft.Row([
-            self.table_selector,
-            ft.VerticalDivider(width=10, color=ft.Colors.TRANSPARENT),
-
-            # Filter Group
-            ft.Container(
-                content=ft.Row([
-                    self.filter_col,
-                    self.filter_op,
-                    self.filter_val,
-                    self.btn_query,
-                    self.btn_refresh,
-                ], spacing=5),
-                padding=5,
-                border=ft.border.all(1, AppColors.BORDER),
-                border_radius=8,
-                bgcolor=AppColors.SURFACE,
-            ),
-
-            ft.Container(expand=True),
-
-            # Actions
-            ft.PopupMenuButton(
-                icon=ft.Icons.MORE_VERT,
-                tooltip=I18n.get("common_more_actions"),
-                items=[
-                    ft.PopupMenuItem(text=I18n.get("data_export_current"), icon=ft.Icons.DOWNLOAD,
-                                     on_click=lambda e: asyncio.create_task(self._export_csv(current_page=True))),
-                    ft.PopupMenuItem(text=I18n.get("data_export_all"), icon=ft.Icons.DRIVE_FILE_MOVE,
-                                     on_click=lambda e: asyncio.create_task(self._export_csv(current_page=False))),
-                ]
-            )
-        ], alignment=ft.MainAxisAlignment.START, spacing=10)
+        toolbar_content = ft.Row(
+            [
+                self.table_selector,
+                ft.VerticalDivider(width=10, color=ft.Colors.TRANSPARENT),
+                # Filter Group
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            self.filter_col,
+                            self.filter_op,
+                            self.filter_val,
+                            self.btn_query,
+                            self.btn_refresh,
+                        ],
+                        spacing=5,
+                    ),
+                    padding=5,
+                    border=ft.border.all(1, AppColors.BORDER),
+                    border_radius=8,
+                    bgcolor=AppColors.SURFACE,
+                ),
+                ft.Container(expand=True),
+                # Actions
+                ft.PopupMenuButton(
+                    icon=ft.Icons.MORE_VERT,
+                    tooltip=I18n.get("common_more_actions"),
+                    items=[
+                        ft.PopupMenuItem(
+                            text=I18n.get("data_export_current"),
+                            icon=ft.Icons.DOWNLOAD,
+                            on_click=lambda e: asyncio.create_task(
+                                self._export_csv(current_page=True)
+                            ),
+                        ),
+                        ft.PopupMenuItem(
+                            text=I18n.get("data_export_all"),
+                            icon=ft.Icons.DRIVE_FILE_MOVE,
+                            on_click=lambda e: asyncio.create_task(
+                                self._export_csv(current_page=False)
+                            ),
+                        ),
+                    ],
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.START,
+            spacing=10,
+        )
 
         # Update visuals for inputs to be 'Dense'
-        for ctrl in [self.table_selector, self.filter_col, self.filter_op, self.filter_val]:
+        for ctrl in [
+            self.table_selector,
+            self.filter_col,
+            self.filter_op,
+            self.filter_val,
+        ]:
             ctrl.height = 36
             ctrl.text_size = 13
             ctrl.content_padding = 10
-            if hasattr(ctrl, 'border'): ctrl.border = "outline"
+            if hasattr(ctrl, "border"):
+                ctrl.border = "outline"
 
         self.filter_op.content_padding = 5
 
-        toolbar_container = ft.Column([
-            ft.Container(
-                content=toolbar_content,
-                padding=10,
-                bgcolor=AppColors.SURFACE,
-            ),
-            self.progress_bar  # Loading bar right below toolbar
-        ], spacing=0)
+        toolbar_container = ft.Column(
+            [
+                ft.Container(
+                    content=toolbar_content,
+                    padding=10,
+                    bgcolor=AppColors.SURFACE,
+                ),
+                self.progress_bar,  # Loading bar right below toolbar
+            ],
+            spacing=0,
+        )
 
         # Data Grid Container - Uses conditional content rendering
         # Content is swapped between loading widget and table in _toggle_loading
 
         # Pagination Bar
         pagination_bar = ft.Container(
-            content=ft.Row([
-                self.txt_count_info,
-                ft.Container(expand=True),
-                self.btn_prev,
-                self.txt_page,
-                self.btn_next,
-            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            content=ft.Row(
+                [
+                    self.txt_count_info,
+                    ft.Container(expand=True),
+                    self.btn_prev,
+                    self.txt_page,
+                    self.btn_next,
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            ),
             padding=ft.padding.symmetric(horizontal=20, vertical=5),
             bgcolor=AppColors.SURFACE,
-            border=ft.border.only(top=ft.border.BorderSide(1, AppColors.BORDER))
+            border=ft.border.only(top=ft.border.BorderSide(1, AppColors.BORDER)),
         )
 
-        return ft.Column([toolbar_container, self._grid_content, pagination_bar], expand=True, spacing=0)
+        return ft.Column(
+            [toolbar_container, self._grid_content, pagination_bar],
+            expand=True,
+            spacing=0,
+        )
 
     async def did_mount_async(self):
         """Called when the control is added to the page (Async wrapper manually called)"""
         import time as _time
-        
+
         # Skip re-loading if tables already loaded (switching back to this view)
         if self._tables_loaded:
             logger.debug("[TableViewerTab] Skipping re-load - tables already loaded")
             return
-        
+
         _t_start = _time.perf_counter()
         logger.debug("[PERF] >>> TableViewerTab.did_mount_async START")
         # Note: standard did_mount is sync. we call this manually or use create_task in init if possible.
-        # But safest is to trigger from a known start point. 
+        # But safest is to trigger from a known start point.
         # In this architecture, we can just launch the task.
         try:
             # Run db fetch in executor (CPU Pool)
             _t0 = _time.perf_counter()
-            tables = await ThreadPoolManager().run_async(TaskType.CPU, self.db_manager.get_all_tables)
-            logger.debug(f"[PERF] TableViewerTab: get_all_tables() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+            tables = await ThreadPoolManager().run_async(
+                TaskType.CPU, self.db_manager.get_all_tables
+            )
+            logger.debug(
+                f"[PERF] TableViewerTab: get_all_tables() took {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+            )
 
             # Update UI on main thread
-            self.table_selector.options = [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in
-                                           tables]
+            self.table_selector.options = [
+                ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t))
+                for t in tables
+            ]
             self.table_selector.disabled = False
 
             if tables:
@@ -296,14 +335,16 @@ class TableViewerTab(ft.Container):
                 _t0 = _time.perf_counter()
                 await self._load_schema_and_data()
                 logger.debug(
-                    f"[PERF] TableViewerTab: _load_schema_and_data() took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+                    f"[PERF] TableViewerTab: _load_schema_and_data() took {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+                )
 
             self._tables_loaded = True  # Mark as loaded
             if self.page:
                 self.update()
-            
+
             logger.debug(
-                f"[PERF] <<< TableViewerTab.did_mount_async END, TOTAL={(_time.perf_counter() - _t_start) * 1000:.1f}ms")
+                f"[PERF] <<< TableViewerTab.did_mount_async END, TOTAL={(_time.perf_counter() - _t_start) * 1000:.1f}ms"
+            )
         except Exception as e:
             logger.error(f"Error loading tables: {e}")
             if self.page:
@@ -344,26 +385,30 @@ class TableViewerTab(ft.Container):
 
         await self._toggle_loading(True)
         try:
-
             # 1. Get Schema
-            schema = await ThreadPoolManager().run_async(TaskType.CPU, self.db_manager.get_table_schema,
-                                                         self.current_table)
-            self.table_columns = [col['name'] for col in schema]
+            schema = await ThreadPoolManager().run_async(
+                TaskType.CPU, self.db_manager.get_table_schema, self.current_table
+            )
+            self.table_columns = [col["name"] for col in schema]
 
             # Detect numeric columns
             self.numeric_cols.clear()
             for col in schema:
-                c_name = col['name']
-                c_type = col.get('type', '').upper()
-                if any(x in c_type for x in ['INT', 'REAL', 'FLOAT', 'DOUBLE', 'NUMERIC', 'DECIMAL']):
+                c_name = col["name"]
+                c_type = col.get("type", "").upper()
+                if any(
+                    x in c_type
+                    for x in ["INT", "REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL"]
+                ):
                     self.numeric_cols.add(c_name)
 
             # Update Filter Dropdown
             self.filter_col.options = [
                 ft.dropdown.Option(
                     key=col,
-                    text=MetaDataManager.get_column_alias(self.current_table, col)
-                ) for col in self.table_columns
+                    text=MetaDataManager.get_column_alias(self.current_table, col),
+                )
+                for col in self.table_columns
             ]
             if self.table_columns:
                 self.filter_col.value = self.table_columns[0]
@@ -391,7 +436,9 @@ class TableViewerTab(ft.Container):
                             # Allow clicking header to sort
                             # Use page.run_task to bridge sync event to async method
                             # Pass INDEX, not name
-                            on_click=lambda e, i=idx: self.page.run_task(self._on_sort, i)
+                            on_click=lambda e, i=idx: self.page.run_task(
+                                self._on_sort, i
+                            ),
                         ),
                         numeric=is_numeric,
                         on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),
@@ -401,7 +448,7 @@ class TableViewerTab(ft.Container):
             # Reset sorting (View State)
             self.sort_col_index = None
             self.sort_asc = True
-            
+
             # Reset DataTable sorting state immediately to prevent stale index vs new columns mismatch
             self.data_table.sort_column_index = None
             self.data_table.sort_ascending = True
@@ -412,7 +459,9 @@ class TableViewerTab(ft.Container):
         except Exception as e:
             logger.error(f"Error loading schema: {e}", exc_info=True)
             if self.page:
-                self.page.show_toast(I18n.get("data_err_load_schema", error="内部读取错误"), "error")
+                self.page.show_toast(
+                    I18n.get("data_err_load_schema", error="内部读取错误"), "error"
+                )
         finally:
             await self._toggle_loading(False)
             self._is_loading = False  # Release loading lock
@@ -420,7 +469,6 @@ class TableViewerTab(ft.Container):
     async def _refresh_data_rows(self):
         """Fetch count and data rows based on current state"""
         try:
-
             # Build Filters
             filters = []
             if self.filter_val.value:
@@ -428,15 +476,19 @@ class TableViewerTab(ft.Container):
                 filter_val = self.filter_val.value
 
                 # Date format conversion
-                if filter_col and 'date' in filter_col.lower():
-                    if re.match(r'^\d{4}-\d{2}-\d{2}$', filter_val):
-                        filter_val = filter_val.replace('-', '')
+                if filter_col and "date" in filter_col.lower():
+                    if re.match(r"^\d{4}-\d{2}-\d{2}$", filter_val):
+                        filter_val = filter_val.replace("-", "")
 
                 filters.append((filter_col, self.filter_op.value, filter_val))
 
             # Run SQL queries in Executor
-            self.total_rows = await ThreadPoolManager().run_async(TaskType.CPU, self.db_manager.get_table_count,
-                                                                  self.current_table, filters)
+            self.total_rows = await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                self.db_manager.get_table_count,
+                self.current_table,
+                filters,
+            )
 
             total_pages = max(1, (self.total_rows // self.page_size) + 1)
 
@@ -446,53 +498,76 @@ class TableViewerTab(ft.Container):
             # SNAPSHOT Columns: Ensure we render with the same columns we resolved sorting against
             # This protects against table_columns changing mid-query (though UI is locked, this is safer)
             current_columns = list(self.table_columns)
-            
+
             # Resolve Sort Column Name from Index (Using Snapshot)
             sort_col_name = None
-            if current_sort_index is not None and isinstance(current_sort_index, int) and 0 <= current_sort_index < len(current_columns):
+            if (
+                current_sort_index is not None
+                and isinstance(current_sort_index, int)
+                and 0 <= current_sort_index < len(current_columns)
+            ):
                 sort_col_name = current_columns[current_sort_index]
 
-            df = await ThreadPoolManager().run_async(TaskType.CPU,
-                                                     functools.partial(
-                                                         self.db_manager.query_table,
-                                                         self.current_table,
-                                                         page=self.current_page,
-                                                         page_size=self.page_size,
-                                                         filters=filters,
-                                                         sort_col=sort_col_name,
-                                                         sort_asc=current_sort_asc
-                                                     )
-                                                     )
+            df = await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                functools.partial(
+                    self.db_manager.query_table,
+                    self.current_table,
+                    page=self.current_page,
+                    page_size=self.page_size,
+                    filters=filters,
+                    sort_col=sort_col_name,
+                    sort_asc=current_sort_asc,
+                ),
+            )
 
             # Render Rows (Main Thread) using SNAPSHOT columns
             self.data_table.rows = []
             for idx, (_, row) in enumerate(df.iterrows()):
                 cells = []
                 for col_name in current_columns:
-                    val = row.get(col_name) # Safe get
+                    val = row.get(col_name)  # Safe get
                     is_numeric = col_name in self.numeric_cols
 
                     # Formatting
                     str_val = str(val)
                     if val is None:
                         str_val = "-"
-                    elif 'date' in col_name.lower() and isinstance(val, str) and len(val) == 8 and val.isdigit():
+                    elif (
+                        "date" in col_name.lower()
+                        and isinstance(val, str)
+                        and len(val) == 8
+                        and val.isdigit()
+                    ):
                         str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
 
                     # 仅对 market_news 表的长文本字段使用左对齐和自动换行
-                    is_news_table = self.current_table == 'market_news'
-                    is_long_text = is_news_table and col_name.lower() in ('content', 'tags')
-                    
+                    is_news_table = self.current_table == "market_news"
+                    is_long_text = is_news_table and col_name.lower() in (
+                        "content",
+                        "tags",
+                    )
+
                     cell_text = ft.Text(
                         str_val,
                         size=13,
                         max_lines=None if is_long_text else 1,  # 新闻内容不限制行数
-                        overflow=ft.TextOverflow.VISIBLE if is_long_text else ft.TextOverflow.ELLIPSIS,
-                        font_family="Roboto Mono" if is_numeric or "code" in col_name.lower() or "date" in col_name.lower() else None,
-                        color=AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT,
-                        text_align=ft.TextAlign.LEFT if is_long_text else ft.TextAlign.CENTER,  # 新闻内容左对齐
+                        overflow=ft.TextOverflow.VISIBLE
+                        if is_long_text
+                        else ft.TextOverflow.ELLIPSIS,
+                        font_family="Roboto Mono"
+                        if is_numeric
+                        or "code" in col_name.lower()
+                        or "date" in col_name.lower()
+                        else None,
+                        color=AppColors.TABLE_CELL_NUMERIC
+                        if is_numeric
+                        else AppColors.TABLE_CELL_TEXT,
+                        text_align=ft.TextAlign.LEFT
+                        if is_long_text
+                        else ft.TextAlign.CENTER,  # 新闻内容左对齐
                     )
-                    
+
                     # 新闻内容使用左对齐容器，并设置固定宽度保证换行
                     if is_long_text:
                         cell_container = ft.Container(
@@ -502,16 +577,28 @@ class TableViewerTab(ft.Container):
                             padding=ft.padding.symmetric(vertical=5),
                         )
                     else:
-                        cell_container = ft.Container(content=cell_text, alignment=ft.alignment.center, expand=True)
-                    
+                        cell_container = ft.Container(
+                            content=cell_text,
+                            alignment=ft.alignment.center,
+                            expand=True,
+                        )
+
                     cells.append(ft.DataCell(cell_container))
 
-                row_color = AppColors.TABLE_ROW_ODD if idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
+                row_color = (
+                    AppColors.TABLE_ROW_ODD
+                    if idx % 2 == 0
+                    else AppColors.TABLE_ROW_EVEN
+                )
                 self.data_table.rows.append(ft.DataRow(cells=cells, color=row_color))
 
             # Update Info Labels
-            self.txt_count_info.value = I18n.get("data_total_rows").format(count=self.total_rows)
-            self.txt_page.value = I18n.get("data_page_num").format(current=self.current_page, total=total_pages)
+            self.txt_count_info.value = I18n.get("data_total_rows").format(
+                count=self.total_rows
+            )
+            self.txt_page.value = I18n.get("data_page_num").format(
+                current=self.current_page, total=total_pages
+            )
 
             # Update Pagination Buttons
             self.btn_prev.disabled = self.current_page <= 1
@@ -524,19 +611,21 @@ class TableViewerTab(ft.Container):
                 self.data_table.sort_column_index = current_sort_index
             else:
                 self.data_table.sort_column_index = None
-            
-            self.data_table.sort_ascending = current_sort_asc
 
             self.data_table.sort_ascending = current_sort_asc
 
-            # OPTIMIZATION: Removed self.update() here because _toggle_loading(False) 
+            self.data_table.sort_ascending = current_sort_asc
+
+            # OPTIMIZATION: Removed self.update() here because _toggle_loading(False)
             # (which is always called after this) will trigger the update.
             # This reduces double-render flicker.
 
         except Exception as e:
             logger.error(f"Error fetching data: {e}", exc_info=True)
             if self.page:
-                self.page.show_toast(I18n.get("data_err_fetch", error="内部读取错误"), "error")
+                self.page.show_toast(
+                    I18n.get("data_err_fetch", error="内部读取错误"), "error"
+                )
 
     async def _on_query_click(self, e):
         self.current_page = 1
@@ -553,9 +642,11 @@ class TableViewerTab(ft.Container):
         # Ensure col_index is int
         # Type Guard: Ensure col_index is an integer
         if not isinstance(col_index, int):
-            logger.warning(f"[_on_sort] Invalid column index type: {type(col_index)} inside DataView. Expected int.")
+            logger.warning(
+                f"[_on_sort] Invalid column index type: {type(col_index)} inside DataView. Expected int."
+            )
             return
-             
+
         if self.sort_col_index == col_index:
             self.sort_asc = not self.sort_asc
         else:
@@ -584,10 +675,10 @@ class TableViewerTab(ft.Container):
 
     async def _export_csv(self, current_page=True):
         import os
-        from datetime import datetime
 
         try:
-            if loading := self.progress_bar.visible: return  # Prevent double click
+            if self.progress_bar.visible:
+                return  # Prevent double click
             await self._toggle_loading(True)
 
             await self._toggle_loading(True)
@@ -597,13 +688,19 @@ class TableViewerTab(ft.Container):
             if self.filter_val.value:
                 filter_col = self.filter_col.value
                 filter_val = self.filter_val.value
-                if filter_col and 'date' in filter_col.lower() and re.match(r'^\d{4}-\d{2}-\d{2}$', filter_val):
-                    filter_val = filter_val.replace('-', '')
+                if (
+                    filter_col
+                    and "date" in filter_col.lower()
+                    and re.match(r"^\d{4}-\d{2}-\d{2}$", filter_val)
+                ):
+                    filter_val = filter_val.replace("-", "")
                 filters.append((filter_col, self.filter_op.value, filter_val))
 
             # Resolve Sort Column Name for Export
             sort_col_name = None
-            if self.sort_col_index is not None and 0 <= self.sort_col_index < len(self.table_columns):
+            if self.sort_col_index is not None and 0 <= self.sort_col_index < len(
+                self.table_columns
+            ):
                 sort_col_name = self.table_columns[self.sort_col_index]
 
             query_func = functools.partial(
@@ -613,7 +710,7 @@ class TableViewerTab(ft.Container):
                 page_size=self.page_size if current_page else 50000,
                 filters=filters,
                 sort_col=sort_col_name,
-                sort_asc=self.sort_asc
+                sort_asc=self.sort_asc,
             )
 
             # Execute in background
@@ -634,29 +731,38 @@ class TableViewerTab(ft.Container):
             filepath = os.path.join(export_dir, filename)
 
             # Writing large CSV can also block, so we push it to executor
-            await ThreadPoolManager().run_async(TaskType.CPU,
-                                                lambda: df.to_csv(filepath, index=False, encoding='utf-8-sig'))
+            await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                lambda: df.to_csv(filepath, index=False, encoding="utf-8-sig"),
+            )
 
             msg = I18n.get("data_export_success", file=filename)
             self.page.show_toast(msg, "success")
 
         except Exception as e:
             logger.error(f"Export failed: {e}", exc_info=True)
-            self.page.show_toast(I18n.get("data_export_fail", error="内部处理错误"), "error")
+            self.page.show_toast(
+                I18n.get("data_export_fail", error="内部处理错误"), "error"
+            )
         finally:
             await self._toggle_loading(False)
 
     def update_theme(self):
         """Update styles on theme change"""
         # Toolbar inputs
-        for ctrl in [self.table_selector, self.filter_col, self.filter_op, self.filter_val]:
+        for ctrl in [
+            self.table_selector,
+            self.filter_col,
+            self.filter_op,
+            self.filter_val,
+        ]:
             ctrl.bgcolor = AppColors.INPUT_BG
             ctrl.color = AppColors.INPUT_TEXT
             ctrl.border_color = AppColors.INPUT_BORDER
             ctrl.text_style = ft.TextStyle(color=AppColors.INPUT_TEXT)
-        
+
         self.btn_query.icon_color = AppColors.PRIMARY
-        
+
         # Loading Widget
         self._loading_text.color = AppColors.TEXT_PRIMARY
         self._loading_hint.color = AppColors.TEXT_SECONDARY
@@ -666,23 +772,32 @@ class TableViewerTab(ft.Container):
         self.data_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
         self.data_table.heading_row_color = AppColors.TABLE_HEADER_BG
         self.data_table.border = ft.border.all(1, AppColors.TABLE_BORDER)
-        
+
         # Update Column Headers
         for col in self.data_table.columns:
-            if isinstance(col.label, ft.Container) and isinstance(col.label.content, ft.Text):
+            if isinstance(col.label, ft.Container) and isinstance(
+                col.label.content, ft.Text
+            ):
                 col.label.content.color = AppColors.TABLE_HEADER_TEXT
-        
+
         # Update Rows
         for i, row in enumerate(self.data_table.rows):
-            row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
+            row.color = (
+                AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
+            )
             for cell in row.cells:
                 content = cell.content
-                if isinstance(content, ft.Container): content = content.content
+                if isinstance(content, ft.Container):
+                    content = content.content
                 if isinstance(content, ft.Text):
                     # Check if numeric based on font family?
                     is_numeric = "Roboto" in (content.font_family or "")
-                    content.color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
-        
+                    content.color = (
+                        AppColors.TABLE_CELL_NUMERIC
+                        if is_numeric
+                        else AppColors.TABLE_CELL_TEXT
+                    )
+
         if self.page:
             self.update()
 
@@ -709,17 +824,21 @@ class SQLConsoleTab(ft.Container):
             border_color=AppColors.INPUT_BORDER,
             cursor_color=AppColors.PRIMARY,
             hint_style=ft.TextStyle(color=AppColors.TEXT_HINT),
-            text_style=ft.TextStyle(font_family="Consolas, monospace", color=AppColors.INPUT_TEXT)
+            text_style=ft.TextStyle(
+                font_family="Consolas, monospace", color=AppColors.INPUT_TEXT
+            ),
         )
 
         self.btn_run = ft.ElevatedButton(
             I18n.get("data_sql_execute"),
             icon=ft.Icons.PLAY_ARROW,
             style=AppStyles.primary_button(),
-            on_click=self._run_query
+            on_click=self._run_query,
         )
 
-        self.progress_ring = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
+        self.progress_ring = ft.ProgressRing(
+            width=16, height=16, stroke_width=2, visible=False
+        )
 
         self.result_table = ft.DataTable(
             columns=[ft.DataColumn(ft.Text(I18n.get("data_sql_result")))],
@@ -731,42 +850,68 @@ class SQLConsoleTab(ft.Container):
             column_spacing=20,
         )
 
-        self.status_text = ft.Text(I18n.get("data_sql_ready"), size=12, color=AppColors.TEXT_SECONDARY)
+        self.status_text = ft.Text(
+            I18n.get("data_sql_ready"), size=12, color=AppColors.TEXT_SECONDARY
+        )
 
-        self.content = ft.Column([
-            ft.Container(
-                content=ft.Column([
-                    self.sql_editor,
-                    ft.Row([
-                        self.btn_run,
-                        self.progress_ring,
-                        ft.Container(expand=True),
-                        ft.Text(I18n.get("data_date_fmt_hint"), size=11, color=AppColors.TEXT_HINT),
-                        ft.OutlinedButton("SELECT * LIMIT 10",
-                                          style=AppStyles.outline_button(),
-                                          on_click=lambda e: self._set_sql("SELECT * FROM stock_basic LIMIT 10")),
-                        ft.OutlinedButton(I18n.get("data_btn_count"),
-                                          style=AppStyles.outline_button(),
-                                          on_click=lambda e: self._set_sql("SELECT COUNT(*) FROM daily_quotes")),
-                    ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
-                ]),
-                padding=10,
-                bgcolor=AppColors.SURFACE,
-                border=ft.border.only(bottom=ft.border.BorderSide(1, AppColors.BORDER))
-            ),
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([self.result_table], scroll=ft.ScrollMode.ALWAYS)
-                ], scroll=ft.ScrollMode.AUTO),
-                expand=True,
-                padding=10
-            ),
-            ft.Container(
-                content=self.status_text,
-                padding=5,
-                bgcolor=AppColors.SURFACE_VARIANT
-            )
-        ], expand=True, spacing=0)
+        self.content = ft.Column(
+            [
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            self.sql_editor,
+                            ft.Row(
+                                [
+                                    self.btn_run,
+                                    self.progress_ring,
+                                    ft.Container(expand=True),
+                                    ft.Text(
+                                        I18n.get("data_date_fmt_hint"),
+                                        size=11,
+                                        color=AppColors.TEXT_HINT,
+                                    ),
+                                    ft.OutlinedButton(
+                                        "SELECT * LIMIT 10",
+                                        style=AppStyles.outline_button(),
+                                        on_click=lambda e: self._set_sql(
+                                            "SELECT * FROM stock_basic LIMIT 10"
+                                        ),
+                                    ),
+                                    ft.OutlinedButton(
+                                        I18n.get("data_btn_count"),
+                                        style=AppStyles.outline_button(),
+                                        on_click=lambda e: self._set_sql(
+                                            "SELECT COUNT(*) FROM daily_quotes"
+                                        ),
+                                    ),
+                                ],
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ]
+                    ),
+                    padding=10,
+                    bgcolor=AppColors.SURFACE,
+                    border=ft.border.only(
+                        bottom=ft.border.BorderSide(1, AppColors.BORDER)
+                    ),
+                ),
+                ft.Container(
+                    content=ft.Column(
+                        [ft.Row([self.result_table], scroll=ft.ScrollMode.ALWAYS)],
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                    expand=True,
+                    padding=10,
+                ),
+                ft.Container(
+                    content=self.status_text,
+                    padding=5,
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                ),
+            ],
+            expand=True,
+            spacing=0,
+        )
 
     def _set_sql(self, sql):
         self.sql_editor.value = sql
@@ -787,30 +932,38 @@ class SQLConsoleTab(ft.Container):
             start_time = time.time()
 
             # Execute in Background
-            result = await ThreadPoolManager().run_async(TaskType.CPU, self.db_manager.execute_sql, sql)
+            result = await ThreadPoolManager().run_async(
+                TaskType.CPU, self.db_manager.execute_sql, sql
+            )
 
             elapsed = time.time() - start_time
 
-            if result['success']:
-                df = result['data']
+            if result["success"]:
+                df = result["data"]
                 MAX_ROWS_UI = 100
                 display_df = df
 
                 if len(df) > MAX_ROWS_UI:
-                    self.status_text.value = I18n.get("data_sql_success_truncated").format(time=elapsed,
-                                                                                           limit=MAX_ROWS_UI,
-                                                                                           rows=len(df))
+                    self.status_text.value = I18n.get(
+                        "data_sql_success_truncated"
+                    ).format(time=elapsed, limit=MAX_ROWS_UI, rows=len(df))
                     display_df = df.head(MAX_ROWS_UI)
                 else:
-                    self.status_text.value = I18n.get("data_sql_success").format(time=elapsed, rows=len(df))
+                    self.status_text.value = I18n.get("data_sql_success").format(
+                        time=elapsed, rows=len(df)
+                    )
                 self.status_text.color = ft.Colors.GREEN
 
                 # Rebuild Table on Main Thread
                 self.result_table.columns = [
-                    ft.DataColumn(ft.Text(MetaDataManager.get_column_alias(None, col), 
-                                          weight=ft.FontWeight.BOLD,
-                                          color=AppColors.TABLE_HEADER_TEXT)) for
-                    col in display_df.columns
+                    ft.DataColumn(
+                        ft.Text(
+                            MetaDataManager.get_column_alias(None, col),
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.TABLE_HEADER_TEXT,
+                        )
+                    )
+                    for col in display_df.columns
                 ]
 
                 self.result_table.rows = []
@@ -819,20 +972,41 @@ class SQLConsoleTab(ft.Container):
                     for idx, val in enumerate(row):
                         col_name = display_df.columns[idx]
                         str_val = str(val)
-                        if 'date' in col_name.lower() and isinstance(val, str) and len(val) == 8 and val.isdigit():
+                        if (
+                            "date" in col_name.lower()
+                            and isinstance(val, str)
+                            and len(val) == 8
+                            and val.isdigit()
+                        ):
                             str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
-                        cells.append(ft.DataCell(ft.Text(str_val, size=12, color=AppColors.TABLE_CELL_TEXT)))
-                    
-                    row_color = AppColors.TABLE_ROW_ODD if row_idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
-                    self.result_table.rows.append(ft.DataRow(cells=cells, color=row_color))
+                        cells.append(
+                            ft.DataCell(
+                                ft.Text(
+                                    str_val, size=12, color=AppColors.TABLE_CELL_TEXT
+                                )
+                            )
+                        )
+
+                    row_color = (
+                        AppColors.TABLE_ROW_ODD
+                        if row_idx % 2 == 0
+                        else AppColors.TABLE_ROW_EVEN
+                    )
+                    self.result_table.rows.append(
+                        ft.DataRow(cells=cells, color=row_color)
+                    )
 
             else:
-                self.status_text.value = I18n.get("data_sql_error").format(error=result['error'])
+                self.status_text.value = I18n.get("data_sql_error").format(
+                    error=result["error"]
+                )
                 self.status_text.color = AppColors.ERROR
                 self.result_table.rows = []
 
         except Exception as e:
-            self.status_text.value = I18n.get("data_sys_error", error="内部数据库执行错误")
+            self.status_text.value = I18n.get(
+                "data_sys_error", error="内部数据库执行错误"
+            )
             self.status_text.color = AppColors.ERROR
             logger.error(f"SQL Execution error: {e}", exc_info=True)
         finally:
@@ -847,26 +1021,30 @@ class SQLConsoleTab(ft.Container):
         self.sql_editor.color = AppColors.INPUT_TEXT
         self.sql_editor.border_color = AppColors.INPUT_BORDER
         self.sql_editor.cursor_color = AppColors.PRIMARY
-        self.sql_editor.text_style = ft.TextStyle(font_family="Consolas, monospace", color=AppColors.INPUT_TEXT)
+        self.sql_editor.text_style = ft.TextStyle(
+            font_family="Consolas, monospace", color=AppColors.INPUT_TEXT
+        )
         self.sql_editor.hint_style = ft.TextStyle(color=AppColors.TEXT_HINT)
-        
+
         # Buttons
         self.btn_run.style = AppStyles.primary_button()
-        
+
         # Result Table
         self.result_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
         self.result_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
         self.result_table.heading_row_color = AppColors.TABLE_HEADER_BG
         self.result_table.border = ft.border.all(1, AppColors.TABLE_BORDER)
-        
+
         # Table Headers
         for col in self.result_table.columns:
             if isinstance(col.label, ft.Text):
                 col.label.color = AppColors.TABLE_HEADER_TEXT
-                
+
         # Table Rows
         for i, row in enumerate(self.result_table.rows):
-            row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
+            row.color = (
+                AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
+            )
             for cell in row.cells:
                 if isinstance(cell.content, ft.Text):
                     cell.content.color = AppColors.TABLE_CELL_TEXT
@@ -890,14 +1068,22 @@ class DataExplorerView(ft.Container):
 
         # Start with a loading state to ensure instant tab switching
         self.loading_view = ft.Container(
-            content=ft.Column([
-                ft.ProgressRing(),
-                ft.Text(I18n.get("data_loading"), size=12, color=AppColors.TEXT_SECONDARY)
-            ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            content=ft.Column(
+                [
+                    ft.ProgressRing(),
+                    ft.Text(
+                        I18n.get("data_loading"),
+                        size=12,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             alignment=ft.alignment.center,
-            expand=True
+            expand=True,
         )
-        
+
         self.content = self.loading_view
 
     def did_mount(self):
@@ -919,48 +1105,53 @@ class DataExplorerView(ft.Container):
 
     async def did_mount_async(self):
         import time as _time
+
         _t0 = _time.perf_counter()
         logger.debug("[PERF] >>> DataExplorerView.did_mount START")
-        
+
         # Subscribe to broadcast messages (only once)
         if self.page and not self._pubsub_subscribed:
             self.page.pubsub.subscribe(self._on_broadcast_message)
             self._pubsub_subscribed = True
-            
+
         # Start lazy build if not done
         if not self._ui_built:
             await self._lazy_build_ui()
             # _lazy_build_ui sets self.tabs if successful.
             # We only mark built if we actually have the content we expect.
-            if hasattr(self, 'tabs'):
+            if hasattr(self, "tabs"):
                 self._ui_built = True
-        
+
         # Trigger data load for child tabs if needed
         # Check if tabs exists to avoid AttributeError
-        if hasattr(self, 'tabs') and self.tabs.selected_index == 0:
-             # Prevent double-loading if _lazy_build_ui just ran (it calls did_mount_async internaly)
-             # But TableViewerTab handles idempotency so it is safe.
-             await self.table_tab.did_mount_async()
+        if hasattr(self, "tabs") and self.tabs.selected_index == 0:
+            # Prevent double-loading if _lazy_build_ui just ran (it calls did_mount_async internaly)
+            # But TableViewerTab handles idempotency so it is safe.
+            await self.table_tab.did_mount_async()
 
         logger.debug(
-            f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+            f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+        )
 
     async def _lazy_build_ui(self):
         """Construct the heavy UI components only when required"""
         import time as _time
+
         _t0 = _time.perf_counter()
         logger.debug("[PERF] >>> DataExplorerView._lazy_build_ui START")
-        
+
         try:
             # Check if still mounted after potential delay
             if not self.page:
-                logger.debug("[DataExplorerView] View unmounted before build, aborting.")
+                logger.debug(
+                    "[DataExplorerView] View unmounted before build, aborting."
+                )
                 return
 
             # Create complex tabs here
             self.table_tab = TableViewerTab(self.db_manager)
             self.sql_tab = SQLConsoleTab(self.db_manager)
-            
+
             self.tabs = ft.Tabs(
                 selected_index=0,
                 animation_duration=300,
@@ -979,33 +1170,36 @@ class DataExplorerView(ft.Container):
                 expand=True,
                 on_change=self._on_tab_changed,
             )
-            
+
             # Swap content
             self.content = self.tabs
-            
+
             # 1. Init child tabs
             # Note: We clear the loading spinner and add tabs
             # self.content.controls.clear() # Not needed if we replace self.content
             # self.content.controls.append(self.tabs)
-            
+
             if self.page:
                 self.update()
                 # Trigger initial data load
                 # Ensure we don't block invalid state
                 await self.table_tab.did_mount_async()
-            
+
         except Exception as e:
             logger.error(f"Error building DataExplorerView: {e}")
             self.content = ft.Text(f"Error loading view: {e}", color=ft.Colors.RED)
             if self.page:
                 self.update()
-            
-        logger.debug(f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms")
+
+        logger.debug(
+            f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+        )
 
     def _on_tab_changed(self, e):
         """Handle tab switching"""
-        if not self._ui_built: return
-        
+        if not self._ui_built:
+            return
+
         # Trigger async mount for logic if needed
         # We can use the page task to run async methods
         if self.tabs.selected_index == 0:
@@ -1017,11 +1211,13 @@ class DataExplorerView(ft.Container):
             # Reset tables_loaded flag to force reload on next mount
             if self._ui_built:
                 self.table_tab._tables_loaded = False
-            logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
+            logger.debug(
+                "[DataExplorerView] Cache cleared - will reload data on next view"
+            )
 
     def update_theme(self):
         """Update styles on theme change"""
-        if hasattr(self, 'table_tab'):
+        if hasattr(self, "table_tab"):
             self.table_tab.update_theme()
-        if hasattr(self, 'sql_tab'):
+        if hasattr(self, "sql_tab"):
             self.sql_tab.update_theme()

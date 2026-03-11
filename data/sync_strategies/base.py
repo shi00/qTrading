@@ -1,12 +1,13 @@
 """
 Base interfaces and data structures for sync strategies.
 """
+
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Any
 
-# Forward declaration for type hinting if needed, 
+# Forward declaration for type hinting if needed,
 # but usually avoid circular imports by strict typing or Protocol
 # from data.tushare_client import TushareClient
 # from data.cache_manager import CacheManager
@@ -20,6 +21,7 @@ class SyncContext:
     Dependency Injection Container for Strategies.
     Decouples strategies from the main DataProcessor.
     """
+
     api: Any  # TushareClient
     cache: Any  # CacheManager
     config: Any = None  # ConfigHandler (Optional)
@@ -30,18 +32,19 @@ class SyncResult:
     """
     Standardized result object for synchronization operations.
     """
+
     added: int = 0
     updated: int = 0
     errors: List[str] = field(default_factory=list)
     status: str = "success"  # success, partial, failed, cancelled
     message: str = ""
 
-    def merge(self, other: 'SyncResult'):
+    def merge(self, other: "SyncResult"):
         """Merge another result into this one."""
         self.added += other.added
         self.updated += other.updated
         self.errors.extend(other.errors)
-        # Status logic: if either is failed, result is failed. 
+        # Status logic: if either is failed, result is failed.
         if other.status == "failed" or self.status == "failed":
             self.status = "failed"
         elif other.status == "cancelled" or self.status == "cancelled":
@@ -68,7 +71,7 @@ class ISyncStrategy(ABC):
 
     async def cancel(self):
         """
-        Handle cancellation requests. 
+        Handle cancellation requests.
         Default implementation just logs, overrides should set internal flags.
         """
         self.logger.debug("Cancellation requested.")

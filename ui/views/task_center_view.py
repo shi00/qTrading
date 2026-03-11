@@ -58,6 +58,7 @@ class TaskCenterView(ft.Container):
     A polished dashboard showing all background operations.
     Card-based layout with status badges, progress bars, and pagination.
     """
+
     def __init__(self, page: ft.Page):
         super().__init__(expand=True)
         self.page = page
@@ -86,32 +87,55 @@ class TaskCenterView(ft.Container):
             ),
         )
 
-        header = ft.Row([
-            ft.Icon(ft.Icons.TASK_ALT, color=AppColors.PRIMARY, size=28),
-            ft.Text(I18n.get("nav_tasks", "任务中心"), size=22, weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY),
-            ft.Container(expand=True),
-            self.stats_text,
-            self.clear_btn,
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-
+        header = ft.Row(
+            [
+                ft.Icon(ft.Icons.TASK_ALT, color=AppColors.PRIMARY, size=28),
+                ft.Text(
+                    I18n.get("nav_tasks", "任务中心"),
+                    size=22,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(expand=True),
+                self.stats_text,
+                self.clear_btn,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
         # --- Empty state ---
         self.empty_view = ft.Container(
-            content=ft.Column([
-                ft.Icon(ft.Icons.INBOX_OUTLINED, size=64, color=AppColors.TEXT_HINT),
-                ft.Text(I18n.get("task_empty_title", "暂无任务"),
-                        size=18, weight=ft.FontWeight.W_500, color=AppColors.TEXT_SECONDARY),
-                ft.Text(I18n.get("task_empty_subtitle", ""),
-                        size=13, color=AppColors.TEXT_HINT, text_align=ft.TextAlign.CENTER),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+            content=ft.Column(
+                [
+                    ft.Icon(
+                        ft.Icons.INBOX_OUTLINED, size=64, color=AppColors.TEXT_HINT
+                    ),
+                    ft.Text(
+                        I18n.get("task_empty_title", "暂无任务"),
+                        size=18,
+                        weight=ft.FontWeight.W_500,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        I18n.get("task_empty_subtitle", ""),
+                        size=13,
+                        color=AppColors.TEXT_HINT,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
             alignment=ft.alignment.center,
             expand=True,
             padding=ft.padding.only(top=60),
         )
 
         # --- Scrollable area ---
-        self.scroll_area = ft.ListView(expand=True, spacing=0, padding=ft.padding.only(top=8))
+        self.scroll_area = ft.ListView(
+            expand=True, spacing=0, padding=ft.padding.only(top=8)
+        )
 
         # --- Pagination footer ---
         self.btn_prev = ft.IconButton(
@@ -137,12 +161,14 @@ class TaskCenterView(ft.Container):
         )
 
         # --- Assembly ---
-        self.content = ft.Column([
-            header,
-            ft.Divider(height=1, color=AppColors.DIVIDER),
-            self.scroll_area,
-            self.pagination_row,
-        ])
+        self.content = ft.Column(
+            [
+                header,
+                ft.Divider(height=1, color=AppColors.DIVIDER),
+                self.scroll_area,
+                self.pagination_row,
+            ]
+        )
         self.padding = ft.padding.all(20)
 
     # --- Lifecycle ---
@@ -163,7 +189,10 @@ class TaskCenterView(ft.Container):
             if self.page:
                 self.page.run_task(self._safe_refresh, current_tasks)
         except Exception as e:
-            logger.error(f"[TaskCenterView] Refresh | ❌ Error scheduling UI update: {e}", exc_info=True)
+            logger.error(
+                f"[TaskCenterView] Refresh | ❌ Error scheduling UI update: {e}",
+                exc_info=True,
+            )
 
     async def _safe_refresh(self, current_tasks):
         try:
@@ -179,11 +208,11 @@ class TaskCenterView(ft.Container):
 
     def _get_page_slice(self, tasks: list[AppTask]) -> list[AppTask]:
         start = (self._current_page - 1) * PAGE_SIZE
-        return tasks[start:start + PAGE_SIZE]
+        return tasks[start : start + PAGE_SIZE]
 
     def _update_pagination_controls(self):
-        self.btn_prev.disabled = (self._current_page <= 1)
-        self.btn_next.disabled = (self._current_page >= self._total_pages)
+        self.btn_prev.disabled = self._current_page <= 1
+        self.btn_next.disabled = self._current_page >= self._total_pages
         self.page_info_text.value = f"{self._current_page} / {self._total_pages}"
 
     def _go_prev(self, e):
@@ -202,9 +231,9 @@ class TaskCenterView(ft.Container):
         self._all_tasks = tasks
         total = len(tasks)
         running = sum(1 for t in tasks if t.status == TaskStatus.RUNNING)
-        self.stats_text.value = I18n.get("task_stats_fmt", "总计 {total} 项 · 运行中 {running}").format(
-            total=total, running=running
-        )
+        self.stats_text.value = I18n.get(
+            "task_stats_fmt", "总计 {total} 项 · 运行中 {running}"
+        ).format(total=total, running=running)
 
         # Pagination
         self._compute_pagination(total)
@@ -212,7 +241,7 @@ class TaskCenterView(ft.Container):
         self._update_pagination_controls()
 
         # Show/hide pagination
-        self.pagination_row.visible = (self._total_pages > 1)
+        self.pagination_row.visible = self._total_pages > 1
 
         # Build task cards or empty state
         if not tasks:
@@ -234,10 +263,19 @@ class TaskCenterView(ft.Container):
 
         # --- Status badge ---
         status_badge = ft.Container(
-            content=ft.Row([
-                ft.Icon(status_icon, size=14, color=status_color),
-                ft.Text(status_label, size=12, weight=ft.FontWeight.W_600, color=status_color),
-            ], spacing=4, tight=True),
+            content=ft.Row(
+                [
+                    ft.Icon(status_icon, size=14, color=status_color),
+                    ft.Text(
+                        status_label,
+                        size=12,
+                        weight=ft.FontWeight.W_600,
+                        color=status_color,
+                    ),
+                ],
+                spacing=4,
+                tight=True,
+            ),
             border=ft.border.all(1, status_color),
             border_radius=12,
             padding=ft.padding.symmetric(horizontal=10, vertical=3),
@@ -252,50 +290,89 @@ class TaskCenterView(ft.Container):
         )
 
         # --- Top row: name + badges ---
-        top_row = ft.Row([
-            type_chip,
-            ft.Text(t.name, weight=ft.FontWeight.W_600, size=14, color=AppColors.TEXT_PRIMARY,
-                    expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            status_badge,
-        ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8)
+        top_row = ft.Row(
+            [
+                type_chip,
+                ft.Text(
+                    t.name,
+                    weight=ft.FontWeight.W_600,
+                    size=14,
+                    color=AppColors.TEXT_PRIMARY,
+                    expand=True,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                status_badge,
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=8,
+        )
 
         # --- Description / Error ---
         desc_text = t.error if t.status == TaskStatus.FAILED else t.description
         desc_row = ft.Text(
-            desc_text or "", size=12, color=AppColors.TEXT_HINT,
-            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+            desc_text or "",
+            size=12,
+            color=AppColors.TEXT_HINT,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
 
         # --- Progress bar ---
         if t.status == TaskStatus.RUNNING:
             pct = t.progress * 100
-            progress_row = ft.Row([
-                ft.ProgressBar(
-                    value=t.progress, expand=True, color=AppColors.INFO,
-                    bgcolor=ft.Colors.with_opacity(0.12, AppColors.INFO),
-                    bar_height=6, border_radius=3,
-                ),
-                ft.Text(f"{pct:.1f}%", size=12, weight=ft.FontWeight.W_600,
-                        color=AppColors.INFO, width=48, text_align=ft.TextAlign.RIGHT),
-            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        elif t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED):
+            progress_row = ft.Row(
+                [
+                    ft.ProgressBar(
+                        value=t.progress,
+                        expand=True,
+                        color=AppColors.INFO,
+                        bgcolor=ft.Colors.with_opacity(0.12, AppColors.INFO),
+                        bar_height=6,
+                        border_radius=3,
+                    ),
+                    ft.Text(
+                        f"{pct:.1f}%",
+                        size=12,
+                        weight=ft.FontWeight.W_600,
+                        color=AppColors.INFO,
+                        width=48,
+                        text_align=ft.TextAlign.RIGHT,
+                    ),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        elif t.status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.INTERRUPTED,
+        ):
             val = 1.0 if t.status == TaskStatus.COMPLETED else t.progress
             progress_row = ft.ProgressBar(
-                value=val, expand=True, color=status_color,
+                value=val,
+                expand=True,
+                color=status_color,
                 bgcolor=ft.Colors.with_opacity(0.08, status_color),
-                bar_height=4, border_radius=2,
+                bar_height=4,
+                border_radius=2,
             )
         else:
             # QUEUED — indeterminate thin bar
             progress_row = ft.ProgressBar(
-                expand=True, color=status_color,
+                expand=True,
+                color=status_color,
                 bgcolor=ft.Colors.with_opacity(0.08, status_color),
-                bar_height=3, border_radius=2,
+                bar_height=3,
+                border_radius=2,
             )
 
         # --- Bottom: time + actions ---
         time_text = ft.Text(
-            _format_time(t.created_at), size=11, color=AppColors.TEXT_HINT,
+            _format_time(t.created_at),
+            size=11,
+            color=AppColors.TEXT_HINT,
             italic=True,
         )
 
@@ -313,24 +390,33 @@ class TaskCenterView(ft.Container):
                 on_click=lambda e, tid=t.id: self._handle_cancel(tid),
             )
 
-        bottom_row = ft.Row([
-            ft.Icon(ft.Icons.ACCESS_TIME, size=14, color=AppColors.TEXT_HINT),
-            time_text,
-            ft.Container(expand=True),
-            action_btn,
-        ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=6)
+        bottom_row = ft.Row(
+            [
+                ft.Icon(ft.Icons.ACCESS_TIME, size=14, color=AppColors.TEXT_HINT),
+                time_text,
+                ft.Container(expand=True),
+                action_btn,
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=6,
+        )
 
         # --- Card assembly ---
         # Highlight running tasks with left accent border
-        left_border_color = status_color if t.status == TaskStatus.RUNNING else ft.Colors.TRANSPARENT
+        left_border_color = (
+            status_color if t.status == TaskStatus.RUNNING else ft.Colors.TRANSPARENT
+        )
 
         card = ft.Container(
-            content=ft.Column([
-                top_row,
-                desc_row,
-                progress_row,
-                bottom_row,
-            ], spacing=6),
+            content=ft.Column(
+                [
+                    top_row,
+                    desc_row,
+                    progress_row,
+                    bottom_row,
+                ],
+                spacing=6,
+            ),
             **AppStyles.card(padding=14, border_radius=8, with_border=False),
             border=ft.border.only(
                 left=ft.BorderSide(3, left_border_color),
@@ -345,7 +431,9 @@ class TaskCenterView(ft.Container):
     # --- Handlers ---
 
     def _handle_cancel(self, task_id: str):
-        UILogger.log_action("TaskCenterView", "Click", f"btn_cancel | task_id={task_id}")
+        UILogger.log_action(
+            "TaskCenterView", "Click", f"btn_cancel | task_id={task_id}"
+        )
         self.task_manager.cancel_task(task_id)
 
     def _handle_clear(self, e):

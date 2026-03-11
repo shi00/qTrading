@@ -1,97 +1,101 @@
-
 import logging
 import pandas as pd
-import numpy as np
 from typing import Dict, List, Tuple, Any
 
-from data.data_dictionary import COMMON_COLUMNS
 
 logger = logging.getLogger(__name__)
+
 
 class DataQualityService:
     """
     Service for performing Deep Health Checks (Tier 2 & Tier 3).
     Stateless logic provider.
     """
-    
+
     MAX_MISSING_REPORT = 10
     LAG_DEFAULT = 9999
     LAG_ERROR = -1
 
     @classmethod
-    def check_continuity(cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame) -> Dict[str, Any]:
+    def check_continuity(
+        cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame
+    ) -> Dict[str, Any]:
         """
         Tier 2: Check for missing trading days in a time-series.
-        
+
         Args:
             df: Data to check.
             date_col: Name of the date column in df.
             trade_cal: DataFrame containing 'cal_date' and 'is_open'.
-            
+
         Returns:
             Dict with 'missing_count', 'missing_dates', 'coverage_ratio'.
         """
         if df.empty:
-            return {'missing_count': 0, 'missing_dates': [], 'coverage_ratio': 0.0}
-            
+            return {"missing_count": 0, "missing_dates": [], "coverage_ratio": 0.0}
+
         # CR-05 fix: avoid modifying caller's DataFrame in-place.
         # Work only with a local series of date strings.
         if pd.api.types.is_datetime64_any_dtype(df[date_col]):
             date_series = df[date_col]
         else:
-            date_series = pd.to_datetime(df[date_col], errors='coerce')
+            date_series = pd.to_datetime(df[date_col], errors="coerce")
 
         start_date = date_series.min()
         end_date = date_series.max()
-        
+
         if pd.isna(start_date) or pd.isna(end_date):
-            return {'missing_count': 0, 'missing_dates': [], 'coverage_ratio': 0.0}
-        
+            return {"missing_count": 0, "missing_dates": [], "coverage_ratio": 0.0}
+
         # Helper to convert to standardized string YYYYMMDD for comparison
-        target_dates = set(date_series.dt.strftime('%Y%m%d'))
-        
+        target_dates = set(date_series.dt.strftime("%Y%m%d"))
+
         # Process trade_cal
         # Assuming trade_cal['cal_date'] is string YYYYMMDD and is_open=1
-        mask = (trade_cal['is_open'] == 1) & \
-               (trade_cal['cal_date'] >= start_date.strftime('%Y%m%d')) & \
-               (trade_cal['cal_date'] <= end_date.strftime('%Y%m%d'))
-               
-        expected_dates = set(trade_cal[mask]['cal_date'])
-        
+        mask = (
+            (trade_cal["is_open"] == 1)
+            & (trade_cal["cal_date"] >= start_date.strftime("%Y%m%d"))
+            & (trade_cal["cal_date"] <= end_date.strftime("%Y%m%d"))
+        )
+
+        expected_dates = set(trade_cal[mask]["cal_date"])
+
         missing = expected_dates - target_dates
         missing_list = sorted(list(missing))
-        
+
         total_expected = len(expected_dates)
         if total_expected == 0:
             ratio = 1.0  # No expected trading dates in range — treat as fully covered
         else:
             ratio = 1.0 - (len(missing) / total_expected)
-            
+
         return {
-            'missing_count': len(missing),
-            'missing_dates': missing_list[:cls.MAX_MISSING_REPORT], # Report top N
-            'coverage_ratio': ratio
+            "missing_count": len(missing),
+            "missing_dates": missing_list[: cls.MAX_MISSING_REPORT],  # Report top N
+            "coverage_ratio": ratio,
         }
 
     @classmethod
-    def check_recency(cls, df: pd.DataFrame, date_col: str, ref_date: str) -> Dict[str, Any]:
+    def check_recency(
+        cls, df: pd.DataFrame, date_col: str, ref_date: str
+    ) -> Dict[str, Any]:
         """
         Tier 2: Check data freshness against a reference date (usually latest trading day).
         """
         if df.empty:
-            return {'lag_days': cls.LAG_DEFAULT, 'latest_data_date': None}
-            
+            return {"lag_days": cls.LAG_DEFAULT, "latest_data_date": None}
+
         # Get latest date in DF
         max_date = df[date_col].max()
         if pd.isna(max_date):
-            return {'lag_days': cls.LAG_ERROR, 'latest_data_date': None}
+            return {"lag_days": cls.LAG_ERROR, "latest_data_date": None}
 
         # Handle string vs datetime
         if pd.api.types.is_datetime64_any_dtype(df[date_col]):
-            latest = max_date.strftime('%Y%m%d')
+            latest = max_date.strftime("%Y%m%d")
         else:
             latest = str(max_date)
-            
+
         # Calculate lag
         try:
             d_latest = pd.to_datetime(latest)
@@ -99,11 +103,8 @@ class DataQualityService:
             lag = (d_ref - d_latest).days
         except Exception:
             lag = cls.LAG_ERROR
-            
-        return {
-            'lag_days': lag,
-            'latest_data_date': latest
-        }
+
+        return {"lag_days": lag, "latest_data_date": latest}
 
     @staticmethod
     def check_nulls(df: pd.DataFrame, columns: List[str] = None) -> Dict[str, float]:
@@ -113,29 +114,30 @@ class DataQualityService:
         """
         if df.empty:
             return {}
-            
+
         check_cols = columns if columns else df.columns
         null_counts = df[check_cols].isnull().sum()
         total = len(df)
-        
+
         ratios = (null_counts / total).to_dict()
         return ratios
 
     @staticmethod
-    def check_cross_validation(df: pd.DataFrame, 
-                             rules: List[Tuple[str, str, float]]) -> List[str]:
+    def check_cross_validation(
+        df: pd.DataFrame, rules: List[Tuple[str, str, float]]
+    ) -> List[str]:
         """
         Tier 3: Reliability Cross-Validation using simple expression evaluation.
-        
+
         Args:
             df: Data
-            rules: List of (name, expression, tolerance). 
+            rules: List of (name, expression, tolerance).
                    Expression should be eval-able string using df columns.
                    e.g. ("VolCheck", "vol - (buy_vol + sell_vol)", 0.05)
-                   Expression should return a Series (diff). 
+                   Expression should return a Series (diff).
                    We check if abs(diff) / val > tolerance.
-                   
-        Current implementation is simplified: 
+
+        Current implementation is simplified:
         We expect the caller to provide specific check logic or we hardcode common patterns here.
         Using `eval` on user strings is risky, so we implement specific named checks.
         """
@@ -148,26 +150,30 @@ class DataQualityService:
                 # CC-06: Implement actual cross-validation logic
                 # Calculate difference based on expression
                 diff = df.eval(expr)
-                
+
                 # Check absolute difference against tolerance
                 # Using fillna(0) to handle potential NaNs in calculation safely
                 failures = diff.abs().fillna(0) > tolerance
                 fail_count = failures.sum()
-                
+
                 if fail_count > 0:
                     sample = df[failures].index[0]
-                    issues.append(f"Rule '{name}' failed: {fail_count} rows exceed tolerance {tolerance} (e.g. index {sample})")
+                    issues.append(
+                        f"Rule '{name}' failed: {fail_count} rows exceed tolerance {tolerance} (e.g. index {sample})"
+                    )
             except Exception as e:
                 issues.append(f"Rule '{name}' execution error: {str(e)}")
-                
+
         return issues
-        
+
     @staticmethod
-    def check_price_vs_factor(df_price: pd.DataFrame, df_adj: pd.DataFrame) -> Dict[str, Any]:
+    def check_price_vs_factor(
+        df_price: pd.DataFrame, df_adj: pd.DataFrame
+    ) -> Dict[str, Any]:
         """
         Tier 3: Verify Price * AdjFactor consistency.
         Requires a joined view of raw and adjusted prices.
-        
+
         Returns:
             Empty dict (not yet implemented — requires adj_factor join in reporting pipeline).
         """

@@ -22,6 +22,7 @@ class ToastManager:
     - All _active_tasks operations protected by _lock
     - Safe to call show() from any thread
     """
+
     MAX_TOAST_COUNT = 5
 
     def __init__(self, page: ft.Page):
@@ -87,7 +88,7 @@ class ToastManager:
             icon=icon,
             color=color,
             duration=duration,
-            on_dismiss=self._remove_toast
+            on_dismiss=self._remove_toast,
         )
 
         with self._lock:
@@ -145,7 +146,9 @@ class ToastManager:
             tasks_snapshot = list(self._active_tasks)
 
         # Cancel all active tasks
-        valid_tasks = [t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future))]
+        valid_tasks = [
+            t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future))
+        ]
         for task in valid_tasks:
             if not task.done():
                 task.cancel()
@@ -167,6 +170,7 @@ class ToastCard(ft.Container):
     Individual toast notification card with animation and timer.
     Uses semantic tokens for standard colors — auto-updates with theme.
     """
+
     LONG_TEXT_THRESHOLD = 80
     COLLAPSED_MAX_LINES = 3
 
@@ -176,22 +180,22 @@ class ToastCard(ft.Container):
         self.duration = duration
         self.on_dismiss = on_dismiss
         self.is_hovered = False
-        self.is_expanded = False # State for expansion
+        self.is_expanded = False  # State for expansion
         self.remaining = duration
         self._is_cancelled = False
 
         # Threshold for "Long Text"
         self.is_long_text = len(message) > self.LONG_TEXT_THRESHOLD
-        
+
         # Text Component
         self.text_control = ft.Text(
-            message, 
-            size=14, 
-            color=ft.Colors.ON_SURFACE, 
-            width=270, 
+            message,
+            size=14,
+            color=ft.Colors.ON_SURFACE,
+            width=270,
             max_lines=self.COLLAPSED_MAX_LINES,
-            overflow=ft.TextOverflow.ELLIPSIS, 
-            tooltip=I18n.get("toast_expand_hint") if self.is_long_text else None
+            overflow=ft.TextOverflow.ELLIPSIS,
+            tooltip=I18n.get("toast_expand_hint") if self.is_long_text else None,
         )
 
         # Expand Button (only if long text)
@@ -203,29 +207,41 @@ class ToastCard(ft.Container):
                 icon_color=ft.Colors.PRIMARY,
                 tooltip=I18n.get("common_expand"),
                 on_click=self._toggle_expand,
-                style=ft.ButtonStyle(padding=0)
+                style=ft.ButtonStyle(padding=0),
             )
 
         # Layout Construction
-        self.content_col = ft.Column([
-            self.text_control,
-        ], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
+        self.content_col = ft.Column(
+            [
+                self.text_control,
+            ],
+            spacing=2,
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
 
         if self.expand_btn:
             self.content_col.controls.append(
-                ft.Row([ft.Container(expand=True), self.expand_btn], alignment=ft.MainAxisAlignment.END, height=20)
+                ft.Row(
+                    [ft.Container(expand=True), self.expand_btn],
+                    alignment=ft.MainAxisAlignment.END,
+                    height=20,
+                )
             )
 
-        self.content = ft.Row([
-            ft.Icon(icon, color=color, size=24),
-            self.content_col,
-            ft.IconButton(
-                ft.Icons.CLOSE,
-                icon_size=16,
-                icon_color=ft.Colors.ON_SURFACE_VARIANT,
-                on_click=self._handle_dismiss_click
-            )
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.START)
+        self.content = ft.Row(
+            [
+                ft.Icon(icon, color=color, size=24),
+                self.content_col,
+                ft.IconButton(
+                    ft.Icons.CLOSE,
+                    icon_size=16,
+                    icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                    on_click=self._handle_dismiss_click,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
 
         self.padding = 12
         self.bgcolor = ft.Colors.SURFACE
@@ -235,7 +251,7 @@ class ToastCard(ft.Container):
             spread_radius=1,
             blur_radius=10,
             color=ft.Colors.with_opacity(0.1, ft.Colors.SHADOW),
-            offset=ft.Offset(0, 4)
+            offset=ft.Offset(0, 4),
         )
         # Animation
         self.offset = ft.Offset(1.1, 0)
@@ -246,9 +262,9 @@ class ToastCard(ft.Container):
 
     def _toggle_expand(self, e):
         self.is_expanded = not self.is_expanded
-        
+
         if self.is_expanded:
-            self.text_control.max_lines = None # Show all
+            self.text_control.max_lines = None  # Show all
             self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_UP
             self.expand_btn.tooltip = I18n.get("common_collapse")
             # Timer logic handled in start_timer loop
@@ -256,7 +272,7 @@ class ToastCard(ft.Container):
             self.text_control.max_lines = self.COLLAPSED_MAX_LINES
             self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN
             self.expand_btn.tooltip = I18n.get("common_expand")
-            
+
         self.update()
 
     def did_mount(self):
@@ -276,11 +292,11 @@ class ToastCard(ft.Container):
                     return
                 if not self.page:
                     return
-                
+
                 # Logic: Don't countdown if hovered OR EXPANDED
                 if not self.is_hovered and not self.is_expanded:
                     self.remaining -= 0.1
-                
+
                 await asyncio.sleep(0.1)
 
             if not self._is_cancelled:

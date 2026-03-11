@@ -41,10 +41,11 @@ Assistant: {"category_L1": "其他人文", "category_L2": "娱乐", "sentiment":
 
 
 # I will assume DEFAULT_AI_PROMPT is unchanged and skip re-pasting it in thought trace.
-# But for replace_file_content, I need to be precise. 
-# The previous `view_file` showed the whole file. 
+# But for replace_file_content, I need to be precise.
+# The previous `view_file` showed the whole file.
 # I can target `class ConfigHandler` and replace it entirely OR replace methods.
 # Replacing the whole class is safer to ensure order and new methods are there.
+
 
 class ConfigHandler:
     _config_cache = None
@@ -62,12 +63,9 @@ class ConfigHandler:
         "log_max_mb": 5,
         "log_backup_count": 5,
         "db_connection_pool_size": 5,
-
         # Heavy sync tasks (Historical Data, Financial Reports)
         "sync_max_concurrent_heavy": 3,
-
         "max_batch_rows": 20000,
-
         "no_proxy_domains": [],
         "ai_api_key": "",
         "ai_base_url": "https://api.deepseek.com",
@@ -78,11 +76,9 @@ class ConfigHandler:
         "ai_news_prompt": DEFAULT_NEWS_PROMPT,
         "ai_max_candidates": 30,
         "strategy_min_turnover": 2.0,
-
         # Max parallel AI analysis tasks (Cloud API or Local Threads)
         # Prevents API Rate Limits (429) or Local Resource exhaustion
         "ai_max_concurrent_analysis": 5,
-
         "request_max_retries": 3,
         "tushare_timeout": 30,
         "tushare_api_rate_limit": 200,
@@ -99,12 +95,13 @@ class ConfigHandler:
         "local_n_ctx": 2048,
         "local_flash_attn": True,
         "local_n_gpu_layers": 0,
-
         # Concurrency
         "sync_concurrency_light": 20,
-        
         # Initialization History Horizon
-        "init_history_years": 3
+        "init_history_years": 3,
+        # Doubao AI Tagging Schedule
+        "doubao_schedule_enabled": False,
+        "doubao_schedule_time": "10:00",
     }
 
     @staticmethod
@@ -138,7 +135,8 @@ class ConfigHandler:
             if dirty:
                 ConfigHandler.save_config(current_config, replace=True)
                 logger.info(
-                    f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}")
+                    f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}"
+                )
 
         except Exception as e:
             logger.error(f"Failed to ensure default config: {e}")
@@ -148,7 +146,7 @@ class ConfigHandler:
         """Helper: Atomic write for JSON config"""
         tmp_file = path + ".tmp"
         try:
-            with open(tmp_file, 'w', encoding='utf-8') as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
                 f.flush()
                 os.fsync(f.fileno())
@@ -174,7 +172,9 @@ class ConfigHandler:
         try:
             return SecurityManager.decrypt_data(value)
         except DecryptionError:
-            logger.warning(f"Failed to decrypt config value. It might be invalid or legacy plaintext.")
+            logger.warning(
+                "Failed to decrypt config value. It might be invalid or legacy plaintext."
+            )
             return ""
         except Exception as e:
             logger.error(f"Decryption error: {e}")
@@ -189,7 +189,7 @@ class ConfigHandler:
 
             if os.path.exists(CONFIG_FILE):
                 try:
-                    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                         ConfigHandler._config_cache = json.load(f)
                         return ConfigHandler._config_cache.copy()
                 except Exception:
@@ -213,13 +213,15 @@ class ConfigHandler:
                         current_config = ConfigHandler._config_cache.copy()
                     elif os.path.exists(CONFIG_FILE):
                         try:
-                            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                                 current_config = json.load(f)
                         except (json.JSONDecodeError, OSError):
                             pass
                     current_config.update(config_data)
 
-                success = ConfigHandler._save_json_atomically(current_config, CONFIG_FILE)
+                success = ConfigHandler._save_json_atomically(
+                    current_config, CONFIG_FILE
+                )
 
                 if success:
                     ConfigHandler._config_cache = current_config
@@ -255,7 +257,9 @@ class ConfigHandler:
             # Clear legacy setting from JSON
             return ConfigHandler.save_config({"ts_token": ""})
         except Exception as e:
-            logger.warning(f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager.")
+            logger.warning(
+                f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager."
+            )
             encrypted = SecurityManager.encrypt_data(token)
             return ConfigHandler.save_config({"ts_token": encrypted})
 
@@ -286,18 +290,34 @@ class ConfigHandler:
     def get_init_history_years(cls) -> int:
         """获取初始化数据年限，默认 3 年"""
         # Note: Using get_setting internally via class method or static
-        return int(ConfigHandler.get_setting('init_history_years', 3))
+        return int(ConfigHandler.get_setting("init_history_years", 3))
 
     @classmethod
     def set_init_history_years(cls, years: int):
         """设置初始化数据年限 (1-5)"""
         years = max(1, min(5, int(years)))
-        return ConfigHandler.save_config({'init_history_years': years})
+        return ConfigHandler.save_config({"init_history_years": years})
 
     @staticmethod
     def get_auto_update_time():
         config = ConfigHandler.load_config()
         return config.get("auto_update_time", "16:30")
+
+    @classmethod
+    def is_doubao_schedule_enabled(cls) -> bool:
+        return cls.load_config().get("doubao_schedule_enabled", False)
+
+    @classmethod
+    def set_doubao_schedule_enabled(cls, enabled: bool):
+        return cls.save_config({"doubao_schedule_enabled": bool(enabled)})
+
+    @classmethod
+    def get_doubao_schedule_time(cls) -> str:
+        return cls.load_config().get("doubao_schedule_time", "10:00")
+
+    @classmethod
+    def set_doubao_schedule_time(cls, time_str: str):
+        return cls.save_config({"doubao_schedule_time": str(time_str)})
 
     @staticmethod
     def get_log_max_mb():
@@ -318,6 +338,7 @@ class ConfigHandler:
     def get_db_url():
         """Get PostgreSQL connection URL from user config or system config."""
         import config as sys_config
+
         user_config = ConfigHandler.load_config()
         return user_config.get("db_url", sys_config.DB_URL)
 
@@ -360,7 +381,9 @@ class ConfigHandler:
 
     @staticmethod
     def set_no_proxy_domains(domains):
-        if not isinstance(domains, list) or not all(isinstance(x, str) for x in domains):
+        if not isinstance(domains, list) or not all(
+            isinstance(x, str) for x in domains
+        ):
             logger.error("Invalid no-proxy domains format: must be list of strings")
             return False
         return ConfigHandler.save_config({"no_proxy_domains": domains})
@@ -391,7 +414,7 @@ class ConfigHandler:
         return {
             "ai_api_key": api_key,
             "ai_base_url": config.get("ai_base_url", ""),
-            "ai_model_name": config.get("ai_model_name", "")
+            "ai_model_name": config.get("ai_model_name", ""),
         }
 
     @staticmethod
@@ -402,7 +425,9 @@ class ConfigHandler:
                 keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                 encrypted_key = ""  # Clear from plain json
             except Exception as e:
-                logger.warning(f"Keyring save failed: {e}. Falling back to SecurityManager.")
+                logger.warning(
+                    f"Keyring save failed: {e}. Falling back to SecurityManager."
+                )
                 encrypted_key = SecurityManager.encrypt_data(api_key)
         else:
             try:
@@ -411,11 +436,13 @@ class ConfigHandler:
                 pass
             encrypted_key = ""
 
-        return ConfigHandler.save_config({
-            "ai_api_key": encrypted_key,
-            "ai_base_url": base_url,
-            "ai_model_name": model_name
-        })
+        return ConfigHandler.save_config(
+            {
+                "ai_api_key": encrypted_key,
+                "ai_base_url": base_url,
+                "ai_model_name": model_name,
+            }
+        )
 
     @staticmethod
     def get_local_ai_timeout() -> int:
@@ -426,7 +453,7 @@ class ConfigHandler:
             int: Timeout seconds, or None if not configured (wait indefinitely)
         """
         try:
-            val = ConfigHandler.get_setting('local_model_timeout')
+            val = ConfigHandler.get_setting("local_model_timeout")
             return int(val) if val is not None else None
         except (ValueError, TypeError):
             # If config is corrupted/invalid, treat as not set (no default provided)
@@ -437,7 +464,7 @@ class ConfigHandler:
         """Set local AI inference timeout (1-3600s)"""
         # Enforce bounds to be consistent with UI
         val = max(1, min(seconds, 3600))
-        ConfigHandler.save_config({'local_model_timeout': val})
+        ConfigHandler.save_config({"local_model_timeout": val})
 
     @staticmethod
     def get_local_ai_config() -> dict:
@@ -456,17 +483,19 @@ class ConfigHandler:
     def save_local_ai_config(model_path: str, timeout: int = 30, **kwargs):
         """Save local AI configuration"""
         # Build config dict
-        cfg = {
-            "local_model_path": model_path,
-            "local_model_timeout": timeout
-        }
+        cfg = {"local_model_path": model_path, "local_model_timeout": timeout}
 
         # Save optional params
-        if 'n_threads' in kwargs: cfg["local_n_threads"] = kwargs['n_threads']
-        if 'n_batch' in kwargs: cfg["local_n_batch"] = kwargs['n_batch']
-        if 'n_ctx' in kwargs: cfg["local_n_ctx"] = kwargs['n_ctx']
-        if 'flash_attn' in kwargs: cfg["local_flash_attn"] = kwargs['flash_attn']
-        if 'n_gpu_layers' in kwargs: cfg["local_n_gpu_layers"] = kwargs['n_gpu_layers']
+        if "n_threads" in kwargs:
+            cfg["local_n_threads"] = kwargs["n_threads"]
+        if "n_batch" in kwargs:
+            cfg["local_n_batch"] = kwargs["n_batch"]
+        if "n_ctx" in kwargs:
+            cfg["local_n_ctx"] = kwargs["n_ctx"]
+        if "flash_attn" in kwargs:
+            cfg["local_flash_attn"] = kwargs["flash_attn"]
+        if "n_gpu_layers" in kwargs:
+            cfg["local_n_gpu_layers"] = kwargs["n_gpu_layers"]
 
         ConfigHandler.save_config(cfg)
 
@@ -577,7 +606,9 @@ class ConfigHandler:
 
     @staticmethod
     def set_tushare_timeout(seconds):
-        return ConfigHandler.save_config({"tushare_timeout": int(seconds) if seconds is not None else None})
+        return ConfigHandler.save_config(
+            {"tushare_timeout": int(seconds) if seconds is not None else None}
+        )
 
     @staticmethod
     def get_tushare_api_limit():
@@ -693,4 +724,6 @@ class ConfigHandler:
 
     @staticmethod
     def set_market_data_poll_interval(seconds):
-        return ConfigHandler.save_config({"market_data_poll_interval": int(max(10, seconds))})
+        return ConfigHandler.save_config(
+            {"market_data_poll_interval": int(max(10, seconds))}
+        )
