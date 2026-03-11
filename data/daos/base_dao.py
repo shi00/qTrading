@@ -52,13 +52,21 @@ class BaseDao:
                 if col in df.columns:
                     df[col] = df[col].astype(str)
 
-        # Replace NaN/NaT with None safely
-        df_clean = df[cols].where(pd.notnull(df[cols]), None)
+        df_clean = df[cols]
 
         # Helper to convert numpy types to native Python types for asyncpg
         def _to_native(val):
             if val is None:
                 return None
+            
+            # Catch all variants of NaNs/NaTs safely before anything is coerced to float('nan')
+            try:
+                if pd.isna(val):
+                    return None
+            except (ValueError, TypeError):
+                # multi-dimensional np arrays or un-hashable types that 'isna' dislikes
+                pass
+
             if isinstance(val, (np.int64, np.int32, np.int16, np.int8)):
                 return int(val)
             if isinstance(val, (np.float64, np.float32)):
@@ -191,24 +199,28 @@ class BaseDao:
             # If the dataframe already has updated_at or the table doesn't need it, just slice
             df_slice = df[columns]
 
-        # Replace pandas nulls with None to map to SQL NULL correctly
         # Extracting out the CPU intensive conversion to allow async offloading
         def _prepare_records(df_slice):
-            df_clean = df_slice.where(pd.notnull(df_slice), None)
-            # For bulk execution via SQLAlchemy, a list of dictionaries is required
-            records = df_clean.to_dict(orient="records")
+            records = df_slice.to_dict(orient="records")
 
             # Convert numpy types in dicts to python native types
             for record in records:
                 for k, v in record.items():
+                    # 1. Defend against NaN/NaT bypassing type checks
+                    try:
+                        if pd.isna(v):
+                            record[k] = None
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+
+                    # 2. Safely cast numerics and booleans
                     if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
                         record[k] = int(v)
                     elif isinstance(v, (np.float64, np.float32)):
                         record[k] = float(v)
                     elif isinstance(v, np.bool_):
                         record[k] = bool(v)
-                    elif pd.isna(v):  # Fallback check
-                        record[k] = None
             return records
 
         records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
