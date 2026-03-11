@@ -244,9 +244,8 @@ class BaseDao:
             logger.warning(
                 f"[{self.__class__.__name__}] UPSERT cancelled during shutdown: {table_name}"
             )
-            if not suppress_errors:
-                raise
-            return 0
+            # CancelledError is a control flow signal, MUST strictly propagate it
+            raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
             err_str = str(e)
