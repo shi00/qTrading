@@ -436,7 +436,7 @@ class TaskCenterView(ft.Container):
         )
         self.task_manager.cancel_task(task_id)
 
-    def _handle_clear(self, e):
+    async def _handle_clear(self, e):
         UILogger.log_action("TaskCenterView", "Click", "btn_clear_finished")
         self._current_page = 1
         self.task_manager.clear_finished()

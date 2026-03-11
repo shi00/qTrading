@@ -379,7 +379,7 @@ class DataSourceTab(ft.Container):
 
     # --- Logic Methods (Migrated from SettingsView) ---
 
-    def refresh_health_status(self, e):
+    async def refresh_health_status(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_check_health")
         if not self.page:
             return
@@ -561,13 +561,13 @@ class DataSourceTab(ft.Container):
             cancellable=True,
         )
 
-    def full_daily_sync(self, e):
+    async def full_daily_sync(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_full_sync")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
-        self._show_confirm_dialog(
+        await self._show_confirm_dialog(
             title_key="dialog_confirm_full_sync_title",
             content_key="dialog_confirm_full_sync_content",
             confirm_btn_key="btn_confirm_sync",
@@ -608,7 +608,7 @@ class DataSourceTab(ft.Container):
             unique_key="daily_sync",
         )
 
-    def _show_confirm_dialog(
+    async def _show_confirm_dialog(
         self,
         title_key,
         content_key,
@@ -672,12 +672,12 @@ class DataSourceTab(ft.Container):
                 I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR
             )
 
-    def confirm_doubao_rebuild(self, e):
+    async def confirm_doubao_rebuild(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_doubao_rebuild")
         if self.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
-        self._show_confirm_dialog(
+        await self._show_confirm_dialog(
             title_key="dialog_doubao_rebuild_title",
             content_key="dialog_doubao_rebuild_content",
             confirm_btn_key="btn_confirm_rebuild",
@@ -720,13 +720,13 @@ class DataSourceTab(ft.Container):
             unique_key="doubao_sync",
         )
 
-    def confirm_clear_cache(self, e):
+    async def confirm_clear_cache(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
-        self._show_confirm_dialog(
+        await self._show_confirm_dialog(
             title_key="dialog_confirm_clear_title",
             content_key="dialog_confirm_clear_content",
             confirm_btn_key="btn_confirm_clear",
@@ -778,7 +778,7 @@ class DataSourceTab(ft.Container):
             unique_key="cache_clear",
         )
 
-    def save_and_verify_tushare(self, e):
+    async def save_and_verify_tushare(self, e):
         """Initiate async token verification to avoid blocking UI"""
         UILogger.log_action("DataSourceTab", "Click", "btn_save_token")
         # Prevent double-click during verification
@@ -852,7 +852,7 @@ class DataSourceTab(ft.Container):
             self.btn_save_token.disabled = False
             self._safe_update()
 
-    def init_historical_data(self, e):
+    async def init_historical_data(self, e):
         if self.is_syncing and getattr(self.sync_button, "text", "").startswith(
             I18n.get("common_cancel")
         ):
@@ -869,7 +869,7 @@ class DataSourceTab(ft.Container):
             return
         UILogger.log_action("DataSourceTab", "Click", "btn_init_historical")
         # Prevent accidental trigger, show confirm dialog
-        self._show_confirm_dialog(
+        await self._show_confirm_dialog(
             title_key="dialog_confirm_init_title",
             content_key="dialog_confirm_init_content",
             confirm_btn_key="btn_confirm_init",
@@ -927,7 +927,7 @@ class DataSourceTab(ft.Container):
                 self._safe_update()
 
                 if isinstance(report, dict):
-                    self.refresh_health_status(None)
+                    await self.refresh_health_status(None)
 
                 return I18n.get("sys_init_success")
 
@@ -1092,7 +1092,7 @@ class DataSourceTab(ft.Container):
         except Exception:
             pass
 
-    def show_health_report_dialog(self, e):
+    async def show_health_report_dialog(self, e):
         """Show full health report dialog"""
         UILogger.log_action("DataSourceTab", "Click", "btn_health_report")
         if not self.page:

@@ -194,6 +194,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
+            
+            # Cooperative yield: allow UI loop to process events like tab switching
+            await asyncio.sleep(0)
 
         # Smart Retry
         if failed_dates and not self._shutdown_event.is_set() and not abort_sync:
@@ -238,6 +241,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     finally:
                         with self._tasks_lock:
                             self._active_tasks.difference_update(r_tasks)
+                    
+                    # Cooperative yield: same as main batch path
+                    await asyncio.sleep(0)
 
         if failed_dates:
             result.errors.append(f"{len(failed_dates)} dates failed after retries")
@@ -360,6 +366,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # 1. Quotes (Critical)
         quotes_rows = await save_if_ok("quotes", cache.save_daily_quotes, critical=True)
 
+        # Yield control between heavy table saves
+        await asyncio.sleep(0)
+
         # 2. Adj Factor (Critical, derived from quotes)
         df_quotes = data_map.get("quotes")
         if (
@@ -379,21 +388,33 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 )
                 raise e
 
+        # Yield control
+        await asyncio.sleep(0)
+
         # 3. Basic / Daily Indicators (Critical)
         basic_rows = await save_if_ok(
             "basic", cache.save_daily_indicators, critical=True
         )
 
+        # Yield control
+        await asyncio.sleep(0)
+
         # 4. Others (Non-critical, can fail silently or log)
         await save_if_ok("limit", cache.save_limit_list)
         await save_if_ok("suspend", cache.save_suspend_d)
+        await asyncio.sleep(0)
         await save_if_ok("margin", cache.save_margin_daily)
         await save_if_ok("lhb", cache.save_top_list)
+        await asyncio.sleep(0)
         await save_if_ok("block", cache.save_block_trade)
         await save_if_ok("mf", cache.save_moneyflow)
+        await asyncio.sleep(0)
         await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
         await save_if_ok("index", cache.save_index_daily)
         await save_if_ok("index_basic", cache.save_index_dailybasic)
+
+        # Yield before northbound special processing
+        await asyncio.sleep(0)
 
         # Northbound special filter
         try:

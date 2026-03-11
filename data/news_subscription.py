@@ -253,8 +253,9 @@ class NewsSubscriptionService:
 
                 self.processing_queue.task_done()
 
-                # 4. Throttle processing to prevent CPU starvation
-                await asyncio.sleep(1.0)
+                # 4. Cooperative yield: let event loop handle pending UI
+                # events (Flet WebSocket dispatch) before next item.
+                await asyncio.sleep(0)
 
             except asyncio.CancelledError:
                 break

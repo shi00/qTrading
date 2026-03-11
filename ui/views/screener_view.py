@@ -667,7 +667,7 @@ class ScreenerView(ft.Container):
         # Render dynamic parameters for this strategy
         self._render_strategy_params()
 
-    def _on_run_click(self, e):
+    async def _on_run_click(self, e):
         UILogger.log_action(
             "ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}"
         )

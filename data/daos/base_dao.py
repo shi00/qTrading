@@ -192,22 +192,26 @@ class BaseDao:
             df_slice = df[columns]
 
         # Replace pandas nulls with None to map to SQL NULL correctly
-        df_clean = df_slice.where(pd.notnull(df_slice), None)
+        # Extracting out the CPU intensive conversion to allow async offloading
+        def _prepare_records(df_slice):
+            df_clean = df_slice.where(pd.notnull(df_slice), None)
+            # For bulk execution via SQLAlchemy, a list of dictionaries is required
+            records = df_clean.to_dict(orient="records")
 
-        # For bulk execution via SQLAlchemy, a list of dictionaries is required
-        records = df_clean.to_dict(orient="records")
+            # Convert numpy types in dicts to python native types
+            for record in records:
+                for k, v in record.items():
+                    if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
+                        record[k] = int(v)
+                    elif isinstance(v, (np.float64, np.float32)):
+                        record[k] = float(v)
+                    elif isinstance(v, np.bool_):
+                        record[k] = bool(v)
+                    elif pd.isna(v):  # Fallback check
+                        record[k] = None
+            return records
 
-        # Convert numpy types in dicts to python native types
-        for record in records:
-            for k, v in record.items():
-                if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
-                    record[k] = int(v)
-                elif isinstance(v, (np.float64, np.float32)):
-                    record[k] = float(v)
-                elif isinstance(v, np.bool_):
-                    record[k] = bool(v)
-                elif pd.isna(v):  # Fallback check
-                    record[k] = None
+        records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
 
         stmt = pg_insert(table)
         update_cols = [c for c in columns if c not in pk_columns]
