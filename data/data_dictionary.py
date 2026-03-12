@@ -228,7 +228,6 @@ TABLE_DEFINITIONS = {
             "stk_bo_rate": "col_stk_bo_rate",
             "stk_co_rate": "col_stk_co_rate",
             "cash_div_tax": "col_cash_div_tax",
-            "cash_div_tax_rate": "col_cash_div_tax_rate",
         },
     },
     "top_list": {

@@ -204,7 +204,6 @@ class FinancialDao(BaseDao):
             "stk_bo_rate",
             "stk_co_rate",
             "cash_div_tax",
-            "cash_div_tax_rate",
             "record_date",
             "ex_date",
         ]
