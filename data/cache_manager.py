@@ -424,7 +424,9 @@ class CacheManager:
 
         logger.debug("[CacheManager] Health | Starting comprehensive check...")
 
-        async with self.engine.connect() as conn:
+        async with self.engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as conn:
             # Total Stocks
             total_stocks = await self.stock_dao.get_active_stock_count()
             total_stocks = total_stocks or 1
@@ -467,7 +469,7 @@ class CacheManager:
                         SELECT SUM(
                             (SELECT COUNT(*) FROM trade_cal tc
                              WHERE tc.is_open = 1
-                               AND tc.cal_date >= MAX(s.list_date, $1)
+                               AND tc.cal_date >= GREATEST(s.list_date, $1)
                                AND tc.cal_date <= $2)
                         ) FROM stock_basic s
                         WHERE s.list_status = 'L'
