@@ -562,7 +562,7 @@ class I18n:
             "progress_sync_fundamentals": "基本面: {current}/{total} ({stock})",
             # --- Settings: System Tab ---
             "sys_core_config": "核心配置",
-            "sys_log_label": "控制系统日志详细程度 (Info/Debug)",
+            "sys_log_label": "控制系统日志详细程度",
             "sys_sync_heavy": "重型同步并发数",
             "sys_sync_heavy_hint": "控制历史行情/财务数据的并发下载 (建议 3-5)",
             "sys_tushare_limit": "Tushare流控",
