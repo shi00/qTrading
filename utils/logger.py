@@ -75,10 +75,10 @@ def setup_logging(name="astock_screener"):
         backup_count = 5
     max_bytes = int(max_mb * 1024 * 1024)
 
-    # 3. Console Handler (INFO+)
+    # 3. Console Handler (user configured level)
     if not has_console:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(logging_level)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
