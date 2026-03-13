@@ -698,6 +698,7 @@ class I18n:
             # System Tab Dropdowns
             "sys_opt_debug": "调试 (DEBUG)",
             "sys_opt_info": "信息 (INFO)",
+            "sys_opt_warn": "警告 (WARNING)",
             "sys_opt_error": "错误 (ERROR)",
             # Theme
             "theme_dark": "现代深色 (默认)",
@@ -761,7 +762,6 @@ class I18n:
             "sys_concurrency": "系统并发数",
             "sys_concurrency_hint": "并发线程数",
             "settings_sync_concurrency": "同步并发",
-            "sys_opt_warn": "警告",
             "tab_stock_basic": "股票列表",
             "tab_alembic_version": "数据库版本",
             "tab_daily_quotes": "日线行情",
@@ -1736,7 +1736,7 @@ class I18n:
             # System Tab Dropdowns
             "sys_opt_debug": "DEBUG",
             "sys_opt_info": "INFO",
-            "sys_opt_warn": "WARN",
+            "sys_opt_warn": "WARNING",
             "sys_opt_error": "ERROR",
             # Health Report Inner
             "health_missing_sample": "Missing Samples",

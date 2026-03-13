@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from utils.log_decorators import UILogger
 
 import flet as ft
 
@@ -8,6 +7,7 @@ from ui.components.settings_widgets import DashboardCard, SectionHeader, Setting
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
