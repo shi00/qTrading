@@ -422,11 +422,10 @@ class CacheManager:
         await self.wait_for_maintenance()
         results = {}
 
-        logger.debug("[CacheManager] Health | Starting comprehensive check...")
+        logger.debug(f"[CacheManager] Health | Starting comprehensive check...")
 
-        async with self.engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        ) as conn:
+        async with self.engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
             # Total Stocks
             total_stocks = await self.stock_dao.get_active_stock_count()
             total_stocks = total_stocks or 1
