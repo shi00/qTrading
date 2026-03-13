@@ -83,8 +83,8 @@ class ConfigHandler:
         "tushare_timeout": 30,
         "tushare_api_rate_limit": 200,
         "locale": "zh",
-        "max_io_workers": 0,
-        "max_cpu_workers": 0,
+        "max_io_workers": 16,
+        "max_cpu_workers": 4,
         "sync_request_delay_heavy": 0.0,
         "sync_request_delay_light": 0.0,
         "news_poll_interval": 60,
@@ -382,7 +382,7 @@ class ConfigHandler:
     @staticmethod
     def set_no_proxy_domains(domains):
         if not isinstance(domains, list) or not all(
-            isinstance(x, str) for x in domains
+                isinstance(x, str) for x in domains
         ):
             logger.error("Invalid no-proxy domains format: must be list of strings")
             return False
@@ -648,7 +648,7 @@ class ConfigHandler:
     def get_max_io_workers():
         """Get max IO threads from config."""
         config = ConfigHandler.load_config()
-        val = config.get("max_io_workers", 0)
+        val = config.get("max_io_workers", os.cpu_count())
         try:
             return int(val)
         except (ValueError, TypeError):
@@ -662,7 +662,7 @@ class ConfigHandler:
     def get_max_cpu_workers():
         """Get max CPU threads from config."""
         config = ConfigHandler.load_config()
-        val = config.get("max_cpu_workers", 0)
+        val = config.get("max_cpu_workers", os.cpu_count() / 2)
         try:
             return int(val)
         except (ValueError, TypeError):
