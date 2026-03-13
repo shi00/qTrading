@@ -315,6 +315,8 @@ class SystemTab(ft.Container):
         )
         level = self.log_level_dropdown.value
         ConfigHandler.set_log_level(level)
+        from utils.logger import update_log_level
+        update_log_level(level)
         self.show_snack(I18n.get("sys_log_label") + ": " + level)
 
     def save_concurrency(self, e):
