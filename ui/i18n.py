@@ -704,8 +704,8 @@ class I18n:
             "theme_dark": "现代深色 (默认)",
             "theme_light": "专业浅色",
             "theme_navy": "北欧深蓝",
-            "theme_dracula": "Dracula (吸血鬼)",
-            "settings_snack_theme_updated": "主题已更新 (立即生效)",
+            "theme_dracula": "德古拉",
+            "settings_snack_theme_updated": "主题已更新",
             "settings_local_gpu_auto": "自动卸载所有层 (推荐)",
             # Health Report Inner
             "health_missing_sample": "未覆盖股票示例",
@@ -1779,7 +1779,7 @@ class I18n:
             "theme_light": "Professional Light",
             "theme_navy": "Nordic Navy",
             "theme_dracula": "Dracula",
-            "settings_snack_theme_updated": "Theme updated (Effective immediately)",
+            "settings_snack_theme_updated": "Theme updated",
             # AI Data Columns
             "col_m2": "M2 Supply",
             "col_m2_yoy": "M2 YoY",
