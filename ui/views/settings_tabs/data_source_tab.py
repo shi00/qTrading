@@ -902,7 +902,7 @@ class DataSourceTab(ft.Container):
                 def _combined_progress(c, t, m):
                     self.update_progress(c, t, m)  # UI update
                     TaskManager().update_progress(
-                        task_id, c / t if t > 0 else 0, f"[{c}/{t}] {m}"
+                        task_id, c / t if t > 0 else 0, f"[{c:.2f}/{t}] {m}"
                     )
 
                 report = await self._processor.initialize_system(
