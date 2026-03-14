@@ -1,5 +1,7 @@
 import unittest
+
 import pandas as pd
+
 from utils.technical_analysis import TechnicalAnalysis
 
 
@@ -46,7 +48,7 @@ class TestTechnicalAnalysis(unittest.TestCase):
                 "low": [10, 20],
                 "open": [10, 20],
                 "adj_factor": [2, 1],
-            }
+            },
         )
         adj_df = TechnicalAnalysis._get_qfq_df(df)
         self.assertEqual(adj_df["close"].iloc[0], 20)

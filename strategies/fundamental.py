@@ -1,6 +1,7 @@
 import polars as pl
-from strategies.polars_base import PolarsBaseStrategy
+
 from strategies.base_strategy import register_strategy
+from strategies.polars_base import PolarsBaseStrategy
 
 
 @register_strategy("value")

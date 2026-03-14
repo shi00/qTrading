@@ -1,6 +1,8 @@
 import logging
-from .base_dao import BaseDao
+
 from utils.time_utils import get_now
+
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -8,7 +10,7 @@ logger = logging.getLogger(__name__)
 class SyncDao(BaseDao):
     # --- Sync Stats ---
     async def update_sync_status(
-        self, table_name, last_data_date, record_count, status="success"
+        self, table_name, last_data_date, record_count, status="success",
     ):
         now = get_now().strftime("%Y-%m-%d %H:%M:%S")
         sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") 
@@ -17,19 +19,18 @@ class SyncDao(BaseDao):
                "last_sync_date"=excluded."last_sync_date","last_data_date"=excluded."last_data_date", 
                "record_count"=excluded."record_count","status"=excluded."status","updated_at"=excluded."updated_at"'''
         await self._write_db(
-            sql, (table_name, now, last_data_date, record_count, status, now)
+            sql, (table_name, now, last_data_date, record_count, status, now),
         )
 
     async def get_sync_status(self, table_name=None):
         if table_name:
             df = await self._read_db(
-                "SELECT * FROM sync_status WHERE table_name = $1", (table_name,)
+                "SELECT * FROM sync_status WHERE table_name = $1", (table_name,),
             )
             if df is not None and not df.empty:
                 return df.iloc[0].to_dict()
             return None
-        else:
-            return await self._read_db("SELECT * FROM sync_status")
+        return await self._read_db("SELECT * FROM sync_status")
 
     # --- Step 4 Status ---
     async def get_completed_step4_stocks(self, sync_version=1):

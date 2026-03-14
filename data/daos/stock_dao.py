@@ -1,7 +1,9 @@
 import logging
-from .base_dao import BaseDao
-from utils.thread_pool import ThreadPoolManager, TaskType
+
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
+
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ class StockDao(BaseDao):
     async def get_active_stock_count(self):
         """Count stocks with list_status='L'"""
         df = await self._read_db(
-            "SELECT count(*) as cnt FROM stock_basic WHERE list_status='L'"
+            "SELECT count(*) as cnt FROM stock_basic WHERE list_status='L'",
         )
         if df is not None and not df.empty:
             return df["cnt"].iloc[0] or 0
@@ -70,7 +72,7 @@ class StockDao(BaseDao):
     async def get_trade_cal_range(self):
         """Get the min and max calendar dates from DB"""
         df = await self._read_db(
-            "SELECT MIN(cal_date) as min_d, MAX(cal_date) as max_d FROM trade_cal"
+            "SELECT MIN(cal_date) as min_d, MAX(cal_date) as max_d FROM trade_cal",
         )
         if df is not None and not df.empty:
             return (df["min_d"].iloc[0], df["max_d"].iloc[0])
@@ -86,7 +88,7 @@ class StockDao(BaseDao):
         df["updated_at"] = get_now().strftime("%Y-%m-%d %H:%M:%S")
 
         return await self._save_upsert(
-            df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"]
+            df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"],
         )
 
     async def overwrite_concepts(self, df):
@@ -103,7 +105,7 @@ class StockDao(BaseDao):
 
         # Prepare params outside transaction
         params = await ThreadPoolManager().run_async(
-            TaskType.CPU, self._prepare_data_params, df, cols
+            TaskType.CPU, self._prepare_data_params, df, cols,
         )
 
         col_str = self._quote_columns(cols)
@@ -134,11 +136,11 @@ class StockDao(BaseDao):
 
     async def clear_all_doubao_concepts(self) -> int:
         return await self._write_db(
-            "DELETE FROM stock_concepts WHERE concept_id LIKE 'AI_DOUBAO_%'"
+            "DELETE FROM stock_concepts WHERE concept_id LIKE 'AI_DOUBAO_%'",
         )
 
     async def get_stocks_without_ai_concepts(
-        self, batch_size: int, exclude_codes: list = None
+        self, batch_size: int, exclude_codes: list = None,
     ) -> list:
         sql = """
             SELECT ts_code, name FROM stock_basic
@@ -210,6 +212,7 @@ class StockDao(BaseDao):
         ai_concept_entries: list of dict, e.g. [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
         """
         import hashlib
+
         import pandas as pd
 
         if not ai_concept_entries:
@@ -233,7 +236,7 @@ class StockDao(BaseDao):
                         "concept_id": dummy_id,
                         "concept_name": "已扫描无强概念",
                         "updated_at": now,
-                    }
+                    },
                 )
                 continue
 
@@ -247,7 +250,7 @@ class StockDao(BaseDao):
                         "concept_id": concept_id,
                         "concept_name": concept,
                         "updated_at": now,
-                    }
+                    },
                 )
 
         if not records:
@@ -258,5 +261,5 @@ class StockDao(BaseDao):
 
         # 使用基础类的 upsert 机制保证安全入库
         return await self._save_upsert(
-            df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"]
+            df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"],
         )

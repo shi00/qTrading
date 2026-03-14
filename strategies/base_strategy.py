@@ -1,6 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ def register_strategy(key: str):
     def decorator(cls):
         if key in _STRATEGY_REGISTRY:
             logger.warning(
-                f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}"
+                f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}",
             )
         _STRATEGY_REGISTRY[key] = cls
         return cls

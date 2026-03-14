@@ -1,6 +1,7 @@
-import unittest
 import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
+import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from ui.views.screener_view import ScreenerView
 
 
@@ -24,7 +25,7 @@ class TestDeepLinking(unittest.TestCase):
             with patch("ui.views.screener_view.ScreenerViewModel") as mock_vm_cls:
                 mock_vm = mock_vm_cls.return_value
                 mock_vm.get_strategies = AsyncMock(
-                    return_value={"strategy_a": "Description A"}
+                    return_value={"strategy_a": "Description A"},
                 )
                 mock_strategy = MagicMock()
                 mock_strategy.get_parameters = MagicMock(return_value=[])
@@ -71,7 +72,7 @@ class TestDeepLinking(unittest.TestCase):
             with patch("ui.views.screener_view.ScreenerViewModel") as mock_vm_cls:
                 mock_vm = mock_vm_cls.return_value
                 mock_vm.get_strategies = AsyncMock(
-                    return_value={"strategy_b": "Description B"}
+                    return_value={"strategy_b": "Description B"},
                 )
                 mock_strategy = MagicMock()
                 mock_strategy.get_parameters = MagicMock(return_value=[])

@@ -17,14 +17,15 @@ The Mixin handles:
 import asyncio
 import logging
 import math
-import pandas as pd
 from datetime import timedelta
+
+import pandas as pd
 
 from data.news_fetcher import NewsFetcher
 from services.ai_service import AIService
+from ui.i18n import I18n
 from utils.config_handler import ConfigHandler  # Used by get_ai_max_candidates
 from utils.technical_analysis import TechnicalAnalysis
-from ui.i18n import I18n
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class AIStrategyMixin:
         return ""  # Default: no additional context
 
     async def run_ai_analysis(
-        self, candidates_df: pd.DataFrame, context: dict, max_stocks: int = None
+        self, candidates_df: pd.DataFrame, context: dict, max_stocks: int = None,
     ) -> pd.DataFrame:
         """
         Run sequential AI analysis on pre-filtered candidates.
@@ -82,7 +83,7 @@ class AIStrategyMixin:
         # --- Guard: AI Available? ---
         if ai_client.client is None:
             logger.info(
-                "[AIStrategyMixin] AI service not configured — returning math-only results"
+                "[AIStrategyMixin] AI service not configured — returning math-only results",
             )
             if on_progress:
                 on_progress(
@@ -100,7 +101,7 @@ class AIStrategyMixin:
         cap = max_stocks or ConfigHandler.get_ai_max_candidates()
         if len(candidates_df) > cap:
             logger.info(
-                f"[AIStrategyMixin] Capping candidates from {len(candidates_df)} to {cap}"
+                f"[AIStrategyMixin] Capping candidates from {len(candidates_df)} to {cap}",
             )
             candidates_df = candidates_df.head(cap)
 
@@ -114,7 +115,7 @@ class AIStrategyMixin:
             history_context = await rm.get_learning_context()
         except Exception as e:
             logger.warning(
-                f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}"
+                f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}",
             )
 
         global_context = ""
@@ -140,7 +141,7 @@ class AIStrategyMixin:
 
             years = ConfigHandler.get_init_history_years()
             start_date_str = (get_now() - timedelta(days=365 * years + 30)).strftime(
-                "%Y%m%d"
+                "%Y%m%d",
             )
             bulk_history_df = await dp.cache.get_daily_quotes(
                 ts_code_list=all_ts_codes,
@@ -196,7 +197,7 @@ class AIStrategyMixin:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch northbound: {e}")
 
         logger.info(
-            f"[AIStrategyMixin] Pre-fetched capital data: moneyflow={len(moneyflow_df)}, top_list={len(top_list_df)}, northbound={len(northbound_df)}"
+            f"[AIStrategyMixin] Pre-fetched capital data: moneyflow={len(moneyflow_df)}, top_list={len(top_list_df)}, northbound={len(northbound_df)}",
         )
 
         # Bundle pre-fetched data for the loop
@@ -213,7 +214,7 @@ class AIStrategyMixin:
 
         if on_progress:
             on_progress(
-                0, total_tasks, I18n.get("ai_progress_init", "初始化 AI 分析引擎...")
+                0, total_tasks, I18n.get("ai_progress_init", "初始化 AI 分析引擎..."),
             )
 
         final_rows = []
@@ -222,7 +223,7 @@ class AIStrategyMixin:
         for row in candidates_df.itertuples(index=False):
             if dp and dp.is_cancelled():
                 logger.info(
-                    "[AIStrategyMixin] Cancellation detected — stopping remaining tasks"
+                    "[AIStrategyMixin] Cancellation detected — stopping remaining tasks",
                 )
                 break
 
@@ -243,7 +244,7 @@ class AIStrategyMixin:
                     )
 
                 hist_df = prefetched_history.get(
-                    row_data.get("ts_code"), pd.DataFrame()
+                    row_data.get("ts_code"), pd.DataFrame(),
                 )
                 news_list = []
                 if row_data.get("ts_code") in news_tasks:
@@ -305,7 +306,7 @@ class AIStrategyMixin:
                 break
             except Exception as e:
                 logger.error(
-                    f"[AIStrategyMixin] Task error for {stock_name}: {e}", exc_info=True
+                    f"[AIStrategyMixin] Task error for {stock_name}: {e}", exc_info=True,
                 )
                 completed_count += 1
             finally:
@@ -314,7 +315,7 @@ class AIStrategyMixin:
                     on_chunk_callback.final_flush()
 
         logger.info(
-            f"[AIStrategyMixin] Complete. {completed_count}/{total_tasks} processed, {len(final_rows)} valid results"
+            f"[AIStrategyMixin] Complete. {completed_count}/{total_tasks} processed, {len(final_rows)} valid results",
         )
 
         # Cleanup: Cancel any orphan news tasks that were never awaited (e.g. user cancelled early)
@@ -386,7 +387,7 @@ class AIStrategyMixin:
 
             # 6. Capital Flow (filter pre-fetched batch data by ts_code)
             capital_flow_text = self._build_capital_flow_text(
-                ts_code, prefetched_capital or {}
+                ts_code, prefetched_capital or {},
             )
 
             # 7. Financials (extract from stock_info which already has screening data)
@@ -417,7 +418,7 @@ class AIStrategyMixin:
 
         except Exception as e:
             logger.error(
-                f"[AIStrategyMixin] Analysis failed for {row.get('ts_code', '?')}: {e}"
+                f"[AIStrategyMixin] Analysis failed for {row.get('ts_code', '?')}: {e}",
             )
             return None
 
@@ -512,7 +513,7 @@ class AIStrategyMixin:
 
         except Exception as e:
             logger.warning(
-                f"[AIStrategyMixin] Technical structure computation failed: {e}"
+                f"[AIStrategyMixin] Technical structure computation failed: {e}",
             )
             result["ma_alignment"] = "Computation error"
             result["volume_trend"] = "Computation error"
@@ -765,7 +766,7 @@ class AIStrategyMixin:
 
         tmv = sf(row.get("total_mv"), default=None)
         parts.append(
-            f"总市值: {f'{tmv / 10000:.2f}亿元' if tmv is not None else 'N/A'}"
+            f"总市值: {f'{tmv / 10000:.2f}亿元' if tmv is not None else 'N/A'}",
         )
 
         parts.append(f"股息率(TTM): {fmt(row.get('dv_ttm'), '%')}")

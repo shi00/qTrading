@@ -1,8 +1,9 @@
-import unittest
-import pandas as pd
-import sys
 import os
+import sys
 import tempfile
+import unittest
+
+import pandas as pd
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -68,7 +69,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "industry": ["Bank"],
                 "market": ["Main"],
                 "list_date": ["19910403"],
-            }
+            },
         )
 
         saved_count = await self.cache.save_stock_basic(df)
@@ -94,7 +95,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "vol": [1000],
                 "amount": [10000],
                 "adj_factor": [1.0],
-            }
+            },
         )
 
         await self.cache.save_daily_quotes(df)
@@ -132,7 +133,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "free_share": [1000],
                 "turnover_rate": [1.0],
                 "turnover_rate_f": [1.0],
-            }
+            },
         )
 
         await self.cache.save_daily_indicators(df)
@@ -169,7 +170,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "or_yoy": [5.0],
                 "netprofit_yoy": [5.0],
                 "goodwill": [0.0],
-            }
+            },
         )
 
         await self.cache.save_financial_reports(df)
@@ -195,7 +196,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "sell_elg_amount": [100],
                 "net_mf_vol": [100],
                 "net_mf_amount": [100],
-            }
+            },
         )
         nb_df = pd.DataFrame(
             {
@@ -205,7 +206,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "vol": [100],
                 "ratio": [5.5],
                 "exchange": ["SZ"],
-            }
+            },
         )
 
         await self.cache.save_moneyflow(mf_df)
@@ -250,7 +251,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "industry": ["Bank"],
                 "market": ["Main"],
                 "list_date": ["20000101"],
-            }
+            },
         )
         daily_quotes = pd.DataFrame(
             {
@@ -266,7 +267,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "amount": [1000],
                 "change": [0.1],
                 "adj_factor": [1],
-            }
+            },
         )
         daily_ind = pd.DataFrame(
             {
@@ -286,7 +287,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "free_share": [100],
                 "turnover_rate": [1],
                 "turnover_rate_f": [1],
-            }
+            },
         )
         fina = pd.DataFrame(
             {
@@ -309,7 +310,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "or_yoy": [1],
                 "netprofit_yoy": [1],
                 "goodwill": [0],
-            }
+            },
         )
 
         await self.cache.save_stock_basic(stock_basic)
@@ -336,7 +337,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
         sql = text("""INSERT INTO screening_history 
                  (trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
                  VALUES (:trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
-        
+
         async with self.cache.engine.begin() as conn:
             await conn.execute(sql, [{
                 "trade_date": "20230101",
@@ -346,7 +347,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "close": 10.0,
                 "pct_chg": 1.0,
                 "ai_score": 0,
-                "ai_reason": ""
+                "ai_reason": "",
             }])
 
         history = await self.cache.get_screening_history("value")
@@ -392,7 +393,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "amount_rate": [0],
                 "float_values": [0],
                 "reason": ["Test"],
-            }
+            },
         )
         await self.cache.save_top_list(df)
 
@@ -411,7 +412,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
                 "vol": [50.0],
                 "buyer": ["B1"],
                 "seller": ["S1"],
-            }
+            },
         )
         await self.cache.save_block_trade(df)
 

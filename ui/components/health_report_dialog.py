@@ -1,16 +1,17 @@
 import logging
 
 import flet as ft
-from ui.i18n import I18n
-from ui.theme import AppColors
+
 from data.constants import (
-    HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
-    HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
-    HEALTH_REPORT_ORDER,
     HEALTH_CHECK_TABLES,
     HEALTH_DEPTH_WARNING_RATIO,
+    HEALTH_REPORT_ORDER,
     HEALTH_THRESHOLD_BREADTH,
+    HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
+    HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
 )
+from ui.i18n import I18n
+from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class HealthScoreCard(ft.Container):
         super().__init__()
 
         self.color, self.icon, i18n_key = self._STATUS_MAP.get(
-            status, self._DEFAULT_STATUS
+            status, self._DEFAULT_STATUS,
         )
         self.text = I18n.get(i18n_key)
         self.bg_gradient = self._make_gradient(self.color)
@@ -116,7 +117,7 @@ class MetricTile(ft.Container):
             controls=[
                 ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
                 ft.Text(
-                    str(value), size=18, weight=ft.FontWeight.BOLD, color=trend_color
+                    str(value), size=18, weight=ft.FontWeight.BOLD, color=trend_color,
                 ),
             ],
             spacing=4,
@@ -124,7 +125,7 @@ class MetricTile(ft.Container):
         )
         if sub_text:
             self.content.controls.append(
-                ft.Text(sub_text, size=10, color=AppColors.TEXT_HINT)
+                ft.Text(sub_text, size=10, color=AppColors.TEXT_HINT),
             )
 
         self.padding = 15
@@ -169,9 +170,9 @@ class KeyMetricsGrid(ft.Column):
                     ),
                     MetricTile(I18n.get("health_gap_count"), str(gap_count), gap_color),
                     MetricTile(
-                        I18n.get("health_sanity_err"), str(sanity_errors), sanity_color
+                        I18n.get("health_sanity_err"), str(sanity_errors), sanity_color,
                     ),
-                ]
+                ],
             ),
             ft.Row(
                 [
@@ -180,7 +181,7 @@ class KeyMetricsGrid(ft.Column):
                         str(latest_date),
                         AppColors.TEXT_PRIMARY,
                     ),
-                ]
+                ],
             ),
         ]
 
@@ -200,7 +201,7 @@ class CoverageDetailTable(ft.Column):
         # Strict ordering based on constants
         sorted_keys = [k for k in HEALTH_REPORT_ORDER if k in tables]
         # Append any extras
-        sorted_keys += [k for k in tables.keys() if k not in HEALTH_REPORT_ORDER]
+        sorted_keys += [k for k in tables if k not in HEALTH_REPORT_ORDER]
 
         for k in sorted_keys:
             t_data = tables[k]
@@ -393,7 +394,7 @@ class CoverageDetailTable(ft.Column):
                     color=AppColors.WARNING
                     if depth_ratio < HEALTH_DEPTH_WARNING_RATIO
                     else AppColors.TEXT_HINT,
-                )
+                ),
             )
         if breadth_ratio is not None:
             items.append(
@@ -403,7 +404,7 @@ class CoverageDetailTable(ft.Column):
                     color=AppColors.WARNING
                     if breadth_ratio < HEALTH_THRESHOLD_BREADTH
                     else AppColors.TEXT_HINT,
-                )
+                ),
             )
         return items
 
@@ -424,7 +425,7 @@ class HealthReportDialog(ft.AlertDialog):
             r_tables = len(report.get("fundamentals", {}).get("tables", {}))
             r_lag = report.get("market", {}).get("lag_days", "?")
             logger.info(
-                f"HealthReportDialog Opened: Status={r_status}, Tables={r_tables}, Lag={r_lag}"
+                f"HealthReportDialog Opened: Status={r_status}, Tables={r_tables}, Lag={r_lag}",
             )
         except Exception as e:
             logger.error(f"Error logging report summary: {e}")
@@ -488,7 +489,7 @@ class HealthReportDialog(ft.AlertDialog):
                     [
                         ft.Icon(ft.Icons.WARNING_AMBER, color=AppColors.ERROR, size=14),
                         ft.Text(r, size=12, color=AppColors.ERROR),
-                    ]
+                    ],
                 )
                 for r in reasons
             ]
@@ -526,8 +527,8 @@ class HealthReportDialog(ft.AlertDialog):
                     ft.Column(
                         [
                             ft.Container(
-                                content=coverage, padding=ft.padding.only(right=15)
-                            )
+                                content=coverage, padding=ft.padding.only(right=15),
+                            ),
                         ],
                         scroll=ft.ScrollMode.AUTO,
                         expand=True,
@@ -562,10 +563,10 @@ class HealthScanDialog(ft.AlertDialog):
     def __init__(self, page):
         self.page_ref = page
         self.progress_bar = ft.ProgressBar(
-            width=400, color=AppColors.PRIMARY, bgcolor=AppColors.SURFACE_VARIANT
+            width=400, color=AppColors.PRIMARY, bgcolor=AppColors.SURFACE_VARIANT,
         )
         self.status_text = ft.Text(
-            I18n.get("scan_step_init"), size=12, color=AppColors.TEXT_SECONDARY
+            I18n.get("scan_step_init"), size=12, color=AppColors.TEXT_SECONDARY,
         )
         self.result_content = ft.Column(visible=False)
 
@@ -581,11 +582,11 @@ class HealthScanDialog(ft.AlertDialog):
                         self.status_text,
                         self.progress_bar,
                         self.result_content,
-                    ]
+                    ],
                 ),
             ),
             actions=[
-                ft.TextButton(I18n.get("common_close"), on_click=self.close_dialog)
+                ft.TextButton(I18n.get("common_close"), on_click=self.close_dialog),
             ],
             actions_padding=10,
         )
@@ -611,7 +612,7 @@ class HealthScanDialog(ft.AlertDialog):
                 self.page_ref.update()
 
             result = await dp.run_quality_scan(
-                sample_size=50, progress_callback=on_progress
+                sample_size=50, progress_callback=on_progress,
             )
             self.show_results(result)
         except Exception as e:
@@ -652,7 +653,7 @@ class HealthScanDialog(ft.AlertDialog):
                                 size=14,
                                 color=AppColors.TEXT_PRIMARY,
                             ),
-                        ]
+                        ],
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -672,7 +673,7 @@ class HealthScanDialog(ft.AlertDialog):
                                 size=16,
                                 weight=ft.FontWeight.BOLD,
                             ),
-                        ]
+                        ],
                     ),
                     ft.Column(
                         [
@@ -686,7 +687,7 @@ class HealthScanDialog(ft.AlertDialog):
                                 size=16,
                                 weight=ft.FontWeight.BOLD,
                             ),
-                        ]
+                        ],
                     ),
                     ft.Column(
                         [
@@ -700,7 +701,7 @@ class HealthScanDialog(ft.AlertDialog):
                                 size=16,
                                 weight=ft.FontWeight.BOLD,
                             ),
-                        ]
+                        ],
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_AROUND,

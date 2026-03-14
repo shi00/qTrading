@@ -1,10 +1,12 @@
-import logging
-import pandas as pd
 import datetime
+import logging
+
+import pandas as pd
+
 from data.cache_manager import CacheManager
 from data.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
-from utils.log_decorators import log_async_operation, PerfThreshold
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -24,7 +26,7 @@ class ReviewManager:
         self.config = ConfigHandler()
 
     @log_async_operation(
-        operation_name="t1_review", threshold_ms=PerfThreshold.DB_BULK_IO
+        operation_name="t1_review", threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run_review(self):
         """
@@ -54,7 +56,7 @@ class ReviewManager:
 
             # Fetch prices since pred_date
             df_quotes = await self.cache.get_daily_quotes(
-                start_date=pred_date, ts_code=ts_code
+                start_date=pred_date, ts_code=ts_code,
             )
             if df_quotes.empty:
                 # Try fetching from API if not in cache (e.g. today's close)
@@ -88,7 +90,7 @@ class ReviewManager:
                     # We need Index Return for this date to calculate Alpha.
                     # Default benchmark: 000300.SH (CSI 300) or 000001.SH (Shanghai Composite)
                     index_code = ConfigHandler.get_config(
-                        "benchmark_index", "000001.SH"
+                        "benchmark_index", "000001.SH",
                     )
 
                     # Fetch Index Quote for T+1
@@ -125,7 +127,7 @@ class ReviewManager:
                     await self._update_result(row["id"], t1_pct, label, index_pct)
                     updated_count += 1
                     logger.info(
-                        f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}"
+                        f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}",
                     )
 
             except Exception as e:
@@ -165,7 +167,7 @@ class ReviewManager:
 
         try:
             df_wins = await self.cache.screener_dao.get_learning_context(
-                limit=limit, is_win=True
+                limit=limit, is_win=True,
             )
             if df_wins is not None and not df_wins.empty:
                 for _, row in df_wins.iterrows():
@@ -178,11 +180,11 @@ class ReviewManager:
                             "reason": str(row["ai_reason"])[:50]
                             if row["ai_reason"]
                             else "",
-                        }
+                        },
                     )
 
             df_losses = await self.cache.screener_dao.get_learning_context(
-                limit=limit, is_win=False
+                limit=limit, is_win=False,
             )
             if df_losses is not None and not df_losses.empty:
                 for _, row in df_losses.iterrows():
@@ -195,7 +197,7 @@ class ReviewManager:
                             "reason": str(row["ai_reason"])[:50]
                             if row["ai_reason"]
                             else "",
-                        }
+                        },
                     )
 
         except Exception as e:
@@ -302,7 +304,7 @@ class ReviewManager:
                     ai_score,
                     str(ai_reason),
                     str(thinking),
-                )
+                ),
             )
 
         if not records:

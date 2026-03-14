@@ -1,7 +1,8 @@
-from pandas_market_calendars import get_calendar
-import pandas as pd
 import datetime
 import logging
+
+import pandas as pd
+from pandas_market_calendars import get_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,7 @@ class OfflineCalendar:
                 return True
 
             # Convert to Timestamp
-            if isinstance(date_obj, str):
-                ts = pd.Timestamp(date_obj)
-            elif isinstance(date_obj, (datetime.date, datetime.datetime)):
+            if isinstance(date_obj, str) or isinstance(date_obj, (datetime.date, datetime.datetime)):
                 ts = pd.Timestamp(date_obj)
             else:
                 ts = date_obj  # Hope it's compatible

@@ -1,7 +1,9 @@
 import datetime
 import logging
+
+from utils.log_decorators import PerfThreshold, log_async_operation
+
 from .base import ISyncStrategy, SyncResult
-from utils.log_decorators import log_async_operation, PerfThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ class HolderSyncStrategy(ISyncStrategy):
         logger.debug("[HolderSync] Stop | Cancellation requested.")
 
     @log_async_operation(
-        operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO
+        operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run(self, **kwargs) -> SyncResult:
         result = SyncResult()
@@ -46,7 +48,7 @@ class HolderSyncStrategy(ISyncStrategy):
             # Determine the latest 2 quarter-end dates to ensure coverage
             quarter_ends = self._get_recent_quarter_ends(count=2)
             logger.debug(
-                f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}"
+                f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}",
             )
 
             for qe in quarter_ends:
@@ -99,7 +101,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 result.errors.append(f"Aborted after {errors} errors")
 
             logger.info(
-                f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}"
+                f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}",
             )
 
         except Exception as e:
@@ -119,23 +121,22 @@ class HolderSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 await save_func(df)
                 logger.debug(
-                    f"[HolderSync] Table | {table_name} end_date={end_date}: {len(df)} records"
+                    f"[HolderSync] Table | {table_name} end_date={end_date}: {len(df)} records",
                 )
                 return len(df)
-            else:
-                logger.debug(
-                    f"[HolderSync] Table | {table_name} end_date={end_date}: no data"
-                )
-                return 0
+            logger.debug(
+                f"[HolderSync] Table | {table_name} end_date={end_date}: no data",
+            )
+            return 0
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
                 logger.warning(
-                    f"[HolderSync] ⛔ Permission denied for {table_name}: {e}"
+                    f"[HolderSync] ⛔ Permission denied for {table_name}: {e}",
                 )
             else:
                 logger.warning(
-                    f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}"
+                    f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}",
                 )
             return -1
 
@@ -158,19 +159,18 @@ class HolderSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 await self.context.cache.save_pledge_stat(df)
                 logger.debug(
-                    f"[HolderSync] Table | pledge_stat end_date={end_date}: {len(df)} records"
+                    f"[HolderSync] Table | pledge_stat end_date={end_date}: {len(df)} records",
                 )
                 return len(df)
-            else:
-                logger.debug(
-                    f"[HolderSync] Table | pledge_stat end_date={end_date}: no data"
-                )
-                return 0
+            logger.debug(
+                f"[HolderSync] Table | pledge_stat end_date={end_date}: no data",
+            )
+            return 0
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
                 logger.warning(
-                    f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}"
+                    f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}",
                 )
             else:
                 logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")

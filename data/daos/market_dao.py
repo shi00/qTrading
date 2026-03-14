@@ -1,4 +1,5 @@
 import logging
+
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ class MarketDao(BaseDao):
         )
 
     async def get_daily_indicators(
-        self, ts_code=None, start_date=None, end_date=None, limit=None
+        self, ts_code=None, start_date=None, end_date=None, limit=None,
     ):
         """Get Daily Indicators."""
         sql = "SELECT * FROM daily_indicators WHERE 1=1"
@@ -174,7 +175,7 @@ class MarketDao(BaseDao):
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
         return await self._save_upsert(
-            df, "moneyflow_hsgt", columns, pk_columns=["trade_date"]
+            df, "moneyflow_hsgt", columns, pk_columns=["trade_date"],
         )
 
     async def get_moneyflow_hsgt(self, trade_date=None, limit=None):

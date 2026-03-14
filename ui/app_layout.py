@@ -76,7 +76,7 @@ class AppLayout(ft.Container):
             content=ft.Column(
                 [
                     ft.Image(
-                        src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN
+                        src="/icon.png", width=48, height=48, fit=ft.ImageFit.CONTAIN,
                     ),
                     ft.Text(
                         I18n.get("app_brand"),
@@ -107,7 +107,7 @@ class AppLayout(ft.Container):
                     selected_icon=ft.Icons.DASHBOARD,
                     label=I18n.get("nav_market"),
                     label_content=ft.Text(
-                        I18n.get("nav_market"), size=12, weight=ft.FontWeight.BOLD
+                        I18n.get("nav_market"), size=12, weight=ft.FontWeight.BOLD,
                     ),
                 ),
                 ft.NavigationRailDestination(
@@ -115,7 +115,7 @@ class AppLayout(ft.Container):
                     selected_icon=ft.Icons.FILTER_ALT,
                     label=I18n.get("nav_screener"),
                     label_content=ft.Text(
-                        I18n.get("nav_screener"), size=12, weight=ft.FontWeight.BOLD
+                        I18n.get("nav_screener"), size=12, weight=ft.FontWeight.BOLD,
                     ),
                 ),
                 ft.NavigationRailDestination(
@@ -123,7 +123,7 @@ class AppLayout(ft.Container):
                     selected_icon=ft.Icons.STORAGE_ROUNDED,
                     label=I18n.get("nav_data"),
                     label_content=ft.Text(
-                        I18n.get("nav_data"), size=12, weight=ft.FontWeight.BOLD
+                        I18n.get("nav_data"), size=12, weight=ft.FontWeight.BOLD,
                     ),
                 ),
                 ft.NavigationRailDestination(
@@ -141,7 +141,7 @@ class AppLayout(ft.Container):
                     selected_icon=ft.Icons.SETTINGS,
                     label=I18n.get("nav_settings"),
                     label_content=ft.Text(
-                        I18n.get("nav_settings"), size=12, weight=ft.FontWeight.BOLD
+                        I18n.get("nav_settings"), size=12, weight=ft.FontWeight.BOLD,
                     ),
                 ),
             ],
@@ -188,7 +188,7 @@ class AppLayout(ft.Container):
 
         self._view_cache[index] = view
         logger.debug(
-            f"[AppLayout] View {index} loaded in {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+            f"[AppLayout] View {index} loaded in {(_time.perf_counter() - _t0) * 1000:.1f}ms",
         )
         return view
 
@@ -247,7 +247,7 @@ class AppLayout(ft.Container):
                     view.update_theme()
                 except Exception as e:
                     logger.error(
-                        f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}"
+                        f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}",
                     )
 
         # 3. Single page update — Flet redraws all semantic-token-based colors automatically
@@ -297,7 +297,7 @@ class AppLayout(ft.Container):
         self.nav_rail.update()
 
         logger.debug(
-            f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms"
+            f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms",
         )
 
     async def run_strategy_from_home(self, strategy_key):

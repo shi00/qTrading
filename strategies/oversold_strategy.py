@@ -1,13 +1,15 @@
+import datetime
+import logging
+
 import pandas as pd
 import polars as pl
-import logging
-import datetime
-from strategies.base_strategy import BaseStrategy, register_strategy
+
+from data.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin
-from utils.technical_analysis import TechnicalAnalysis
-from utils.config_handler import ConfigHandler
-from data.quality_gate import require_quality, QualityTier, QualityGateError
+from strategies.base_strategy import BaseStrategy, register_strategy
 from ui.i18n import I18n
+from utils.config_handler import ConfigHandler
+from utils.technical_analysis import TechnicalAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         period = current_params.get("rsi_period", 14)
         threshold = current_params.get("rsi_threshold", 30)
         return I18n.get(
-            "strategy_oversold_dynamic_desc", f"RSI({period}) < {threshold}"
+            "strategy_oversold_dynamic_desc", f"RSI({period}) < {threshold}",
         ).format(period=period, threshold=threshold)
 
     # ============================================================
@@ -103,7 +105,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         candidates["_rsi_threshold"] = rsi_threshold
 
         logger.info(
-            f"[OversoldStrategy] Phase 1 complete: {len(candidates)} candidates (RSI < {rsi_threshold})"
+            f"[OversoldStrategy] Phase 1 complete: {len(candidates)} candidates (RSI < {rsi_threshold})",
         )
 
         # --- Phase 2: AI Analysis (via Mixin) ---
@@ -131,7 +133,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         end_date = await dp.cache.get_latest_trade_date()
         if not end_date:
             logger.warning(
-                "[OversoldStrategy] No trade date found in database cache. Is the DB initialized?"
+                "[OversoldStrategy] No trade date found in database cache. Is the DB initialized?",
             )
             return pd.DataFrame()
 
@@ -141,13 +143,13 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         ).strftime("%Y%m%d")
 
         logger.info(
-            f"[OversoldStrategy] Fetching history {start_date} → {end_date} for RSI calculation..."
+            f"[OversoldStrategy] Fetching history {start_date} → {end_date} for RSI calculation...",
         )
 
         try:
             valid_codes = snapshot_df["ts_code"].tolist()
             history_pdf = await dp.cache.get_daily_quotes(
-                start_date=start_date, end_date=end_date, ts_code_list=valid_codes
+                start_date=start_date, end_date=end_date, ts_code_list=valid_codes,
             )
 
             if history_pdf is None or history_pdf.empty:
@@ -181,7 +183,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             # Calculate Dynamic RSI
             rsi_col_name = f"rsi_{rsi_period}"
             rsi_expr = TechnicalAnalysis.get_rsi_expr(
-                col_name="qfq_close", period=rsi_period, alias=rsi_col_name
+                col_name="qfq_close", period=rsi_period, alias=rsi_col_name,
             )
 
             result_df = (
@@ -189,7 +191,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     [
                         rsi_expr.over("ts_code"),
                         pl.col("close").count().over("ts_code").alias("day_count"),
-                    ]
+                    ],
                 )
                 .filter(pl.col("trade_date") == end_date)  # Latest day only
                 .filter(pl.col("day_count") >= rsi_period * 2)  # Stability guard
@@ -212,6 +214,6 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             raise
         except Exception as e:
             logger.error(
-                f"[OversoldStrategy] Error during execution: {e}", exc_info=True
+                f"[OversoldStrategy] Error during execution: {e}", exc_info=True,
             )
             raise RuntimeError(f"Strategy internal error: {e}")

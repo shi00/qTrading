@@ -9,10 +9,10 @@
 """
 
 import functools
+import inspect
 import logging
 import time
-from typing import Callable, Optional, Any, List
-import inspect
+from typing import Any, Callable, List, Optional
 
 from utils.sanitizers import DataSanitizer
 
@@ -37,7 +37,7 @@ class UILogger:
 
     @classmethod
     def log_action(
-        cls, component: str, action: str, target: str = None, details: str = None
+        cls, component: str, action: str, target: str = None, details: str = None,
     ):
         """
         静态辅助方法：为匿名 Lambda 等无法挂接装饰器的场景准备的单行打点入口
@@ -51,7 +51,7 @@ class UILogger:
 
 
 def log_ui_action(
-    component_name: str, action_type: str = "Click", target_name: str = None
+    component_name: str, action_type: str = "Click", target_name: str = None,
 ):
     """
     UI 动作强制埋点装饰器 (适用于绑定在类方法的 Event Handler)
@@ -232,24 +232,23 @@ def track_performance(
                 return result
 
             return async_wrapper
-        else:
 
-            @functools.wraps(func)
-            def sync_wrapper(*args, **kwargs):
-                start_time = time.perf_counter()
-                result = func(*args, **kwargs)
-                elapsed = time.perf_counter() - start_time
-                elapsed_ms = elapsed * 1000
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            elapsed_ms = elapsed * 1000
 
-                if elapsed_ms > threshold_ms:
-                    logger.log(
-                        level,
-                        f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)",
-                    )
+            if elapsed_ms > threshold_ms:
+                logger.log(
+                    level,
+                    f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)",
+                )
 
-                return result
+            return result
 
-            return sync_wrapper
+        return sync_wrapper
 
     return decorator
 
@@ -268,7 +267,7 @@ class AsyncOperationLogger:
     """
 
     def __init__(
-        self, operation: str, context: dict = None, log_level: int = logging.DEBUG
+        self, operation: str, context: dict = None, log_level: int = logging.DEBUG,
     ):
         """
         Args:

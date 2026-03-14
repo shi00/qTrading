@@ -5,7 +5,7 @@ import functools
 import logging
 import threading
 from enum import Enum, auto
-from typing import Optional, Callable, TypeVar
+from typing import Callable, Optional, TypeVar
 
 from utils.config_handler import ConfigHandler
 
@@ -81,10 +81,10 @@ class ThreadPoolManager:
         cpu_workers = ConfigHandler.get_max_cpu_workers()
 
         new_io_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=io_workers, thread_name_prefix="IO_Worker"
+            max_workers=io_workers, thread_name_prefix="IO_Worker",
         )
         new_cpu_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=cpu_workers, thread_name_prefix="CPU_Worker"
+            max_workers=cpu_workers, thread_name_prefix="CPU_Worker",
         )
 
         # 2. Swap references (Atomic in Python GIL)
@@ -95,7 +95,7 @@ class ThreadPoolManager:
         self._cpu_pool = new_cpu_pool
 
         logger.info(
-            f"Thread Pools swapped. New sizes: IO={io_workers}, CPU={cpu_workers}"
+            f"Thread Pools swapped. New sizes: IO={io_workers}, CPU={cpu_workers}",
         )
 
         # 3. Graceful shutdown of old pools in background thread to avoid blocking reload
@@ -125,25 +125,24 @@ class ThreadPoolManager:
         return self._cpu_pool
 
     def get_executor(
-        self, task_type: TaskType
+        self, task_type: TaskType,
     ) -> concurrent.futures.ThreadPoolExecutor:
         if task_type == TaskType.IO:
             return self.io_pool
-        elif task_type == TaskType.CPU:
+        if task_type == TaskType.CPU:
             return self.cpu_pool
-        else:
-            # Fallback to IO if unsure
-            return self.io_pool
+        # Fallback to IO if unsure
+        return self.io_pool
 
     def submit(
-        self, task_type: TaskType, func: Callable[..., T], *args, **kwargs
+        self, task_type: TaskType, func: Callable[..., T], *args, **kwargs,
     ) -> concurrent.futures.Future[T]:
         """Submit a sync task to the specific pool"""
         executor = self.get_executor(task_type)
         return executor.submit(func, *args, **kwargs)
 
     async def run_async(
-        self, task_type: TaskType, func: Callable[..., T], *args, **kwargs
+        self, task_type: TaskType, func: Callable[..., T], *args, **kwargs,
     ) -> T:
         """
         Run a sync function in the executor and await it (asyncio bridge).

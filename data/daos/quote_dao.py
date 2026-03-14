@@ -43,7 +43,7 @@ class QuoteDao(BaseDao):
             return False
 
     async def get_daily_quotes(
-        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None
+        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None,
     ):
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
@@ -77,7 +77,7 @@ class QuoteDao(BaseDao):
                 for i in range(0, len(ts_code_list), chunk_size):
                     chunk = ts_code_list[i : i + chunk_size]
                     placeholders = ",".join(
-                        [f"${base_idx + j}" for j in range(len(chunk))]
+                        [f"${base_idx + j}" for j in range(len(chunk))],
                     )
                     chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
                     chunk_params = base_params + chunk
@@ -88,14 +88,12 @@ class QuoteDao(BaseDao):
 
                 if all_results:
                     return pd.concat(all_results, ignore_index=True)
-                else:
-                    return pd.DataFrame()
-            else:
-                placeholders = ",".join(
-                    [f"${idx + j}" for j in range(len(ts_code_list))]
-                )
-                sql += f" AND ts_code IN ({placeholders})"
-                params.extend(ts_code_list)
+                return pd.DataFrame()
+            placeholders = ",".join(
+                [f"${idx + j}" for j in range(len(ts_code_list))],
+            )
+            sql += f" AND ts_code IN ({placeholders})"
+            params.extend(ts_code_list)
 
         return await self._read_db(sql, params)
 
@@ -107,7 +105,7 @@ class QuoteDao(BaseDao):
 
     async def get_cached_trade_dates(self):
         df = await self._read_db(
-            "SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date"
+            "SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date",
         )
         if df is None or df.empty:
             return set()
@@ -129,7 +127,7 @@ class QuoteDao(BaseDao):
             "amount",
         ]
         return await self._save_upsert(
-            df, "index_daily", cols, pk_columns=["ts_code", "trade_date"]
+            df, "index_daily", cols, pk_columns=["ts_code", "trade_date"],
         )
 
     async def save_index_dailybasic(self, df):
@@ -148,7 +146,7 @@ class QuoteDao(BaseDao):
             "pb",
         ]
         return await self._save_upsert(
-            df, "index_dailybasic", cols, pk_columns=["ts_code", "trade_date"]
+            df, "index_dailybasic", cols, pk_columns=["ts_code", "trade_date"],
         )
 
     async def get_index_daily(self, ts_code=None, trade_date=None):
@@ -202,7 +200,7 @@ class QuoteDao(BaseDao):
             "limit_type",
         ]
         return await self._save_upsert(
-            df, "limit_list", cols, pk_columns=["trade_date", "ts_code"]
+            df, "limit_list", cols, pk_columns=["trade_date", "ts_code"],
         )
 
     # --- Top List ---
@@ -225,7 +223,7 @@ class QuoteDao(BaseDao):
             "reason",
         ]
         return await self._save_upsert(
-            df, "top_list", cols, pk_columns=["trade_date", "ts_code"]
+            df, "top_list", cols, pk_columns=["trade_date", "ts_code"],
         )
 
     async def get_top_list(self, trade_date=None):
@@ -240,14 +238,14 @@ class QuoteDao(BaseDao):
     async def save_margin_daily(self, df):
         cols = ["ts_code", "trade_date", "rzye", "rqye", "rzmre", "rqyl", "rzrqye"]
         return await self._save_upsert(
-            df, "margin_daily", cols, pk_columns=["ts_code", "trade_date"]
+            df, "margin_daily", cols, pk_columns=["ts_code", "trade_date"],
         )
 
     # --- Suspend ---
     async def save_suspend_d(self, df):
         cols = ["ts_code", "trade_date", "suspend_timing", "suspend_type_name"]
         return await self._save_upsert(
-            df, "suspend_d", cols, pk_columns=["ts_code", "trade_date"]
+            df, "suspend_d", cols, pk_columns=["ts_code", "trade_date"],
         )
 
     # --- Moneyflow ---
@@ -268,7 +266,7 @@ class QuoteDao(BaseDao):
             "net_mf_amount",
         ]
         return await self._save_upsert(
-            df, "moneyflow_daily", cols, pk_columns=["ts_code", "trade_date"]
+            df, "moneyflow_daily", cols, pk_columns=["ts_code", "trade_date"],
         )
 
     async def get_moneyflow(self, trade_date=None, ts_code=None):
@@ -288,7 +286,7 @@ class QuoteDao(BaseDao):
     async def save_northbound(self, df):
         cols = ["ts_code", "trade_date", "name", "vol", "ratio", "exchange"]
         return await self._save_upsert(
-            df, "northbound_holding", cols, pk_columns=["ts_code", "trade_date"]
+            df, "northbound_holding", cols, pk_columns=["ts_code", "trade_date"],
         )
 
     async def get_northbound(self, trade_date=None, ts_code=None):
@@ -306,7 +304,7 @@ class QuoteDao(BaseDao):
 
     async def get_latest_northbound(self):
         df = await self._read_db(
-            "SELECT MAX(trade_date) as max_td FROM northbound_holding"
+            "SELECT MAX(trade_date) as max_td FROM northbound_holding",
         )
         if df is not None and not df.empty:
             td = df["max_td"].iloc[0]

@@ -1,11 +1,13 @@
-import unittest
-import pytest
 import asyncio
+import unittest
+from unittest.mock import AsyncMock, patch
+
 import pandas as pd
-from unittest.mock import patch, AsyncMock
+import pytest
+import pytest_asyncio
+
 from data.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-import pytest_asyncio
 
 # Redefining event_loop is often not needed with newer pytest-asyncio,
 # but if we do, we must match scope.
@@ -42,7 +44,7 @@ class TestDataIntegrity:
             return func(*args, **kwargs)
 
         with patch(
-            "utils.thread_pool.ThreadPoolManager.run_async", side_effect=mock_run_async
+            "utils.thread_pool.ThreadPoolManager.run_async", side_effect=mock_run_async,
         ):
             # Mock API return
             mock_df = pd.DataFrame({"ts_code": ["000002.SZ"], "end_date": ["20231231"]})

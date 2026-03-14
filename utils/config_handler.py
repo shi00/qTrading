@@ -6,7 +6,7 @@ import keyring
 from readerwriterlock import rwlock
 
 import config
-from utils.security_utils import SecurityManager, DecryptionError
+from utils.security_utils import DecryptionError, SecurityManager
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class ConfigHandler:
             if dirty:
                 ConfigHandler.save_config(current_config, replace=True)
                 logger.info(
-                    f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}"
+                    f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}",
                 )
 
         except Exception as e:
@@ -173,7 +173,7 @@ class ConfigHandler:
             return SecurityManager.decrypt_data(value)
         except DecryptionError:
             logger.warning(
-                "Failed to decrypt config value. It might be invalid or legacy plaintext."
+                "Failed to decrypt config value. It might be invalid or legacy plaintext.",
             )
             return ""
         except Exception as e:
@@ -220,7 +220,7 @@ class ConfigHandler:
                     current_config.update(config_data)
 
                 success = ConfigHandler._save_json_atomically(
-                    current_config, CONFIG_FILE
+                    current_config, CONFIG_FILE,
                 )
 
                 if success:
@@ -258,7 +258,7 @@ class ConfigHandler:
             return ConfigHandler.save_config({"ts_token": ""})
         except Exception as e:
             logger.warning(
-                f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager."
+                f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager.",
             )
             encrypted = SecurityManager.encrypt_data(token)
             return ConfigHandler.save_config({"ts_token": encrypted})
@@ -426,7 +426,7 @@ class ConfigHandler:
                 encrypted_key = ""  # Clear from plain json
             except Exception as e:
                 logger.warning(
-                    f"Keyring save failed: {e}. Falling back to SecurityManager."
+                    f"Keyring save failed: {e}. Falling back to SecurityManager.",
                 )
                 encrypted_key = SecurityManager.encrypt_data(api_key)
         else:
@@ -441,7 +441,7 @@ class ConfigHandler:
                 "ai_api_key": encrypted_key,
                 "ai_base_url": base_url,
                 "ai_model_name": model_name,
-            }
+            },
         )
 
     @staticmethod
@@ -607,7 +607,7 @@ class ConfigHandler:
     @staticmethod
     def set_tushare_timeout(seconds):
         return ConfigHandler.save_config(
-            {"tushare_timeout": int(seconds) if seconds is not None else None}
+            {"tushare_timeout": int(seconds) if seconds is not None else None},
         )
 
     @staticmethod
@@ -725,5 +725,5 @@ class ConfigHandler:
     @staticmethod
     def set_market_data_poll_interval(seconds):
         return ConfigHandler.save_config(
-            {"market_data_poll_interval": int(max(10, seconds))}
+            {"market_data_poll_interval": int(max(10, seconds))},
         )

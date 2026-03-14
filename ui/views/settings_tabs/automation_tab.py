@@ -1,6 +1,8 @@
 import logging
 import weakref
+
 import flet as ft
+
 from ui.components.settings_widgets import DashboardCard, SettingRow
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
@@ -35,7 +37,7 @@ class AutomationTab(ft.Container):
         auto_update_time = ConfigHandler.get_auto_update_time()
 
         self.schedule_enabled = ft.Switch(
-            value=auto_update_enabled, on_change=self.on_schedule_toggle
+            value=auto_update_enabled, on_change=self.on_schedule_toggle,
         )
         self.schedule_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
@@ -56,7 +58,7 @@ class AutomationTab(ft.Container):
         doubao_time = ConfigHandler.get_doubao_schedule_time()
 
         self.doubao_enabled = ft.Switch(
-            value=doubao_enabled, on_change=self.on_doubao_toggle
+            value=doubao_enabled, on_change=self.on_doubao_toggle,
         )
         self.doubao_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
@@ -131,10 +133,10 @@ class AutomationTab(ft.Container):
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             self.schedule_status,
-                        ]
+                        ],
                     ),
-                ]
-            )
+                ],
+            ),
         )
 
         self.row_doubao_schedule = SettingRow(
@@ -171,10 +173,10 @@ class AutomationTab(ft.Container):
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             self.doubao_status,
-                        ]
+                        ],
                     ),
-                ]
-            )
+                ],
+            ),
         )
 
         self.txt_hint_bg = ft.Text(
@@ -247,16 +249,16 @@ class AutomationTab(ft.Container):
             self.schedule_time.label = I18n.get("settings_update_time")
             self.schedule_time.options = self._build_time_options()
             self.schedule_status.value = self._get_schedule_status_text(
-                self.schedule_enabled.value
+                self.schedule_enabled.value,
             )
 
             self.doubao_enabled.label = I18n.get(
-                "settings_doubao_update", "自动重塑豆包概念"
+                "settings_doubao_update", "自动重塑豆包概念",
             )
             self.doubao_time.label = I18n.get("settings_update_time")
             self.doubao_time.options = self._build_time_options()
             self.doubao_status.value = self._get_schedule_status_text(
-                self.doubao_enabled.value
+                self.doubao_enabled.value,
             )
 
             # 重建整个内容以确保所有文本更新
@@ -295,7 +297,7 @@ class AutomationTab(ft.Container):
             self.show_snack(
                 I18n.get("settings_snack_auto_on")
                 if enabled
-                else I18n.get("settings_snack_auto_off")
+                else I18n.get("settings_snack_auto_off"),
             )
 
     def on_schedule_time_change(self, e):
@@ -305,7 +307,7 @@ class AutomationTab(ft.Container):
         self.update()
         if self.show_snack:
             self.show_snack(
-                I18n.get("settings_snack_time_set").format(time=selected_time)
+                I18n.get("settings_snack_time_set").format(time=selected_time),
             )
 
     def on_doubao_toggle(self, e):
@@ -321,7 +323,7 @@ class AutomationTab(ft.Container):
             self.show_snack(
                 I18n.get("settings_snack_auto_on")
                 if enabled
-                else I18n.get("settings_snack_auto_off")
+                else I18n.get("settings_snack_auto_off"),
             )
 
     def on_doubao_time_change(self, e):
@@ -330,7 +332,7 @@ class AutomationTab(ft.Container):
         self.update()
         if self.show_snack:
             self.show_snack(
-                I18n.get("settings_snack_time_set").format(time=selected_time)
+                I18n.get("settings_snack_time_set").format(time=selected_time),
             )
 
 
@@ -403,8 +405,8 @@ class NotificationsTab(ft.Container):
                     self.row_alerts,
                     ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                     self.row_interval,
-                ]
-            )
+                ],
+            ),
         )
 
         self.txt_notify_desc = ft.Text(
@@ -484,9 +486,8 @@ class NotificationsTab(ft.Container):
         if enabled:
             if self.show_snack:
                 self.show_snack(I18n.get("settings_snack_news_on"))
-        else:
-            if self.show_snack:
-                self.show_snack(I18n.get("settings_snack_news_off"))
+        elif self.show_snack:
+            self.show_snack(I18n.get("settings_snack_news_off"))
 
     def on_interval_change(self, e):
         """处理拉取间隔变更"""
@@ -495,7 +496,7 @@ class NotificationsTab(ft.Container):
             ConfigHandler.save_config({"news_poll_interval": val})
             if self.show_snack:
                 self.show_snack(
-                    I18n.get("settings_snack_interval_set").format(interval=val)
+                    I18n.get("settings_snack_interval_set").format(interval=val),
                 )
         except ValueError:
             pass

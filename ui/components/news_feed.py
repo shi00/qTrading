@@ -1,7 +1,8 @@
 import flet as ft
 import pandas as pd
-from ui.theme import AppColors, AppStyles
+
 from ui.i18n import I18n
+from ui.theme import AppColors, AppStyles
 
 
 class NewsFeed(ft.Container):
@@ -25,12 +26,12 @@ class NewsFeed(ft.Container):
         self._cached_has_more = False
 
         self.news_list = ft.ListView(
-            spacing=10, padding=10, auto_scroll=False, expand=True
+            spacing=10, padding=10, auto_scroll=False, expand=True,
         )
 
         # I18n Refs
         self.empty_text = ft.Text(
-            I18n.get("home_news_empty"), color=AppColors.TEXT_HINT
+            I18n.get("home_news_empty"), color=AppColors.TEXT_HINT,
         )
 
         self.empty_state = ft.Container(
@@ -143,7 +144,7 @@ class NewsFeed(ft.Container):
             self._cached_news = news_data
         else:
             self._cached_news = pd.concat(
-                [news_data, self._cached_news], ignore_index=True
+                [news_data, self._cached_news], ignore_index=True,
             )
 
         # Ensure we are in list mode
@@ -184,7 +185,7 @@ class NewsFeed(ft.Container):
                 self._cached_news = news_data
             else:
                 self._cached_news = pd.concat(
-                    [self._cached_news, news_data], ignore_index=True
+                    [self._cached_news, news_data], ignore_index=True,
                 )
         self._cached_has_more = has_more
 
@@ -232,13 +233,13 @@ class NewsFeed(ft.Container):
                                 size=12,
                             ),
                             ft.Text(
-                                time_str[-8:], color=AppColors.TEXT_SECONDARY, size=12
+                                time_str[-8:], color=AppColors.TEXT_SECONDARY, size=12,
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
                     ft.Text(content, size=14, color=AppColors.TEXT_PRIMARY),
-                ]
+                ],
             ),
             padding=10,
             bgcolor=bg_color,

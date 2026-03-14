@@ -6,18 +6,18 @@ import threading
 import pandas as pd
 
 from data.cache_manager import CacheManager
-from data.mixins.health_mixin import HealthCheckMixin
 from data.mixins.calendar_mixin import CalendarMixin
+from data.mixins.health_mixin import HealthCheckMixin
 from data.news_fetcher import NewsFetcher
 from data.sync_strategies.base import SyncContext
 from data.sync_strategies.financial import FinancialSyncStrategy
 from data.sync_strategies.historical import HistoricalSyncStrategy
-from data.sync_strategies.macro import MacroSyncStrategy
 from data.sync_strategies.holder import HolderSyncStrategy
+from data.sync_strategies.macro import MacroSyncStrategy
 from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.log_decorators import log_async_operation, PerfThreshold
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Initialize Context & Strategies
             self.context = SyncContext(
-                api=self.api, cache=self.cache, config=ConfigHandler
+                api=self.api, cache=self.cache, config=ConfigHandler,
             )
             self.context.processor = self
             self.strategies = {
@@ -101,9 +101,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return asyncio.Event()
 
         if not hasattr(current_loop, "_processor_cancel_evt"):
-            setattr(current_loop, "_processor_cancel_evt", asyncio.Event())
+            current_loop._processor_cancel_evt = asyncio.Event()
 
-        return getattr(current_loop, "_processor_cancel_evt")
+        return current_loop._processor_cancel_evt
 
     async def request_cancel(self):
         """
@@ -186,29 +186,29 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     # ==========================================
 
     @log_async_operation(
-        operation_name="sync_historical", threshold_ms=PerfThreshold.DB_BULK_IO
+        operation_name="sync_historical", threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def sync_historical_data(self, days=365, progress_callback=None):
         """Delegated to HistoricalSyncStrategy"""
         result = await self.strategies["historical"].run(
-            days=days, progress_callback=progress_callback
+            days=days, progress_callback=progress_callback,
         )
         return result
 
     @log_async_operation(
-        operation_name="sync_financial", threshold_ms=PerfThreshold.DB_BULK_IO
+        operation_name="sync_financial", threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def sync_financial_reports(
-        self, periods=None, progress_callback=None, force=False
+        self, periods=None, progress_callback=None, force=False,
     ):
         """Delegated to FinancialSyncStrategy"""
         result = await self.strategies["financial"].run(
-            periods=periods, force=force, progress_callback=progress_callback
+            periods=periods, force=force, progress_callback=progress_callback,
         )
         return result.added
 
     async def sync_comprehensive_fundamentals(
-        self, progress_callback=None, force=False
+        self, progress_callback=None, force=False,
     ):
         """Delegated to FinancialSyncStrategy (Full Sync Mode)
 
@@ -216,14 +216,14 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             SyncResult: Full result object with status, added count, and errors
         """
         result = await self.strategies["financial"].run(
-            force=force, progress_callback=progress_callback
+            force=force, progress_callback=progress_callback,
         )
         return result
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):
         """Delegated to FinancialSyncStrategy"""
         return await self.strategies["financial"].repair_financial_data(
-            ts_codes, progress_callback
+            ts_codes, progress_callback,
         )
 
     async def sync_daily_market_snapshot(self, trade_date=None, force=False):
@@ -232,7 +232,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             trade_date = await self.get_latest_trade_date()
 
         await self.strategies["historical"].sync_daily_market_snapshot(
-            trade_date, force=force
+            trade_date, force=force,
         )
 
         # Clear caches to ensure fresh data visibility
@@ -264,13 +264,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         return result
 
     async def run_doubao_tagging(
-        self, task_id: str = None, cancel_event=None, **kwargs
+        self, task_id: str = None, cancel_event=None, **kwargs,
     ):
         try:
             from scripts.doubao_auto_tagger import DoubaoTagger
         except ImportError:
             logger.error(
-                "Playwright 依赖缺失，请运行 `pip install playwright && playwright install`"
+                "Playwright 依赖缺失，请运行 `pip install playwright && playwright install`",
             )
             raise RuntimeError("系统缺少自动化打标底层依赖组件。")
 
@@ -289,7 +289,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     # ==========================================
 
     @log_async_operation(
-        operation_name="init_data", threshold_ms=PerfThreshold.GLOBAL_INIT
+        operation_name="init_data", threshold_ms=PerfThreshold.GLOBAL_INIT,
     )
     async def init_data(self):
         """Initialize DB with enhanced schema"""
@@ -307,7 +307,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return True, I18n.get("status_never_synced")
 
             last_sync = datetime.datetime.strptime(
-                status.get("last_sync_date"), "%Y-%m-%d %H:%M:%S"
+                status.get("last_sync_date"), "%Y-%m-%d %H:%M:%S",
             )
             days_since = (get_now() - last_sync).days
 
@@ -326,7 +326,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     # ... Other simple sync/get methods ...
 
     @log_async_operation(
-        operation_name="sync_stock_basic", threshold_ms=PerfThreshold.EXTERNAL_NETWORK
+        operation_name="sync_stock_basic", threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
     async def sync_stock_basic(self):
         """Sync stock basic info (Step 1 of initialization)."""
@@ -351,17 +351,16 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             if df is not None and not df.empty:
                 count = await self.cache.save_stock_basic(df)
                 await self.cache.update_sync_status(
-                    "stock_basic", get_now().strftime("%Y%m%d"), count
+                    "stock_basic", get_now().strftime("%Y%m%d"), count,
                 )
                 logger.info(
-                    f"[DataProcessor] Sync Basic | ✅ Pushed {count} active stocks"
+                    f"[DataProcessor] Sync Basic | ✅ Pushed {count} active stocks",
                 )
                 return count
-            else:
-                logger.warning(
-                    "[DataProcessor] Sync Basic | ⚠️ Remote API returned empty dataset"
-                )
-                return 0
+            logger.warning(
+                "[DataProcessor] Sync Basic | ⚠️ Remote API returned empty dataset",
+            )
+            return 0
 
         except Exception as e:
             logger.error(f"[DataProcessor] Sync Basic | ❌ Failed: {e}", exc_info=True)
@@ -371,7 +370,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 self._is_syncing_basic = False
 
     @log_async_operation(
-        operation_name="sync_concepts", threshold_ms=PerfThreshold.EXTERNAL_NETWORK
+        operation_name="sync_concepts", threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
     async def sync_concepts(self):
         """Sync stock concepts from Tushare."""
@@ -428,7 +427,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     elif isinstance(r, Exception):
                         # Log but don't stop everything for one failed concept
                         logger.warning(
-                            f"[DataProcessor] Sync Concepts | ⚠️ Subtask failed: {r}"
+                            f"[DataProcessor] Sync Concepts | ⚠️ Subtask failed: {r}",
                         )
 
             except asyncio.CancelledError:
@@ -458,13 +457,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             # Atomic overwrite (refresh)
             count = await self.cache.overwrite_concepts(full_df)
             logger.info(
-                f"[DataProcessor] Sync Concepts | ✅ Saved {count} structured mappings"
+                f"[DataProcessor] Sync Concepts | ✅ Saved {count} structured mappings",
             )
             return count
 
         except Exception as e:
             logger.error(
-                f"[DataProcessor] Sync Concepts | ❌ Failed: {e}", exc_info=True
+                f"[DataProcessor] Sync Concepts | ❌ Failed: {e}", exc_info=True,
             )
             return 0
 
@@ -502,7 +501,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Find latest valid date
             cache_df = await self.cache.get_trade_cal(
-                start_date=start_str, end_date=today_str, is_open=1
+                start_date=start_str, end_date=today_str, is_open=1,
             )
             date = today_str
             if not cache_df.empty:
@@ -585,8 +584,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         Note: Call request_cancel() to cancel this operation.
         """
-        from ui.i18n import I18n
         from data.data_dictionary import validate_schema_definitions
+        from ui.i18n import I18n
 
         # Run schema validation (DD-01)
         validate_schema_definitions()
@@ -625,7 +624,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             stock_count = await self.sync_stock_basic()
             if stock_count == 0:
                 logger.error(
-                    "[DataProcessor] Init | ❌ Critical failure: Stock Basic sync returned empty, aborting entire phase."
+                    "[DataProcessor] Init | ❌ Critical failure: Stock Basic sync returned empty, aborting entire phase.",
                 )
                 return None
             if self.is_cancelled():
@@ -645,11 +644,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 get_now() - datetime.timedelta(days=365 * years + 30)
             ).strftime("%Y%m%d")
             cal_success = await self.ensure_trade_cal(
-                end_date, required_start_date=rough_start
+                end_date, required_start_date=rough_start,
             )
             if not cal_success:
                 logger.error(
-                    "[DataProcessor] Init | ❌ Critical failure: Trade calendar sync failed, aborting entire phase."
+                    "[DataProcessor] Init | ❌ Critical failure: Trade calendar sync failed, aborting entire phase.",
                 )
                 return None
             if self.is_cancelled():
@@ -661,11 +660,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             trade_days = 250 * years
             history_result = await self.sync_historical_data(
-                days=trade_days, progress_callback=step3_callback
+                days=trade_days, progress_callback=step3_callback,
             )
             if history_result and history_result.status == "failed":
                 logger.error(
-                    f"[DataProcessor] Init | ❌ Historical daily sync encountered errors: {history_result.errors}"
+                    f"[DataProcessor] Init | ❌ Historical daily sync encountered errors: {history_result.errors}",
                 )
                 return None
             if self.is_cancelled():
@@ -676,11 +675,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 report_step(4, current, total, msg)
 
             financial_result = await self.sync_comprehensive_fundamentals(
-                progress_callback=step4_callback
+                progress_callback=step4_callback,
             )
             if financial_result and financial_result.status == "failed":
                 logger.error(
-                    f"[DataProcessor] Init | ❌ Financial sync encountered errors: {financial_result.errors}"
+                    f"[DataProcessor] Init | ❌ Financial sync encountered errors: {financial_result.errors}",
                 )
                 return None
             if self.is_cancelled():
@@ -692,7 +691,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             macro_res = await self.strategies["macro"].run()
             if macro_res.status == "failed":
                 logger.warning(
-                    f"[DataProcessor] Init | ⚠️ Macro sync failed: {macro_res.errors}"
+                    f"[DataProcessor] Init | ⚠️ Macro sync failed: {macro_res.errors}",
                 )
 
             report_step(5, 1, 3, I18n.get("init_sync_holders"))
@@ -700,7 +699,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             holder_res = await self.strategies["holder"].run()
             if holder_res.status == "failed":
                 logger.warning(
-                    f"[DataProcessor] Init | ⚠️ Holder sync failed: {holder_res.errors}"
+                    f"[DataProcessor] Init | ⚠️ Holder sync failed: {holder_res.errors}",
                 )
 
             report_step(5, 2, 3, I18n.get("init_step_5_done"))
@@ -735,7 +734,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         end = get_now().strftime("%Y%m%d")
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
         rough_start = (get_now() - datetime.timedelta(days=int(days * 2.0))).strftime(
-            "%Y%m%d"
+            "%Y%m%d",
         )
         all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end)
         start = (
@@ -744,7 +743,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             else (all_dates[0] if all_dates else rough_start)
         )
         return await self.cache.get_daily_quotes(
-            ts_code=ts_code, start_date=start, end_date=end
+            ts_code=ts_code, start_date=start, end_date=end,
         )
 
     async def get_strategy_data(self):

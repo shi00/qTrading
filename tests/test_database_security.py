@@ -1,6 +1,7 @@
-import unittest
 import os
 import sqlite3
+import unittest
+
 from data.database_manager import DatabaseManager
 
 
@@ -16,7 +17,7 @@ class TestDatabaseManagerSecurity(unittest.TestCase):
 
         # Create sample tables
         cursor.execute(
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)"
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)",
         )
         cursor.execute("INSERT INTO users VALUES (1, 'admin', 'secret')")
         cursor.execute("INSERT INTO users VALUES (2, 'guest', '12345')")
@@ -54,7 +55,7 @@ class TestDatabaseManagerSecurity(unittest.TestCase):
 
         # Verify valid query works
         df_valid = self.db_manager.query_table(
-            "users", filters=[("username", "=", "admin")]
+            "users", filters=[("username", "=", "admin")],
         )
         self.assertEqual(len(df_valid), 1)
 
@@ -79,14 +80,14 @@ class TestDatabaseManagerSecurity(unittest.TestCase):
 
         # INSERT
         result = self.db_manager.execute_sql(
-            "INSERT INTO users VALUES (3, 'hacker', '123')"
+            "INSERT INTO users VALUES (3, 'hacker', '123')",
         )
         self.assertFalse(result["success"])
         self.assertIn("Only SELECT statements are allowed", result.get("error", ""))
 
         # UPDATE
         result = self.db_manager.execute_sql(
-            "UPDATE users SET password='hacked' WHERE id=1"
+            "UPDATE users SET password='hacked' WHERE id=1",
         )
         self.assertFalse(result["success"])
         self.assertIn("Only SELECT statements are allowed", result.get("error", ""))

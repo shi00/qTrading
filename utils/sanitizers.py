@@ -106,7 +106,7 @@ class DataSanitizer:
             import traceback
 
             tb_lines = traceback.format_exception(
-                type(exception), exception, exception.__traceback__
+                type(exception), exception, exception.__traceback__,
             )
             # 过滤敏感路径
             tb_clean = [
@@ -139,12 +139,11 @@ class DataSanitizer:
                     result[k] = DataSanitizer.sanitize_token(v)
                 else:
                     result[k] = "***"
+            # DataFrame特殊处理
+            elif isinstance(v, pd.DataFrame):
+                result[k] = DataSanitizer.sanitize_dataframe(v)
             else:
-                # DataFrame特殊处理
-                if isinstance(v, pd.DataFrame):
-                    result[k] = DataSanitizer.sanitize_dataframe(v)
-                else:
-                    result[k] = v
+                result[k] = v
 
         return result
 

@@ -1,6 +1,7 @@
 import flet as ft
-from ui.theme import AppColors, AppStyles
+
 from ui.i18n import I18n
+from ui.theme import AppColors, AppStyles
 
 
 class MarketDashboard(ft.Column):
@@ -21,29 +22,29 @@ class MarketDashboard(ft.Column):
         # --- Internal State Refs for UI Updates ---
         # Indices Values
         self.sh_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY
+            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY,
         )
         self.sh_chg = ft.Text(
-            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY
+            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
         )
 
         self.sz_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY
+            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY,
         )
         self.sz_chg = ft.Text(
-            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY
+            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
         )
 
         self.cyb_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY
+            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY,
         )
         self.cyb_chg = ft.Text(
-            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY
+            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
         )
 
         # Northbound Values
         self.hsgt_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY
+            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
         )
         self.hsgt_sub = ft.Text("--", size=12, color=AppColors.TEXT_SECONDARY)
 
@@ -82,7 +83,7 @@ class MarketDashboard(ft.Column):
         # Hot Concepts Container (Dynamic Content)
         self.concepts_row = ft.ResponsiveRow(run_spacing=10)
         self.concepts_placeholder = ft.Text(
-            I18n.get("home_hot_concepts_empty"), size=12, color=AppColors.TEXT_HINT
+            I18n.get("home_hot_concepts_empty"), size=12, color=AppColors.TEXT_HINT,
         )
 
         # --- Layout Construction ---
@@ -92,11 +93,11 @@ class MarketDashboard(ft.Column):
                 self._build_card(self.sz_title, self.sz_val, self.sz_chg),
                 self._build_card(self.cyb_title, self.cyb_val, self.cyb_chg),
                 self._build_card(self.hsgt_title, self.hsgt_val, self.hsgt_sub),
-            ]
+            ],
         )
 
         self.concepts_section = ft.Column(
-            [self.concepts_title, self.concepts_row], spacing=10
+            [self.concepts_title, self.concepts_row], spacing=10,
         )
         # Init with placeholder
         self.concepts_row.controls = [self.concepts_placeholder]

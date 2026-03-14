@@ -1,7 +1,7 @@
+import asyncio
 import logging
 import threading
 import time
-import asyncio
 
 logger = logging.getLogger(__name__)
 

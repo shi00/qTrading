@@ -45,14 +45,14 @@ class ProxyManager:
 
         # Safety Filter: Ensure all items are strings
         target_domains = list(
-            set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()])
+            set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]),
         )
 
         if not target_domains:
             logger.info("[ProxyManager] No cache/whitelist domains configured.")
         else:
             logger.info(
-                f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist."
+                f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist.",
             )
             final_domains.update(target_domains)
 
@@ -65,7 +65,7 @@ class ProxyManager:
             os.environ["NO_PROXY"] = new_no_proxy
             os.environ["no_proxy"] = new_no_proxy
             logger.info(
-                f"[ProxyManager] Configuration applied. NO_PROXY={new_no_proxy}"
+                f"[ProxyManager] Configuration applied. NO_PROXY={new_no_proxy}",
             )
         else:
             logger.info("[ProxyManager] Configuration applied. No changes.")

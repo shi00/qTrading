@@ -283,8 +283,8 @@ class SystemTab(ft.Container):
                             self.row_proxy,
                         ],
                         spacing=10,
-                    )
-                )
+                    ),
+                ),
             ],
             padding=ft.padding.only(bottom=50),
         )
@@ -311,7 +311,7 @@ class SystemTab(ft.Container):
     def on_log_level_change(self, e):
         """Handle log level change"""
         UILogger.log_action(
-            "SystemTab", "Select", f"log_level={self.log_level_dropdown.value}"
+            "SystemTab", "Select", f"log_level={self.log_level_dropdown.value}",
         )
         level = self.log_level_dropdown.value
         ConfigHandler.set_log_level(level)
@@ -325,7 +325,7 @@ class SystemTab(ft.Container):
             val = int(self.concurrency_input.value)
             if val < 1 or val > 32:
                 self.show_snack(
-                    I18n.get("sys_snack_concurrency_range"), color=AppColors.ERROR
+                    I18n.get("sys_snack_concurrency_range"), color=AppColors.ERROR,
                 )
                 return
             ConfigHandler.set_sync_max_concurrent_heavy(val)
@@ -383,7 +383,7 @@ class SystemTab(ft.Container):
 
             if not io_str or not cpu_str:
                 self.show_snack(
-                    I18n.get("sys_snack_threads_empty"), color=AppColors.ERROR
+                    I18n.get("sys_snack_threads_empty"), color=AppColors.ERROR,
                 )
                 return
 
@@ -417,7 +417,7 @@ class SystemTab(ft.Container):
                 color=AppColors.ERROR,
             )
             logger.error(
-                f"[SystemTab] ThreadPool | ❌ Save failed: {ex}", exc_info=True
+                f"[SystemTab] ThreadPool | ❌ Save failed: {ex}", exc_info=True,
             )
 
     def save_rate_limit(self, e):
@@ -458,15 +458,15 @@ class SystemTab(ft.Container):
 
             ConfigHandler.set_no_proxy_domains(domains)
             self.show_snack(
-                I18n.get("settings_snack_no_proxy_saved"), color=AppColors.SUCCESS
+                I18n.get("settings_snack_no_proxy_saved"), color=AppColors.SUCCESS,
             )
             logger.info(f"No-Proxy domains updated: {domains}")
 
             from utils.proxy_manager import ProxyManager
-            from utils.thread_pool import ThreadPoolManager, TaskType
+            from utils.thread_pool import TaskType, ThreadPoolManager
 
             ThreadPoolManager().submit(
-                TaskType.IO, ProxyManager.apply_smart_proxy_policy
+                TaskType.IO, ProxyManager.apply_smart_proxy_policy,
             )
 
         except Exception as ex:

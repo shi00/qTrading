@@ -1,11 +1,13 @@
+import logging
+
 import flet as ft
-from ui.theme import AppColors
+
 from ui.i18n import I18n
-from ui.views.settings_tabs.data_source_tab import DataSourceTab
+from ui.theme import AppColors
 from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
+from ui.views.settings_tabs.data_source_tab import DataSourceTab
 from ui.views.settings_tabs.system_tab import SystemTab
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +72,7 @@ class SettingsView(ft.Container):
                 self.header_title,
                 tab_bar,
                 ft.Divider(
-                    height=1, thickness=1
+                    height=1, thickness=1,
                 ),  # Color defaults to DIVIDER (Outline Variant) which is correct
                 self.tab_body,
             ],
@@ -175,7 +177,7 @@ class SettingsView(ft.Container):
                 o for o in self.page.overlay if not isinstance(o, ft.SnackBar)
             ]
             snack = ft.SnackBar(
-                content=ft.Text(message), open=True, bgcolor=color, **kwargs
+                content=ft.Text(message), open=True, bgcolor=color, **kwargs,
             )
             self.page.overlay.append(snack)
             self.page.update()
@@ -195,7 +197,7 @@ class SettingsView(ft.Container):
                     tab.update_theme()
                 except Exception as e:
                     logger.warning(
-                        f"Failed to update theme for tab {type(tab).__name__}: {e}"
+                        f"Failed to update theme for tab {type(tab).__name__}: {e}",
                     )
 
         self._safe_update()

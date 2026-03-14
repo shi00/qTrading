@@ -67,10 +67,10 @@ class TushareClient:
                 # Capacity allows for small bursts (e.g. 5 seconds worth or fixed 10)
                 capacity = max(10, rate_per_sec * 5)
                 self._rate_limiter = TokenBucket(
-                    start_tokens=capacity, capacity=capacity, rate=rate_per_sec
+                    start_tokens=capacity, capacity=capacity, rate=rate_per_sec,
                 )
                 logger.info(
-                    f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)"
+                    f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
                 )
             else:
                 self._rate_limiter = None
@@ -81,7 +81,7 @@ class TushareClient:
                 # Pass timeout to requests via tushare SDK
                 self.pro = ts.pro_api(timeout=self.timeout)
                 logger.info(
-                    f"[API] Tushare Client initialized with timeout={self.timeout}s"
+                    f"[API] Tushare Client initialized with timeout={self.timeout}s",
                 )
             else:
                 self.pro = None
@@ -94,18 +94,19 @@ class TushareClient:
         # Re-initialize with timeout
         self.pro = ts.pro_api(timeout=self.timeout)
         logger.info(
-            f"[API] Token updated. Client re-initialized with timeout={self.timeout}s"
+            f"[API] Token updated. Client re-initialized with timeout={self.timeout}s",
         )
 
     async def _handle_api_call(self, func, **kwargs):
         """Async wrapper that yields to event loop during rate limit / backoff"""
         import asyncio
-        from utils.thread_pool import ThreadPoolManager
         import functools
 
         # Tushare SDK wraps API methods as functools.partial(DataApi.query, 'api_name').
         # Standard __name__ doesn't exist on partial objects, so extract from partial.args[0].
         import functools as _functools
+
+        from utils.thread_pool import ThreadPoolManager
 
         if isinstance(func, _functools.partial) and func.args:
             api_name = func.args[0]
@@ -119,13 +120,13 @@ class TushareClient:
             try:
                 if not self.pro:
                     raise Exception(
-                        "Tushare Token not set. Please set your token in settings."
+                        "Tushare Token not set. Please set your token in settings.",
                     )
 
                 loop = asyncio.get_running_loop()
                 # Run the actual synchronous HTTP call in the IO thread pool
                 result = await loop.run_in_executor(
-                    ThreadPoolManager().io_pool, functools.partial(func, **kwargs)
+                    ThreadPoolManager().io_pool, functools.partial(func, **kwargs),
                 )
 
                 # Apply unified column renaming if this API needs it
@@ -153,7 +154,7 @@ class TushareClient:
                 if is_rate_limit:
                     sleep_time = (2**i) + random.uniform(0, 1)
                     logger.debug(
-                        f"[tushare_api] RATE_LIMITED ({api_name}): backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})"
+                        f"[tushare_api] RATE_LIMITED ({api_name}): backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})",
                     )
                     await asyncio.sleep(sleep_time)
                     continue
@@ -161,14 +162,14 @@ class TushareClient:
                 if is_network_error:
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
                     logger.warning(
-                        f"[tushare_api] CONNECTION_ERROR ({api_name}): {type(e).__name__} - retry in {sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})"
+                        f"[tushare_api] CONNECTION_ERROR ({api_name}): {type(e).__name__} - retry in {sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})",
                     )
                     await asyncio.sleep(sleep_time)
                     continue
 
                 if i == self.max_retries - 1:
                     logger.error(
-                        f"[tushare_api] RETRY_EXHAUSTED ({api_name}): {error_msg}"
+                        f"[tushare_api] RETRY_EXHAUSTED ({api_name}): {error_msg}",
                     )
                     raise e
 
@@ -210,7 +211,7 @@ class TushareClient:
 
         if page >= max_pages:
             logger.warning(
-                f"[API] Pagination hit max_pages={max_pages} (offset={offset}). Results may be incomplete."
+                f"[API] Pagination hit max_pages={max_pages} (offset={offset}). Results may be incomplete.",
             )
 
         if not df_list:
@@ -225,7 +226,7 @@ class TushareClient:
             raise Exception("Tushare Token not set. Please set your token in settings.")
         try:
             df = self.pro.trade_cal(
-                exchange="SSE", start_date=start_date, end_date=end_date, is_open="1"
+                exchange="SSE", start_date=start_date, end_date=end_date, is_open="1",
             )
             if df is not None and not df.empty:
                 return df["cal_date"].tolist()
@@ -282,19 +283,18 @@ class TushareClient:
                     TushareClient._trade_cal_cache.update(dates)
                     TushareClient._loaded_years.add(year)
                     logger.info(
-                        f"[Cache] Successfully loaded {len(dates)} trading days for {year}"
+                        f"[Cache] Successfully loaded {len(dates)} trading days for {year}",
                     )
 
                     return date_str in dates
-                else:
-                    logger.warning(
-                        f"[Cache] Failed to load calendar for {year} (Empty response)"
-                    )
+                logger.warning(
+                    f"[Cache] Failed to load calendar for {year} (Empty response)",
+                )
                     # Do not mark as loaded so we retry next time, or logic below deals with it
 
         except Exception as e:
             logger.warning(
-                f"[API] Trade calendar cache load failed: {e}, falling back to Offline Calendar"
+                f"[API] Trade calendar cache load failed: {e}, falling back to Offline Calendar",
             )
 
         # 3. Fallback: Offline Calendar (pandas_market_calendars)
@@ -310,7 +310,7 @@ class TushareClient:
                 is_weekday = dt.weekday() < 5
                 if is_weekday:
                     logger.warning(
-                        f"[API] UNSAFE_FALLBACK: Assuming {date_str} is trading day (weekday check). May be inaccurate for holidays!"
+                        f"[API] UNSAFE_FALLBACK: Assuming {date_str} is trading day (weekday check). May be inaccurate for holidays!",
                     )
                 return is_weekday
             except (ValueError, TypeError):
@@ -349,7 +349,7 @@ class TushareClient:
         return await self.get_stock_basic()
 
     async def get_daily_quotes(
-        self, trade_date=None, start_date=None, end_date=None, ts_code=None
+        self, trade_date=None, start_date=None, end_date=None, ts_code=None,
     ):
         """Get daily quotes with adj_factor joined"""
 
@@ -408,7 +408,7 @@ class TushareClient:
         )
 
     async def get_income(
-        self, period=None, start_date=None, end_date=None, ts_code=None
+        self, period=None, start_date=None, end_date=None, ts_code=None,
     ):
         """Get income statement data"""
 
@@ -422,7 +422,7 @@ class TushareClient:
         )
 
     async def get_cashflow(
-        self, period=None, start_date=None, end_date=None, ts_code=None
+        self, period=None, start_date=None, end_date=None, ts_code=None,
     ):
         """Get cashflow statement data"""
 
@@ -436,7 +436,7 @@ class TushareClient:
         )
 
     async def get_balancesheet(
-        self, period=None, start_date=None, end_date=None, ts_code=None
+        self, period=None, start_date=None, end_date=None, ts_code=None,
     ):
         """Get balance sheet data"""
 
@@ -475,7 +475,7 @@ class TushareClient:
         return await self._handle_api_call(self.pro.block_trade, trade_date=trade_date)
 
     async def get_fina_indicator(
-        self, ts_code=None, period=None, start_date=None, end_date=None
+        self, ts_code=None, period=None, start_date=None, end_date=None,
     ):
         """
         Get financial indicators (ROE, growth rates, etc.)
@@ -522,11 +522,11 @@ class TushareClient:
         """
 
         return await self._handle_api_call(
-            self.pro.concept_detail, ts_code=ts_code, fields="id,concept_name"
+            self.pro.concept_detail, ts_code=ts_code, fields="id,concept_name",
         )
 
     async def get_index_daily(
-        self, ts_code=None, trade_date=None, start_date=None, end_date=None
+        self, ts_code=None, trade_date=None, start_date=None, end_date=None,
     ):
         """Get index daily data"""
 
@@ -543,7 +543,7 @@ class TushareClient:
         """Get Northbound (HSGT) money flow"""
 
         return await self._handle_api_call(
-            self.pro.moneyflow_hsgt, trade_date=trade_date
+            self.pro.moneyflow_hsgt, trade_date=trade_date,
         )
 
     async def get_index_dailybasic(self, trade_date=None, ts_code=None):
@@ -581,7 +581,7 @@ class TushareClient:
         # Note: API might be 'margin_detail' or 'margin' depending on permissions
         # Usually 'margin_detail' is for individual stocks
         return await self._handle_api_call(
-            self.pro.margin_detail, trade_date=trade_date, ts_code=ts_code
+            self.pro.margin_detail, trade_date=trade_date, ts_code=ts_code,
         )
 
     async def get_fina_audit(self, ts_code, start_date=None, end_date=None):
@@ -596,7 +596,7 @@ class TushareClient:
         )
 
     async def get_forecast(
-        self, ts_code=None, period=None, start_date=None, end_date=None, ann_date=None
+        self, ts_code=None, period=None, start_date=None, end_date=None, ann_date=None,
     ):
         """Get performance forecast"""
 
@@ -611,7 +611,7 @@ class TushareClient:
         )
 
     async def get_fina_mainbz(
-        self, ts_code=None, period=None, start_date=None, end_date=None
+        self, ts_code=None, period=None, start_date=None, end_date=None,
     ):
         """Get main business composition"""
 
@@ -628,11 +628,11 @@ class TushareClient:
         """Get share pledge statistics"""
 
         return await self._handle_api_call_paginated(
-            self.pro.pledge_stat, ts_code=ts_code, end_date=end_date
+            self.pro.pledge_stat, ts_code=ts_code, end_date=end_date,
         )
 
     async def get_repurchase(
-        self, ts_code=None, start_date=None, end_date=None, ann_date=None
+        self, ts_code=None, start_date=None, end_date=None, ann_date=None,
     ):
         """Get share repurchase"""
 
@@ -645,7 +645,7 @@ class TushareClient:
         )
 
     async def get_dividend(
-        self, ts_code=None, start_date=None, end_date=None, ann_date=None
+        self, ts_code=None, start_date=None, end_date=None, ann_date=None,
     ):
         """Get dividend history"""
 
@@ -662,11 +662,11 @@ class TushareClient:
     async def get_shibor(self, start_date=None, end_date=None):
         """Get Shibor rates"""
         return await self._handle_api_call(
-            self.pro.shibor, start_date=start_date, end_date=end_date
+            self.pro.shibor, start_date=start_date, end_date=end_date,
         )
 
     async def get_top10_holders(
-        self, ts_code=None, end_date=None, start_date=None, ann_date=None
+        self, ts_code=None, end_date=None, start_date=None, ann_date=None,
     ):
         """Get Top 10 Holders"""
         return await self._handle_api_call_paginated(
@@ -678,7 +678,7 @@ class TushareClient:
         )
 
     async def get_index_weight(
-        self, index_code=None, trade_date=None, start_date=None, end_date=None
+        self, index_code=None, trade_date=None, start_date=None, end_date=None,
     ):
         """Get Index Component Weights"""
         return await self._handle_api_call(
@@ -690,7 +690,7 @@ class TushareClient:
         )
 
     async def get_stk_holdernumber(
-        self, ts_code=None, end_date=None, start_date=None, ann_date=None
+        self, ts_code=None, end_date=None, start_date=None, ann_date=None,
     ):
         """Get Stock Holder Number (Chip Concentration)"""
         return await self._handle_api_call_paginated(

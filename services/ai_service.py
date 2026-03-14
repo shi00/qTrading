@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from data.review_manager import ReviewManager
 from services.local_model_manager import LocalModelManager
 from utils.config_handler import ConfigHandler
-from utils.log_decorators import log_async_operation, PerfThreshold
+from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class AIService:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             logger.debug(
-                "[AIService] Semaphore | No running event loop, using DummySemaphore."
+                "[AIService] Semaphore | No running event loop, using DummySemaphore.",
             )
 
             class DummySemaphore:
@@ -69,9 +69,9 @@ class AIService:
             # Enforce minimum concurrency of 1 to prevent deadlock
             raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
             concurrency = max(1, int(raw_val)) if raw_val else 5
-            setattr(current_loop, "_ai_semaphore", asyncio.Semaphore(concurrency))
+            current_loop._ai_semaphore = asyncio.Semaphore(concurrency)
 
-        return getattr(current_loop, "_ai_semaphore")
+        return current_loop._ai_semaphore
 
     def _setup_client(self):
         """
@@ -84,14 +84,14 @@ class AIService:
 
         if not api_key:
             logger.warning(
-                "[AIService] Config | ⚠️ API Key not found. AI features disabled."
+                "[AIService] Config | ⚠️ API Key not found. AI features disabled.",
             )
             self.client = None
             return
 
         if not base_url:
             logger.error(
-                "[AIService] Config | ❌ 'ai_base_url' is mandatory. No default fallback."
+                "[AIService] Config | ❌ 'ai_base_url' is mandatory. No default fallback.",
             )
             self.client = None
             return
@@ -165,7 +165,7 @@ class AIService:
                 "You are a helpful assistant.",
             )
             user_prompt = next(
-                (m["content"] for m in messages if m["role"] == "user"), ""
+                (m["content"] for m in messages if m["role"] == "user"), "",
             )
 
             if not manager.get_loaded_model_path():
@@ -189,7 +189,7 @@ class AIService:
 
             async with await self._get_semaphore():
                 logger.debug(
-                    f"[AIService] Cloud | Invoking {model} ({len(messages)} messages)"
+                    f"[AIService] Cloud | Invoking {model} ({len(messages)} messages)",
                 )
 
                 response = await self.client.chat.completions.create(
@@ -217,7 +217,7 @@ class AIService:
                         ):
                             reasoning_content += delta.reasoning_content
                             on_chunk(
-                                delta.reasoning_content, True
+                                delta.reasoning_content, True,
                             )  # True for is_reasoning
                         if delta.content:
                             response_content += delta.content
@@ -244,7 +244,7 @@ class AIService:
                     # ignoring trailing garbage (like "Extra data")
                     try:
                         obj, idx = json.JSONDecoder().raw_decode(
-                            response_content[start:]
+                            response_content[start:],
                         )
                         return obj
                     except json.JSONDecodeError:
@@ -302,7 +302,7 @@ class AIService:
             [
                 f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}"
                 for n in news_list[:5]
-            ]
+            ],
         )
         if not news_list:
             news_text = "No recent news found."
@@ -359,12 +359,12 @@ class AIService:
                 history_context = await rm.get_learning_context()
             except Exception as e:
                 logger.warning(
-                    f"[AIService] Analyze | ⚠️ Learning context fetch failed: {e}"
+                    f"[AIService] Analyze | ⚠️ Learning context fetch failed: {e}",
                 )
                 history_context = ""
 
         # Load System Prompt
-        from strategies.strategy_prompts import resolve_prompt, _UNIVERSAL_RULES
+        from strategies.strategy_prompts import _UNIVERSAL_RULES, resolve_prompt
 
         if ui_prompt_override and ui_prompt_override.strip():
             system_prompt = ui_prompt_override.strip()
@@ -435,6 +435,7 @@ class AIService:
             try:
                 import os
                 import re
+
                 import config
                 from utils.time_utils import get_now
 
@@ -453,7 +454,7 @@ class AIService:
 
                 # Removed "prompt_" prefix as requested by user. Timestamp is up to seconds.
                 dump_file = os.path.join(
-                    dump_dir, f"{strat_str}_{stock_code}_{timestamp}.md"
+                    dump_dir, f"{strat_str}_{stock_code}_{timestamp}.md",
                 )
 
                 with open(dump_file, "w", encoding="utf-8") as f:
@@ -461,11 +462,11 @@ class AIService:
                     f.write(f"# User Prompt\n```xml\n{user_prompt}\n```\n")
 
                 logger.debug(
-                    f"[AIService] Analyze | Prepared LLM Context. Full payload saved to: {dump_file}"
+                    f"[AIService] Analyze | Prepared LLM Context. Full payload saved to: {dump_file}",
                 )
             except Exception as e:
                 logger.debug(
-                    f"[AIService] Analyze | Failed to dump prompt to file: {e}"
+                    f"[AIService] Analyze | Failed to dump prompt to file: {e}",
                 )
 
         try:
@@ -481,12 +482,12 @@ class AIService:
 
         except asyncio.TimeoutError:
             logger.error(
-                "[AIService] Analyze | ❌ Timeout (120s exceeded)", exc_info=True
+                "[AIService] Analyze | ❌ Timeout (120s exceeded)", exc_info=True,
             )
             return {"error": "Analysis timeout", "score": 0}
         except Exception as e:
             logger.error(
-                f"[AIService] Analyze | ❌ Top-level failure: {e}", exc_info=True
+                f"[AIService] Analyze | ❌ Top-level failure: {e}", exc_info=True,
             )
             return {"error": str(e), "score": 0}
 
@@ -496,7 +497,7 @@ class AIService:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             logger.debug(
-                "[AIService] SetupLock | No running event loop, using DummyLock."
+                "[AIService] SetupLock | No running event loop, using DummyLock.",
             )
 
             class DummyLock:
@@ -509,9 +510,9 @@ class AIService:
             return DummyLock()
 
         if not hasattr(current_loop, "_ai_setup_lock"):
-            setattr(current_loop, "_ai_setup_lock", asyncio.Lock())
+            current_loop._ai_setup_lock = asyncio.Lock()
 
-        return getattr(current_loop, "_ai_setup_lock")
+        return current_loop._ai_setup_lock
 
     async def _setup_local_model(self):
         """
@@ -548,7 +549,7 @@ class AIService:
         return raw_result
 
     @log_async_operation(
-        operation_name="classify_news", threshold_ms=PerfThreshold.AI_INFERENCE
+        operation_name="classify_news", threshold_ms=PerfThreshold.AI_INFERENCE,
     )
     async def classify_news(self, text: str) -> dict:
         """
@@ -563,25 +564,25 @@ class AIService:
         # 1. Try Local Model
         try:
             raw_result = await self._chat_completion(
-                messages, provider="local", json_mode=True
+                messages, provider="local", json_mode=True,
             )
             result = self._parse_news_result(raw_result)
             logger.debug(
-                f"[AIService] Classify | Local ✅ {result.get('category')} / {result.get('sentiment')}"
+                f"[AIService] Classify | Local ✅ {result.get('category')} / {result.get('sentiment')}",
             )
             return result
         except Exception as local_e:
             # Local failed (not configured, crash, etc.)
             # Log only if it wasn't just "not configured" (which is common)
             if "not installed" not in str(local_e) and "not configured" not in str(
-                local_e
+                local_e,
             ):
                 logger.warning(
-                    f"[AIService] Classify | ⚠️ Local failed, falling back to cloud: {local_e}"
+                    f"[AIService] Classify | ⚠️ Local failed, falling back to cloud: {local_e}",
                 )
             else:
                 logger.warning(
-                    f"[AIService] Classify | ⚠️ Local model unavailable, falling back to cloud: {local_e}"
+                    f"[AIService] Classify | ⚠️ Local model unavailable, falling back to cloud: {local_e}",
                 )
 
         # 2. Fallback to Cloud
@@ -591,16 +592,16 @@ class AIService:
             # Inner cloud call had 30s timeout on client.
             # We will use 30s default.
             raw_result = await self._chat_completion(
-                messages, provider="cloud", json_mode=True
+                messages, provider="cloud", json_mode=True,
             )
             result = self._parse_news_result(raw_result)
             logger.debug(
-                f"[AIService] Classify | Cloud ✅ {result.get('category')} / {result.get('sentiment')}"
+                f"[AIService] Classify | Cloud ✅ {result.get('category')} / {result.get('sentiment')}",
             )
             return result
         except Exception as e:
             logger.error(
-                f"[AIService] Classify | ❌ All providers failed: {e}", exc_info=True
+                f"[AIService] Classify | ❌ All providers failed: {e}", exc_info=True,
             )
             return None
 
@@ -618,7 +619,7 @@ class AIService:
 
             # Minimal request to test auth
             await self.client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1
+                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1,
             )
             return True
         except Exception as e:
@@ -647,11 +648,11 @@ class AIService:
 
             # Simple test request
             await client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1
+                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1,
             )
             return True
         except Exception as e:
             logger.error(
-                f"[AIService] TestConn | ❌ Test connection failed: {e}", exc_info=True
+                f"[AIService] TestConn | ❌ Test connection failed: {e}", exc_info=True,
             )
             raise e

@@ -5,7 +5,7 @@ Base interfaces and data structures for sync strategies.
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Any
+from typing import Any, List
 
 # Forward declaration for type hinting if needed,
 # but usually avoid circular imports by strict typing or Protocol

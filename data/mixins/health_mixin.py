@@ -13,21 +13,20 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-
 from data.constants import (
-    HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
-    HEALTH_THRESHOLD_MARKET_LAG_DAYS,
-    get_health_depth_full_trade_days,
     HEALTH_DEPTH_SAFETY_MULTIPLIER,
     HEALTH_THRESHOLD_BREADTH,
-    TIER_QUOTE_FRESHNESS_DAYS,
+    HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
+    HEALTH_THRESHOLD_MARKET_LAG_DAYS,
     TIER_FINANCIAL_FRESHNESS_DAYS,
+    TIER_QUOTE_FRESHNESS_DAYS,
+    get_health_depth_full_trade_days,
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.data_quality import DataQualityService
 from strategies.base_strategy import _STRATEGY_REGISTRY
 from ui.i18n import I18n
-from utils.log_decorators import log_async_operation, PerfThreshold
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
 if TYPE_CHECKING:
@@ -74,7 +73,7 @@ class HealthCheckMixin:
             ):
                 self._quality_tier = 0
                 logger.warning(
-                    "[DataProcessor] FastCheck | ⚠️ No sync records. Degrading Tier to CRITICAL (0)"
+                    "[DataProcessor] FastCheck | ⚠️ No sync records. Degrading Tier to CRITICAL (0)",
                 )
                 return
 
@@ -86,7 +85,7 @@ class HealthCheckMixin:
             # This is the ONLY hard requirement for RSI/MA strategies.
             # financial_reports is optional (upgrades to GOLD if present & fresh).
             latest_quote_date = sync_dict.get("daily_quotes", {}).get(
-                "last_data_date", ""
+                "last_data_date", "",
             )
 
             # Fast verification: if sync_status is missing or stale, double check actual table MAX(date)
@@ -104,7 +103,7 @@ class HealthCheckMixin:
             if not latest_quote_date:
                 self._quality_tier = 1
                 logger.debug(
-                    "[DataProcessor] FastCheck | No last quote explicitly set in stats. Attempting verify..."
+                    "[DataProcessor] FastCheck | No last quote explicitly set in stats. Attempting verify...",
                 )
                 return
 
@@ -112,13 +111,13 @@ class HealthCheckMixin:
                 latest_dt = parse_date(str(latest_quote_date), "%Y%m%d")
                 days_lag = (get_now() - latest_dt).days
                 logger.debug(
-                    f"[DataProcessor] FastCheck | Quote Lag measured as {days_lag}d"
+                    f"[DataProcessor] FastCheck | Quote Lag measured as {days_lag}d",
                 )
 
                 # Double check actual table if sync_status claims it's stale (sync_status could be out of sync with DB)
                 if days_lag > TIER_QUOTE_FRESHNESS_DAYS:
                     logger.debug(
-                        "[DataProcessor] FastCheck | Metadata points to stale, fallback to deep sweep..."
+                        "[DataProcessor] FastCheck | Metadata points to stale, fallback to deep sweep...",
                     )
                     try:
                         db_max_date = await self.cache.get_latest_trade_date()
@@ -126,17 +125,17 @@ class HealthCheckMixin:
                             latest_dt = parse_date(str(db_max_date), "%Y%m%d")
                             days_lag = (get_now() - latest_dt).days
                             logger.debug(
-                                f"[DataProcessor] FastCheck | DB MAX swept. Lag settled as {days_lag}d"
+                                f"[DataProcessor] FastCheck | DB MAX swept. Lag settled as {days_lag}d",
                             )
                     except Exception as e:
                         logger.warning(
-                            f"[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: {e}"
+                            f"[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: {e}",
                         )
 
             except (ValueError, TypeError):
                 self._quality_tier = 1
                 logger.warning(
-                    f"[DataProcessor] FastCheck | ⚠️ Malformed date '{latest_quote_date}'. Degrading to BRONZE."
+                    f"[DataProcessor] FastCheck | ⚠️ Malformed date '{latest_quote_date}'. Degrading to BRONZE.",
                 )
                 return
 
@@ -157,7 +156,7 @@ class HealthCheckMixin:
                 self._quality_tier = 1  # Stale quotes -> BRONZE
 
             logger.debug(
-                f"[DataProcessor] FastCheck | Derived fast Tier parameter = {self._quality_tier}"
+                f"[DataProcessor] FastCheck | Derived fast Tier parameter = {self._quality_tier}",
             )
         except Exception as e:
             logger.error(
@@ -193,7 +192,7 @@ class HealthCheckMixin:
                 end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))
             ).strftime("%Y%m%d")
             all_dates = await self.get_trade_dates(
-                start_date=rough_start, end_date=end_date
+                start_date=rough_start, end_date=end_date,
             )
             if all_dates and len(all_dates) >= (years * 250):
                 start_date = all_dates[-(years * 250)]
@@ -202,7 +201,7 @@ class HealthCheckMixin:
                     all_dates[0]
                     if all_dates
                     else (end_date_obj - datetime.timedelta(days=365 * years)).strftime(
-                        "%Y%m%d"
+                        "%Y%m%d",
                     )
                 )
 
@@ -282,8 +281,8 @@ class HealthCheckMixin:
                 data_status = "yellow"
                 reasons.append(
                     I18n.get("health_financial_missing").format(
-                        ratio=f"{fin_fresh_ratio:.0%}"
-                    )
+                        ratio=f"{fin_fresh_ratio:.0%}",
+                    ),
                 )
 
             # --- Depth & Breadth: Strategy-driven evaluation ---
@@ -323,7 +322,7 @@ class HealthCheckMixin:
                         I18n.get("health_depth_warning").format(
                             count=len(missing_depth),
                             required=max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER,
-                        )
+                        ),
                     )
 
             missing_breadth = [
@@ -338,14 +337,14 @@ class HealthCheckMixin:
                     data_status = "yellow"
                 reasons.append(
                     I18n.get("health_breadth_warning").format(
-                        count=len(missing_breadth)
-                    )
+                        count=len(missing_breadth),
+                    ),
                 )
 
             # Log Metrics
             logger.debug(
                 f"[DataProcessor] Health | Metrics snapshot: Lag={lag_days}d, FinCoverage={fin_fresh_ratio:.1%}, Missing={len(all_missing)}, "
-                f"MissDepth={len(missing_depth)}, MissBreadth={len(missing_breadth)}"
+                f"MissDepth={len(missing_depth)}, MissBreadth={len(missing_breadth)}",
             )
 
             # Final Status Aggregation
@@ -356,7 +355,7 @@ class HealthCheckMixin:
 
             if status != "green":
                 logger.warning(
-                    f"[DataProcessor] QualityScan | ⚠️ Evaluation abnormal. Status={status}, Reasons={reasons}"
+                    f"[DataProcessor] QualityScan | ⚠️ Evaluation abnormal. Status={status}, Reasons={reasons}",
                 )
 
             # Update Tier State
@@ -365,15 +364,14 @@ class HealthCheckMixin:
             elif status == "yellow":
                 # Force downgrade to Bronze if data is stale, missing depth, or missing breadth
                 self._quality_tier = 1
+            # If everything is green, grant Gold. If yellow (e.g. minor lag), grant Silver.
+            # Only upgrade, never blindly carry over an unjustified current tier
+            elif fin_fresh_ratio > 0.9:
+                self._quality_tier = 3  # GOLD
+            elif fin_fresh_ratio > 0.5 or lag_days <= 5:
+                self._quality_tier = 2  # SILVER
             else:
-                # If everything is green, grant Gold. If yellow (e.g. minor lag), grant Silver.
-                # Only upgrade, never blindly carry over an unjustified current tier
-                if fin_fresh_ratio > 0.9:
-                    self._quality_tier = 3  # GOLD
-                elif fin_fresh_ratio > 0.5 or lag_days <= 5:
-                    self._quality_tier = 2  # SILVER
-                else:
-                    self._quality_tier = 1  # BRONZE
+                self._quality_tier = 1  # BRONZE
 
             # Calculate overall system coverage (using financial as main proxy)
             sys_coverage = fin_fresh_ratio * 100
@@ -384,7 +382,7 @@ class HealthCheckMixin:
                 status_desc = I18n.get("health_status_lag_short", days=lag_days)
 
             status_msg = I18n.get("init_complete").format(
-                status=status_desc, coverage=f"{sys_coverage:.1f}%"
+                status=status_desc, coverage=f"{sys_coverage:.1f}%",
             )
             # Append concept info
             status_msg += f" | {I18n.get('health_concepts_count', count=concept_count)}"
@@ -420,10 +418,10 @@ class HealthCheckMixin:
                 f"[DataProcessor] QualityScan | ❌ Deep engine health sweep crashed: {e}",
                 exc_info=True,
             )
-            return {"status": "red", "msg": f"Check failed: {str(e)}"}
+            return {"status": "red", "msg": f"Check failed: {e!s}"}
 
     @log_async_operation(
-        operation_name="run_quality_scan", threshold_ms=PerfThreshold.DB_BULK_IO
+        operation_name="run_quality_scan", threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run_quality_scan(self, sample_size=50, progress_callback=None):
         """
@@ -452,7 +450,7 @@ class HealthCheckMixin:
             sample = random.sample(active_stocks, min(sample_size, len(active_stocks)))
 
             logger.debug(
-                f"[DataProcessor] QualityScan | Commencing deep sweep on {len(sample)} random targets."
+                f"[DataProcessor] QualityScan | Commencing deep sweep on {len(sample)} random targets.",
             )
 
             # 2. Prepare Context
@@ -462,20 +460,20 @@ class HealthCheckMixin:
             # Fetch 1 year of data for all sampled stocks at once to avoid N+1 queries
             # and over-fetching entire 20-year history for single stocks.
             start_date_str = (get_now() - datetime.timedelta(days=365)).strftime(
-                "%Y%m%d"
+                "%Y%m%d",
             )
 
             # Only fetch open trading days within scan window (halves data vs full calendar)
             trade_cal_df = await self.cache.get_trade_cal(
-                start_date=start_date_str, is_open=1
+                start_date=start_date_str, is_open=1,
             )
             if trade_cal_df is None or trade_cal_df.empty:
                 logger.warning(
-                    "[DataProcessor] QualityScan | ⚠️ Trade calendar void, continuity skipped."
+                    "[DataProcessor] QualityScan | ⚠️ Trade calendar void, continuity skipped.",
                 )
 
             batch_df = await self.cache.get_daily_quotes(
-                ts_code_list=sample, start_date=start_date_str
+                ts_code_list=sample, start_date=start_date_str,
             )
 
             # 3. Iterate Sample (DataFrame Slicing in Memory)
@@ -504,19 +502,19 @@ class HealthCheckMixin:
                     # Check Continuity (only if trade_cal is available)
                     if trade_cal_df is not None and not trade_cal_df.empty:
                         cont_res = DataQualityService.check_continuity(
-                            df_daily, "trade_date", trade_cal_df
+                            df_daily, "trade_date", trade_cal_df,
                         )
                         scan_results["continuity"].append(cont_res["coverage_ratio"])
 
                     # Check Recency (vs today)
                     rec_res = DataQualityService.check_recency(
-                        df_daily, "trade_date", get_now().strftime("%Y%m%d")
+                        df_daily, "trade_date", get_now().strftime("%Y%m%d"),
                     )
                     scan_results["recency"].append(rec_res["lag_days"])
 
                     # Check Nulls (Close price)
                     null_res = DataQualityService.check_nulls(
-                        df_daily, ["close", "vol"]
+                        df_daily, ["close", "vol"],
                     )
                     scan_results["nulls"].append(null_res.get("close", 0.0))
 
@@ -540,7 +538,7 @@ class HealthCheckMixin:
 
             self._quality_tier = tier
             logger.info(
-                f"[DataProcessor] QualityScan | ✅ Thorough evaluation complete. Validated Deep Tier is {tier}"
+                f"[DataProcessor] QualityScan | ✅ Thorough evaluation complete. Validated Deep Tier is {tier}",
             )
 
             result = {

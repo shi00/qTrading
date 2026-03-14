@@ -1,7 +1,10 @@
 import logging
+
 import pandas as pd
+
+from utils.thread_pool import TaskType, ThreadPoolManager
+
 from .base_dao import BaseDao
-from utils.thread_pool import ThreadPoolManager, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,7 @@ class FinancialDao(BaseDao):
                 "goodwill" = COALESCE(excluded."goodwill", financial_reports."goodwill")
         """
         params = await ThreadPoolManager().run_async(
-            TaskType.CPU, self._prepare_data_params, df, cols
+            TaskType.CPU, self._prepare_data_params, df, cols,
         )
         return await self._write_db(sql, params, is_many=True)
 
@@ -102,7 +105,7 @@ class FinancialDao(BaseDao):
         with_date = trade_date
         if not with_date:
             df = await self._read_db(
-                "SELECT MAX(trade_date) as max_td FROM daily_indicators"
+                "SELECT MAX(trade_date) as max_td FROM daily_indicators",
             )
             if df is not None and not df.empty:
                 with_date = df["max_td"].iloc[0]
@@ -112,7 +115,7 @@ class FinancialDao(BaseDao):
         if not with_date:
             return pd.DataFrame()
         return await self._read_db(
-            "SELECT * FROM daily_indicators WHERE trade_date = $1", (with_date,)
+            "SELECT * FROM daily_indicators WHERE trade_date = $1", (with_date,),
         )
 
     async def get_cached_indicator_dates(self):
@@ -134,7 +137,7 @@ class FinancialDao(BaseDao):
             "net_profit_max",
         ]
         return await self._save_upsert(
-            df, "fina_forecast", cols, pk_columns=["ts_code", "end_date", "ann_date"]
+            df, "fina_forecast", cols, pk_columns=["ts_code", "end_date", "ann_date"],
         )
 
     async def save_fina_mainbz(self, df):
@@ -148,7 +151,7 @@ class FinancialDao(BaseDao):
             "curr_type",
         ]
         return await self._save_upsert(
-            df, "fina_mainbz", cols, pk_columns=["ts_code", "end_date", "bz_item"]
+            df, "fina_mainbz", cols, pk_columns=["ts_code", "end_date", "bz_item"],
         )
 
     async def save_fina_audit(self, df):
@@ -161,7 +164,7 @@ class FinancialDao(BaseDao):
             "audit_agency",
         ]
         return await self._save_upsert(
-            df, "fina_audit", cols, pk_columns=["ts_code", "end_date"]
+            df, "fina_audit", cols, pk_columns=["ts_code", "end_date"],
         )
 
     async def save_pledge_stat(self, df):
@@ -175,7 +178,7 @@ class FinancialDao(BaseDao):
             "pledge_ratio",
         ]
         return await self._save_upsert(
-            df, "pledge_stat", cols, pk_columns=["ts_code", "end_date"]
+            df, "pledge_stat", cols, pk_columns=["ts_code", "end_date"],
         )
 
     async def save_repurchase(self, df):
@@ -191,7 +194,7 @@ class FinancialDao(BaseDao):
             "low_limit",
         ]
         return await self._save_upsert(
-            df, "repurchase", cols, pk_columns=["ts_code", "ann_date"]
+            df, "repurchase", cols, pk_columns=["ts_code", "ann_date"],
         )
 
     async def save_dividend(self, df):
@@ -208,5 +211,5 @@ class FinancialDao(BaseDao):
             "ex_date",
         ]
         return await self._save_upsert(
-            df, "dividend", cols, pk_columns=["ts_code", "end_date", "ann_date"]
+            df, "dividend", cols, pk_columns=["ts_code", "end_date", "ann_date"],
         )

@@ -29,7 +29,7 @@ class MetricCard(ft.Container):
     """
 
     def __init__(
-        self, label, value, icon=None, status_color=None, trend=None, trend_up=True
+        self, label, value, icon=None, status_color=None, trend=None, trend_up=True,
     ):
         super().__init__()
         self.expand = True
@@ -48,16 +48,16 @@ class MetricCard(ft.Container):
             color=ft.Colors.ON_SURFACE_VARIANT,
         )
         self.value_view = ft.Text(
-            self.value_text, size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY
+            self.value_text, size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY,
         )
         self.status_row_view = ft.Row(
-            [], spacing=4, alignment=ft.MainAxisAlignment.START
+            [], spacing=4, alignment=ft.MainAxisAlignment.START,
         )
 
         self._build_status_row()
 
         self.content = ft.Column(
-            [self.label_view, self.value_view, self.status_row_view], spacing=4
+            [self.label_view, self.value_view, self.status_row_view], spacing=4,
         )
 
         self.padding = 15
@@ -83,7 +83,7 @@ class MetricCard(ft.Container):
                     size=11,
                     color=trend_color,
                     weight=ft.FontWeight.BOLD,
-                )
+                ),
             )
 
         self.status_row_view.controls = controls if controls else [ft.Container()]
@@ -170,17 +170,17 @@ class ActionChip(ft.Container):
             # Show Spinner
             color = ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.PRIMARY
             self.content.controls[-1] = ft.ProgressRing(
-                width=16, height=16, stroke_width=2, color=color
+                width=16, height=16, stroke_width=2, color=color,
             )
             self.disabled = True
             self.opacity = 0.8  # Slight dim but clearer than disabled
         else:
             # Restore Icon
             sub_color = ft.Colors.with_opacity(
-                0.8, ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.ON_SURFACE
+                0.8, ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.ON_SURFACE,
             )
             self.content.controls[-1] = ft.Icon(
-                ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16
+                ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16,
             )
             self.disabled = False
             self.opacity = 1.0
@@ -227,7 +227,7 @@ class SectionHeader(ft.Row):
             ft.Row(
                 [
                     ft.Container(
-                        width=4, height=18, bgcolor=ft.Colors.SECONDARY, border_radius=2
+                        width=4, height=18, bgcolor=ft.Colors.SECONDARY, border_radius=2,
                     ),
                     ft.Text(
                         title,
@@ -271,10 +271,10 @@ class SettingRow(ft.ResponsiveRow):
             bgcolor=ft.Colors.with_opacity(0.1, color),
         )
         self.title_view = ft.Text(
-            title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE
+            title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.ON_SURFACE,
         )
         self.subtitle_view = ft.Text(
-            subtitle, size=12, color=ft.Colors.ON_SURFACE_VARIANT
+            subtitle, size=12, color=ft.Colors.ON_SURFACE_VARIANT,
         )
 
         # --- Left Side (Icon + Text) ---
@@ -283,7 +283,7 @@ class SettingRow(ft.ResponsiveRow):
                 self.icon_container,
                 ft.Container(width=10),
                 ft.Column(
-                    [self.title_view, self.subtitle_view], spacing=2, expand=True
+                    [self.title_view, self.subtitle_view], spacing=2, expand=True,
                 ),  # Text wraps or expands
             ],
             alignment=ft.MainAxisAlignment.START,

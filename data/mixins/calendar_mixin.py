@@ -16,7 +16,7 @@ import time
 from typing import TYPE_CHECKING
 
 from data.constants import MARKET_CLOSE_HOUR
-from utils.log_decorators import log_async_operation, PerfThreshold
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ class CalendarMixin:
                 return result
         except Exception as e:
             logger.warning(
-                f"[DataProcessor] Calendar | ⚠️ Failed to fetch latest trade date fallback: {e}"
+                f"[DataProcessor] Calendar | ⚠️ Failed to fetch latest trade date fallback: {e}",
             )
 
         # Fallback
@@ -99,7 +99,7 @@ class CalendarMixin:
             await self.ensure_trade_cal(end_date, required_start_date=start_date)
             # Use strict type check for safety with generic read
             cache_df = await self.cache.get_trade_cal(
-                start_date=start_date, end_date=end_date, is_open=1
+                start_date=start_date, end_date=end_date, is_open=1,
             )
 
             if not cache_df.empty:
@@ -164,8 +164,7 @@ class CalendarMixin:
             async def fetch_and_save(s, e):
                 y = int(e[:4])
                 real_end = datetime.date(y, 12, 31).strftime("%Y%m%d")
-                if e < real_end:
-                    e = real_end
+                e = max(e, real_end)
 
                 pass  # 动作已由装饰器覆盖
                 df = await self.api.get_trade_cal(start_date=s, end_date=e)
@@ -176,23 +175,22 @@ class CalendarMixin:
 
             if not min_db or not max_db:
                 return await fetch_and_save(target_start, end_date)
-            else:
-                # Check coverage and fetch missing parts
-                tasks = []
-                if target_start < min_db:
-                    gap = (
-                        datetime.datetime.strptime(min_db, "%Y%m%d")
-                        - datetime.datetime.strptime(target_start, "%Y%m%d")
-                    ).days
-                    if gap > 10:
-                        tasks.append(fetch_and_save(target_start, min_db))
+            # Check coverage and fetch missing parts
+            tasks = []
+            if target_start < min_db:
+                gap = (
+                    datetime.datetime.strptime(min_db, "%Y%m%d")
+                    - datetime.datetime.strptime(target_start, "%Y%m%d")
+                ).days
+                if gap > 10:
+                    tasks.append(fetch_and_save(target_start, min_db))
 
-                if max_db < end_date:
-                    tasks.append(fetch_and_save(max_db, end_date))
+            if max_db < end_date:
+                tasks.append(fetch_and_save(max_db, end_date))
 
-                if tasks:
-                    results = await asyncio.gather(*tasks)
-                    return all(results)
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                return all(results)
 
             return True  # Already covered
 

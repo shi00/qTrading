@@ -1,22 +1,24 @@
-import logging
-from utils.log_decorators import UILogger
 import asyncio
+import logging
+
 import flet as ft
+
+from data.cache_manager import CacheManager
+from data.data_processor import DataProcessor
+from data.tushare_client import TushareClient
+from services.task_manager import TaskManager
 from ui.components.settings_widgets import (
+    ActionChip,
     DashboardCard,
     MetricCard,
-    ActionChip,
     SectionHeader,
     SettingRow,
 )
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
-from data.data_processor import DataProcessor
-from data.cache_manager import CacheManager
-from services.task_manager import TaskManager
-from utils.thread_pool import ThreadPoolManager, TaskType
-from data.tushare_client import TushareClient
+from utils.log_decorators import UILogger
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ class DataSourceTab(ft.Container):
                                         on_click=self.show_health_report_dialog,
                                     ),
                                     self.btn_check_health,
-                                ]
+                                ],
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -116,14 +118,14 @@ class DataSourceTab(ft.Container):
                             ft.Column([self.metric_coverage], col={"sm": 6, "md": 3}),
                             ft.Column([self.metric_health], col={"sm": 6, "md": 3}),
                             ft.Column([self.metric_storage], col={"sm": 6, "md": 3}),
-                        ]
+                        ],
                     ),
                     ft.Container(height=10),
                     ft.Container(height=10),
                     ft.Container(height=10),
                     self.health_summary_container,
-                ]
-            )
+                ],
+            ),
         )
 
         # 2. Action Console
@@ -145,7 +147,7 @@ class DataSourceTab(ft.Container):
             ft.Icons.AUTO_FIX_HIGH,
             I18n.get("ds_btn_doubao_rebuild", "重塑豆包"),
             I18n.get(
-                "ds_btn_doubao_rebuild_desc", "清空所有豆包专属概念并触发全量重新打标"
+                "ds_btn_doubao_rebuild_desc", "清空所有豆包专属概念并触发全量重新打标",
             ),
             self.confirm_doubao_rebuild,
         )
@@ -159,16 +161,16 @@ class DataSourceTab(ft.Container):
                         [
                             ft.Column([self.action_full_sync], col={"sm": 12, "md": 4}),
                             ft.Column(
-                                [self.action_doubao_rebuild], col={"sm": 12, "md": 4}
+                                [self.action_doubao_rebuild], col={"sm": 12, "md": 4},
                             ),
                             ft.Column(
-                                [self.action_clear_cache], col={"sm": 12, "md": 4}
+                                [self.action_clear_cache], col={"sm": 12, "md": 4},
                             ),
                         ],
                         run_spacing=10,
                     ),
-                ]
-            )
+                ],
+            ),
         )
 
         # 3. Connection Settings
@@ -196,7 +198,7 @@ class DataSourceTab(ft.Container):
         )
         self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT, size=12)
         self.status_text = ft.Text(
-            I18n.get("settings_verify_failed"), color=AppColors.TEXT_HINT, size=12
+            I18n.get("settings_verify_failed"), color=AppColors.TEXT_HINT, size=12,
         )
 
         self.row_token = SettingRow(
@@ -228,8 +230,8 @@ class DataSourceTab(ft.Container):
                     SectionHeader(I18n.get("settings_sec_api")),
                     ft.Container(height=10),
                     self.row_token,
-                ]
-            )
+                ],
+            ),
         )
 
         # 4. Historical Data
@@ -282,7 +284,7 @@ class DataSourceTab(ft.Container):
                                 [self.progress_bar, self.progress_text],
                                 spacing=2,
                                 expand=True,
-                            )
+                            ),
                         ],
                         alignment=ft.MainAxisAlignment.END,
                     ),  # Container row
@@ -299,8 +301,8 @@ class DataSourceTab(ft.Container):
                     SectionHeader(I18n.get("settings_init_data")),
                     ft.Container(height=10),
                     self.row_init,
-                ]
-            )
+                ],
+            ),
         )
 
         # Assemble logic
@@ -365,7 +367,7 @@ class DataSourceTab(ft.Container):
         self.row_init.subtitle = I18n.get("settings_hint_first_run")
 
         self.history_years_dropdown.label = I18n.get(
-            "settings_history_range", "History Range"
+            "settings_history_range", "History Range",
         )
         self.history_years_dropdown.options = [
             ft.dropdown.Option("1", f"1 {I18n.get('unit_year', 'Year')}".strip()),
@@ -388,20 +390,20 @@ class DataSourceTab(ft.Container):
         self.btn_check_health.disabled = True
 
         self.metric_health.set_value(
-            I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, AppColors.INFO
+            I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, AppColors.INFO,
         )
         self.metric_storage.set_value(
-            I18n.get("ds_status_calc"), ft.Icons.HOURGLASS_TOP, AppColors.TEXT_HINT
+            I18n.get("ds_status_calc"), ft.Icons.HOURGLASS_TOP, AppColors.TEXT_HINT,
         )
         self.health_summary_container.content = ft.Text(
-            I18n.get("health_checking"), size=12, color=AppColors.TEXT_SECONDARY
+            I18n.get("health_checking"), size=12, color=AppColors.TEXT_SECONDARY,
         )
         self.update()
 
         async def _run_health_check(task_id: str, **kwargs):
             try:
                 TaskManager().update_progress(
-                    task_id, 0.2, I18n.get("task_progress_checking")
+                    task_id, 0.2, I18n.get("task_progress_checking"),
                 )
                 result = await self._processor.check_data_health()
 
@@ -409,16 +411,16 @@ class DataSourceTab(ft.Container):
                 status = result.get("status", "red")
 
                 TaskManager().update_progress(
-                    task_id, 0.9, I18n.get("task_progress_analyzing")
+                    task_id, 0.9, I18n.get("task_progress_analyzing"),
                 )
 
                 if status == "yellow":
                     self.metric_health.set_value(
-                        I18n.get("ds_health_lag"), ft.Icons.WARNING, AppColors.WARNING
+                        I18n.get("ds_health_lag"), ft.Icons.WARNING, AppColors.WARNING,
                     )
                 elif status == "red":
                     self.metric_health.set_value(
-                        I18n.get("ds_health_error"), ft.Icons.ERROR, AppColors.ERROR
+                        I18n.get("ds_health_error"), ft.Icons.ERROR, AppColors.ERROR,
                     )
                 else:
                     self.metric_health.set_value(
@@ -436,7 +438,7 @@ class DataSourceTab(ft.Container):
                 else:
                     display_date = str(latest)
                 self.metric_sync.set_value(
-                    display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY
+                    display_date, ft.Icons.ACCESS_TIME, AppColors.PRIMARY,
                 )
 
                 cov_val = details.get("financial_coverage", 0)
@@ -446,10 +448,10 @@ class DataSourceTab(ft.Container):
                     cov_str = str(cov_val)
 
                 self.metric_coverage.set_value(
-                    cov_str, ft.Icons.DATA_USAGE, AppColors.INFO
+                    cov_str, ft.Icons.DATA_USAGE, AppColors.INFO,
                 )
                 self.metric_storage.set_value(
-                    I18n.get("common_normal"), ft.Icons.STORAGE, AppColors.SUCCESS
+                    I18n.get("common_normal"), ft.Icons.STORAGE, AppColors.SUCCESS,
                 )
 
                 miss_critical = details.get("missing_critical", 0)
@@ -458,12 +460,12 @@ class DataSourceTab(ft.Container):
                 lag = market_info.get("lag_days", 0)
 
                 sys_text = I18n.get("ds_health_summary_sys").format(
-                    cov=cov_str, lag=lag
+                    cov=cov_str, lag=lag,
                 )
 
                 if miss_critical > 0:
                     core_text = I18n.get("ds_health_summary_core").format(
-                        miss=miss_critical
+                        miss=miss_critical,
                     )
                     core_color = AppColors.ERROR
                     core_icon = ft.Icons.WARNING_AMBER_ROUNDED
@@ -484,12 +486,12 @@ class DataSourceTab(ft.Container):
                             ft.Text("|", size=12, color=AppColors.DIVIDER),
                             ft.Text(
                                 I18n.get("ds_health_summary_depth").format(
-                                    miss=miss_depth
+                                    miss=miss_depth,
                                 ),
                                 size=12,
                                 color=AppColors.WARNING,
                             ),
-                        ]
+                        ],
                     )
                 if miss_breadth > 0:
                     integrity_items.extend(
@@ -497,12 +499,12 @@ class DataSourceTab(ft.Container):
                             ft.Text("|", size=12, color=AppColors.DIVIDER),
                             ft.Text(
                                 I18n.get("ds_health_summary_breadth").format(
-                                    miss=miss_breadth
+                                    miss=miss_breadth,
                                 ),
                                 size=12,
                                 color=AppColors.WARNING,
                             ),
-                        ]
+                        ],
                     )
 
                 self.health_summary_container.content = ft.Column(
@@ -510,10 +512,10 @@ class DataSourceTab(ft.Container):
                         ft.Row(
                             [
                                 ft.Icon(
-                                    ft.Icons.ANALYTICS, size=14, color=AppColors.INFO
+                                    ft.Icons.ANALYTICS, size=14, color=AppColors.INFO,
                                 ),
                                 ft.Text(
-                                    sys_text, size=12, color=AppColors.TEXT_PRIMARY
+                                    sys_text, size=12, color=AppColors.TEXT_PRIMARY,
                                 ),
                             ],
                             spacing=5,
@@ -535,7 +537,7 @@ class DataSourceTab(ft.Container):
 
             except Exception as e:
                 logger.error(
-                    f"[DataSourceTab] Health | ❌ Check failed: {e}", exc_info=True
+                    f"[DataSourceTab] Health | ❌ Check failed: {e}", exc_info=True,
                 )
                 self.metric_health.set_value(
                     I18n.get("common_check_fail").format(error=""),
@@ -543,7 +545,7 @@ class DataSourceTab(ft.Container):
                     AppColors.ERROR,
                 )
                 self.health_summary_container.content = ft.Text(
-                    I18n.get("ds_health_check_error"), size=12, color=AppColors.ERROR
+                    I18n.get("ds_health_check_error"), size=12, color=AppColors.ERROR,
                 )
                 raise
 
@@ -595,7 +597,7 @@ class DataSourceTab(ft.Container):
                 return "日更完成"
             except Exception as ex:
                 self.show_snack(
-                    f"{I18n.get('common_error')}: {str(ex)[:30]}", color=AppColors.ERROR
+                    f"{I18n.get('common_error')}: {str(ex)[:30]}", color=AppColors.ERROR,
                 )
                 raise
             finally:
@@ -619,7 +621,7 @@ class DataSourceTab(ft.Container):
         try:
             if not self.page:
                 logger.error(
-                    "[DataSourceTab] Dialog | ❌ Page not attached, cannot open dialog"
+                    "[DataSourceTab] Dialog | ❌ Page not attached, cannot open dialog",
                 )
                 return
 
@@ -669,7 +671,7 @@ class DataSourceTab(ft.Container):
                 exc_info=True,
             )
             self.show_snack(
-                I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR
+                I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR,
             )
 
     async def confirm_doubao_rebuild(self, e):
@@ -697,7 +699,7 @@ class DataSourceTab(ft.Container):
             try:
                 tm.update_progress(task_id, 0.05, "重启 Playwright 流水线并清空词库...")
                 await self._processor.run_doubao_tagging(
-                    task_id=task_id, cancel_event=cancel_event
+                    task_id=task_id, cancel_event=cancel_event,
                 )
                 self.show_snack(
                     I18n.get("snack_doubao_done", "豆包概念已全部重塑！"),
@@ -706,7 +708,7 @@ class DataSourceTab(ft.Container):
                 return "重塑完成"
             except Exception as ex:
                 self.show_snack(
-                    f"{I18n.get('common_error')}: {str(ex)[:30]}", color=AppColors.ERROR
+                    f"{I18n.get('common_error')}: {str(ex)[:30]}", color=AppColors.ERROR,
                 )
                 raise
             finally:
@@ -750,7 +752,7 @@ class DataSourceTab(ft.Container):
         if running:
             self.show_snack(
                 I18n.get(
-                    "ds_sync_in_progress", "请先等待执行中任务完成或取消后，再清空缓存"
+                    "ds_sync_in_progress", "请先等待执行中任务完成或取消后，再清空缓存",
                 ),
                 color=AppColors.WARNING,
             )
@@ -784,10 +786,10 @@ class DataSourceTab(ft.Container):
         # Prevent double-click during verification
         if self._is_verifying:
             logger.warning(
-                "[DataSourceTab] Token verification double-click intercepted."
+                "[DataSourceTab] Token verification double-click intercepted.",
             )
             self.show_snack(
-                I18n.get("settings_status_verifying"), color=AppColors.WARNING
+                I18n.get("settings_status_verifying"), color=AppColors.WARNING,
             )
             return
 
@@ -836,13 +838,13 @@ class DataSourceTab(ft.Container):
             self.status_icon.color = AppColors.SUCCESS
             self.status_icon.icon = ft.Icons.CHECK_CIRCLE
             self.show_snack(
-                I18n.get("settings_snack_token_verified"), color=AppColors.SUCCESS
+                I18n.get("settings_snack_token_verified"), color=AppColors.SUCCESS,
             )
         except Exception as ex:
             # Verification failed - Don't save token, don't update singleton
             logger.warning(f"Token verification failed: {ex}")
             self.status_text.value = I18n.get("ds_verify_fail_fmt").format(
-                error=str(ex)[:20]
+                error=str(ex)[:20],
             )
             self.status_text.color = AppColors.ERROR
             self.status_icon.color = AppColors.ERROR
@@ -854,7 +856,7 @@ class DataSourceTab(ft.Container):
 
     async def init_historical_data(self, e):
         if self.is_syncing and getattr(self.sync_button, "text", "").startswith(
-            I18n.get("common_cancel")
+            I18n.get("common_cancel"),
         ):
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
             # Request cancellation via DataProcessor
@@ -902,11 +904,11 @@ class DataSourceTab(ft.Container):
                 def _combined_progress(c, t, m):
                     self.update_progress(c, t, m)  # UI update
                     TaskManager().update_progress(
-                        task_id, c / t if t > 0 else 0, f"[{c:.2f}/{t}] {m}"
+                        task_id, c / t if t > 0 else 0, f"[{c:.2f}/{t}] {m}",
                     )
 
                 report = await self._processor.initialize_system(
-                    progress_callback=_combined_progress
+                    progress_callback=_combined_progress,
                 )
 
                 if self._processor.is_cancelled():
@@ -935,7 +937,7 @@ class DataSourceTab(ft.Container):
                 msg = I18n.get("settings_msg_sync_cancelled")
                 self.show_snack(msg, color=AppColors.WARNING)
                 self.progress_text.value = I18n.get(
-                    "ds_progress_cancelled_fmt", msg=msg
+                    "ds_progress_cancelled_fmt", msg=msg,
                 )
 
                 # Revert UI on cancel
@@ -951,13 +953,13 @@ class DataSourceTab(ft.Container):
                     msg = error_str
                 else:
                     msg = I18n.get(
-                        "ds_init_fail_fmt", error="内部系统错误，请检查系统日志。"
+                        "ds_init_fail_fmt", error="内部系统错误，请检查系统日志。",
                     )
 
                 self.show_snack(msg, color=AppColors.ERROR)
                 self.progress_text.value = I18n.get("ds_progress_failed_fmt", msg=msg)
                 logger.error(
-                    f"[DataSourceTab] Sync | ❌ Init sync failed: {e}", exc_info=True
+                    f"[DataSourceTab] Sync | ❌ Init sync failed: {e}", exc_info=True,
                 )
 
                 # Revert UI
@@ -997,8 +999,8 @@ class DataSourceTab(ft.Container):
 
     def on_history_years_change(self, e):
         """Handle history year dropdown selection"""
-        from utils.config_handler import ConfigHandler
         from ui.theme import AppColors
+        from utils.config_handler import ConfigHandler
 
         try:
             val = int(e.control.value)
@@ -1008,7 +1010,7 @@ class DataSourceTab(ft.Container):
             self._safe_update()
         except Exception as ex:
             logger.error(
-                f"[DataSourceTab] HistoryRange | ❌ Failed to set config: {ex}"
+                f"[DataSourceTab] HistoryRange | ❌ Failed to set config: {ex}",
             )
 
     def _set_sync_busy(self, is_busy: bool, active_btn: ft.Control = None):
@@ -1038,22 +1040,21 @@ class DataSourceTab(ft.Container):
                     ctrl.disabled = is_busy
 
             # Case 2: Inactive Buttons (Others)
+            elif is_busy:
+                ctrl.disabled = True
+                if isinstance(ctrl, ActionChip):
+                    ctrl.opacity = 0.5  # Strong dim
             else:
-                if is_busy:
-                    ctrl.disabled = True
+                try:
+                    ctrl.disabled = False
                     if isinstance(ctrl, ActionChip):
-                        ctrl.opacity = 0.5  # Strong dim
-                else:
-                    try:
-                        ctrl.disabled = False
-                        if isinstance(ctrl, ActionChip):
-                            ctrl.set_loading(False)  # Reset state
-                            ctrl.opacity = 1.0
-                    except Exception as e:
-                        logger.error(
-                            f"[DataSourceTab] Sync | ❌ Failed to reset ctrl state ({ctrl}): {e}",
-                            exc_info=True,
-                        )
+                        ctrl.set_loading(False)  # Reset state
+                        ctrl.opacity = 1.0
+                except Exception as e:
+                    logger.error(
+                        f"[DataSourceTab] Sync | ❌ Failed to reset ctrl state ({ctrl}): {e}",
+                        exc_info=True,
+                    )
 
         # Batch update via parent container to ensure consistency
         if self.page:
@@ -1082,5 +1083,5 @@ class DataSourceTab(ft.Container):
 
         except Exception as ex:
             self.show_snack(
-                I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR
+                I18n.get("common_op_fail").format(error=ex), color=AppColors.ERROR,
             )

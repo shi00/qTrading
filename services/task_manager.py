@@ -1,18 +1,19 @@
 import asyncio
+import datetime
 import logging
 import threading
 import time as _time
 import traceback
 import uuid
-import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+import pandas as pd
+
+from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager
-from ui.i18n import I18n
-import pandas as pd
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,7 @@ class TaskManager:
                     TaskStatus.RUNNING,
                 ):
                     logger.warning(
-                        f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})"
+                        f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})",
                     )
                     return None
 
@@ -199,7 +200,7 @@ class TaskManager:
             self._loop.call_soon_threadsafe(self._register_and_run, task)
         else:
             logger.error(
-                f"[TaskManager] Cannot submit task '{name}': no event loop captured."
+                f"[TaskManager] Cannot submit task '{name}': no event loop captured.",
             )
 
         return task.id
@@ -251,7 +252,7 @@ class TaskManager:
 
         if not task.cancellable:
             logger.warning(
-                f"[TaskManager] Attempted to cancel non-cancellable task: {task.id}"
+                f"[TaskManager] Attempted to cancel non-cancellable task: {task.id}",
             )
             return
 
@@ -313,7 +314,7 @@ class TaskManager:
             await self._persist_task_async(task)
         if active_ids:
             logger.info(
-                f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s)."
+                f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).",
             )
             self._notify_subscribers()
 
@@ -330,7 +331,7 @@ class TaskManager:
             for tid, _ in to_evict:
                 del self._tasks[tid]
             logger.debug(
-                f"[TaskManager] Auto-evicted {len(to_evict)} old finished task(s)."
+                f"[TaskManager] Auto-evicted {len(to_evict)} old finished task(s).",
             )
 
     # --- Internal Runner ---
@@ -386,7 +387,7 @@ class TaskManager:
             task.error = str(e)
             task.description = f"Failed: {type(e).__name__}"
             logger.error(
-                f"[TaskManager] Task {task.id} Failed: {e}\n{traceback.format_exc()}"
+                f"[TaskManager] Task {task.id} Failed: {e}\n{traceback.format_exc()}",
             )
         finally:
             task._asyncio_task = None
@@ -433,7 +434,7 @@ class TaskManager:
 
         # 3. Load recent history (_read_db returns pd.DataFrame)
         df = await cache._read_db(
-            "SELECT * FROM task_history ORDER BY created_at DESC LIMIT 200"
+            "SELECT * FROM task_history ORDER BY created_at DESC LIMIT 200",
         )
         if df is not None and not df.empty:
             for _, row in df.iterrows():
@@ -455,12 +456,12 @@ class TaskManager:
                 except Exception as e:
                     logger.warning(f"[TaskManager] Skipping malformed history row: {e}")
             logger.info(
-                f"[TaskManager] Loaded {len(self._history)} historical task(s) from DB."
+                f"[TaskManager] Loaded {len(self._history)} historical task(s) from DB.",
             )
 
         # 4. Purge old records (>30 days)
         await cache._write_db(
-            "DELETE FROM task_history WHERE completed_at < (NOW() - INTERVAL '30 days')::text"
+            "DELETE FROM task_history WHERE completed_at < (NOW() - INTERVAL '30 days')::text",
         )
 
         self._db_ready = True

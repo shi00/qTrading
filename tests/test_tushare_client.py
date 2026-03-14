@@ -1,11 +1,11 @@
-import sys
 import os
+import sys
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import unittest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Make sure to import the class to be tested
 # Assuming path is setup or we run as module
@@ -27,7 +27,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     async def test_client_respects_rate_limit(
-        self, mock_set_token, mock_pro_api, mock_sleep
+        self, mock_set_token, mock_pro_api, mock_sleep,
     ):
         """Test that client integration works"""
         mock_api_instance = MagicMock()
@@ -41,7 +41,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
 
         # Mock Config to return a known limit
         with patch.object(
-            ConfigHandler, "get_tushare_api_limit", return_value=60
+            ConfigHandler, "get_tushare_api_limit", return_value=60,
         ):  # 1s interval
             client = TushareClient(token="dummy")
 
@@ -89,7 +89,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     async def test_retry_on_network_error(
-        self, mock_set_token, mock_pro_api, mock_sleep
+        self, mock_set_token, mock_pro_api, mock_sleep,
     ):
         """Test retry logic on network error"""
         mock_api_instance = MagicMock()
@@ -114,7 +114,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     async def test_failure_after_max_retries(
-        self, mock_set_token, mock_pro_api, mock_sleep
+        self, mock_set_token, mock_pro_api, mock_sleep,
     ):
         """Test that it raises exception after max retries"""
         mock_api_instance = MagicMock()
@@ -129,7 +129,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
             await client.get_daily_quotes(ts_code="000001.SZ")
 
         self.assertEqual(
-            mock_api_instance.daily.call_count, 3
+            mock_api_instance.daily.call_count, 3,
         )  # Max retries default is 3
 
     @patch("tushare.pro_api")
@@ -143,7 +143,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
         mock_df = MagicMock()
         mock_df.empty = False
         mock_df.__getitem__.return_value.tolist.return_value = [
-            "20250101"
+            "20250101",
         ]  # cal_date column
 
         mock_api_instance.trade_cal.return_value = mock_df

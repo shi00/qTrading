@@ -3,10 +3,10 @@ import hashlib
 import logging
 import os
 import threading
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 from utils.config_handler import ConfigHandler
-from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ try:
 except ImportError:
     _HAS_LLAMA_CPP = False
     logger.warning(
-        "llama-cpp-python not installed. Embedded AI features will be disabled."
+        "llama-cpp-python not installed. Embedded AI features will be disabled.",
     )
 
 if _HAS_LLAMA_CPP:
@@ -55,7 +55,7 @@ class LocalModelManager:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             logger.warning(
-                "[LocalModel] No running event loop for load lock. Using dummy lock."
+                "[LocalModel] No running event loop for load lock. Using dummy lock.",
             )
 
             class DummyLock:
@@ -68,9 +68,9 @@ class LocalModelManager:
             return DummyLock()
 
         if not hasattr(current_loop, "_local_load_lock"):
-            setattr(current_loop, "_local_load_lock", asyncio.Lock())
+            current_loop._local_load_lock = asyncio.Lock()
 
-        return getattr(current_loop, "_local_load_lock")
+        return current_loop._local_load_lock
 
     @classmethod
     async def get_instance(cls):
@@ -106,7 +106,7 @@ class LocalModelManager:
             return ""
 
     async def load_model(
-        self, model_path: str, config: Optional[Dict[str, Any]] = None
+        self, model_path: str, config: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         Load the model from GGUF file.
@@ -145,7 +145,7 @@ class LocalModelManager:
             # because calculating it is the bottleneck we want to avoid.
 
             logger.info(
-                f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})..."
+                f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})...",
             )
 
             self._is_loading = True
@@ -157,13 +157,13 @@ class LocalModelManager:
                 # Let's do it before, as verification. It takes time, but only happens ONCE per file change now.
                 logger.info("[LocalModel] Verifying file integrity (MD5)...")
                 target_md5 = await ThreadPoolManager().run_async(
-                    TaskType.IO, self.calculate_file_md5, model_path
+                    TaskType.IO, self.calculate_file_md5, model_path,
                 )
 
                 # 2. Load Model (Async CPU)
                 logger.info("[LocalModel] Scheduling model load on TaskType.CPU...")
                 self._llm = await ThreadPoolManager().run_async(
-                    TaskType.CPU, self._create_llama_instance, model_path, config
+                    TaskType.CPU, self._create_llama_instance, model_path, config,
                 )
 
                 # Update State
@@ -173,7 +173,7 @@ class LocalModelManager:
 
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.info(
-                    f"[LocalModel] Model loaded successfully in {elapsed:.2f}s."
+                    f"[LocalModel] Model loaded successfully in {elapsed:.2f}s.",
                 )
                 return True
             except Exception as e:
@@ -191,7 +191,7 @@ class LocalModelManager:
         Sync factory method to create Llama instance with config.
         """
         logger.info(
-            f"[LocalModel] Initializing Llama in thread: {threading.current_thread().name}"
+            f"[LocalModel] Initializing Llama in thread: {threading.current_thread().name}",
         )
 
         return Llama(
@@ -241,7 +241,7 @@ class LocalModelManager:
         timeout_val = config.get("local_model_timeout", 90) or 90
 
         logger.info(
-            f"[LocalModel] Scheduling inference on TaskType.CPU. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}, Timeout: {timeout_val}s"
+            f"[LocalModel] Scheduling inference on TaskType.CPU. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}, Timeout: {timeout_val}s",
         )
         start_time = asyncio.get_event_loop().time()
 
@@ -262,7 +262,7 @@ class LocalModelManager:
                 )
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.info(
-                    f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}"
+                    f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}",
                 )
                 return output
             except asyncio.TimeoutError as te:
@@ -277,7 +277,7 @@ class LocalModelManager:
                 self._model_path = ""
                 self._model_stat = (0, 0)
                 raise RuntimeError(
-                    f"Local inference timed out ({timeout_val}s). Memory freed."
+                    f"Local inference timed out ({timeout_val}s). Memory freed.",
                 ) from te
             except Exception as e:
                 logger.error(f"[LocalModel] Inference error: {e}", exc_info=True)
@@ -288,13 +288,13 @@ class LocalModelManager:
                 raise RuntimeError(f"Inference execution failed: {e}") from e
 
     def _generate_sync(
-        self, prompt: str, max_tokens: int, temperature: float, system_prompt: str
+        self, prompt: str, max_tokens: int, temperature: float, system_prompt: str,
     ) -> str:
         """
         Sync generation logic.
         """
         logger.info(
-            f"[LocalModel] Running generation in thread: {threading.current_thread().name}"
+            f"[LocalModel] Running generation in thread: {threading.current_thread().name}",
         )
 
         if not self._llm:

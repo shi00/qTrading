@@ -1,7 +1,9 @@
-import polars as pl
 import logging
-from strategies.polars_base import PolarsBaseStrategy
+
+import polars as pl
+
 from strategies.base_strategy import register_strategy
+from strategies.polars_base import PolarsBaseStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,7 @@ class NorthboundStrategy(PolarsBaseStrategy):
                 .filter(pl.col("ratio") > target_ratio)
                 .filter(
                     pl.col("ts_code").str.ends_with(".SH")
-                    | pl.col("ts_code").str.ends_with(".SZ")
+                    | pl.col("ts_code").str.ends_with(".SZ"),
                 )
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("ratio", descending=True)
@@ -192,7 +194,7 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                         pl.col("amount").sum(),
                         pl.col("vol").sum(),
                         pl.col("price").mean(),
-                    ]
+                    ],
                 )
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("amount", descending=True)

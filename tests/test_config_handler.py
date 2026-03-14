@@ -1,6 +1,6 @@
-import unittest
 import os
 import sys
+import unittest
 from unittest.mock import patch
 
 # Add project root to path
@@ -51,7 +51,7 @@ class TestConfigHandler(unittest.TestCase):
 
         # Change settings via generic save
         ConfigHandler.save_config(
-            {"auto_update_enabled": True, "auto_update_time": "18:00"}
+            {"auto_update_enabled": True, "auto_update_time": "18:00"},
         )
 
         self.assertTrue(ConfigHandler.is_auto_update_enabled())

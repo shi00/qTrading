@@ -8,9 +8,9 @@ Create Date: 2026-03-04 20:57:13.832233
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "367c382dbf28"
@@ -31,7 +31,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("adj_factor", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_adj_factor_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_adj_factor_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -46,7 +46,7 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(), nullable=True),
         sa.Column("updated_at", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", "buyer", "seller", name=op.f("pk_block_trade")
+            "ts_code", "trade_date", "buyer", "seller", name=op.f("pk_block_trade"),
         ),
     )
     op.create_table(
@@ -69,12 +69,12 @@ def upgrade() -> None:
         sa.Column("turnover_rate_f", sa.Float(), nullable=True),
         sa.Column("volume_ratio", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_daily_indicators")
+            "ts_code", "trade_date", name=op.f("pk_daily_indicators"),
         ),
     )
     with op.batch_alter_table("daily_indicators", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_daily_indicators_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_daily_indicators_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -99,7 +99,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("daily_quotes", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_daily_quotes_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_daily_quotes_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -116,12 +116,12 @@ def upgrade() -> None:
         sa.Column("record_date", sa.String(), nullable=True),
         sa.Column("ex_date", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "ann_date", name=op.f("pk_dividend")
+            "ts_code", "end_date", "ann_date", name=op.f("pk_dividend"),
         ),
     )
     with op.batch_alter_table("dividend", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_dividend_ann_date"), ["ann_date"], unique=False
+            batch_op.f("ix_dividend_ann_date"), ["ann_date"], unique=False,
         )
 
     op.create_table(
@@ -145,12 +145,12 @@ def upgrade() -> None:
         sa.Column("net_profit_min", sa.Float(), nullable=True),
         sa.Column("net_profit_max", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "ann_date", name=op.f("pk_fina_forecast")
+            "ts_code", "end_date", "ann_date", name=op.f("pk_fina_forecast"),
         ),
     )
     with op.batch_alter_table("fina_forecast", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_fina_forecast_ann_date"), ["ann_date"], unique=False
+            batch_op.f("ix_fina_forecast_ann_date"), ["ann_date"], unique=False,
         )
 
     op.create_table(
@@ -164,12 +164,12 @@ def upgrade() -> None:
         sa.Column("curr_type", sa.String(), nullable=True),
         sa.Column("update_flag", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "bz_item", name=op.f("pk_fina_mainbz")
+            "ts_code", "end_date", "bz_item", name=op.f("pk_fina_mainbz"),
         ),
     )
     with op.batch_alter_table("fina_mainbz", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_fina_mainbz_end_date"), ["end_date"], unique=False
+            batch_op.f("ix_fina_mainbz_end_date"), ["end_date"], unique=False,
         )
 
     op.create_table(
@@ -195,12 +195,12 @@ def upgrade() -> None:
         sa.Column("goodwill", sa.Float(), nullable=True),
         sa.Column("audit_result", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", name=op.f("pk_financial_reports")
+            "ts_code", "end_date", name=op.f("pk_financial_reports"),
         ),
     )
     with op.batch_alter_table("financial_reports", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_financial_reports_end_date"), ["end_date"], unique=False
+            batch_op.f("ix_financial_reports_end_date"), ["end_date"], unique=False,
         )
 
     op.create_table(
@@ -220,7 +220,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("index_daily", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_index_daily_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_index_daily_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -238,7 +238,7 @@ def upgrade() -> None:
         sa.Column("pe_ttm", sa.Float(), nullable=True),
         sa.Column("pb", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_index_dailybasic")
+            "ts_code", "trade_date", name=op.f("pk_index_dailybasic"),
         ),
     )
     op.create_table(
@@ -248,12 +248,12 @@ def upgrade() -> None:
         sa.Column("trade_date", sa.String(), nullable=False),
         sa.Column("weight", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "index_code", "con_code", "trade_date", name=op.f("pk_index_weight")
+            "index_code", "con_code", "trade_date", name=op.f("pk_index_weight"),
         ),
     )
     with op.batch_alter_table("index_weight", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_index_weight_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_index_weight_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -276,7 +276,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("limit_list", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_limit_list_ts_code"), ["ts_code"], unique=False
+            batch_op.f("ix_limit_list_ts_code"), ["ts_code"], unique=False,
         )
 
     op.create_table(
@@ -306,7 +306,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("margin_daily", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_margin_daily_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_margin_daily_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -319,7 +319,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
         sa.UniqueConstraint(
-            "content", "publish_time", name="uq_market_news_content_pub"
+            "content", "publish_time", name="uq_market_news_content_pub",
         ),
     )
     op.create_table(
@@ -345,12 +345,12 @@ def upgrade() -> None:
         sa.Column("net_mf_vol", sa.Integer(), nullable=True),
         sa.Column("net_mf_amount", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_moneyflow_daily")
+            "ts_code", "trade_date", name=op.f("pk_moneyflow_daily"),
         ),
     )
     with op.batch_alter_table("moneyflow_daily", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_moneyflow_daily_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_moneyflow_daily_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -373,12 +373,12 @@ def upgrade() -> None:
         sa.Column("ratio", sa.Float(), nullable=True),
         sa.Column("exchange", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_northbound_holding")
+            "ts_code", "trade_date", name=op.f("pk_northbound_holding"),
         ),
     )
     with op.batch_alter_table("northbound_holding", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_northbound_holding_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_northbound_holding_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -407,7 +407,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("repurchase", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_repurchase_ann_date"), ["ann_date"], unique=False
+            batch_op.f("ix_repurchase_ann_date"), ["ann_date"], unique=False,
         )
 
     op.create_table(
@@ -453,7 +453,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("screening_history", schema=None) as batch_op:
         batch_op.create_index(
-            "idx_sh_date_strategy", ["trade_date", "strategy_name"], unique=False
+            "idx_sh_date_strategy", ["trade_date", "strategy_name"], unique=False,
         )
 
     op.create_table(
@@ -478,12 +478,12 @@ def upgrade() -> None:
         sa.Column("holder_num_change", sa.Float(), nullable=True),
         sa.Column("holder_num_ratio", sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", name=op.f("pk_stk_holdernumber")
+            "ts_code", "end_date", name=op.f("pk_stk_holdernumber"),
         ),
     )
     with op.batch_alter_table("stk_holdernumber", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_stk_holdernumber_end_date"), ["end_date"], unique=False
+            batch_op.f("ix_stk_holdernumber_end_date"), ["end_date"], unique=False,
         )
 
     op.create_table(
@@ -501,7 +501,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("stock_basic", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_stock_basic_list_date"), ["list_date"], unique=False
+            batch_op.f("ix_stock_basic_list_date"), ["list_date"], unique=False,
         )
 
     op.create_table(
@@ -511,12 +511,12 @@ def upgrade() -> None:
         sa.Column("concept_id", sa.String(), nullable=False),
         sa.Column("updated_at", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "concept_id", name=op.f("pk_stock_concepts")
+            "ts_code", "concept_id", name=op.f("pk_stock_concepts"),
         ),
     )
     with op.batch_alter_table("stock_concepts", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_stock_concepts_ts_code"), ["ts_code"], unique=False
+            batch_op.f("ix_stock_concepts_ts_code"), ["ts_code"], unique=False,
         )
 
     op.create_table(
@@ -536,7 +536,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("suspend_d", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_suspend_d_trade_date"), ["trade_date"], unique=False
+            batch_op.f("ix_suspend_d_trade_date"), ["trade_date"], unique=False,
         )
 
     op.create_table(
@@ -566,7 +566,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("task_history", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_task_history_created_at"), ["created_at"], unique=False
+            batch_op.f("ix_task_history_created_at"), ["created_at"], unique=False,
         )
 
     op.create_table(
@@ -579,12 +579,12 @@ def upgrade() -> None:
         sa.Column("hold_ratio", sa.Float(), nullable=True),
         sa.Column("holder_type", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "holder_name", name=op.f("pk_top10_holders")
+            "ts_code", "end_date", "holder_name", name=op.f("pk_top10_holders"),
         ),
     )
     with op.batch_alter_table("top10_holders", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_top10_holders_holder_name"), ["holder_name"], unique=False
+            batch_op.f("ix_top10_holders_holder_name"), ["holder_name"], unique=False,
         )
 
     op.create_table(
@@ -608,7 +608,7 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("top_list", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_top_list_ts_code"), ["ts_code"], unique=False
+            batch_op.f("ix_top_list_ts_code"), ["ts_code"], unique=False,
         )
 
     op.create_table(

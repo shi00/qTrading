@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class BaseDao:
         def _to_native(val):
             if val is None:
                 return None
-            
+
             # Catch all variants of NaNs/NaTs safely before anything is coerced to float('nan')
             try:
                 if pd.isna(val):
@@ -93,7 +93,7 @@ class BaseDao:
             # SQLAlchemy 1.4/2.0+ async engine check
             if hasattr(self.engine, "sync_engine") and self.engine.sync_engine is None:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Engine disposed, skipping write."
+                    f"[{self.__class__.__name__}] Engine disposed, skipping write.",
                 )
                 return 0
         except Exception:
@@ -107,17 +107,17 @@ class BaseDao:
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > 2000:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Slow Write ({elapsed:.1f}ms): {sql[:200]}..."
+                    f"[{self.__class__.__name__}] Slow Write ({elapsed:.1f}ms): {sql[:200]}...",
                 )
             else:
                 logger.debug(
-                    f"[{self.__class__.__name__}] Write ({elapsed:.1f}ms): {sql[:200]}..."
+                    f"[{self.__class__.__name__}] Write ({elapsed:.1f}ms): {sql[:200]}...",
                 )
 
             return len(params) if is_many and params else 1
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] Write cancelled during shutdown."
+                f"[{self.__class__.__name__}] Write cancelled during shutdown.",
             )
             if not suppress_errors:
                 raise
@@ -135,7 +135,7 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during write (Shutdown): {e}"
+                    f"[{self.__class__.__name__}] DB Closed during write (Shutdown): {e}",
                 )
                 return 0
 
@@ -154,7 +154,7 @@ class BaseDao:
         return ",".join(['"' + c + '"' for c in columns])
 
     async def _save_upsert(
-        self, df, table_name, columns, pk_columns, suppress_errors=True
+        self, df, table_name, columns, pk_columns, suppress_errors=True,
     ):
         """
         Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
@@ -164,6 +164,7 @@ class BaseDao:
             return 0
 
         import asyncio
+
         from data.models import Base
 
         await self._get_maintenance_event().wait()
@@ -171,7 +172,7 @@ class BaseDao:
         table = Base.metadata.tables.get(table_name)
         if table is None:
             logger.error(
-                f"[{self.__class__.__name__}] Table {table_name} not found in SQLAlchemy metadata."
+                f"[{self.__class__.__name__}] Table {table_name} not found in SQLAlchemy metadata.",
             )
             return 0
 
@@ -183,7 +184,7 @@ class BaseDao:
         missing_cols = [col for col in columns if col not in df.columns]
         if missing_cols:
             logger.warning(
-                f"[{self.__class__.__name__}] Insert '{table_name}': Missing columns in dataframe, filling with None: {missing_cols}"
+                f"[{self.__class__.__name__}] Insert '{table_name}': Missing columns in dataframe, filling with None: {missing_cols}",
             )
             # Use assign with dict comprehension to add missing columns safely as None
             df = df.assign(**{col: None for col in missing_cols})
@@ -233,7 +234,7 @@ class BaseDao:
         else:
             update_dict = {c: getattr(stmt.excluded, c) for c in update_cols}
             stmt = stmt.on_conflict_do_update(
-                index_elements=pk_columns, set_=update_dict
+                index_elements=pk_columns, set_=update_dict,
             )
 
         start_time = time.perf_counter()
@@ -244,17 +245,17 @@ class BaseDao:
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > 2000:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}"
+                    f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}",
                 )
             else:
                 logger.debug(
-                    f"[{self.__class__.__name__}] UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}"
+                    f"[{self.__class__.__name__}] UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}",
                 )
 
             return len(records)
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] UPSERT cancelled during shutdown: {table_name}"
+                f"[{self.__class__.__name__}] UPSERT cancelled during shutdown: {table_name}",
             )
             # CancelledError is a control flow signal, MUST strictly propagate it
             raise
@@ -270,7 +271,7 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during upsert (Shutdown): {e}"
+                    f"[{self.__class__.__name__}] DB Closed during upsert (Shutdown): {e}",
                 )
                 return 0
 
@@ -301,23 +302,23 @@ class BaseDao:
 
                 # Offload DF creation
                 df = await ThreadPoolManager().run_async(
-                    TaskType.CPU, pd.DataFrame, rows, columns=cols
+                    TaskType.CPU, pd.DataFrame, rows, columns=cols,
                 )
 
                 elapsed = (time.perf_counter() - start_time) * 1000
                 if elapsed > 500:
                     logger.warning(
-                        f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}..."
+                        f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
                     )
                 else:
                     logger.debug(
-                        f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}..."
+                        f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
                     )
 
                 return df
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] Read cancelled during shutdown."
+                f"[{self.__class__.__name__}] Read cancelled during shutdown.",
             )
             return pd.DataFrame()
         except Exception as e:
@@ -334,7 +335,7 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}"
+                    f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}",
                 )
                 return pd.DataFrame()
 

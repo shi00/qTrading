@@ -7,7 +7,7 @@ import sys
 from collections import defaultdict
 from typing import List, Tuple
 
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import Page, async_playwright
 
 # Dynamically add the project root to sys.path so it can run from anywhere
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -97,7 +97,7 @@ class DoubaoTagger:
                 # 获取最后一个气泡内的全文本或代码块
                 # 使用 text_content() 获取原汁原味的文本，避免被 CSS 隐藏
                 bubbles = await page.locator(
-                    '.content-wrapper, div[data-testid="chat-message-bubble"]'
+                    '.content-wrapper, div[data-testid="chat-message-bubble"]',
                 ).all()
                 potential_json = ""
 
@@ -140,7 +140,7 @@ class DoubaoTagger:
             try:
                 data = json.loads(response_text)
                 print(
-                    f"✅ 成功解析 JSON，共提取了 {len(data)} 个股票对象。", flush=True
+                    f"✅ 成功解析 JSON，共提取了 {len(data)} 个股票对象。", flush=True,
                 )
 
                 if self.dry_run:
@@ -168,7 +168,7 @@ class DoubaoTagger:
                 ) as f:
                     f.write(html_content)
                 await page.screenshot(
-                    path=os.path.join(APP_ROOT, "debug_doubao_fail.png")
+                    path=os.path.join(APP_ROOT, "debug_doubao_fail.png"),
                 )
             except Exception:
                 pass
@@ -221,7 +221,7 @@ class DoubaoTagger:
                     batch_limit = random.randint(30, 50)
 
                 stocks = await self.dao.get_stocks_without_ai_concepts(
-                    batch_limit, exclude_codes
+                    batch_limit, exclude_codes,
                 )
 
                 if not stocks and not exclude_codes:
@@ -230,7 +230,7 @@ class DoubaoTagger:
                         flush=True,
                     )
                     break
-                elif not stocks and exclude_codes:
+                if not stocks and exclude_codes:
                     print("⚠️ 正常股票已遍历完毕，开始攻坚错题本排查队列...", flush=True)
                     # 清洗错题本：移除重试超过阈值的死忠坏账
                     exclude_codes = [
@@ -242,7 +242,7 @@ class DoubaoTagger:
                         print("🚫 错题本重试全线溃败或已清空，彻底结束。", flush=True)
                         break
                     stocks = await self.dao.get_stocks_without_ai_concepts(
-                        20, []
+                        20, [],
                     )  # 降低批次大小攻坚
                     # 过滤只查错题本中的股票
                     stocks = [s for s in stocks if s[0] in exclude_codes]
@@ -292,7 +292,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0, help="Max stocks to process")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Do not save to databases"
+        "--dry-run", action="store_true", help="Do not save to databases",
     )
     args = parser.parse_args()
 

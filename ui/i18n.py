@@ -2029,11 +2029,11 @@ class I18n:
             if key not in cls._missing_keys:
                 if default is not None:
                     logger.debug(
-                        f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {cls._locale})"
+                        f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {cls._locale})",
                     )
                 else:
                     logger.warning(
-                        f"[I18n] Missing translation for key: '{key}' (Locale: {cls._locale})"
+                        f"[I18n] Missing translation for key: '{key}' (Locale: {cls._locale})",
                     )
                 cls._missing_keys.add(key)
             return default if default is not None else key

@@ -520,14 +520,14 @@ def validate_schema_definitions():
 
         if missing_defs:
             logger.warning(
-                f"[DataDict] The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}"
+                f"[DataDict] The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}",
             )
             logger.warning(
-                "[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly."
+                "[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.",
             )
         else:
             logger.info(
-                f"[DataDict] Schema validation passed. {len(db_tables)} tables verified via SQLAlchemy Metadata."
+                f"[DataDict] Schema validation passed. {len(db_tables)} tables verified via SQLAlchemy Metadata.",
             )
 
     except Exception as e:

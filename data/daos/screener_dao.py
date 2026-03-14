@@ -1,8 +1,11 @@
 import functools
 import logging
+
 import pandas as pd
-from .base_dao import BaseDao
+
 from data.models import ScreeningHistory
+
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ class ScreenerDao(BaseDao):
             LIMIT $1 OFFSET $2
         """
         return await self._read_db(
-            sql, (limit * 5, offset)
+            sql, (limit * 5, offset),
         )  # limit*5 to cover multiple strategies per date
 
     async def get_history_records(self, trade_date, strategy_name=None):

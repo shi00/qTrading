@@ -1,6 +1,7 @@
-import unittest
 import os
 import sqlite3
+import unittest
+
 from data.database_manager import DatabaseManager
 
 
@@ -18,16 +19,16 @@ class TestDatabaseManager(unittest.TestCase):
         # Create sample tables
         cursor.execute("CREATE TABLE stock_basic (ts_code TEXT PRIMARY KEY, name TEXT)")
         cursor.execute(
-            "INSERT INTO stock_basic VALUES ('000001.SZ', 'PingAn'), ('600519.SH', 'Moutai')"
+            "INSERT INTO stock_basic VALUES ('000001.SZ', 'PingAn'), ('600519.SH', 'Moutai')",
         )
 
         cursor.execute(
-            "CREATE TABLE daily_quotes (ts_code TEXT, trade_date TEXT, close REAL)"
+            "CREATE TABLE daily_quotes (ts_code TEXT, trade_date TEXT, close REAL)",
         )
         for i in range(100):
             date = f"202301{i:02d}" if i < 31 else "20230201"
             cursor.execute(
-                f"INSERT INTO daily_quotes VALUES ('000001.SZ', '{date}', {10.0 + i})"
+                f"INSERT INTO daily_quotes VALUES ('000001.SZ', '{date}', {10.0 + i})",
             )
 
         conn.commit()
@@ -69,7 +70,7 @@ class TestDatabaseManager(unittest.TestCase):
 
     def test_execute_sql_valid(self):
         result = self.db_manager.execute_sql(
-            "SELECT * FROM stock_basic WHERE name = 'PingAn'"
+            "SELECT * FROM stock_basic WHERE name = 'PingAn'",
         )
         self.assertTrue(result["success"])
         self.assertEqual(len(result["data"]), 1)

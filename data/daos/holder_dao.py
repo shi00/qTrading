@@ -1,4 +1,5 @@
 import logging
+
 from data.daos.base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class HolderDao(BaseDao):
             "holder_num_ratio",
         ]
         return await self._save_upsert(
-            df, "stk_holdernumber", columns, pk_columns=["ts_code", "end_date"]
+            df, "stk_holdernumber", columns, pk_columns=["ts_code", "end_date"],
         )
 
     async def save_top10_holders(self, df):

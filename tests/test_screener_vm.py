@@ -1,7 +1,9 @@
-import unittest
 import asyncio
+import unittest
+from unittest.mock import AsyncMock, MagicMock
+
 import pandas as pd
-from unittest.mock import MagicMock, AsyncMock
+
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 

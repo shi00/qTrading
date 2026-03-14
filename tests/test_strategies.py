@@ -1,22 +1,24 @@
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest
+
 import pandas as pd
+
 from strategies.all_strategies import StrategyManager
 from strategies.fundamental import (
-    ValueStrategy,
-    GrowthStrategy,
-    DividendStrategy,
     CashFlowStrategy,
+    DividendStrategy,
+    GrowthStrategy,
     LargePEStrategy,
+    ValueStrategy,
 )
 from strategies.market import (
-    TechnicalBreakoutStrategy,
-    NorthboundStrategy,
-    InstitutionalStrategy,
     BlockTradeStrategy,
+    InstitutionalStrategy,
+    NorthboundStrategy,
+    TechnicalBreakoutStrategy,
 )
 from strategies.oversold_strategy import OversoldStrategy
 
@@ -43,7 +45,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
                 "roe": [16.0, 8.0, 5.0],
                 # Financials
                 "debt_to_assets": [40.0, 80.0, 60.0],
-            }
+            },
         )
 
         self.context = {"screening_data": self.base_data}
@@ -102,7 +104,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
     async def test_northbound(self):
         """Test Northbound: Ratio > 5%"""
         nb_data = pd.DataFrame(
-            {"ts_code": ["000001.SZ", "000002.SZ"], "ratio": [6.0, 1.0]}
+            {"ts_code": ["000001.SZ", "000002.SZ"], "ratio": [6.0, 1.0]},
         )
         ctx = {"northbound_data": nb_data, "screening_data": self.base_data}
 
@@ -142,7 +144,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         history_data = []
         for d, p in zip(dates, c_prices):
             history_data.append(
-                {"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0}
+                {"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0},
             )
 
         history_df = pd.DataFrame(history_data)
@@ -161,7 +163,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
     async def test_institutional(self):
         """Test Institutional: Net > 3000"""
         lhb_data = pd.DataFrame(
-            {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]}
+            {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]},
         )
         ctx = {"top_list": lhb_data, "screening_data": self.base_data}
 
@@ -179,14 +181,14 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
                 "amount": [800, 300, 50],  # Stock A total 1100? Logic sums it up?
                 "vol": [1, 1, 1],
                 "price": [10, 10, 10],
-            }
+            },
         )
         # Note: Strategy filters rows > 1000 first, THEN groups.
         # So 800 and 300 are both filtered out individually.
 
         # Let's adjust to pass
         block_data_pass = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [10], "price": [10]}
+            {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [10], "price": [10]},
         )
 
         ctx = {"block_trade": block_data_pass, "screening_data": self.base_data}

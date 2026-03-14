@@ -1,6 +1,6 @@
-import logging
 import functools
 import inspect
+import logging
 from enum import IntEnum
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def _check_tier(processor, min_tier, func_name):
     """Shared logic to verify quality tier."""
     if processor is None:
         logger.warning(
-            f"[QualityGate] Bypassed for {func_name}: DataProcessor not found in context. (Could be test env or context missing)"
+            f"[QualityGate] Bypassed for {func_name}: DataProcessor not found in context. (Could be test env or context missing)",
         )
         return  # Skip check if no processor found
     current_tier = getattr(processor, "_quality_tier", None)
@@ -102,14 +102,13 @@ def require_quality(min_tier: QualityTier):
                 return await func(self, *args, **kwargs)
 
             return async_wrapper
-        else:
 
-            @functools.wraps(func)
-            def sync_wrapper(self, *args, **kwargs):
-                processor = _find_processor(self, args, kwargs)
-                _check_tier(processor, min_tier, func.__name__)
-                return func(self, *args, **kwargs)
+        @functools.wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            processor = _find_processor(self, args, kwargs)
+            _check_tier(processor, min_tier, func.__name__)
+            return func(self, *args, **kwargs)
 
-            return sync_wrapper
+        return sync_wrapper
 
     return decorator

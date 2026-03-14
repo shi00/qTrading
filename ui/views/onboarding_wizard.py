@@ -77,7 +77,7 @@ class OnboardingWizard(ft.Container):
             options=[
                 ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
                 ft.dropdown.Option(
-                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)"
+                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)",
                 ),
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
@@ -109,7 +109,7 @@ class OnboardingWizard(ft.Container):
             bgcolor=AppColors.BORDER,
         )
         self.sync_status = ft.Text(
-            I18n.get("wizard_status_ready"), size=12, color=AppColors.TEXT_SECONDARY
+            I18n.get("wizard_status_ready"), size=12, color=AppColors.TEXT_SECONDARY,
         )
 
         # Step 4: Schedule options
@@ -195,7 +195,7 @@ class OnboardingWizard(ft.Container):
                         content=ft.Icon(ft.Icons.ARROW_RIGHT_ALT, color=color, size=24),
                         padding=ft.padding.symmetric(horizontal=10),
                         offset=ft.Offset(0, -0.2),
-                    )
+                    ),
                 )
         return controls
 
@@ -331,7 +331,7 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=10),
                 ft.ExpansionTile(
                     title=ft.Text(
-                        I18n.get("wizard_ai_advanced"), size=14, color=AppColors.PRIMARY
+                        I18n.get("wizard_ai_advanced"), size=14, color=AppColors.PRIMARY,
                     ),
                     subtitle=ft.Text(
                         I18n.get("wizard_ai_advanced_subtitle"),
@@ -403,7 +403,7 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step3_desc").format(
-                        years=years, hours=int(years * 1.5)
+                        years=years, hours=int(years * 1.5),
                     ),
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
@@ -451,7 +451,7 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=30),
                 ft.Row([self.schedule_enabled], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Text(
-                    I18n.get("wizard_schedule_note"), size=12, color=AppColors.TEXT_HINT
+                    I18n.get("wizard_schedule_note"), size=12, color=AppColors.TEXT_HINT,
                 ),
                 ft.Container(height=30),
                 ft.Row(
@@ -543,7 +543,7 @@ class OnboardingWizard(ft.Container):
 
         except Exception as ex:
             self.token_status.value = I18n.get("wizard_err_verify_failed").format(
-                error=str(ex)[:40]
+                error=str(ex)[:40],
             )
             self.token_status.color = AppColors.ERROR
             self.update()
@@ -598,7 +598,7 @@ class OnboardingWizard(ft.Container):
                 # Use unified initialization workflow
                 # This ensures Stock List -> Calendar -> History -> Financials -> Health Check
                 result = await processor.initialize_system(
-                    progress_callback=update_progress
+                    progress_callback=update_progress,
                 )
 
                 if processor.is_cancelled():
@@ -608,7 +608,7 @@ class OnboardingWizard(ft.Container):
                 elif result is None:
                     # Critical failure without explicit cancellation
                     raise Exception(
-                        "Initialization task failed unexpectedly. Check logs."
+                        "Initialization task failed unexpectedly. Check logs.",
                     )
                 else:
                     self.sync_status.value = I18n.get("wizard_msg_history_done")
@@ -628,7 +628,7 @@ class OnboardingWizard(ft.Container):
         except Exception as ex:
             logger.error(f"Sync error: {ex}", exc_info=True)
             self.sync_status.value = I18n.get("wizard_msg_sync_failed").format(
-                error=str(ex)[:40]
+                error=str(ex)[:40],
             )
             self.sync_status.color = ft.Colors.RED
             self.sync_progress.value = 0
@@ -702,7 +702,7 @@ class OnboardingWizard(ft.Container):
 
         except Exception as ex:
             self.ai_status.value = I18n.get("wizard_ai_error").format(
-                error=str(ex)[:30]
+                error=str(ex)[:30],
             )
             self.ai_status.color = AppColors.ERROR
             self.update()
@@ -716,8 +716,8 @@ class OnboardingWizard(ft.Container):
 
     async def _handle_cancel_sync(self, e):
         """Cancel the running sync task"""
-        from ui.theme import AppColors
         from data.data_processor import DataProcessor
+        from ui.theme import AppColors
 
         try:
             processor = DataProcessor()

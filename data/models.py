@@ -3,7 +3,15 @@ SQLAlchemy ORM models for A-Stock Screener.
 These models represent the database schema previously defined in schema.sql.
 """
 
-from sqlalchemy import Column, String, Float, Integer, BigInteger, UniqueConstraint, Index
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Float,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
 

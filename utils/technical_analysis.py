@@ -124,8 +124,7 @@ class TechnicalAnalysis:
 
         if ma5 > ma20:
             return "UP"
-        else:
-            return "DOWN"
+        return "DOWN"
 
     @staticmethod
     def get_rsi(df, period=6):
@@ -207,7 +206,7 @@ class TechnicalAnalysis:
                 dif.fill_null(0.0).alias("dif"),
                 dea.fill_null(0.0).alias("dea"),
                 macd.fill_null(0.0).alias("macd"),
-            ]
+            ],
         ).alias("macd_struct")
 
     @staticmethod
@@ -216,7 +215,7 @@ class TechnicalAnalysis:
 
         # RSV
         llv = pl.col(low).rolling_min(
-            window_size=n, min_samples=1
+            window_size=n, min_samples=1,
         )  # min_samples not fully supported in old polars?
         # rolling_min in Polars usually requires window_size.
         # Handle dynamic window? No, just standard rolling.

@@ -1,5 +1,7 @@
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 from utils.config_handler import ConfigHandler
 from utils.security_utils import SecurityManager
 
@@ -43,7 +45,7 @@ def isolate_environment(tmp_path):
         patch("utils.config_handler.CONFIG_FILE", str(tmp_path / "test_settings.json")),
         patch.object(SecurityManager, "KEY_FILE", str(tmp_path / ".secret.key")),
         patch.object(
-            SecurityManager, "KEY_FILE_BAK", str(tmp_path / ".secret.key.bak")
+            SecurityManager, "KEY_FILE_BAK", str(tmp_path / ".secret.key.bak"),
         ),
         patch("keyring.set_password", side_effect=_mock_set),
         patch("keyring.get_password", side_effect=_mock_get),

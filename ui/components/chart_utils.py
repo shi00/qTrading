@@ -5,17 +5,18 @@ Generates professional candlestick charts with volume subplots and
 moving averages, rendered as in-memory PNG for inline display via ft.Image.
 """
 
-import io
 import base64
+import io
 import logging
 
-import pandas as pd
-import mplfinance as mpf
 import matplotlib
+import mplfinance as mpf
+import pandas as pd
 
 matplotlib.use("Agg")  # Non-interactive backend, safe for threading
 
 import flet as ft
+
 from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)

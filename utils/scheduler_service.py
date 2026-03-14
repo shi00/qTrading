@@ -14,7 +14,7 @@ from data.review_manager import ReviewManager
 from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.thread_pool import ThreadPoolManager, TaskType
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class SchedulerService:
         # 'apscheduler.job_defaults.max_instances': 1 ensures we don't overlap runs
         # timezone='Asia/Shanghai' ensures consistent scheduling regardless of server location
         self.scheduler = AsyncIOScheduler(
-            job_defaults={"max_instances": 1}, timezone="Asia/Shanghai"
+            job_defaults={"max_instances": 1}, timezone="Asia/Shanghai",
         )
         self._last_update_date = None
         self._last_pred_date = None
@@ -87,7 +87,7 @@ class SchedulerService:
         job_id = event.job_id
         run_time = event.scheduled_run_time
         logger.warning(
-            f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})"
+            f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})",
         )
 
     def stop(self):
@@ -118,11 +118,11 @@ class SchedulerService:
         # Run sync config check in thread pool to avoid blocking event loop
         try:
             current_config = await ThreadPoolManager().run_async(
-                TaskType.IO, self._check_config_sync
+                TaskType.IO, self._check_config_sync,
             )
         except asyncio.CancelledError:
             logger.info(
-                "[Scheduler] _watch_config_changes cancelled (likely shutting down)"
+                "[Scheduler] _watch_config_changes cancelled (likely shutting down)",
             )
             raise
         except Exception as e:
@@ -141,18 +141,18 @@ class SchedulerService:
         changed = False
         if current_time != self._last_known_config["time"]:
             logger.info(
-                f"[Scheduler] Detected schedule time change: {self._last_known_config['time']} -> {current_time}"
+                f"[Scheduler] Detected schedule time change: {self._last_known_config['time']} -> {current_time}",
             )
             changed = True
 
         if current_enabled != self._last_known_config["enabled"]:
             logger.info(
-                f"[Scheduler] Detected enable status change: {self._last_known_config['enabled']} -> {current_enabled}"
+                f"[Scheduler] Detected enable status change: {self._last_known_config['enabled']} -> {current_enabled}",
             )
             changed = True
 
         if current_doubao_time != self._last_known_config.get(
-            "doubao_time"
+            "doubao_time",
         ) or current_doubao_enabled != self._last_known_config.get("doubao_enabled"):
             logger.info("[Scheduler] Detected Doubao schedule config change")
             changed = True
@@ -210,7 +210,7 @@ class SchedulerService:
             replace_existing=True,
         )
         logger.info(
-            f"[Scheduler] Scheduled Doubao Weekly Refresh at {dh:02d}:{dm:02d} on Saturdays"
+            f"[Scheduler] Scheduled Doubao Weekly Refresh at {dh:02d}:{dm:02d} on Saturdays",
         )
 
     async def _run_daily_update(self):
@@ -229,11 +229,11 @@ class SchedulerService:
         try:
             client = TushareClient()
             is_trading = await ThreadPoolManager().run_async(
-                TaskType.IO, client.is_trading_day, today
+                TaskType.IO, client.is_trading_day, today,
             )  # TODO: P0-4 Phase 2 will make this fully async
             if not is_trading:
                 logger.info(
-                    f"[Scheduler] Update skipped ({today} is not a trading day)"
+                    f"[Scheduler] Update skipped ({today} is not a trading day)",
                 )
                 return
         except Exception as e:
@@ -277,7 +277,7 @@ class SchedulerService:
             processor = DataProcessor()
             tm.update_progress(task_id, 0.05, "清空历史豆包概念...")
             await processor.run_doubao_tagging(
-                task_id=task_id, cancel_event=cancel_event
+                task_id=task_id, cancel_event=cancel_event,
             )
             return "豆包概念重塑完成"
 
@@ -301,16 +301,16 @@ class SchedulerService:
         try:
             client = TushareClient()
             is_trading = await ThreadPoolManager().run_async(
-                TaskType.IO, client.is_trading_day, today
+                TaskType.IO, client.is_trading_day, today,
             )  # TODO: P0-4 Phase 2 will make this fully async
             if not is_trading:
                 logger.info(
-                    f"[Scheduler] Prediction skipped ({today} is not a trading day)"
+                    f"[Scheduler] Prediction skipped ({today} is not a trading day)",
                 )
                 return
         except Exception as e:
             logger.warning(
-                f"[Scheduler] Trade calendar check failed for prediction: {e}"
+                f"[Scheduler] Trade calendar check failed for prediction: {e}",
             )
             if get_now().weekday() >= 5:
                 return
@@ -353,9 +353,8 @@ class SchedulerService:
                 await rm.save_results("AI_Auto_Nightly", result_df)
                 self._last_pred_date = today
                 return I18n.get("sched_pred_done_found", count=len(result_df))
-            else:
-                self._last_pred_date = today
-                return I18n.get("sched_pred_done_empty")
+            self._last_pred_date = today
+            return I18n.get("sched_pred_done_empty")
 
         TaskManager().submit_task(
             name=I18n.get("sched_task_prediction", date=today),

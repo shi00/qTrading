@@ -3,8 +3,9 @@ import logging
 import threading
 
 import flet as ft
-from ui.theme import AppColors
+
 from ui.i18n import I18n
+from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ class ToastCard(ft.Container):
                     [ft.Container(expand=True), self.expand_btn],
                     alignment=ft.MainAxisAlignment.END,
                     height=20,
-                )
+                ),
             )
 
         self.content = ft.Row(

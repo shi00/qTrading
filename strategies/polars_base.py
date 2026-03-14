@@ -1,9 +1,11 @@
+import logging
 from abc import abstractmethod
+
 import pandas as pd
 import polars as pl
-import logging
+
+from data.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.base_strategy import BaseStrategy
-from data.quality_gate import require_quality, QualityTier, QualityGateError
 
 logger = logging.getLogger(__name__)
 

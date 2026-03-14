@@ -1,14 +1,14 @@
-import unittest
-import sys
-import os
-import logging
 import asyncio
+import logging
+import os
+import sys
+import unittest
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from utils.config_handler import ConfigHandler
 from data.tushare_client import TushareClient
+from utils.config_handler import ConfigHandler
 
 # Configure logging to stdout
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
@@ -47,7 +47,7 @@ class TestTushareLimits(unittest.TestCase):
                     period=period,
                     limit=5,
                     fields="ts_code,end_date,roe",
-                )
+                ),
             )
 
             if df is not None and not df.empty:
@@ -58,7 +58,7 @@ class TestTushareLimits(unittest.TestCase):
             elif df is not None and df.empty:
                 print("API Success but returned EMPTY data.")
                 print(
-                    "This might mean the period is invalid or no data exists, but Permission is likely OK."
+                    "This might mean the period is invalid or no data exists, but Permission is likely OK.",
                 )
             else:
                 print("API returned None (Unknown error).")
@@ -66,7 +66,7 @@ class TestTushareLimits(unittest.TestCase):
         except Exception as e:
             print(f"API Failed with error: {e}")
             print(
-                "CONCLUSION: Batch sync MIGHT BE RESTRICTED. Fallback to Incremental/Looping mode needed."
+                "CONCLUSION: Batch sync MIGHT BE RESTRICTED. Fallback to Incremental/Looping mode needed.",
             )
             # Fail the test to alert CI/User
             self.fail(f"API Permission Check Failed: {e}")

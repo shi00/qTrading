@@ -1,9 +1,12 @@
 import asyncio
 import datetime
+
 import pytest
-from utils.config_handler import ConfigHandler
+
 from data.data_processor import DataProcessor
 from ui.i18n import I18n
+from utils.config_handler import ConfigHandler
+
 
 @pytest.mark.asyncio
 async def test_config_and_calendar():
@@ -29,7 +32,7 @@ async def test_config_and_calendar():
             else all_dates[0]
         )
         print(
-            f"Start date calculated for {years} years: {start_date}. Available dates: {len(all_dates)}"
+            f"Start date calculated for {years} years: {start_date}. Available dates: {len(all_dates)}",
         )
     else:
         print("No trade dates found. Calendar sync might be needed.")

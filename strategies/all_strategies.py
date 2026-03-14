@@ -8,8 +8,9 @@ Adding a new strategy requires ONLY:
 """
 
 import logging
-from ui.i18n import I18n
+
 from strategies.base_strategy import _STRATEGY_REGISTRY
+from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +18,10 @@ logger = logging.getLogger(__name__)
 # IMPORTANT: Import each strategy module to trigger @register_strategy.
 # This is the ONLY place you need to touch when adding a new strategy file.
 # ============================================================================
-import strategies.ai_strategy  # noqa: E402, F401
+import strategies.ai_strategy  # noqa: E402
+import strategies.fundamental  # noqa: E402
+import strategies.market  # noqa: E402
 import strategies.oversold_strategy  # noqa: E402, F401
-import strategies.fundamental  # noqa: E402, F401
-import strategies.market  # noqa: E402, F401
 
 
 class StrategyManager:
@@ -33,7 +34,7 @@ class StrategyManager:
             self.strategies[k] = instance
 
         logger.info(
-            f"[StrategyManager] Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}"
+            f"[StrategyManager] Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}",
         )
         self._validate_i18n()
 
@@ -45,11 +46,11 @@ class StrategyManager:
             # I18n.get returns the key itself if not found
             if name_val == s._name_key:
                 logger.warning(
-                    f"[StrategyManager] ⚠ Missing i18n key: '{s._name_key}' (strategy: {key})"
+                    f"[StrategyManager] ⚠ Missing i18n key: '{s._name_key}' (strategy: {key})",
                 )
             if desc_val == s._desc_key:
                 logger.warning(
-                    f"[StrategyManager] ⚠ Missing i18n key: '{s._desc_key}' (strategy: {key})"
+                    f"[StrategyManager] ⚠ Missing i18n key: '{s._desc_key}' (strategy: {key})",
                 )
 
     def get_strategy(self, key):

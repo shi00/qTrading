@@ -1,18 +1,15 @@
 import asyncio
+import json
 import logging
+import threading
 from datetime import timedelta
-
 
 import akshare as ak
 import pandas as pd
-
-from utils.thread_pool import ThreadPoolManager, TaskType
-from ui.i18n import I18n
-
-import json
-import threading
-
 import requests
+
+from ui.i18n import I18n
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -110,7 +107,7 @@ class NewsFetcher:
                                         "title": title,
                                         "publish_time": pub_time,
                                         "source": "巨潮公告",
-                                    }
+                                    },
                                 )
 
                             if news_list:
@@ -143,7 +140,7 @@ class NewsFetcher:
                                     "title": title_str,
                                     "publish_time": str(pub_time),
                                     "source": str(source),
-                                }
+                                },
                             )
 
                         return news_list
@@ -152,7 +149,7 @@ class NewsFetcher:
 
             except Exception as outer_e:
                 logger.error(
-                    f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}"
+                    f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}",
                 )
             finally:
                 # Always restore global pandas settings (inside lock for thread-safety)
@@ -243,7 +240,7 @@ class NewsFetcher:
                         or row.get("title", I18n.get("news_no_title")),
                         "content": row.get("内容") or row.get("content", ""),
                         "time": final_time,
-                    }
+                    },
                 )
 
             # Ensure we sort by time DESC so news_list[0] is truly the latest
@@ -274,7 +271,7 @@ class NewsFetcher:
                     "id": "",
                 }
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 }
 
                 resp = requests.get(url, params=params, headers=headers, timeout=10)

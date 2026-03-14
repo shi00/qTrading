@@ -122,8 +122,8 @@ async def main(page: ft.Page):
         logger.info("[Main] All resources released. Exiting process immediately.")
 
         # Give logs a split second to flush
-        import time
         import os
+        import time
 
         time.sleep(0.1)
         os._exit(0)
@@ -197,7 +197,7 @@ async def main(page: ft.Page):
                 content=wizard,
                 expand=True,
                 padding=40,
-            )
+            ),
         )
     else:
         # Show main app directly

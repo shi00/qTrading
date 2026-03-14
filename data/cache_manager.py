@@ -2,16 +2,13 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 import threading
 
-import re
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import config
-from utils.config_handler import ConfigHandler
-from utils.thread_pool import ThreadPoolManager, TaskType
-from data.data_dictionary import TABLE_DEFINITIONS
 from data.constants import get_health_depth_full_trade_days
 
 # DAOs
@@ -19,13 +16,16 @@ from data.daos.base_dao import (
     BaseDao,
 )  # Expose static helpers via BaseDao if needed, or keeping usage internal
 from data.daos.financial_dao import FinancialDao
+from data.daos.holder_dao import HolderDao
+from data.daos.macro_dao import MacroDao
 from data.daos.market_dao import MarketDao
 from data.daos.quote_dao import QuoteDao
 from data.daos.screener_dao import ScreenerDao
 from data.daos.stock_dao import StockDao
 from data.daos.sync_dao import SyncDao
-from data.daos.macro_dao import MacroDao
-from data.daos.holder_dao import HolderDao
+from data.data_dictionary import TABLE_DEFINITIONS
+from utils.config_handler import ConfigHandler
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class CacheManager:
         self._initialized = True
         self._schema_initialized = False
         logger.debug(
-            f"[CacheManager] State | Initialized with AsyncEngine: {connection_string}"
+            f"[CacheManager] State | Initialized with AsyncEngine: {connection_string}",
         )
 
     @property
@@ -100,9 +100,9 @@ class CacheManager:
         if not hasattr(current_loop, "_cache_maint_event"):
             evt = asyncio.Event()
             evt.set()  # Default to Set (Not in maintenance)
-            setattr(current_loop, "_cache_maint_event", evt)
+            current_loop._cache_maint_event = evt
 
-        return getattr(current_loop, "_cache_maint_event")
+        return current_loop._cache_maint_event
 
     @property
     def _init_lock(self):
@@ -111,7 +111,7 @@ class CacheManager:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             logger.warning(
-                "[CacheManager] Config | ⚠️ No running event loop for _init_lock. Using dummy."
+                "[CacheManager] Config | ⚠️ No running event loop for _init_lock. Using dummy.",
             )
 
             class DummyLock:
@@ -124,9 +124,9 @@ class CacheManager:
             return DummyLock()
 
         if not hasattr(current_loop, "_cache_init_lock"):
-            setattr(current_loop, "_cache_init_lock", asyncio.Lock())
+            current_loop._cache_init_lock = asyncio.Lock()
 
-        return getattr(current_loop, "_cache_init_lock")
+        return current_loop._cache_init_lock
 
     async def close(self):
         """Dispose the engine"""
@@ -140,7 +140,7 @@ class CacheManager:
         except Exception:
             pass
         await self.engine.dispose()
-        
+
         # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
         try:
             current_loop = asyncio.get_running_loop()
@@ -218,10 +218,11 @@ class CacheManager:
 
             def run_alembic_upgrade():
                 from alembic.config import Config
+
                 from alembic import command
 
                 alembic_ini_path = os.path.join(
-                    os.path.dirname(__file__), "..", "alembic.ini"
+                    os.path.dirname(__file__), "..", "alembic.ini",
                 )
                 alembic_cfg = Config(alembic_ini_path)
                 alembic_cfg.attributes["configure_logger"] = False
@@ -235,7 +236,7 @@ class CacheManager:
                 # (which exactly matches the old schema.sql) to prevent 'table already exists' errors.
                 if has_old_schema and not has_alembic:
                     logger.debug(
-                        "[CacheManager] Schema | Legacy database detected. Stamped baseline."
+                        "[CacheManager] Schema | Legacy database detected. Stamped baseline.",
                     )
                     command.stamp(alembic_cfg, "367c382dbf28")
 
@@ -261,7 +262,7 @@ class CacheManager:
             logger.info("[CacheManager] Wipe | Hard reset completed.")
         except Exception as e:
             logger.error(
-                f"[CacheManager] Wipe | ❌ Error during hard reset: {e}", exc_info=True
+                f"[CacheManager] Wipe | ❌ Error during hard reset: {e}", exc_info=True,
             )
             raise
 
@@ -275,14 +276,14 @@ class CacheManager:
             # Dynamically query all user tables from PostgreSQL catalog
             async with self.engine.begin() as conn:
                 r = await conn.exec_driver_sql(
-                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'"
+                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'",
                 )
                 tables = [row[0] for row in r.fetchall()]
 
                 for t in tables:
                     if not re.match(r"^[a-zA-Z0-9_]+$", t):
                         logger.warning(
-                            f"[CacheManager] Wipe | ⚠️ Malformed table name skipped: {t}"
+                            f"[CacheManager] Wipe | ⚠️ Malformed table name skipped: {t}",
                         )
                         continue
                     await conn.execute(sa.text(f'DROP TABLE IF EXISTS "{t}"'))
@@ -326,7 +327,7 @@ class CacheManager:
     # --- Daily Quotes ---
     async def save_daily_quotes(self, df, priority=None, suppress_errors=True):
         return await self.quote_dao.save_daily_quotes(
-            df, priority, suppress_errors=suppress_errors
+            df, priority, suppress_errors=suppress_errors,
         )
 
     async def check_data_exists(self, trade_date: str) -> bool:
@@ -334,29 +335,29 @@ class CacheManager:
         return await self.quote_dao.check_data_exists(trade_date)
 
     async def get_daily_quotes(
-        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None
+        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None,
     ):
         return await self.quote_dao.get_daily_quotes(
-            ts_code, start_date, end_date, ts_code_list
+            ts_code, start_date, end_date, ts_code_list,
         )
 
     # --- Daily Indicators ---
     async def save_daily_indicators(self, df, suppress_errors=True):
         return await self.market_dao.save_daily_indicators(
-            df, suppress_errors=suppress_errors
+            df, suppress_errors=suppress_errors,
         )
 
     async def get_daily_indicators(
-        self, ts_code=None, start_date=None, end_date=None, limit=None
+        self, ts_code=None, start_date=None, end_date=None, limit=None,
     ):
         return await self.market_dao.get_daily_indicators(
-            ts_code, start_date, end_date, limit
+            ts_code, start_date, end_date, limit,
         )
 
     # --- Adj Factor ---
     async def save_adj_factors(self, df, suppress_errors=True):
         return await self.market_dao.save_adj_factors(
-            df, suppress_errors=suppress_errors
+            df, suppress_errors=suppress_errors,
         )
 
     async def get_adj_factors(self, ts_code, start_date=None, end_date=None):
@@ -408,10 +409,10 @@ class CacheManager:
 
     # --- Sync Stats & Misc ---
     async def update_sync_status(
-        self, table_name, last_data_date, record_count, status="success"
+        self, table_name, last_data_date, record_count, status="success",
     ):
         return await self.sync_dao.update_sync_status(
-            table_name, last_data_date, record_count, status
+            table_name, last_data_date, record_count, status,
         )
 
     async def get_sync_status(self, table_name=None):
@@ -422,7 +423,7 @@ class CacheManager:
         await self.wait_for_maintenance()
         results = {}
 
-        logger.debug(f"[CacheManager] Health | Starting comprehensive check...")
+        logger.debug("[CacheManager] Health | Starting comprehensive check...")
 
         async with self.engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
@@ -430,7 +431,7 @@ class CacheManager:
             total_stocks = await self.stock_dao.get_active_stock_count()
             total_stocks = total_stocks or 1
             logger.debug(
-                f"[CacheManager] Health | Active stocks baseline: {total_stocks}"
+                f"[CacheManager] Health | Active stocks baseline: {total_stocks}",
             )
 
             # Tables Check (Dynamic iteration based on registry)
@@ -446,10 +447,10 @@ class CacheManager:
             global_expected_rows = None
             try:
                 r_min = await conn.exec_driver_sql(
-                    "SELECT MIN(trade_date) FROM daily_quotes"
+                    "SELECT MIN(trade_date) FROM daily_quotes",
                 )
                 r_max = await conn.exec_driver_sql(
-                    "SELECT MAX(trade_date) FROM daily_quotes"
+                    "SELECT MAX(trade_date) FROM daily_quotes",
                 )
                 row_min = r_min.fetchone()
                 row_max = r_max.fetchone()
@@ -478,11 +479,11 @@ class CacheManager:
                     row_exp = r_exp.fetchone()
                     global_expected_rows = (row_exp[0] if row_exp else 1) or 1
                     logger.debug(
-                        f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}"
+                        f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
                     )
             except Exception as e:
                 logger.warning(
-                    f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}"
+                    f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}",
                 )
 
             for table, meta in monitored_tables.items():
@@ -496,7 +497,7 @@ class CacheManager:
                         # Global Check: Just ensure data exists (>0 rows)
                         tbl = sa.table(table)
                         r = await conn.execute(
-                            sa.select(sa.func.count()).select_from(tbl)
+                            sa.select(sa.func.count()).select_from(tbl),
                         )
                         cnt = r.scalar() or 0
                         ratio = 1.0 if cnt > 0 else 0.0
@@ -514,8 +515,8 @@ class CacheManager:
                         tbl = sa.table(table)
                         r = await conn.execute(
                             sa.select(
-                                sa.func.count(sa.distinct(sa.column(code_col)))
-                            ).select_from(tbl)
+                                sa.func.count(sa.distinct(sa.column(code_col))),
+                            ).select_from(tbl),
                         )
                         cnt = r.scalar() or 0
                         ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
@@ -528,7 +529,7 @@ class CacheManager:
                         if configured_col:
                             date_col_candidates.append(configured_col)
                         date_col_candidates.extend(
-                            ["trade_date", "end_date", "ann_date"]
+                            ["trade_date", "end_date", "ann_date"],
                         )
                         try:
                             max_date = None
@@ -537,8 +538,8 @@ class CacheManager:
                                     tbl_d = sa.table(table)
                                     r2 = await conn.execute(
                                         sa.select(
-                                            sa.func.max(sa.column(dc))
-                                        ).select_from(tbl_d)
+                                            sa.func.max(sa.column(dc)),
+                                        ).select_from(tbl_d),
                                     )
                                     val = r2.scalar()
                                     if val:
@@ -548,7 +549,7 @@ class CacheManager:
                                     continue  # Column doesn't exist in this table
                             if max_date:
                                 max_dt = datetime.datetime.strptime(
-                                    str(max_date)[:8], "%Y%m%d"
+                                    str(max_date)[:8], "%Y%m%d",
                                 )
                                 age_days = (get_now() - max_dt).days
                                 # Fresh if within 7 days, decay linearly to 30 days
@@ -564,14 +565,14 @@ class CacheManager:
                                 fresh_ratio = 0.0
                         except Exception:
                             logger.debug(
-                                f"[CacheManager] Health | Freshness check skipped for {table}: no valid date column"
+                                f"[CacheManager] Health | Freshness check skipped for {table}: no valid date column",
                             )
 
                     # --- Depth (all stock tables, based on global trade days) ---
                     depth_ratio = None
                     if is_stock_table and global_trade_days > 0:
                         depth_ratio = min(
-                            1.0, global_trade_days / get_health_depth_full_trade_days()
+                            1.0, global_trade_days / get_health_depth_full_trade_days(),
                         )
 
                     # --- Breadth (daily-frequency tables only) ---
@@ -587,13 +588,13 @@ class CacheManager:
                         try:
                             tbl_b = sa.table(table)
                             r_total = await conn.execute(
-                                sa.select(sa.func.count()).select_from(tbl_b)
+                                sa.select(sa.func.count()).select_from(tbl_b),
                             )
                             actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
                         except Exception:
                             logger.debug(
-                                f"[CacheManager] Health | Breadth calc failed for {table}"
+                                f"[CacheManager] Health | Breadth calc failed for {table}",
                             )
 
                     table_type = "stock" if is_stock_table else "global"
@@ -609,35 +610,34 @@ class CacheManager:
                     if ratio < 0.1:
                         if is_stock_table:
                             logger.warning(
-                                f"[CacheManager] Health | ⚠️ Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})"
+                                f"[CacheManager] Health | ⚠️ Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})",
                             )
                         else:
                             logger.warning(
-                                f"[CacheManager] Health | ⚠️ Table {table} (global) CRITICAL: {cnt} records"
+                                f"[CacheManager] Health | ⚠️ Table {table} (global) CRITICAL: {cnt} records",
                             )
+                    elif is_stock_table:
+                        d_str = (
+                            f", depth={depth_ratio:.1%}"
+                            if depth_ratio is not None
+                            else ""
+                        )
+                        b_str = (
+                            f", breadth={breadth_ratio:.1%}"
+                            if breadth_ratio is not None
+                            else ""
+                        )
+                        logger.debug(
+                            f"[CacheManager] Health | Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}{d_str}{b_str}",
+                        )
                     else:
-                        if is_stock_table:
-                            d_str = (
-                                f", depth={depth_ratio:.1%}"
-                                if depth_ratio is not None
-                                else ""
-                            )
-                            b_str = (
-                                f", breadth={breadth_ratio:.1%}"
-                                if breadth_ratio is not None
-                                else ""
-                            )
-                            logger.debug(
-                                f"[CacheManager] Health | Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}{d_str}{b_str}"
-                            )
-                        else:
-                            logger.debug(
-                                f"[CacheManager] Health | Table {table} (global): {cnt} records"
-                            )
+                        logger.debug(
+                            f"[CacheManager] Health | Table {table} (global): {cnt} records",
+                        )
                 except Exception as e:
                     if "no such table" in str(e):
                         logger.warning(
-                            f"[CacheManager] Health | ⚠️ Table {table} missing/not created yet."
+                            f"[CacheManager] Health | ⚠️ Table {table} missing/not created yet.",
                         )
                     else:
                         logger.error(

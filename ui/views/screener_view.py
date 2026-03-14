@@ -1,15 +1,16 @@
 import logging
 import time
-import pandas as pd
+
 import flet as ft
+import pandas as pd
 
 from data.metadata_manager import MetaDataManager
-from ui.components.virtual_table import VirtualTable
+from services.task_manager import TaskManager
 from ui.components.stock_detail_dialog import StockDetailDialog
+from ui.components.virtual_table import VirtualTable
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
-from services.task_manager import TaskManager
+from ui.viewmodels.screener_view_model import TASK_NAME_PREFIX, ScreenerViewModel
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ class ScreenerView(ft.Container):
         )
         self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)
         self.progress_ring = ft.ProgressRing(
-            visible=False, width=20, height=20, color=AppColors.ACCENT
+            visible=False, width=20, height=20, color=AppColors.ACCENT,
         )
 
         self.result_table = VirtualTable(on_sort=self._on_virtual_sort)
@@ -75,7 +76,7 @@ class ScreenerView(ft.Container):
 
         # 4. Logs (Virtualized via Column for auto-scrolling)
         self.log_view = ft.Column(
-            expand=True, spacing=4, scroll=ft.ScrollMode.ALWAYS, auto_scroll=True
+            expand=True, spacing=4, scroll=ft.ScrollMode.ALWAYS, auto_scroll=True,
         )
 
         # 5. Pagination
@@ -98,16 +99,16 @@ class ScreenerView(ft.Container):
         self.page_size_dropdown = ft.Dropdown(
             options=[
                 ft.dropdown.Option(
-                    "10", text=f"10 {I18n.get('screener_per_page', '条/页')}"
+                    "10", text=f"10 {I18n.get('screener_per_page', '条/页')}",
                 ),
                 ft.dropdown.Option(
-                    "20", text=f"20 {I18n.get('screener_per_page', '条/页')}"
+                    "20", text=f"20 {I18n.get('screener_per_page', '条/页')}",
                 ),
                 ft.dropdown.Option(
-                    "50", text=f"50 {I18n.get('screener_per_page', '条/页')}"
+                    "50", text=f"50 {I18n.get('screener_per_page', '条/页')}",
                 ),
                 ft.dropdown.Option(
-                    "100", text=f"100 {I18n.get('screener_per_page', '条/页')}"
+                    "100", text=f"100 {I18n.get('screener_per_page', '条/页')}",
                 ),
             ],
             value="50",
@@ -262,7 +263,7 @@ class ScreenerView(ft.Container):
         # Handle Pending Deep Link
         if self._pending_strategy_key:
             logger.debug(
-                f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}"
+                f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}",
             )
             await self.select_and_run_strategy(self._pending_strategy_key)
             self._pending_strategy_key = None
@@ -271,7 +272,7 @@ class ScreenerView(ft.Container):
         """Public API to select and run a strategy (Deep Link)"""
         if not self.strategy_dropdown.options:
             logger.debug(
-                f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}"
+                f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}",
             )
             self._pending_strategy_key = strategy_key
             return
@@ -413,12 +414,12 @@ class ScreenerView(ft.Container):
 
         # AI Stream Container Styling
         self.log_view_container = ft.Container(
-            content=self.log_view, border_radius=8, padding=5, expand=True
+            content=self.log_view, border_radius=8, padding=5, expand=True,
         )
 
         self.log_card = ft.Container(
             content=ft.Column(
-                [self.log_title_text, self.log_view_container], spacing=5
+                [self.log_title_text, self.log_view_container], spacing=5,
             ),
             expand=True,
             padding=ft.padding.only(top=10),
@@ -512,7 +513,7 @@ class ScreenerView(ft.Container):
         """Fetch and render the history tree from DB."""
         try:
             tree_data = await self.vm.load_history_tree(
-                offset=self._history_tree_offset
+                offset=self._history_tree_offset,
             )
             if not self.page:
                 return
@@ -530,7 +531,7 @@ class ScreenerView(ft.Container):
                                 size=13,
                             ),
                             padding=20,
-                        )
+                        ),
                     )
                 self.history_load_more_btn.visible = False
             else:
@@ -549,17 +550,17 @@ class ScreenerView(ft.Container):
                     subtiles.append(
                         ft.ListTile(
                             leading=ft.Icon(
-                                ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT
+                                ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT,
                             ),
                             title=ft.Text(
                                 f"{I18n.get('screener_all_strategies', '全部策略')} ({total_cnt})",
                                 size=13,
                             ),
                             on_click=lambda e, d=date_str: self._on_tree_item_click(
-                                d, None
+                                d, None,
                             ),
                             dense=True,
-                        )
+                        ),
                     )
                     for s in strategies:
                         subtiles.append(
@@ -570,22 +571,22 @@ class ScreenerView(ft.Container):
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
                                 title=ft.Text(
-                                    f"{s['strategy_name']} ({s['cnt']})", size=13
+                                    f"{s['strategy_name']} ({s['cnt']})", size=13,
                                 ),
                                 on_click=lambda e, d=date_str, sn=s["strategy_name"]: (
                                     self._on_tree_item_click(d, sn)
                                 ),
                                 dense=True,
-                            )
+                            ),
                         )
 
                     tile = ft.ExpansionTile(
                         title=ft.Text(
-                            f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500
+                            f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500,
                         ),
                         subtitle=ft.Text(
                             I18n.get("history_total", "共 {count} 条").format(
-                                count=total_cnt
+                                count=total_cnt,
                             ),
                             size=11,
                             color=AppColors.TEXT_SECONDARY,
@@ -641,7 +642,7 @@ class ScreenerView(ft.Container):
 
     def _on_strategy_change(self, e):
         UILogger.log_action(
-            "ScreenerView", "Select", f"strategy={self.strategy_dropdown.value}"
+            "ScreenerView", "Select", f"strategy={self.strategy_dropdown.value}",
         )
         self.selected_strategy = self.strategy_dropdown.value
         self.run_btn.disabled = not self.selected_strategy
@@ -669,7 +670,7 @@ class ScreenerView(ft.Container):
 
     async def _on_run_click(self, e):
         UILogger.log_action(
-            "ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}"
+            "ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}",
         )
         if not self.selected_strategy:
             return
@@ -714,7 +715,7 @@ class ScreenerView(ft.Container):
                     int(default) if default == int(default) else round(default, 1)
                 )
                 value_text = ft.Text(
-                    f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY
+                    f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY,
                 )
 
                 def make_on_change(vt, lbl):
@@ -727,10 +728,10 @@ class ScreenerView(ft.Container):
                         # Trigger dynamic strategy description update
                         if self.selected_strategy:
                             strategy_obj = self.vm.strategy_mgr.get_strategy(
-                                self.selected_strategy
+                                self.selected_strategy,
                             )
                             if strategy_obj and hasattr(
-                                strategy_obj, "get_dynamic_description"
+                                strategy_obj, "get_dynamic_description",
                             ):
                                 params = self._collect_params()
                                 self.strategy_desc_text.value = (
@@ -797,7 +798,7 @@ class ScreenerView(ft.Container):
                     from strategies.strategy_prompts import get_base_prompt
 
                     current_val = get_base_prompt(self.selected_strategy) or p.get(
-                        "default", ""
+                        "default", "",
                     )
                 else:
                     current_val = p.get("default", "")
@@ -820,8 +821,8 @@ class ScreenerView(ft.Container):
 
                     def make_restore_default(strat):
                         def restore_default(e):
-                            from utils.config_handler import ConfigHandler
                             from strategies.strategy_prompts import get_base_prompt
+                            from utils.config_handler import ConfigHandler
 
                             ConfigHandler.set_strategy_prompt(strat, None)
                             ctrl.value = str(get_base_prompt(strat))
@@ -829,7 +830,7 @@ class ScreenerView(ft.Container):
                             if self.page and hasattr(self.page, "show_toast"):
                                 self.page.show_toast(
                                     I18n.get(
-                                        "ai_settings_restored", "系统提示词已恢复默认"
+                                        "ai_settings_restored", "系统提示词已恢复默认",
                                     ),
                                     "info",
                                 )
@@ -842,7 +843,7 @@ class ScreenerView(ft.Container):
 
                             ConfigHandler.set_strategy_prompt(strat, ctrl.value)
                             UILogger.log_action(
-                                "ScreenerView", "SavePrompt", f"strategy={strat}"
+                                "ScreenerView", "SavePrompt", f"strategy={strat}",
                             )
                             if self.page and hasattr(self.page, "show_toast"):
                                 self.page.show_toast(
@@ -884,7 +885,7 @@ class ScreenerView(ft.Container):
                                             ft.Container(expand=True),
                                             save_btn,
                                             reset_btn,
-                                        ]
+                                        ],
                                     ),
                                     ctrl,
                                 ],
@@ -894,7 +895,7 @@ class ScreenerView(ft.Container):
                         )
                     else:
                         wrapper = ft.Container(
-                            content=ctrl, margin=ft.margin.only(top=10, bottom=5)
+                            content=ctrl, margin=ft.margin.only(top=10, bottom=5),
                         )
                     advanced_controls.append(wrapper)
                 else:
@@ -996,13 +997,12 @@ class ScreenerView(ft.Container):
                 # Show toast info
                 if hasattr(self.page, "show_toast"):
                     self.page.show_toast(
-                        I18n.get("data_export_success").format(file=path), "success"
+                        I18n.get("data_export_success").format(file=path), "success",
                     )
-            else:
-                if hasattr(self.page, "show_toast"):
-                    self.page.show_toast(
-                        I18n.get("data_export_fail").format(error=error), "error"
-                    )
+            elif hasattr(self.page, "show_toast"):
+                self.page.show_toast(
+                    I18n.get("data_export_fail").format(error=error), "error",
+                )
         except Exception as ex:
             logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
         finally:
@@ -1030,7 +1030,7 @@ class ScreenerView(ft.Container):
         # Instantiate or update dialog
         if not self.detail_dialog:
             self.detail_dialog = StockDetailDialog(
-                stock_data=raw_data, data_processor=self.vm.data_processor
+                stock_data=raw_data, data_processor=self.vm.data_processor,
             )
             self.page.overlay.append(self.detail_dialog)
         else:
@@ -1055,11 +1055,11 @@ class ScreenerView(ft.Container):
 
             # 2. Update Pagination
             self.page_info_text.value = I18n.get("screener_page_info").format(
-                current=self.vm.page_no, total=getattr(self.vm, "total_pages", 0)
+                current=self.vm.page_no, total=getattr(self.vm, "total_pages", 0),
             )
             self.prev_btn.disabled = self.vm.page_no <= 1
             self.next_btn.disabled = self.vm.page_no >= getattr(
-                self.vm, "total_pages", 0
+                self.vm, "total_pages", 0,
             )
 
             # 3. Enable Export if data exists
@@ -1077,7 +1077,7 @@ class ScreenerView(ft.Container):
             # Clear table explicitly to remove old results
             self.result_table.set_columns([])
             self.result_table.set_rows(
-                [], sort_col=self.vm.sort_column, sort_asc=self.vm.sort_ascending
+                [], sort_col=self.vm.sort_column, sort_asc=self.vm.sort_ascending,
             )
             self._raw_row_lookup = {}  # Clear lookup
             return
@@ -1173,10 +1173,10 @@ class ScreenerView(ft.Container):
                     # Human readable large numbers
                     if val > 1_000_000_000:
                         return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi', '亿')}"
-                    elif val > 10_000:
+                    if val > 10_000:
                         return f"{val / 10_000:.2f}{I18n.get('unit_wan', '万')}"
                     return f"{val:,.0f}"
-                elif isinstance(val, float):
+                if isinstance(val, float):
                     return f"{val:.2f}"
 
             return str(val)
@@ -1221,7 +1221,7 @@ class ScreenerView(ft.Container):
                     size=12,
                     no_wrap=False,
                     font_family="Roboto Mono, Consolas, monospace",
-                )
+                ),
             )
             self.log_view.update()
 
@@ -1260,7 +1260,7 @@ class ScreenerView(ft.Container):
                     padding=10,
                     bgcolor=AppColors.BACKGROUND,
                     border_radius=4,
-                )
+                ),
             ],
             initially_expanded=True,
             visible=False,  # Hidden until reasoning text arrives
@@ -1272,7 +1272,7 @@ class ScreenerView(ft.Container):
                 ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
                 reasoning_tile,
                 ft.Container(
-                    content=content_md, padding=ft.padding.only(left=5, right=5)
+                    content=content_md, padding=ft.padding.only(left=5, right=5),
                 ),
             ],
             spacing=10,
@@ -1393,7 +1393,7 @@ class ScreenerView(ft.Container):
                 self._render_table()
             except Exception as e:
                 logger.error(
-                    f"[ScreenerView] Theme | ❌ Re-render failed: {e}", exc_info=True
+                    f"[ScreenerView] Theme | ❌ Re-render failed: {e}", exc_info=True,
                 )
 
             self.page.update()

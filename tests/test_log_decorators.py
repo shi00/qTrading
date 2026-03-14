@@ -9,20 +9,22 @@
 - 上下文管理器
 """
 
-import sys
 import os
+import sys
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import pytest
-import logging
 import asyncio
+import logging
+
 import pandas as pd
+import pytest
+
 from utils.log_decorators import (
+    AsyncOperationLogger,
     log_async_operation,
     track_performance,
-    AsyncOperationLogger,
 )
 from utils.sanitizers import DataSanitizer
 
@@ -135,7 +137,7 @@ class TestLogAsyncOperation:
         """测试参数脱敏"""
 
         @log_async_operation(
-            operation_name="test_sanitize", log_args=True, sanitize_params=["token"]
+            operation_name="test_sanitize", log_args=True, sanitize_params=["token"],
         )
         async def func_with_token(token):
             return "done"
@@ -154,9 +156,8 @@ class TestLogAsyncOperation:
         async def failing_func():
             raise ValueError("Test error")
 
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(ValueError):
-                await failing_func()
+        with caplog.at_level(logging.ERROR), pytest.raises(ValueError):
+            await failing_func()
 
         # 验证异常被记录
         assert "[test_error] failed" in caplog.text
@@ -270,11 +271,10 @@ class TestAsyncOperationLogger:
     @pytest.mark.asyncio
     async def test_exception_handling(self, caplog):
         """测试异常处理"""
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(RuntimeError):
-                async with AsyncOperationLogger("test_error") as op:
-                    op.add_metric("attempts", 3)
-                    raise RuntimeError("Test exception")
+        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError):
+            async with AsyncOperationLogger("test_error") as op:
+                op.add_metric("attempts", 3)
+                raise RuntimeError("Test exception")
 
         # 验证异常被记录
         assert "[test_error] failed" in caplog.text

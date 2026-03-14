@@ -1,10 +1,11 @@
+import logging
+
 import flet as ft
-from utils.config_handler import ConfigHandler
+
 from services.ai_service import AIService
 from ui.i18n import I18n
 from ui.theme import AppColors
-from utils.config_handler import DEFAULT_AI_PROMPT
-import logging
+from utils.config_handler import DEFAULT_AI_PROMPT, ConfigHandler
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class AISettingsDialog(ft.AlertDialog):
             options=[
                 ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
                 ft.dropdown.Option(
-                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)"
+                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)",
                 ),
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),

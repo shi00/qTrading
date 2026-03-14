@@ -66,7 +66,7 @@ class SecurityManager:
             except Exception as e:
                 logger.critical(f"Failed to load backup key file: {e}")
                 raise RuntimeError(
-                    "CRITICAL: Both primary and backup key files are corrupt. Cannot proceed."
+                    "CRITICAL: Both primary and backup key files are corrupt. Cannot proceed.",
                 )
 
         # 3. If neither exists, and we are sure main file doesn't exist (not just failed to load), generate new.
@@ -80,7 +80,7 @@ class SecurityManager:
             raise RuntimeError(
                 "CRITICAL: Key file exists but is unreadable (and no backup found). "
                 "Manual intervention required to prevent data loss. "
-                "Delete '.secret.key' manually to reset (WARNING: All encrypted data will be lost)."
+                "Delete '.secret.key' manually to reset (WARNING: All encrypted data will be lost).",
             )
 
         # Generate new key
@@ -119,10 +119,10 @@ class SecurityManager:
             # Hide the file on Windows
             if os.name == "nt":
                 subprocess.run(
-                    ["attrib", "+h", cls.KEY_FILE], check=False, capture_output=True
+                    ["attrib", "+h", cls.KEY_FILE], check=False, capture_output=True,
                 )
                 subprocess.run(
-                    ["attrib", "+h", cls.KEY_FILE_BAK], check=False, capture_output=True
+                    ["attrib", "+h", cls.KEY_FILE_BAK], check=False, capture_output=True,
                 )
         except Exception as e:
             logger.error(f"Error saving key: {e}")

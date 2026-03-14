@@ -1,9 +1,11 @@
-from strategies.base_strategy import BaseStrategy, register_strategy
-from data.quality_gate import require_quality, QualityTier
-from strategies.ai_mixin import AIStrategyMixin
-import pandas as pd
 import logging
+
+import pandas as pd
+
+from data.quality_gate import QualityTier, require_quality
 from services.ai_service import AIService
+from strategies.ai_mixin import AIStrategyMixin
+from strategies.base_strategy import BaseStrategy, register_strategy
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
 
         # Sort by turnover_rate desc (Most active), cap at limit
         candidates = candidates.sort_values("turnover_rate", ascending=False).head(
-            self.limit
+            self.limit,
         )
 
         if candidates.empty:

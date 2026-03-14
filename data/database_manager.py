@@ -1,8 +1,8 @@
 import logging
 
 import pandas as pd
-import sqlparse
 import sqlalchemy as sa
+import sqlparse
 
 import config
 
@@ -65,7 +65,7 @@ class DatabaseManager:
             columns = []
             for col_info in insp.get_columns(table_name):
                 columns.append(
-                    {"name": col_info["name"], "type": str(col_info["type"])}
+                    {"name": col_info["name"], "type": str(col_info["type"])},
                 )
             return columns
         except Exception as e:
@@ -111,7 +111,7 @@ class DatabaseManager:
             # Whitelist validation: reject columns not in schema (mirrors sort_col check)
             if schema_cols and col_name not in schema_cols:
                 logger.warning(
-                    f"[DatabaseManager] Filter column '{col_name}' not in schema, skipped."
+                    f"[DatabaseManager] Filter column '{col_name}' not in schema, skipped.",
                 )
                 continue
             op_func = _OP_MAP.get(op)
@@ -159,12 +159,12 @@ class DatabaseManager:
                 if sort_col in schema_cols:
                     col_obj = sa.column(sort_col)
                     stmt = stmt.order_by(
-                        sa.asc(col_obj) if sort_asc else sa.desc(col_obj)
+                        sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
                     )
             elif table_name == "daily_quotes":
                 # Default sort for common tables
                 stmt = stmt.order_by(
-                    sa.desc(sa.column("trade_date")), sa.asc(sa.column("ts_code"))
+                    sa.desc(sa.column("trade_date")), sa.asc(sa.column("ts_code")),
                 )
 
             # 3. Apply Pagination
@@ -205,7 +205,7 @@ class DatabaseManager:
             return {
                 "success": False,
                 "data": None,
-                "error": f"SQL Parse Error: {str(e)}",
+                "error": f"SQL Parse Error: {e!s}",
             }
 
         if not parsed:

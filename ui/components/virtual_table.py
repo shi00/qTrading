@@ -1,4 +1,5 @@
 import flet as ft
+
 from ui.theme import AppColors, AppStyles
 
 
@@ -21,7 +22,7 @@ class VirtualTable(ft.Column):
             bgcolor=AppColors.TABLE_HEADER_BG,
             height=35,  # Compact header
             border=ft.border.only(
-                bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER)
+                bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER),
             ),
         )
 
@@ -66,7 +67,7 @@ class VirtualTable(ft.Column):
         """Refresh styles on theme change"""
         self.header_container.bgcolor = AppColors.TABLE_HEADER_BG
         self.header_container.border = ft.border.only(
-            bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER)
+            bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER),
         )
         self._build_header()  # Rebuild header text colors
         # Re-render rows to update cell colors
@@ -110,7 +111,7 @@ class VirtualTable(ft.Column):
             )
 
             width = col.get(
-                "width", 100
+                "width", 100,
             )  # Default to 100 if missing for safe width calculation
             total_width += width
 
@@ -120,7 +121,7 @@ class VirtualTable(ft.Column):
 
         # Enforce minimum width to trigger horizontal scrolling in the parent Row
         self.inner_column.width = max(
-            total_width, 800
+            total_width, 800,
         )  # Ensure it doesn't shrink too small on empty
         self.header_container.width = max(total_width, 800)
 
@@ -158,7 +159,7 @@ class VirtualTable(ft.Column):
                 is_numeric = False
                 try:
                     float(
-                        val.replace("%", "").replace(",", "")
+                        val.replace("%", "").replace(",", ""),
                     )  # Handle commas in numbers
                     is_numeric = True
                 except ValueError:
@@ -205,7 +206,7 @@ class VirtualTable(ft.Column):
                             ft.TextSpan(
                                 parts[0],
                                 ft.TextStyle(
-                                    weight=ft.FontWeight.BOLD, color=text_color
+                                    weight=ft.FontWeight.BOLD, color=text_color,
                                 ),
                             ),
                             ft.TextSpan(

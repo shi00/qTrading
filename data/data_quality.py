@@ -1,7 +1,7 @@
 import logging
-import pandas as pd
-from typing import Dict, List, Tuple, Any
+from typing import Any, Dict, List, Tuple
 
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class DataQualityService:
 
     @classmethod
     def check_continuity(
-        cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame
+        cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame,
     ) -> Dict[str, Any]:
         """
         Tier 2: Check for missing trading days in a time-series.
@@ -77,7 +77,7 @@ class DataQualityService:
 
     @classmethod
     def check_recency(
-        cls, df: pd.DataFrame, date_col: str, ref_date: str
+        cls, df: pd.DataFrame, date_col: str, ref_date: str,
     ) -> Dict[str, Any]:
         """
         Tier 2: Check data freshness against a reference date (usually latest trading day).
@@ -124,7 +124,7 @@ class DataQualityService:
 
     @staticmethod
     def check_cross_validation(
-        df: pd.DataFrame, rules: List[Tuple[str, str, float]]
+        df: pd.DataFrame, rules: List[Tuple[str, str, float]],
     ) -> List[str]:
         """
         Tier 3: Reliability Cross-Validation using simple expression evaluation.
@@ -159,16 +159,16 @@ class DataQualityService:
                 if fail_count > 0:
                     sample = df[failures].index[0]
                     issues.append(
-                        f"Rule '{name}' failed: {fail_count} rows exceed tolerance {tolerance} (e.g. index {sample})"
+                        f"Rule '{name}' failed: {fail_count} rows exceed tolerance {tolerance} (e.g. index {sample})",
                     )
             except Exception as e:
-                issues.append(f"Rule '{name}' execution error: {str(e)}")
+                issues.append(f"Rule '{name}' execution error: {e!s}")
 
         return issues
 
     @staticmethod
     def check_price_vs_factor(
-        df_price: pd.DataFrame, df_adj: pd.DataFrame
+        df_price: pd.DataFrame, df_adj: pd.DataFrame,
     ) -> Dict[str, Any]:
         """
         Tier 3: Verify Price * AdjFactor consistency.

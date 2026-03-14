@@ -1,10 +1,12 @@
 import datetime
 import logging
-from .base import ISyncStrategy, SyncResult
-from data.daos.macro_dao import MacroDao
+
 from data.constants import MAJOR_INDICES
-from utils.log_decorators import log_async_operation, PerfThreshold
+from data.daos.macro_dao import MacroDao
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
+
+from .base import ISyncStrategy, SyncResult
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ class MacroSyncStrategy(ISyncStrategy):
         logger.debug("[MacroSync] Stop | Cancellation requested.")
 
     @log_async_operation(
-        operation_name="MacroSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO
+        operation_name="MacroSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run(self, **kwargs) -> SyncResult:
         result = SyncResult()
@@ -54,7 +56,7 @@ class MacroSyncStrategy(ISyncStrategy):
             result.errors.append(str(e))
         if result.status != "failed":
             logger.info(
-                f"[MacroSync] Run | ✅ Complete. Added={result.added}, Errors={len(result.errors)}"
+                f"[MacroSync] Run | ✅ Complete. Added={result.added}, Errors={len(result.errors)}",
             )
         return result
 
@@ -126,7 +128,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     get_now() - datetime.timedelta(days=int(250 * years * 2.0))
                 ).strftime("%Y%m%d")
                 all_dates = await self.context.processor.get_trade_dates(
-                    start_date=rough_start, end_date=today
+                    start_date=rough_start, end_date=today,
                 )
                 start_date = (
                     all_dates[-(250 * years)]
@@ -147,7 +149,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     ).strftime("%Y%m%d")
                 except ValueError:
                     logger.warning(
-                        f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year."
+                        f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.",
                     )
                     start_date = (
                         get_now()
@@ -159,7 +161,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 return
 
             df = await self.context.api.get_shibor(
-                start_date=start_date, end_date=today
+                start_date=start_date, end_date=today,
             )
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
@@ -194,7 +196,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     today - datetime.timedelta(days=int(250 * years * 2.0))
                 ).strftime("%Y%m%d")
                 all_dates = await self.context.processor.get_trade_dates(
-                    start_date=rough_start, end_date=today.strftime("%Y%m%d")
+                    start_date=rough_start, end_date=today.strftime("%Y%m%d"),
                 )
                 start_date = (
                     all_dates[-(250 * years)]
@@ -203,7 +205,7 @@ class MacroSyncStrategy(ISyncStrategy):
                         all_dates[0]
                         if all_dates
                         else (today - datetime.timedelta(days=365 * years)).strftime(
-                            "%Y%m%d"
+                            "%Y%m%d",
                         )
                     )
                 )
@@ -212,7 +214,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 if (today - last_dt).days > 30:
                     should_update = True
                     start_date = (last_dt + datetime.timedelta(days=1)).strftime(
-                        "%Y%m%d"
+                        "%Y%m%d",
                     )
                 else:
                     start_date = today.strftime("%Y%m%d")
@@ -223,7 +225,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
             end_date = today.strftime("%Y%m%d")
             logger.debug(
-                f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices..."
+                f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",
             )
 
             for idx_code in MAJOR_INDICES:
@@ -238,7 +240,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
                 try:
                     df = await self.context.api.get_index_weight(
-                        index_code=idx_code, start_date=start_date, end_date=end_date
+                        index_code=idx_code, start_date=start_date, end_date=end_date,
                     )
 
                     if df is not None and not df.empty:
@@ -246,12 +248,12 @@ class MacroSyncStrategy(ISyncStrategy):
                         result.added += count if count else 0
                 except Exception as e:
                     logger.warning(
-                        f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}"
+                        f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}",
                     )
                     # Continue to next index
 
         except Exception as e:
             logger.warning(
-                f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}", exc_info=True
+                f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}", exc_info=True,
             )
             result.errors.append(f"IndexWeight: {e}")

@@ -1,14 +1,15 @@
 import asyncio
 import logging
-from utils.log_decorators import UILogger
+
 import flet as ft
 import pandas as pd
 
-from ui.viewmodels.home_view_model import HomeViewModel
-from ui.i18n import I18n
-from ui.theme import AppColors
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
+from ui.i18n import I18n
+from ui.theme import AppColors
+from ui.viewmodels.home_view_model import HomeViewModel
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,13 @@ class HomeView(ft.Container):
 
         # --- Initialize Components ---
         self.header_title = ft.Text(
-            I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD
+            I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD,
         )
         self.header = self._build_header()
         self.dashboard = MarketDashboard()
         self.news_feed = NewsFeed(on_load_more_click=self._on_load_more_click)
         self.news_header = ft.Text(
-            I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD
+            I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD,
         )
 
         # Assemble Layout

@@ -1,15 +1,17 @@
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import unittest
 import asyncio
 import datetime
+import unittest
+from unittest.mock import AsyncMock, patch
+
 import pandas as pd
-from unittest.mock import patch, AsyncMock
+
+from data.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.tushare_client import TushareClient
-from data.cache_manager import CacheManager
 
 
 class TestDataProcessor(unittest.TestCase):
@@ -26,7 +28,7 @@ class TestDataProcessor(unittest.TestCase):
     def setUp(self):
         # Patch ThreadPoolManager to run synchronously
         self.patcher_tpm = patch(
-            "utils.thread_pool.ThreadPoolManager.run_async", new=self.fake_run_async
+            "utils.thread_pool.ThreadPoolManager.run_async", new=self.fake_run_async,
         )
         self.patcher_tpm.start()
 
@@ -35,7 +37,7 @@ class TestDataProcessor(unittest.TestCase):
 
         # Setup Patcher
         self.patcher_api = patch(
-            "data.data_processor.TushareClient", return_value=self.mock_api
+            "data.data_processor.TushareClient", return_value=self.mock_api,
         )
         self.patcher_api.start()
 
@@ -79,13 +81,13 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.get_cached_indicator_dates = AsyncMock()
         self.mock_cache.save_financial_reports = AsyncMock()
         self.mock_cache.get_stock_basic = AsyncMock(
-            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]})
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]}),
         )
         self.mock_cache.get_cached_financial_records = AsyncMock(return_value=set())
         self.mock_cache.get_trade_cal = AsyncMock()  # Added missing AsyncMock
         # FIX: Mock get_trade_cal_range (needed by CalendarMixin._ensure_trade_cal_impl)
         self.mock_cache.get_trade_cal_range = AsyncMock(
-            return_value=("20200101", "20261231")
+            return_value=("20200101", "20261231"),
         )
         # FIX: Mock save_trade_cal (needed by CalendarMixin._ensure_trade_cal_impl)
         self.mock_cache.save_trade_cal = AsyncMock()
@@ -98,8 +100,8 @@ class TestDataProcessor(unittest.TestCase):
                     "table_name": ["daily_quotes", "financial_reports"],
                     "last_data_date": ["20260305", "20260301"],
                     "record_count": [1000, 500],
-                }
-            )
+                },
+            ),
         )
 
         # Configure ConfigHandler return value
@@ -117,8 +119,8 @@ class TestDataProcessor(unittest.TestCase):
                     "financial_reports": {"ratio": 0.95, "type": "stock"},
                     "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
                     "stock_basic": {"ratio": 1.0, "type": "global"},
-                }
-            }
+                },
+            },
         )
 
     def tearDown(self):
@@ -139,24 +141,24 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_mixin_inheritance(self):
         """Verify DataProcessor correctly inherits from both Mixins"""
-        from data.mixins.health_mixin import HealthCheckMixin
         from data.mixins.calendar_mixin import CalendarMixin
+        from data.mixins.health_mixin import HealthCheckMixin
 
         self.assertIsInstance(self.processor, HealthCheckMixin)
         self.assertIsInstance(self.processor, CalendarMixin)
 
     def test_mro_resolution(self):
         """Verify MRO resolves Mixin methods correctly"""
-        from data.mixins.health_mixin import HealthCheckMixin
         from data.mixins.calendar_mixin import CalendarMixin
+        from data.mixins.health_mixin import HealthCheckMixin
 
         # check_data_health should come from HealthCheckMixin
         self.assertIs(
-            DataProcessor.check_data_health, HealthCheckMixin.check_data_health
+            DataProcessor.check_data_health, HealthCheckMixin.check_data_health,
         )
         # get_latest_trade_date should come from CalendarMixin
         self.assertIs(
-            DataProcessor.get_latest_trade_date, CalendarMixin.get_latest_trade_date
+            DataProcessor.get_latest_trade_date, CalendarMixin.get_latest_trade_date,
         )
 
     # ==========================================================
@@ -190,8 +192,8 @@ class TestDataProcessor(unittest.TestCase):
                             "20231024",
                         ],
                         "is_open": [1] * 14,
-                    }
-                )
+                    },
+                ),
             )
 
             date_str = await self.processor.get_latest_trade_date()
@@ -227,8 +229,8 @@ class TestDataProcessor(unittest.TestCase):
                             "20231025",
                         ],
                         "is_open": [1] * 15,
-                    }
-                )
+                    },
+                ),
             )
 
             date_str = await self.processor.get_latest_trade_date()
@@ -260,8 +262,8 @@ class TestDataProcessor(unittest.TestCase):
                             "20231027",
                         ],
                         "is_open": [1] * 11,
-                    }
-                )
+                    },
+                ),
             )
 
             date_str = await self.processor.get_latest_trade_date()
@@ -287,7 +289,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_trade_dates(self):
         """Test get_trade_dates returns sorted list"""
         mock_df = pd.DataFrame(
-            {"cal_date": ["20230103", "20230101", "20230102"], "is_open": [1, 1, 1]}
+            {"cal_date": ["20230103", "20230101", "20230102"], "is_open": [1, 1, 1]},
         )
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
@@ -300,14 +302,14 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_trade_dates_fallback(self):
         """Test get_trade_dates fallback when DB fails"""
         self.mock_cache.get_trade_cal_range = AsyncMock(
-            side_effect=Exception("DB Error")
+            side_effect=Exception("DB Error"),
         )
         self.mock_cache.get_trade_cal = AsyncMock(side_effect=Exception("DB Error"))
 
         dates = await self.processor.get_trade_dates("20230102", "20230106")
         # Fallback should return weekday-only dates (Mon-Fri)
         self.assertEqual(
-            dates, ["20230102", "20230103", "20230104", "20230105", "20230106"]
+            dates, ["20230102", "20230103", "20230104", "20230105", "20230106"],
         )
 
     def test_get_trade_dates_fallback(self):
@@ -352,8 +354,8 @@ class TestDataProcessor(unittest.TestCase):
                         datetime.datetime.now().strftime("%Y%m%d"),
                     ],
                     "record_count": [1000, 500],
-                }
-            )
+                },
+            ),
         )
 
         await self.processor._assign_basic_tier()
@@ -380,8 +382,8 @@ class TestDataProcessor(unittest.TestCase):
                     "table_name": ["daily_quotes"],
                     "last_data_date": ["20200101"],
                     "record_count": [1000],
-                }
-            )
+                },
+            ),
         )
         # Mock get_latest_trade_date to also return stale date
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20200101")
@@ -400,7 +402,7 @@ class TestDataProcessor(unittest.TestCase):
         mock_cal_df = pd.DataFrame({"cal_date": mock_trade_dates, "is_open": [1, 1, 1]})
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_cal_df)
         self.mock_cache.get_cached_trade_dates = AsyncMock(
-            return_value={"20230101", "20230102", "20230103"}
+            return_value={"20230101", "20230102", "20230103"},
         )
 
         with patch.object(
@@ -408,25 +410,24 @@ class TestDataProcessor(unittest.TestCase):
             "get_latest_trade_date",
             new_callable=AsyncMock,
             return_value="20230103",
+        ), patch.object(
+            self.processor,
+            "get_trade_dates",
+            new_callable=AsyncMock,
+            return_value=mock_trade_dates,
         ):
-            with patch.object(
-                self.processor,
-                "get_trade_dates",
-                new_callable=AsyncMock,
-                return_value=mock_trade_dates,
-            ):
-                res = await self.processor.check_data_health()
-                self.assertEqual(res["status"], "green")
+            res = await self.processor.check_data_health()
+            self.assertEqual(res["status"], "green")
 
         # Scenario 2: Lagging (Yellow)
         mock_trade_dates_2 = ["20230101", "20230102", "20230103", "20230104"]
         mock_cal_df_2 = pd.DataFrame(
-            {"cal_date": mock_trade_dates_2, "is_open": [1] * 4}
+            {"cal_date": mock_trade_dates_2, "is_open": [1] * 4},
         )
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_cal_df_2)
         # Only have 3 days local, missing 1
         self.mock_cache.get_cached_trade_dates = AsyncMock(
-            return_value={"20230101", "20230102", "20230103"}
+            return_value={"20230101", "20230102", "20230103"},
         )
 
         with patch.object(
@@ -434,17 +435,16 @@ class TestDataProcessor(unittest.TestCase):
             "get_latest_trade_date",
             new_callable=AsyncMock,
             return_value="20230104",
+        ), patch.object(
+            self.processor,
+            "get_trade_dates",
+            new_callable=AsyncMock,
+            return_value=mock_trade_dates_2,
         ):
-            with patch.object(
-                self.processor,
-                "get_trade_dates",
-                new_callable=AsyncMock,
-                return_value=mock_trade_dates_2,
-            ):
-                # Reset health cache to force fresh eval
-                self.processor._health_cache = {"time": 0, "data": None}
-                res = await self.processor.check_data_health()
-                self.assertEqual(res["status"], "yellow")
+            # Reset health cache to force fresh eval
+            self.processor._health_cache = {"time": 0, "data": None}
+            res = await self.processor.check_data_health()
+            self.assertEqual(res["status"], "yellow")
 
         # Scenario 3: Missing Critical Tables (Red)
         self.mock_cache.check_comprehensive_health = AsyncMock(
@@ -453,14 +453,14 @@ class TestDataProcessor(unittest.TestCase):
                     "daily_quotes": {"ratio": 0.0, "type": "stock"},
                     "daily_indicators": {"ratio": 0.0, "type": "stock"},
                     "financial_reports": {"ratio": 0.0, "type": "stock"},
-                }
-            }
+                },
+            },
         )
         dates_3 = [f"202301{i:02d}" for i in range(10, 20)]
         self.mock_cache.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame(
-                {"cal_date": dates_3, "is_open": [1] * len(dates_3)}
-            )
+                {"cal_date": dates_3, "is_open": [1] * len(dates_3)},
+            ),
         )
         self.mock_cache.get_cached_trade_dates = AsyncMock(return_value={"20230110"})
 
@@ -469,16 +469,15 @@ class TestDataProcessor(unittest.TestCase):
             "get_latest_trade_date",
             new_callable=AsyncMock,
             return_value="20230119",
+        ), patch.object(
+            self.processor,
+            "get_trade_dates",
+            new_callable=AsyncMock,
+            return_value=dates_3,
         ):
-            with patch.object(
-                self.processor,
-                "get_trade_dates",
-                new_callable=AsyncMock,
-                return_value=dates_3,
-            ):
-                self.processor._health_cache = {"time": 0, "data": None}
-                res = await self.processor.check_data_health()
-                self.assertEqual(res["status"], "red")
+            self.processor._health_cache = {"time": 0, "data": None}
+            res = await self.processor.check_data_health()
+            self.assertEqual(res["status"], "red")
 
     def test_check_data_health(self):
         asyncio.run(self.async_test_check_data_health())
@@ -502,7 +501,7 @@ class TestDataProcessor(unittest.TestCase):
 
         # Mock Cache existence
         self.processor.cache.get_daily_quotes = AsyncMock(
-            return_value=pd.DataFrame({"close": [10]})
+            return_value=pd.DataFrame({"close": [10]}),
         )
 
         await self.processor.sync_daily_market_snapshot(trade_date)
@@ -517,10 +516,10 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.check_data_exists = AsyncMock(return_value=False)
 
         mock_quotes = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "trade_date": ["20231025"]}
+            {"ts_code": ["000001.SZ"], "trade_date": ["20231025"]},
         )
         mock_basic = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "trade_date": ["20231025"], "pe": [10]}
+            {"ts_code": ["000001.SZ"], "trade_date": ["20231025"], "pe": [10]},
         )
 
         self.mock_api.get_daily_quotes.return_value = mock_quotes
@@ -530,7 +529,7 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.save_daily_indicators = AsyncMock(return_value=1)
         self.mock_cache.update_sync_status = AsyncMock()
         self.mock_cache.get_screening_data = AsyncMock(
-            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "pe": [10]})
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "pe": [10]}),
         )
 
         df = await self.processor.sync_daily_market_snapshot(target_date)
@@ -574,15 +573,15 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
         self.mock_cache.get_cached_trade_dates = AsyncMock(
-            return_value={"20230105", "20230104"}
+            return_value={"20230105", "20230104"},
         )
         self.mock_cache.get_cached_indicator_dates = AsyncMock(
-            return_value={"20230105", "20230104"}
+            return_value={"20230105", "20230104"},
         )
 
         historical_strategy = self.processor.strategies["historical"]
         with patch.object(
-            historical_strategy, "sync_daily_market_snapshot", new_callable=AsyncMock
+            historical_strategy, "sync_daily_market_snapshot", new_callable=AsyncMock,
         ) as mock_sync:
             await self.processor.sync_historical_data(days=days)
 
@@ -606,7 +605,7 @@ class TestDataProcessor(unittest.TestCase):
                 "ann_date": ["20230401"],
                 "n_income": [1000],
                 "total_revenue": [5000],
-            }
+            },
         )
         mock_balance = pd.DataFrame(
             {
@@ -615,7 +614,7 @@ class TestDataProcessor(unittest.TestCase):
                 "ann_date": ["20230401"],
                 "total_assets": [10000],
                 "total_liab": [5000],
-            }
+            },
         )
         mock_indicator = pd.DataFrame(
             {
@@ -623,7 +622,7 @@ class TestDataProcessor(unittest.TestCase):
                 "end_date": ["20230331"],
                 "ann_date": ["20230401"],
                 "roe": [10.5],
-            }
+            },
         )
 
         self.mock_api.get_income.return_value = mock_income
@@ -661,21 +660,21 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""
         self.mock_cache.get_screening_data = AsyncMock(
-            return_value=pd.DataFrame({"pe": [10]})
+            return_value=pd.DataFrame({"pe": [10]}),
         )
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230101")
 
         self.mock_cache.get_northbound = AsyncMock(
-            return_value=pd.DataFrame({"ratio": [5]})
+            return_value=pd.DataFrame({"ratio": [5]}),
         )
         self.mock_cache.get_moneyflow = AsyncMock(
-            return_value=pd.DataFrame({"net_mf_vol": [100]})
+            return_value=pd.DataFrame({"net_mf_vol": [100]}),
         )
         self.mock_cache.get_top_list = AsyncMock(
-            return_value=pd.DataFrame({"net_rate": [10.5]})
+            return_value=pd.DataFrame({"net_rate": [10.5]}),
         )
         self.mock_cache.get_block_trade = AsyncMock(
-            return_value=pd.DataFrame({"amt": [5000]})
+            return_value=pd.DataFrame({"amt": [5000]}),
         )
 
         context = await self.processor.prepare_screening_context()
@@ -725,12 +724,12 @@ class TestDataProcessor(unittest.TestCase):
         """Verify get_market_overview uses memory cache to skip ensure_trade_cal"""
 
         self.mock_cache.get_trade_cal.return_value = pd.DataFrame(
-            {"cal_date": ["20230101", "20230102"], "is_open": [1, 1]}
+            {"cal_date": ["20230101", "20230102"], "is_open": [1, 1]},
         )
 
         # Mock API methods to return valid DataFrames
         mock_result_df = pd.DataFrame(
-            {"close": [3000], "pct_chg": [1.0], "north_money": [500]}
+            {"close": [3000], "pct_chg": [1.0], "north_money": [500]},
         )
         self.mock_api.get_index_daily = AsyncMock(return_value=mock_result_df)
         self.mock_api.get_moneyflow_hsgt = AsyncMock(return_value=mock_result_df)
@@ -777,7 +776,7 @@ class TestDataProcessor(unittest.TestCase):
 
         historical_strategy = self.processor.strategies["historical"]
         with patch.object(
-            historical_strategy, "sync_daily_market_snapshot", side_effect=side_effect
+            historical_strategy, "sync_daily_market_snapshot", side_effect=side_effect,
         ):
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 await self.processor.sync_historical_data(days=days)
@@ -801,7 +800,7 @@ class TestDataProcessor(unittest.TestCase):
         # Mock stock basic
         stocks = [f"{i:06d}.SZ" for i in range(1, 6)]
         self.mock_cache.get_stock_basic = AsyncMock(
-            return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * 5})
+            return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * 5}),
         )
 
         # Generate trade dates ending AT fixed_now (critical for recency check: lag < 5)
@@ -811,8 +810,8 @@ class TestDataProcessor(unittest.TestCase):
 
         self.mock_cache.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame(
-                {"cal_date": cal_dates, "is_open": [1] * len(cal_dates)}
-            )
+                {"cal_date": cal_dates, "is_open": [1] * len(cal_dates)},
+            ),
         )
 
         # Mock batch daily quotes: each stock has full coverage of ALL cal_dates
@@ -820,7 +819,7 @@ class TestDataProcessor(unittest.TestCase):
         for code in stocks:
             for d in cal_dates:
                 rows.append(
-                    {"ts_code": code, "trade_date": d, "close": 10.0, "vol": 1000}
+                    {"ts_code": code, "trade_date": d, "close": 10.0, "vol": 1000},
                 )
         batch_df = pd.DataFrame(rows)
         self.mock_cache.get_daily_quotes = AsyncMock(return_value=batch_df)
@@ -833,7 +832,7 @@ class TestDataProcessor(unittest.TestCase):
         with patch("data.mixins.health_mixin.get_now", return_value=fixed_now):
             with patch("random.sample", side_effect=lambda pop, k: pop[:k]):
                 result = await self.processor.run_quality_scan(
-                    sample_size=5, progress_callback=progress_cb
+                    sample_size=5, progress_callback=progress_cb,
                 )
 
         self.assertIn("tier", result)
@@ -863,11 +862,11 @@ class TestDataProcessor(unittest.TestCase):
         stocks = [f"{i:06d}.SZ" for i in range(1, 20)]
         self.mock_cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
-                {"ts_code": stocks, "list_status": ["L"] * len(stocks)}
-            )
+                {"ts_code": stocks, "list_status": ["L"] * len(stocks)},
+            ),
         )
         self.mock_cache.get_trade_cal = AsyncMock(
-            return_value=pd.DataFrame({"cal_date": ["20230101"], "is_open": [1]})
+            return_value=pd.DataFrame({"cal_date": ["20230101"], "is_open": [1]}),
         )
         self.mock_cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -876,8 +875,8 @@ class TestDataProcessor(unittest.TestCase):
                     "trade_date": ["20230101"],
                     "close": [10.0],
                     "vol": [100],
-                }
-            )
+                },
+            ),
         )
 
         # Set cancel after clear_cancel is called
@@ -888,10 +887,9 @@ class TestDataProcessor(unittest.TestCase):
             self.processor._get_cancel_event().set()
 
         with patch.object(
-            self.processor, "clear_cancel", side_effect=cancel_after_clear
-        ):
-            with patch("random.sample", side_effect=lambda pop, k: pop[:k]):
-                result = await self.processor.run_quality_scan(sample_size=10)
+            self.processor, "clear_cancel", side_effect=cancel_after_clear,
+        ), patch("random.sample", side_effect=lambda pop, k: pop[:k]):
+            result = await self.processor.run_quality_scan(sample_size=10)
 
         # Should return early with minimal data processed
         self.assertEqual(result["tier"], 1)
@@ -908,7 +906,7 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.get_trade_cal_range = AsyncMock(return_value=(None, None))
         # api.get_trade_cal is called with await, so must be AsyncMock
         self.processor.api.get_trade_cal = AsyncMock(
-            return_value=pd.DataFrame({"cal_date": ["20230101"], "is_open": [1]})
+            return_value=pd.DataFrame({"cal_date": ["20230101"], "is_open": [1]}),
         )
         self.mock_cache.save_trade_cal = AsyncMock()
 
@@ -922,7 +920,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_ensure_trade_cal_impl_already_covered(self):
         """Test _ensure_trade_cal_impl when DB already covers the range → no API call"""
         self.mock_cache.get_trade_cal_range = AsyncMock(
-            return_value=("20200101", "20261231")
+            return_value=("20200101", "20261231"),
         )
 
         result = await self.processor._ensure_trade_cal_impl("20260305")
@@ -936,13 +934,13 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_ensure_trade_cal_impl_gap_fill(self):
         """Test _ensure_trade_cal_impl fills gaps when DB range doesn't extend to end_date"""
         self.mock_cache.get_trade_cal_range = AsyncMock(
-            return_value=("20200101", "20250101")
+            return_value=("20200101", "20250101"),
         )
         # api.get_trade_cal is called with await, so must be AsyncMock
         self.processor.api.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame(
-                {"cal_date": ["20250102", "20250103"], "is_open": [1, 1]}
-            )
+                {"cal_date": ["20250102", "20250103"], "is_open": [1, 1]},
+            ),
         )
         self.mock_cache.save_trade_cal = AsyncMock()
 
@@ -967,8 +965,8 @@ class TestDataProcessor(unittest.TestCase):
                     "table_name": ["daily_quotes"],
                     "last_data_date": [dt.datetime.now().strftime("%Y%m%d")],
                     "record_count": [1000],
-                }
-            )
+                },
+            ),
         )
 
         await self.processor._assign_basic_tier()
@@ -993,7 +991,7 @@ class TestDataProcessor(unittest.TestCase):
         ) as mock_impl:
             # With required_start_date, cache should be bypassed even if date matches
             result = await self.processor.ensure_trade_cal(
-                "20230101", required_start_date="20200101"
+                "20230101", required_start_date="20200101",
             )
             self.assertTrue(result)
             mock_impl.assert_called_once_with("20230101", "20200101")
@@ -1015,7 +1013,7 @@ class TestDataProcessor(unittest.TestCase):
         ) as mock_latest:
             self.mock_cache.check_data_exists = AsyncMock(return_value=True)
             self.mock_cache.get_screening_data = AsyncMock(
-                return_value=pd.DataFrame({"close": [10]})
+                return_value=pd.DataFrame({"close": [10]}),
             )
 
             await self.processor.sync_daily_market_snapshot(trade_date=None)

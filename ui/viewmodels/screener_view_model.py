@@ -1,18 +1,19 @@
 import asyncio
 import logging
-import time
-import pandas as pd
 import os
-from typing import Optional, Dict, Callable
+import time
+from typing import Callable, Dict, Optional
 
-from data.data_processor import DataProcessor
-from data.review_manager import ReviewManager
-from strategies.all_strategies import StrategyManager
-from utils.thread_pool import ThreadPoolManager, TaskType
-from ui.i18n import I18n
-from services.task_manager import TaskManager
-from data.quality_gate import QualityGateError
+import pandas as pd
+
 from data.cache_manager import CacheManager
+from data.data_processor import DataProcessor
+from data.quality_gate import QualityGateError
+from data.review_manager import ReviewManager
+from services.task_manager import TaskManager
+from strategies.all_strategies import StrategyManager
+from ui.i18n import I18n
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -116,13 +117,13 @@ class ScreenerViewModel:
                     "label_key": "ai_system_prompt",
                     "type": "textarea",
                     "default": "",  # UI uses get_base_prompt to map the value dynamically
-                }
+                },
             )
 
         return params
 
     async def run_strategy(
-        self, strategy_key: str, save_results: bool = True, params: dict = None
+        self, strategy_key: str, save_results: bool = True, params: dict = None,
     ):
         """Execute strategy screening via the global TaskManager."""
         strategy = self.strategy_mgr.get_strategy(strategy_key)
@@ -137,12 +138,12 @@ class ScreenerViewModel:
             try:
                 # 1. Prepare Context (may trigger massive data load)
                 TaskManager().update_progress(
-                    task_id, 0.05, I18n.get("task_loading_data")
+                    task_id, 0.05, I18n.get("task_loading_data"),
                 )
                 context = await self.data_processor.get_strategy_data()
                 if not context:
                     TaskManager().update_progress(
-                        task_id, 0.1, I18n.get("task_cache_empty_init")
+                        task_id, 0.1, I18n.get("task_cache_empty_init"),
                     )
                     await self.data_processor.init_data()
                     context = await self.data_processor.get_strategy_data()
@@ -185,11 +186,11 @@ class ScreenerViewModel:
                     result_df = await strategy.filter(context)
                 else:
                     result_df = await ThreadPoolManager().run_async(
-                        TaskType.CPU, strategy.filter, context
+                        TaskType.CPU, strategy.filter, context,
                     )
 
                 TaskManager().update_progress(
-                    task_id, 0.95, I18n.get("task_aggregating_results")
+                    task_id, 0.95, I18n.get("task_aggregating_results"),
                 )
 
                 if result_df is not None and not result_df.empty:
@@ -205,22 +206,21 @@ class ScreenerViewModel:
                     if self.on_status:
                         self.on_status(
                             I18n.get("screener_done_saved").format(
-                                count=len(result_df)
+                                count=len(result_df),
                             ),
                             "green",
                         )
                     if self.on_progress:
                         self.on_progress(False)
                     return I18n.get("task_screening_success", count=len(result_df))
-                else:
-                    self._full_results = pd.DataFrame()
-                    if self.on_update:
-                        self.on_update()
-                    if self.on_status:
-                        self.on_status(I18n.get("screener_no_results"), "orange")
-                    if self.on_progress:
-                        self.on_progress(False)
-                    return I18n.get("screener_no_results")
+                self._full_results = pd.DataFrame()
+                if self.on_update:
+                    self.on_update()
+                if self.on_status:
+                    self.on_status(I18n.get("screener_no_results"), "orange")
+                if self.on_progress:
+                    self.on_progress(False)
+                return I18n.get("screener_no_results")
 
             except asyncio.CancelledError:
                 if self.on_status:
@@ -230,24 +230,24 @@ class ScreenerViewModel:
                 raise
             except QualityGateError as e:
                 logger.warning(
-                    f"[ScreenerVM] Strategy execution blocked by Quality Gate: {e}"
+                    f"[ScreenerVM] Strategy execution blocked by Quality Gate: {e}",
                 )
                 if self.on_status:
                     self.on_status(
-                        I18n.get("screener_blocked", reason=str(e)), "orange"
+                        I18n.get("screener_blocked", reason=str(e)), "orange",
                     )
                 if self.on_progress:
                     self.on_progress(False)
                 return I18n.get("screener_blocked", reason=str(e))
             except Exception as e:
                 logger.error(
-                    f"[ScreenerVM] Strategy execution failed: {e}", exc_info=True
+                    f"[ScreenerVM] Strategy execution failed: {e}", exc_info=True,
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
                 safe_msg = I18n.get("screener_internal_error")
                 if self.on_status:
                     self.on_status(
-                        I18n.get("screener_exec_error").format(error=safe_msg), "red"
+                        I18n.get("screener_exec_error").format(error=safe_msg), "red",
                     )
                 if self.on_progress:
                     self.on_progress(False)
@@ -261,7 +261,7 @@ class ScreenerViewModel:
             self.on_progress(True)
         if self.on_status:
             self.on_status(
-                I18n.get("screener_running_strategy").format(name=strategy.name), "blue"
+                I18n.get("screener_running_strategy").format(name=strategy.name), "blue",
             )
 
         # Dispatch to TaskManager!
@@ -359,7 +359,7 @@ class ScreenerViewModel:
         if self.on_status:
             self.on_status(
                 I18n.get("screener_ai_analyzing").format(
-                    done=current, total=total, msg=msg
+                    done=current, total=total, msg=msg,
                 ),
                 "blue",
             )
@@ -400,7 +400,7 @@ class ScreenerViewModel:
                 except RuntimeError:
                     if self._main_loop and self._main_loop.is_running():
                         asyncio.run_coroutine_threadsafe(
-                            self._flush_ai_buffer(), self._main_loop
+                            self._flush_ai_buffer(), self._main_loop,
                         )
                     else:
                         self._flush_pending = False
@@ -530,7 +530,7 @@ class ScreenerViewModel:
             if date not in tree:
                 tree[date] = []
             tree[date].append(
-                {"strategy_name": row["strategy_name"], "cnt": int(row["cnt"])}
+                {"strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},
             )
         return tree
 
