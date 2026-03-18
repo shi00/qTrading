@@ -83,7 +83,7 @@ def generate_kline_png(
 
     # Ensure date column
     if "trade_date" in chart_df.columns:
-        chart_df["trade_date"] = pd.to_datetime(chart_df["trade_date"].astype(str))
+        chart_df["trade_date"] = pd.to_datetime(chart_df["trade_date"])
         chart_df = chart_df.set_index("trade_date")
     elif not isinstance(chart_df.index, pd.DatetimeIndex):
         raise ValueError("DataFrame needs a 'trade_date' column or DatetimeIndex")

@@ -100,33 +100,6 @@ class MarketDao(BaseDao):
 
         return await self._read_db(sql, params)
 
-    # --- Adjustment Factors ---
-    async def save_adj_factors(self, df, suppress_errors=True):
-        """Save Adjustment Factors. Table: adj_factor"""
-        if df is None or df.empty:
-            return 0
-        columns = ["ts_code", "trade_date", "adj_factor"]
-        return await self._save_upsert(
-            df,
-            "adj_factor",
-            columns,
-            pk_columns=["ts_code", "trade_date"],
-            suppress_errors=suppress_errors,
-        )
-
-    async def get_adj_factors(self, ts_code, start_date=None, end_date=None):
-        sql = "SELECT * FROM adj_factor WHERE ts_code = $1"
-        params = [ts_code]
-        idx = 2
-        if start_date:
-            sql += f" AND trade_date >= ${idx}"
-            params.append(start_date)
-            idx += 1
-        if end_date:
-            sql += f" AND trade_date <= ${idx}"
-            params.append(end_date)
-        return await self._read_db(sql, params)
-
     # --- Index Weights ---
     async def save_index_weights(self, df):
         """Save Index Component Weights. Table: index_weight"""

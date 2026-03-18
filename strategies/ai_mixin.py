@@ -137,16 +137,14 @@ class AIStrategyMixin:
         news_tasks = {}
         try:
             # 1. O(1) DB Query for History
-            end_date_str = get_now().strftime("%Y%m%d")
+            end_date = get_now().date()
 
             years = ConfigHandler.get_init_history_years()
-            start_date_str = (get_now() - timedelta(days=365 * years + 30)).strftime(
-                "%Y%m%d",
-            )
+            start_date = (get_now() - timedelta(days=365 * years + 30)).date()
             bulk_history_df = await dp.cache.get_daily_quotes(
                 ts_code_list=all_ts_codes,
-                start_date=start_date_str,
-                end_date=end_date_str,
+                start_date=start_date,
+                end_date=end_date,
             )
             if bulk_history_df is not None and not bulk_history_df.empty:
                 for code, group in bulk_history_df.groupby("ts_code"):
@@ -651,8 +649,13 @@ class AIStrategyMixin:
             ]
 
             # Append last 3 micro candles
+            import datetime
             for _, r in df.tail(3).iterrows():
-                d = str(r.get("trade_date", ""))[-4:]
+                td = r.get("trade_date")
+                if isinstance(td, (datetime.date, datetime.datetime)):
+                    d = td.strftime("%m%d")
+                else:
+                    d = str(td or "")[-4:]
                 c = f"{r.get('close', 0):.2f}"
                 p_val = r.get("pct_chg", 0)
                 p = f"{p_val:+.2f}%" if not pd.isna(p_val) else "N/A"

@@ -101,6 +101,7 @@ class TushareClient:
         """Async wrapper that yields to event loop during rate limit / backoff"""
         import asyncio
         import functools
+        import datetime
 
         # Tushare SDK wraps API methods as functools.partial(DataApi.query, 'api_name').
         # Standard __name__ doesn't exist on partial objects, so extract from partial.args[0].
@@ -112,6 +113,15 @@ class TushareClient:
             api_name = func.args[0]
         else:
             api_name = getattr(func, "__name__", str(func))
+
+        # Core Boundary Fix: format any native date/datetime arguments to Tushare string format YYYYMMDD
+        formatted_kwargs = {}
+        for k, v in kwargs.items():
+            if isinstance(v, (datetime.date, datetime.datetime)):
+                formatted_kwargs[k] = v.strftime("%Y%m%d")
+            else:
+                formatted_kwargs[k] = v
+        kwargs = formatted_kwargs
 
         for i in range(self.max_retries):
             if self._rate_limiter:
@@ -222,8 +232,15 @@ class TushareClient:
         """Get list of actual trading dates (includes holidays handling).
         NOTE: This is a SYNC method — must remain sync for APScheduler (non-asyncio thread).
         For async contexts, use get_trade_cal() instead."""
+        import datetime
         if not self.pro:
             raise Exception("Tushare Token not set. Please set your token in settings.")
+        
+        if isinstance(start_date, (datetime.date, datetime.datetime)):
+            start_date = start_date.strftime("%Y%m%d")
+        if isinstance(end_date, (datetime.date, datetime.datetime)):
+            end_date = end_date.strftime("%Y%m%d")
+            
         try:
             df = self.pro.trade_cal(
                 exchange="SSE", start_date=start_date, end_date=end_date, is_open="1",
@@ -240,13 +257,18 @@ class TushareClient:
         Strategy: Year-based lazy loading with Double-Checked Locking.
 
         Args:
-            date_str: Date in YYYYMMDD format. If None, uses today.
+            date_str: Date in YYYYMMDD format, or a native datetime.date object. If None, uses today.
 
         Returns:
             bool: True if trading day, False if holiday/weekend
         """
+        import datetime
         if date_str is None:
             date_str = get_now().strftime("%Y%m%d")
+        elif isinstance(date_str, (datetime.date, datetime.datetime)):
+            date_str = date_str.strftime("%Y%m%d")
+        elif not isinstance(date_str, str):
+            date_str = str(date_str)
 
         year = date_str[:4]
 

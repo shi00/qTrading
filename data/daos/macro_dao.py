@@ -31,7 +31,7 @@ class MacroDao(BaseDao):
 
         if "created_at" not in df.columns:
             df = df.copy()
-            df["created_at"] = get_now().strftime("%Y-%m-%d %H:%M:%S")
+            df["created_at"] = get_now().replace(tzinfo=None)
             columns.append("created_at")
 
         return await self._save_upsert(

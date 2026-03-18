@@ -61,8 +61,8 @@ class HealthCheckMixin:
         Tier Logic:
           - CRITICAL (0): No sync_status records at all, or daily_quotes never synced.
           - BRONZE  (1): daily_quotes exists but is stale (> TIER_QUOTE_FRESHNESS_DAYS lag).
-          - SILVER  (2): daily_quotes is fresh. Sufficient for MA/RSI strategies.
-          - GOLD    (3): daily_quotes fresh AND financial_reports recent (< TIER_FINANCIAL_FRESHNESS_DAYS).
+          - SILVER  (2): All critical tables are fresh. Sufficient for MA/RSI strategies.
+          - GOLD    (3): All critical tables fresh AND financial_reports recent (< TIER_FINANCIAL_FRESHNESS_DAYS).
         """
         try:
             sync_records = await self.cache.get_sync_status()
@@ -81,9 +81,14 @@ class HealthCheckMixin:
             sync_dict = sync_records.set_index("table_name").to_dict("index")
             logger.debug("[DataProcessor] FastCheck | Sync records retrieved.")
 
-            # ── SILVER gate: only requires daily_quotes to be fresh ──
-            # This is the ONLY hard requirement for RSI/MA strategies.
-            # financial_reports is optional (upgrades to GOLD if present & fresh).
+            # Get all critical tables from data dictionary
+            critical_tables = [
+                name
+                for name, meta in TABLE_DEFINITIONS.items()
+                if meta.get("quality_config", {}).get("critical")
+            ]
+
+            # Check daily_quotes first (primary gate)
             latest_quote_date = sync_dict.get("daily_quotes", {}).get(
                 "last_data_date", "",
             )
@@ -140,18 +145,40 @@ class HealthCheckMixin:
                 return
 
             if days_lag <= TIER_QUOTE_FRESHNESS_DAYS:
-                self._quality_tier = 2  # SILVER — safe for MA/RSI
+                # Check all other critical tables for freshness
+                stale_critical = []
+                for table in critical_tables:
+                    if table == "daily_quotes":
+                        continue  # Already checked
 
-                # Optional upgrade to GOLD if financial data is also fresh
-                fin_info = sync_dict.get("financial_reports", {})
-                fin_date = fin_info.get("last_data_date", "") if fin_info else ""
-                if fin_date:
-                    try:
-                        fin_lag = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
-                        if fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS:
-                            self._quality_tier = 3  # GOLD
-                    except (ValueError, TypeError):
-                        pass  # Stay at SILVER, no downgrade
+                    info = sync_dict.get(table, {})
+                    last_date = info.get("last_data_date", "") if info else ""
+                    if last_date:
+                        try:
+                            table_lag = (get_now() - parse_date(str(last_date), "%Y%m%d")).days
+                            if table_lag > TIER_QUOTE_FRESHNESS_DAYS:
+                                stale_critical.append(table)
+                        except (ValueError, TypeError):
+                            stale_critical.append(table)
+
+                if stale_critical:
+                    self._quality_tier = 1  # BRONZE - some critical tables are stale
+                    logger.warning(
+                        f"[DataProcessor] FastCheck | ⚠️ Critical tables stale: {stale_critical}. Degrading to BRONZE.",
+                    )
+                else:
+                    self._quality_tier = 2  # SILVER — all critical tables fresh
+
+                    # Optional upgrade to GOLD if financial data is also fresh
+                    fin_info = sync_dict.get("financial_reports", {})
+                    fin_date = fin_info.get("last_data_date", "") if fin_info else ""
+                    if fin_date:
+                        try:
+                            fin_lag = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
+                            if fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS:
+                                self._quality_tier = 3  # GOLD
+                        except (ValueError, TypeError):
+                            pass  # Stay at SILVER, no downgrade
             else:
                 self._quality_tier = 1  # Stale quotes -> BRONZE
 
@@ -182,8 +209,8 @@ class HealthCheckMixin:
 
         try:
             end_date = await self.get_latest_trade_date()
-            # Generate start date based on configured dynamic years
-            end_date_obj = datetime.datetime.strptime(end_date, "%Y%m%d")
+            from utils.time_utils import parse_date
+            end_date_obj = parse_date(end_date)
             from utils.config_handler import ConfigHandler
 
             years = ConfigHandler.get_init_history_years()

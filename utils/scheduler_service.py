@@ -42,11 +42,15 @@ class SchedulerService:
             return
 
         # Initialize AsyncIOScheduler with explicit timezone
-        # Initialize AsyncIOScheduler with explicit timezone
         # 'apscheduler.job_defaults.max_instances': 1 ensures we don't overlap runs
+        # 'misfire_grace_time': 60 allows jobs to run up to 60s late during heavy load
         # timezone='Asia/Shanghai' ensures consistent scheduling regardless of server location
         self.scheduler = AsyncIOScheduler(
-            job_defaults={"max_instances": 1}, timezone="Asia/Shanghai",
+            job_defaults={
+                "max_instances": 1,
+                "misfire_grace_time": 60,
+            },
+            timezone="Asia/Shanghai",
         )
         self._last_update_date = None
         self._last_pred_date = None
@@ -275,14 +279,14 @@ class SchedulerService:
             task = tm.get_task(task_id)
             cancel_event = task._cancel_event if task else None
             processor = DataProcessor()
-            tm.update_progress(task_id, 0.05, "清空历史豆包概念...")
+            tm.update_progress(task_id, 0.05, "清空历史AI概念...")
             await processor.run_doubao_tagging(
                 task_id=task_id, cancel_event=cancel_event,
             )
-            return "豆包概念重塑完成"
+            return "AI概念重建完成"
 
         TaskManager().submit_task(
-            name="豆包概念周度重塑",
+            name="AI概念周度重建",
             task_type="AI打标",
             coroutine_factory=_doubao_logic,
             cancellable=True,

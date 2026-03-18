@@ -47,15 +47,15 @@ class DataQualityService:
         if pd.isna(start_date) or pd.isna(end_date):
             return {"missing_count": 0, "missing_dates": [], "coverage_ratio": 0.0}
 
-        # Helper to convert to standardized string YYYYMMDD for comparison
-        target_dates = set(date_series.dt.strftime("%Y%m%d"))
+        target_dates = set(date_series.dt.date)
 
-        # Process trade_cal
-        # Assuming trade_cal['cal_date'] is string YYYYMMDD and is_open=1
+        start_date_obj = start_date.date() if hasattr(start_date, 'date') else start_date
+        end_date_obj = end_date.date() if hasattr(end_date, 'date') else end_date
+
         mask = (
             (trade_cal["is_open"] == 1)
-            & (trade_cal["cal_date"] >= start_date.strftime("%Y%m%d"))
-            & (trade_cal["cal_date"] <= end_date.strftime("%Y%m%d"))
+            & (trade_cal["cal_date"] >= start_date_obj)
+            & (trade_cal["cal_date"] <= end_date_obj)
         )
 
         expected_dates = set(trade_cal[mask]["cal_date"])

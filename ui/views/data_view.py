@@ -533,13 +533,12 @@ class TableViewerTab(ft.Container):
                     str_val = str(val)
                     if val is None:
                         str_val = "-"
-                    elif (
-                        "date" in col_name.lower()
-                        and isinstance(val, str)
-                        and len(val) == 8
-                        and val.isdigit()
-                    ):
-                        str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
+                    elif "date" in col_name.lower():
+                        import datetime
+                        if isinstance(val, (datetime.date, datetime.datetime)):
+                            str_val = val.strftime("%Y-%m-%d")
+                        elif isinstance(val, str) and len(val) == 8 and val.isdigit():
+                            str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
 
                     # 仅对 market_news 表的长文本字段使用左对齐和自动换行
                     is_news_table = self.current_table == "market_news"
@@ -972,13 +971,12 @@ class SQLConsoleTab(ft.Container):
                     for idx, val in enumerate(row):
                         col_name = display_df.columns[idx]
                         str_val = str(val)
-                        if (
-                            "date" in col_name.lower()
-                            and isinstance(val, str)
-                            and len(val) == 8
-                            and val.isdigit()
-                        ):
-                            str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
+                        if "date" in col_name.lower():
+                            import datetime
+                            if isinstance(val, (datetime.date, datetime.datetime)):
+                                str_val = val.strftime("%Y-%m-%d")
+                            elif isinstance(val, str) and len(val) == 8 and val.isdigit():
+                                str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
                         cells.append(
                             ft.DataCell(
                                 ft.Text(

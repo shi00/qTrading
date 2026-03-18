@@ -409,14 +409,6 @@ TABLE_DEFINITIONS = {
             "1y": "col_1y",
         },
     },
-    "adj_factor": {
-        "alias": "tab_adj_factor",
-        "desc": "复权因子",
-        "quality_config": {"tier": 1, "monitor": True},
-        "columns": {
-            "adj_factor": "col_adj_factor",
-        },
-    },
     "stk_holdernumber": {
         "alias": "tab_stk_holdernumber",
         "desc": "股东户数",

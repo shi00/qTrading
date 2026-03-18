@@ -62,7 +62,11 @@ class ConfigHandler:
         "auto_update_time": "16:30",
         "log_max_mb": 5,
         "log_backup_count": 5,
-        "db_connection_pool_size": 5,
+        "db_connection_pool_size": 10,
+        "db_pool_pre_ping": True,
+        "db_pool_recycle": 1800,
+        "db_pool_timeout": 30,
+        "db_max_overflow": 5,
         # Heavy sync tasks (Historical Data, Financial Reports)
         "sync_max_concurrent_heavy": 3,
         "max_batch_rows": 20000,
@@ -335,6 +339,26 @@ class ConfigHandler:
         return config.get("db_connection_pool_size", 5)
 
     @staticmethod
+    def get_db_pool_pre_ping():
+        config = ConfigHandler.load_config()
+        return config.get("db_pool_pre_ping", True)
+
+    @staticmethod
+    def get_db_pool_recycle():
+        config = ConfigHandler.load_config()
+        return config.get("db_pool_recycle", 1800)
+
+    @staticmethod
+    def get_db_pool_timeout():
+        config = ConfigHandler.load_config()
+        return config.get("db_pool_timeout", 30)
+
+    @staticmethod
+    def get_db_max_overflow():
+        config = ConfigHandler.load_config()
+        return config.get("db_max_overflow", 5)
+
+    @staticmethod
     def get_db_url():
         """Get PostgreSQL connection URL from user config or system config."""
         import config as sys_config
@@ -345,6 +369,14 @@ class ConfigHandler:
     @staticmethod
     def set_db_connection_pool_size(size):
         return ConfigHandler.save_config({"db_connection_pool_size": int(size)})
+
+    @staticmethod
+    def set_db_max_overflow(overflow):
+        return ConfigHandler.save_config({"db_max_overflow": int(overflow)})
+
+    @staticmethod
+    def set_db_pool_timeout(timeout):
+        return ConfigHandler.save_config({"db_pool_timeout": int(timeout)})
 
     @staticmethod
     def get_sync_concurrency():

@@ -25,17 +25,6 @@ class QualityGate:
     Ensures data quality meets the required tier before running a strategy.
     """
 
-    @staticmethod
-    def get_current_tier():
-        """
-        Get global quality tier from DataProcessor singleton or context.
-
-        NOTE: This is a placeholder — not used at runtime.
-        The @require_quality decorator uses _find_processor() to locate the
-        DataProcessor instance and reads _quality_tier directly from it.
-        """
-        return 0
-
 
 def _find_processor(instance, args, kwargs):
     """Shared logic to locate the DataProcessor instance.

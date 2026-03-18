@@ -137,19 +137,24 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             )
             return pd.DataFrame()
 
-        start_date = (
-            datetime.datetime.strptime(end_date, "%Y%m%d")
-            - datetime.timedelta(days=120)
-        ).strftime("%Y%m%d")
+        # Safely extract native date object for math
+        if isinstance(end_date, str):
+            end_date_obj = datetime.datetime.strptime(end_date.replace("-", ""), "%Y%m%d").date()
+        elif isinstance(end_date, datetime.datetime):
+            end_date_obj = end_date.date()
+        else:
+            end_date_obj = end_date
+
+        start_date_obj = end_date_obj - datetime.timedelta(days=120)
 
         logger.info(
-            f"[OversoldStrategy] Fetching history {start_date} → {end_date} for RSI calculation...",
+            f"[OversoldStrategy] Fetching history {start_date_obj} → {end_date_obj} for RSI calculation...",
         )
 
         try:
             valid_codes = snapshot_df["ts_code"].tolist()
             history_pdf = await dp.cache.get_daily_quotes(
-                start_date=start_date, end_date=end_date, ts_code_list=valid_codes,
+                start_date=start_date_obj, end_date=end_date_obj, ts_code_list=valid_codes,
             )
 
             if history_pdf is None or history_pdf.empty:
@@ -193,7 +198,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         pl.col("close").count().over("ts_code").alias("day_count"),
                     ],
                 )
-                .filter(pl.col("trade_date") == end_date)  # Latest day only
+                .filter(pl.col("trade_date") == end_date_obj)  # Latest day only
                 .filter(pl.col("day_count") >= rsi_period * 2)  # Stability guard
                 .filter(pl.col(rsi_col_name) < rsi_threshold)  # Dynamic threshold
                 .collect()

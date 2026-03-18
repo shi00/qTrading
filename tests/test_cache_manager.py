@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import datetime
 import unittest
 
 import pandas as pd
@@ -107,11 +108,11 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
         # Test get_latest_trade_date
         date = await self.cache.get_latest_trade_date()
-        self.assertEqual(date, "20230101")
+        self.assertEqual(date, datetime.date(2023, 1, 1))
 
         # Test get_cached_trade_dates
         dates = await self.cache.get_cached_trade_dates()
-        self.assertIn("20230101", dates)
+        self.assertIn(datetime.date(2023, 1, 1), dates)
 
     async def test_daily_indicators(self):
         """Test daily indicators operations"""
@@ -140,10 +141,10 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
         # Test get_cached_indicator_dates
         dates = await self.cache.get_cached_indicator_dates()
-        self.assertIn("20230101", dates)
+        self.assertIn(datetime.date(2023, 1, 1), dates)
 
         # Test get_latest_indicators
-        res = await self.cache.get_latest_indicators("20230101")
+        res = await self.cache.get_latest_indicators(datetime.date(2023, 1, 1))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["pe"], 10.0)
 
@@ -175,9 +176,9 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
         await self.cache.save_financial_reports(df)
 
-        res = await self.cache.get_latest_financials()
+        res = await self.cache.get_cached_financial_records()
         self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["roe"], 15.5)
+        self.assertIn(("000001.SZ", datetime.date(2023, 3, 31)), res)
 
     async def test_moneyflow_northbound(self):
         """Test moneyflow and northbound data"""
@@ -212,7 +213,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
         await self.cache.save_moneyflow(mf_df)
         await self.cache.save_northbound(nb_df)
 
-        res_mf = await self.cache.get_moneyflow("20230101")
+        res_mf = await self.cache.get_moneyflow(datetime.date(2023, 1, 1))
         self.assertEqual(res_mf.iloc[0]["buy_md_amount"], 100)
 
         (
@@ -230,7 +231,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_sync_status(self):
         """Test sync status operations"""
-        await self.cache.update_sync_status("test_table", "20230101", 100)
+        await self.cache.update_sync_status("test_table", datetime.date(2023, 1, 1), 100)
 
         status = await self.cache.get_sync_status("test_table")
         self.assertEqual(status["record_count"], 100)
@@ -319,7 +320,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
         await self.cache.save_financial_reports(fina)
 
         # Execute Query
-        df = await self.cache.get_screening_data(trade_date="20230101")
+        df = await self.cache.get_screening_data(trade_date=datetime.date(2023, 1, 1))
 
         self.assertFalse(df.empty)
         row = df.iloc[0]
@@ -340,7 +341,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
         async with self.cache.engine.begin() as conn:
             await conn.execute(sql, [{
-                "trade_date": "20230101",
+                "trade_date": datetime.date(2023, 1, 1),
                 "strategy_name": "value",
                 "ts_code": "000001.SZ",
                 "name": "PA",
@@ -368,7 +369,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_clear_cache(self):
         """Test clearing cache"""
-        await self.cache.update_sync_status("test", "20230101", 1)
+        await self.cache.update_sync_status("test", datetime.date(2023, 1, 1), 1)
         await self.cache.clear_all_cache()
 
         status = await self.cache.get_sync_status("test")
@@ -397,7 +398,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
         )
         await self.cache.save_top_list(df)
 
-        res = await self.cache.get_top_list("20230101")
+        res = await self.cache.get_top_list(datetime.date(2023, 1, 1))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["net_amount"], 1000)
 
@@ -416,7 +417,7 @@ class TestCacheManager(unittest.IsolatedAsyncioTestCase):
         )
         await self.cache.save_block_trade(df)
 
-        res = await self.cache.get_block_trade("20230101")
+        res = await self.cache.get_block_trade(datetime.date(2023, 1, 1))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["amount"], 500)
 

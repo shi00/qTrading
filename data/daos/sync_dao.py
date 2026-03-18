@@ -12,7 +12,7 @@ class SyncDao(BaseDao):
     async def update_sync_status(
         self, table_name, last_data_date, record_count, status="success",
     ):
-        now = get_now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_now().replace(tzinfo=None)
         sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") 
                VALUES ($1, $2, $3, $4, $5, $6) 
                ON CONFLICT("table_name") DO UPDATE SET 
@@ -46,7 +46,7 @@ class SyncDao(BaseDao):
             return set()
 
     async def mark_stock_step4_completed(self, ts_code, sync_version=1):
-        now = get_now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_now().replace(tzinfo=None)
         sql = '''INSERT INTO stock_sync_status ("ts_code","step4_completed_at","sync_version") 
                VALUES ($1, $2, $3) 
                ON CONFLICT("ts_code") DO UPDATE SET 

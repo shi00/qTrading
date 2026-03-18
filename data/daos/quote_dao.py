@@ -111,6 +111,37 @@ class QuoteDao(BaseDao):
             return set()
         return set(df["trade_date"])
 
+    async def get_cached_dates_for_table(self, table_name: str) -> set:
+        """
+        Get distinct dates from a table for breakpoint resume check.
+        Supports tables with trade_date, end_date, or ann_date columns.
+        """
+        date_col_map = {
+            "daily_quotes": "trade_date",
+            "daily_indicators": "trade_date",
+            "moneyflow_daily": "trade_date",
+            "northbound_holding": "trade_date",
+            "moneyflow_hsgt": "trade_date",
+            "margin_daily": "trade_date",
+            "suspend_d": "trade_date",
+            "financial_reports": "end_date",
+        }
+
+        date_col = date_col_map.get(table_name, "trade_date")
+
+        try:
+            df = await self._read_db(
+                f"SELECT DISTINCT {date_col} FROM {table_name} ORDER BY {date_col}",
+            )
+            if df is None or df.empty:
+                return set()
+            return set(df[date_col])
+        except Exception as e:
+            logger.warning(
+                f"[QuoteDao] Failed to get cached dates for {table_name}: {e}",
+            )
+            return set()
+
     # --- Index Data ---
     async def save_index_daily(self, df):
         cols = [

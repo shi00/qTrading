@@ -141,10 +141,10 @@ class AutomationTab(ft.Container):
 
         self.row_doubao_schedule = SettingRow(
             icon=ft.Icons.AUTO_AWESOME,
-            title=I18n.get("settings_doubao_update", "自动重塑豆包概念"),
+            title=I18n.get("settings_doubao_update", "自动重建AI概念"),
             subtitle=I18n.get(
                 "settings_doubao_desc",
-                "开启后将定时自动清空并重建全市场的大模型专属概念体系",
+                "开启后将定时自动清空并重建全市场的AI概念体系",
             ),
             control=self.doubao_enabled,
             icon_color=AppColors.PRIMARY,
@@ -253,7 +253,7 @@ class AutomationTab(ft.Container):
             )
 
             self.doubao_enabled.label = I18n.get(
-                "settings_doubao_update", "自动重塑豆包概念",
+                "settings_doubao_update", "自动重建AI概念",
             )
             self.doubao_time.label = I18n.get("settings_update_time")
             self.doubao_time.options = self._build_time_options()

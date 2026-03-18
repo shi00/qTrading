@@ -180,15 +180,11 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         completed_count = skipped_count
 
-        # Invariant Dates
-        end_date = get_now().strftime("%Y%m%d")
+        end_date = get_now().date()
         years = ConfigHandler.get_init_history_years()
-        # Safety multiplier 2.0 for TradeDays -> NaturalDays conversion
-        rough_start = (
-            get_now() - datetime.timedelta(days=int(250 * years * 2.0))
-        ).strftime("%Y%m%d")
+        rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
         all_dates = await self.context.processor.get_trade_dates(
-            start_date=rough_start, end_date=end_date,
+            start_date=rough_start_date, end_date=end_date,
         )
         start_date = (
             all_dates[-(250 * years)]
@@ -196,19 +192,17 @@ class FinancialSyncStrategy(ISyncStrategy):
             else (
                 all_dates[0]
                 if all_dates
-                else (get_now() - datetime.timedelta(days=365 * years)).strftime(
-                    "%Y%m%d",
-                )
+                else (get_now().date() - datetime.timedelta(days=365 * years))
             )
         )
 
-        # Generate full date range for batch sync (run AFTER stock loop to avoid API contention)
         all_dates = []
-        curr = datetime.datetime.strptime(start_date, "%Y%m%d")
-        end_dt_obj = datetime.datetime.strptime(end_date, "%Y%m%d")
-        while curr <= end_dt_obj:
-            all_dates.append(curr.strftime("%Y%m%d"))
-            curr += datetime.timedelta(days=1)
+        from utils.time_utils import parse_date
+        curr_dt = parse_date(start_date)
+        end_dt_obj = parse_date(end_date)
+        while curr_dt <= end_dt_obj:
+            all_dates.append(curr_dt.strftime("%Y%m%d"))
+            curr_dt += datetime.timedelta(days=1)
 
         # Inner processing function
         async def process_one_stock(ts_code):
@@ -375,9 +369,12 @@ class FinancialSyncStrategy(ISyncStrategy):
         last_sync_str = status.get("last_sync_date")
 
         try:
-            last_sync_dt = datetime.datetime.strptime(
-                last_sync_str, "%Y-%m-%d %H:%M:%S",
-            )
+            if isinstance(last_sync_str, datetime.datetime):
+                last_sync_dt = last_sync_str
+            else:
+                last_sync_dt = datetime.datetime.strptime(
+                    last_sync_str, "%Y-%m-%d %H:%M:%S",
+                )
             start_date_dt = last_sync_dt + datetime.timedelta(days=1)
         except Exception:
             # Fallback
@@ -450,9 +447,10 @@ class FinancialSyncStrategy(ISyncStrategy):
 
             await asyncio.gather(*tasks)
 
-            # P1-13 S6: Checkpoint synchronously per day to avoid losing 30-day progress
+            from datetime import datetime as dt_module
+            day_date = dt_module.strptime(day_str, "%Y%m%d").date()
             await self.context.cache.update_sync_status(
-                "financial_reports", day_str, total_saved,
+                "financial_reports", day_date, total_saved,
             )
 
             if progress_callback:
@@ -513,8 +511,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                         logger.warning(
                             f"[FinancialSync] BatchSync | ⛔ Permission Denied for {table_name}: {e}",
                         )
+                        from datetime import datetime as dt_module
                         await self.context.cache.update_sync_status(
-                            table_name, date_str, 0, status="permission_denied",
+                            table_name, dt_module.strptime(date_str, "%Y%m%d").date(), 0, status="permission_denied",
                         )
                     else:
                         logger.warning(

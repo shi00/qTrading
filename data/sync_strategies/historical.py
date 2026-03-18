@@ -108,11 +108,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
             result.errors.append("No trade dates found")
             return
 
-        # Breakpoint Resume (Check Cache)
+        # Breakpoint Resume (Check Cache for all Critical tables)
+        CRITICAL_TABLES = ["daily_quotes", "daily_indicators", "moneyflow_daily"]
         try:
-            cached_quotes = await self.context.cache.get_cached_trade_dates()
-            cached_inds = await self.context.cache.get_cached_indicator_dates()
-            existing = cached_quotes.intersection(cached_inds)
+            cached_dates_per_table = {}
+            for table in CRITICAL_TABLES:
+                cached_dates_per_table[table] = await self.context.cache.get_cached_dates_for_table(table)
+
+            existing = set()
+            if all(cached_dates_per_table.values()):
+                existing = set.intersection(*cached_dates_per_table.values())
 
             original_count = len(trade_dates)
             trade_dates = [d for d in trade_dates if d not in existing]
@@ -121,7 +126,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if skipped > 0:
                 logger.debug(
-                    f"[HistoricalSync] Resume | Skipped {skipped} cached dates.",
+                    f"[HistoricalSync] Resume | Skipped {skipped} dates (all critical tables present).",
                 )
         except Exception as e:
             logger.warning(f"[HistoricalSync] Resume | ⚠️ Cache check failed: {e}")
@@ -368,24 +373,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # Yield control between heavy table saves
         await asyncio.sleep(0)
 
-        # 2. Adj Factor (Critical, derived from quotes)
+        # 2. Check adj_factor column (used for price adjustment calculations)
         df_quotes = data_map.get("quotes")
-        if (
-            df_quotes is not None
-            and not df_quotes.empty
-            and "adj_factor" in df_quotes.columns
-        ):
-            try:
-                await cache.save_adj_factors(
-                    df_quotes[["ts_code", "trade_date", "adj_factor"]],
-                    suppress_errors=False,
+        if df_quotes is not None and not df_quotes.empty:
+            if "adj_factor" not in df_quotes.columns:
+                logger.warning(
+                    f"[HistoricalSync] DaySync | ⚠️ adj_factor column missing in quotes for {trade_date}. "
+                    "This may affect price adjustment calculations.",
                 )
-            except Exception as e:
-                logger.error(
-                    f"[HistoricalSync] DaySync | ❌ Critical save failed for adj_factor: {e}",
-                    exc_info=True,
-                )
-                raise e
 
         # Yield control
         await asyncio.sleep(0)
@@ -400,15 +395,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # 4. Others (Non-critical, can fail silently or log)
         await save_if_ok("limit", cache.save_limit_list)
-        await save_if_ok("suspend", cache.save_suspend_d)
+        suspend_rows = await save_if_ok("suspend", cache.save_suspend_d)
         await asyncio.sleep(0)
-        await save_if_ok("margin", cache.save_margin_daily)
+        margin_rows = await save_if_ok("margin", cache.save_margin_daily)
         await save_if_ok("lhb", cache.save_top_list)
         await asyncio.sleep(0)
         await save_if_ok("block", cache.save_block_trade)
-        await save_if_ok("mf", cache.save_moneyflow)
+        mf_rows = await save_if_ok("mf", cache.save_moneyflow)
         await asyncio.sleep(0)
-        await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
+        hsgt_rows = await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
         await save_if_ok("index", cache.save_index_daily)
         await save_if_ok("index_basic", cache.save_index_dailybasic)
 
@@ -416,6 +411,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
 
         # Northbound special filter
+        north_rows = 0
         try:
             df_north = data_map.get("north")
             if df_north is not None and not df_north.empty:
@@ -423,18 +419,37 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     df_north["ts_code"].astype(str).str.endswith((".SH", ".SZ"))
                 ]
                 if not df_north.empty:
-                    await cache.save_northbound(df_north)
+                    north_rows = await cache.save_northbound(df_north)
+                    north_rows = north_rows if north_rows is not None else len(df_north)
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical): {e}",
             )
 
-        # Strictly update sync status using actual rows written, protecting against silent DB failures
+        # Update sync status for all monitored tables
+        # Critical tables
         if quotes_rows > 0:
             await cache.update_sync_status("daily_quotes", trade_date, quotes_rows)
 
         if basic_rows > 0:
             await cache.update_sync_status("daily_indicators", trade_date, basic_rows)
+
+        # Money Flow (critical for strategy analysis)
+        if mf_rows > 0:
+            await cache.update_sync_status("moneyflow_daily", trade_date, mf_rows)
+
+        # Non-critical but monitored tables
+        if north_rows > 0:
+            await cache.update_sync_status("northbound_holding", trade_date, north_rows)
+
+        if hsgt_rows > 0:
+            await cache.update_sync_status("moneyflow_hsgt", trade_date, hsgt_rows)
+
+        if margin_rows > 0:
+            await cache.update_sync_status("margin_daily", trade_date, margin_rows)
+
+        if suspend_rows > 0:
+            await cache.update_sync_status("suspend_d", trade_date, suspend_rows)
 
     async def sync_moneyflow(self, trade_date=None):
         """Sync money flow for a specific date (Standalone)."""

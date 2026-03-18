@@ -301,8 +301,14 @@ class AsyncOperationLogger:
         metrics_str = ""
         if self.metrics:
             import json
+            import datetime
+            
+            def _json_serial(obj):
+                if isinstance(obj, (datetime.datetime, datetime.date)):
+                    return obj.isoformat()
+                raise TypeError(f"Type {type(obj)} not serializable")
 
-            metrics_str = f" | metrics: {json.dumps(self.metrics)}"
+            metrics_str = f" | metrics: {json.dumps(self.metrics, default=_json_serial)}"
 
         # 记录完成
         if exc_type is None:

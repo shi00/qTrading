@@ -306,10 +306,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             if status is None or not status.get("last_sync_date"):
                 return True, I18n.get("status_never_synced")
 
-            last_sync = datetime.datetime.strptime(
-                status.get("last_sync_date"), "%Y-%m-%d %H:%M:%S",
-            )
-            days_since = (get_now() - last_sync).days
+            last_sync = status.get("last_sync_date")
+            if isinstance(last_sync, str):
+                last_sync = datetime.datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S")
+            days_since = (get_now() - last_sync.replace(tzinfo=None)).days
 
             if days_since >= 30:
                 return True, I18n.get("status_days_ago", days=days_since)
@@ -351,7 +351,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             if df is not None and not df.empty:
                 count = await self.cache.save_stock_basic(df)
                 await self.cache.update_sync_status(
-                    "stock_basic", get_now().strftime("%Y%m%d"), count,
+                    "stock_basic", get_now().date(), count,
                 )
                 logger.info(
                     f"[DataProcessor] Sync Basic | ✅ Pushed {count} active stocks",
@@ -468,23 +468,17 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
     async def prepare_market_data(self):
-        """Prepare data for AI Analysis."""
         now = get_now()
-        today_str = now.strftime("%Y%m%d")
-        # Check if trading day, if not fallback to latest
-        # Simplified logic compared to original for brevity but keeping intent
-
+        today_date = now.date()
         latest = await self.get_latest_trade_date()
-        if latest != today_str:
+        if latest != today_date:
             return latest
 
-        # If it IS today, check if we have data
         cached_date = await self.cache.get_latest_trade_date()
-        if cached_date != today_str:
-            # Sync today
-            await self.sync_daily_market_snapshot(today_str)
+        if cached_date != today_date:
+            await self.sync_daily_market_snapshot(today_date)
 
-        return today_str
+        return today_date
 
     async def get_market_overview(self):
         """
@@ -493,17 +487,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """
         try:
             now = get_now()
-            today_str = now.strftime("%Y%m%d")
-            start_str = (now - datetime.timedelta(days=30)).strftime("%Y%m%d")
+            today_date = now.date()
+            start_date = today_date - datetime.timedelta(days=30)
 
-            # Calendar Check (Cached inside ensure_trade_cal)
-            await self.ensure_trade_cal(today_str)
+            await self.ensure_trade_cal(today_date)
 
-            # Find latest valid date
             cache_df = await self.cache.get_trade_cal(
-                start_date=start_str, end_date=today_str, is_open=1,
+                start_date=start_date, end_date=today_date, is_open=1,
             )
-            date = today_str
+            date = today_date
             if not cache_df.empty:
                 date = sorted(cache_df["cal_date"].tolist())[-1]
 

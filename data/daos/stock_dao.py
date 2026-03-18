@@ -22,11 +22,8 @@ class StockDao(BaseDao):
             "market",
             "list_date",
             "list_status",
-            "updated_at",
         ]
 
-        df = df.copy()
-        df["updated_at"] = get_now().strftime("%Y-%m-%d %H:%M:%S")
         return await self._save_upsert(df, "stock_basic", cols, pk_columns=["ts_code"])
 
     async def get_stock_basic(self):
@@ -82,10 +79,7 @@ class StockDao(BaseDao):
     async def save_concepts(self, df):
         if df is None or df.empty:
             return 0
-        cols = ["ts_code", "concept_name", "concept_id", "updated_at"]
-
-        df = df.copy()
-        df["updated_at"] = get_now().strftime("%Y-%m-%d %H:%M:%S")
+        cols = ["ts_code", "concept_name", "concept_id"]
 
         return await self._save_upsert(
             df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"],
@@ -101,11 +95,10 @@ class StockDao(BaseDao):
 
         cols = ["ts_code", "concept_name", "concept_id", "updated_at"]
         df = df.copy()
-        df["updated_at"] = get_now().strftime("%Y-%m-%d %H:%M:%S")
+        df["updated_at"] = get_now().replace(tzinfo=None)
 
-        # Prepare params outside transaction
         params = await ThreadPoolManager().run_async(
-            TaskType.CPU, self._prepare_data_params, df, cols,
+            TaskType.CPU, self._prepare_data_params, df, cols, "stock_concepts"
         )
 
         col_str = self._quote_columns(cols)
@@ -126,13 +119,6 @@ class StockDao(BaseDao):
         except Exception as e:
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
             raise e
-
-    async def clear_concepts(self):
-        """
-        Clear all concept data.
-        NOTE: Prefer overwrite_concepts for full refresh to ensure atomicity.
-        """
-        await self._write_db("DELETE FROM stock_concepts")
 
     async def clear_all_doubao_concepts(self) -> int:
         return await self._write_db(
@@ -218,7 +204,6 @@ class StockDao(BaseDao):
         if not ai_concept_entries:
             return 0
 
-        now = get_now().strftime("%Y-%m-%d %H:%M:%S")
         records = []
 
         for item in ai_concept_entries:
@@ -228,14 +213,12 @@ class StockDao(BaseDao):
 
             concepts = item.get("concepts", [])
             if not concepts:
-                # 记录一条空概念，证明 AI 已经看过了，防止下次重复扫描
                 dummy_id = f"AI_DOUBAO_{hashlib.md5(b'NONE').hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,
                         "concept_id": dummy_id,
                         "concept_name": "已扫描无强概念",
-                        "updated_at": now,
                     },
                 )
                 continue
@@ -249,7 +232,6 @@ class StockDao(BaseDao):
                         "ts_code": ts_code,
                         "concept_id": concept_id,
                         "concept_name": concept,
-                        "updated_at": now,
                     },
                 )
 
@@ -257,9 +239,8 @@ class StockDao(BaseDao):
             return 0
 
         df = pd.DataFrame(records)
-        cols = ["ts_code", "concept_name", "concept_id", "updated_at"]
+        cols = ["ts_code", "concept_name", "concept_id"]
 
-        # 使用基础类的 upsert 机制保证安全入库
         return await self._save_upsert(
             df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"],
         )

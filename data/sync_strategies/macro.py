@@ -4,7 +4,7 @@ import logging
 from data.constants import MAJOR_INDICES
 from data.daos.macro_dao import MacroDao
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 from .base import ISyncStrategy, SyncResult
 
@@ -114,21 +114,17 @@ class MacroSyncStrategy(ISyncStrategy):
         return indicator
 
     async def _sync_shibor_daily(self, result):
-        """Fetch and save daily Shibor rates."""
         try:
             latest = await self.dao.get_shibor_latest_date()
-            today = get_now().strftime("%Y%m%d")
+            today = get_now().date()
 
             if not latest:
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                # Trade days to natural days safe multiplier: 2.0
-                rough_start = (
-                    get_now() - datetime.timedelta(days=int(250 * years * 2.0))
-                ).strftime("%Y%m%d")
+                rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
                 all_dates = await self.context.processor.get_trade_dates(
-                    start_date=rough_start, end_date=today,
+                    start_date=rough_start_date, end_date=today,
                 )
                 start_date = (
                     all_dates[-(250 * years)]
@@ -136,32 +132,30 @@ class MacroSyncStrategy(ISyncStrategy):
                     else (
                         all_dates[0]
                         if all_dates
-                        else (
-                            get_now() - datetime.timedelta(days=365 * years)
-                        ).strftime("%Y%m%d")
+                        else (get_now().date() - datetime.timedelta(days=365 * years))
                     )
                 )
             else:
                 try:
-                    last_dt = datetime.datetime.strptime(str(latest), "%Y%m%d")
-                    start_date = (
-                        last_dt + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)
-                    ).strftime("%Y%m%d")
+                    last_dt = parse_date(latest)
+                    start_date = last_dt.date() + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)
                 except ValueError:
                     logger.warning(
                         f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.",
                     )
                     start_date = (
-                        get_now()
+                        get_now().date()
                         - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)
-                    ).strftime("%Y%m%d")
+                    )
 
             if start_date > today:
                 logger.debug("[MacroSync] Shibor already up to date.")
                 return
 
+            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, 'strftime') else str(start_date)
+            end_str = today.strftime("%Y%m%d") if hasattr(today, 'strftime') else str(today)
             df = await self.context.api.get_shibor(
-                start_date=start_date, end_date=today,
+                start_date=start_str, end_date=end_str,
             )
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
@@ -173,18 +167,12 @@ class MacroSyncStrategy(ISyncStrategy):
             result.errors.append(f"Shibor: {e}")
 
     async def _sync_index_weights(self, result):
-        """Sync Index Weights for Major Indices (Monthly)."""
         try:
-            # Access MarketDao via cache manager
             market_dao = self.context.cache.market_dao
             latest = await market_dao.get_latest_index_weight_date()
 
-            # Simple monthly check: if latest is > 30 days ago, fetch "current" weights
-            # Tushare index_weight: trade_date (transcation date), start_date, end_date
-            # We just fetch by trade_date range or just 'latest' snapshot logic?
-            # Tushare index_weight(index_code, start_date, end_date)
-
             today = get_now()
+            today_date = today.date()
             should_update = False
 
             if not latest:
@@ -192,11 +180,9 @@ class MacroSyncStrategy(ISyncStrategy):
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                rough_start = (
-                    today - datetime.timedelta(days=int(250 * years * 2.0))
-                ).strftime("%Y%m%d")
+                rough_start_date = today_date - datetime.timedelta(days=int(250 * years * 2.0))
                 all_dates = await self.context.processor.get_trade_dates(
-                    start_date=rough_start, end_date=today.strftime("%Y%m%d"),
+                    start_date=rough_start_date, end_date=today_date,
                 )
                 start_date = (
                     all_dates[-(250 * years)]
@@ -204,25 +190,22 @@ class MacroSyncStrategy(ISyncStrategy):
                     else (
                         all_dates[0]
                         if all_dates
-                        else (today - datetime.timedelta(days=365 * years)).strftime(
-                            "%Y%m%d",
-                        )
+                        else (today_date - datetime.timedelta(days=365 * years))
                     )
                 )
             else:
-                last_dt = datetime.datetime.strptime(str(latest), ("%Y%m%d"))
+                last_dt = parse_date(latest)
                 if (today - last_dt).days > 30:
                     should_update = True
-                    start_date = (last_dt + datetime.timedelta(days=1)).strftime(
-                        "%Y%m%d",
-                    )
+                    start_date = last_dt.date() + datetime.timedelta(days=1)
                 else:
-                    start_date = today.strftime("%Y%m%d")
+                    start_date = today_date
 
             if not should_update:
                 logger.debug("[MacroSync] Index weights up to date (monthly).")
                 return
 
+            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, 'strftime') else str(start_date)
             end_date = today.strftime("%Y%m%d")
             logger.debug(
                 f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",
@@ -240,7 +223,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
                 try:
                     df = await self.context.api.get_index_weight(
-                        index_code=idx_code, start_date=start_date, end_date=end_date,
+                        index_code=idx_code, start_date=start_str, end_date=end_date,
                     )
 
                     if df is not None and not df.empty:

@@ -235,7 +235,7 @@ class ReviewManager:
         if df is None or df.empty:
             return
 
-        current_date = get_now().strftime("%Y%m%d")
+        current_date = get_now().date()
 
         # Helpers to safely extract fields
         def _f(row_data, key, default=None):

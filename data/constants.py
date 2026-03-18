@@ -132,7 +132,6 @@ CORE_DATA_TABLES = {
 AI_DATA_TABLES = {
     "stk_holdernumber": {"desc": "股东户数"},
     "top10_holders": {"desc": "前十大股东"},
-    "adj_factor": {"desc": "复权因子"},
     "macro_economy": {"desc": "宏观经济", "type": "global"},
     "shibor_daily": {"desc": "Shibor利率", "type": "global"},
     "moneyflow_hsgt": {"desc": "北向资金流", "type": "global"},
@@ -153,7 +152,6 @@ HEALTH_REPORT_ORDER = [
     "financial_reports",
     "fina_forecast",
     "daily_indicators",
-    "adj_factor",
     # Global (AI)
     "macro_economy",
     "shibor_daily",

@@ -5,10 +5,10 @@ import sqlalchemy as sa
 import sqlparse
 
 import config
+from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
 
-# --- SQLAlchemy Core operator mapping ---
 _OP_MAP = {
     "=": lambda c, v: c == v,
     ">": lambda c, v: c > v,
@@ -33,6 +33,11 @@ class DatabaseManager:
         self._engine = sa.create_engine(
             config.DB_URL_SYNC,
             echo=False,
+            pool_size=int(ConfigHandler.get_db_connection_pool_size()),
+            max_overflow=int(ConfigHandler.get_db_max_overflow()),
+            pool_pre_ping=ConfigHandler.get_db_pool_pre_ping(),
+            pool_recycle=int(ConfigHandler.get_db_pool_recycle()),
+            pool_timeout=int(ConfigHandler.get_db_pool_timeout()),
         )
 
     def close(self):

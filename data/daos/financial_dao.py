@@ -66,26 +66,11 @@ class FinancialDao(BaseDao):
                 "goodwill" = COALESCE(excluded."goodwill", financial_reports."goodwill")
         """
         params = await ThreadPoolManager().run_async(
-            TaskType.CPU, self._prepare_data_params, df, cols,
+            TaskType.CPU, self._prepare_data_params, df, cols, "financial_reports"
         )
         return await self._write_db(sql, params, is_many=True)
 
-    async def get_latest_financials(self):
-        """Get latest financial report per stock.
 
-        WARNING: Dead code — only called from test_cache_manager.py L148.
-        Uses MAX(end_date) which is a future-function risk if used in strategies.
-        If reactivated, must change to MAX(ann_date) with ann_date <= cutoff_date filter.
-        """
-        sql = """
-              SELECT f.*
-              FROM financial_reports f
-                       INNER JOIN (SELECT ts_code, MAX(end_date) as max_date
-                                   FROM financial_reports
-                                   GROUP BY ts_code) latest
-                                  ON f.ts_code = latest.ts_code AND f.end_date = latest.max_date \
-              """
-        return await self._read_db(sql)
 
     async def get_cached_financial_records(self, period=None):
         if period:

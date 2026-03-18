@@ -76,6 +76,33 @@ class SystemTab(ft.Container):
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
             suffix_text=I18n.get("common_items"),
             border_radius=8,
+            label=I18n.get("settings_db_pool"),
+        )
+
+        # DB Max Overflow
+        self.db_overflow_input = ft.TextField(
+            value=str(ConfigHandler.get_db_max_overflow()),
+            width=AppStyles.CONTROL_WIDTH_SM,
+            text_size=14,
+            content_padding=10,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
+            suffix_text=I18n.get("common_items"),
+            border_radius=8,
+            label=I18n.get("settings_db_overflow"),
+        )
+
+        # DB Pool Timeout
+        self.db_timeout_input = ft.TextField(
+            value=str(ConfigHandler.get_db_pool_timeout()),
+            width=AppStyles.CONTROL_WIDTH_SM,
+            text_size=14,
+            content_padding=10,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
+            suffix_text=I18n.get("common_seconds"),
+            border_radius=8,
+            label=I18n.get("settings_db_timeout"),
         )
 
         # Thread Pool Controls
@@ -197,11 +224,13 @@ class SystemTab(ft.Container):
             control=ft.Row(
                 [
                     self.pool_size_input,
+                    self.db_overflow_input,
+                    self.db_timeout_input,
                     ft.IconButton(
                         icon=ft.Icons.SAVE_ROUNDED,
                         icon_color=AppColors.PRIMARY,
                         tooltip=I18n.get("settings_save_config"),
-                        on_click=self.save_pool_size,
+                        on_click=self.save_db_pool_settings,
                     ),
                 ],
                 spacing=5,
@@ -336,16 +365,35 @@ class SystemTab(ft.Container):
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
-    def save_pool_size(self, e):
-        """Save DB connection pool size"""
+    def save_db_pool_settings(self, e):
+        """Save DB connection pool settings (pool_size, max_overflow, timeout)"""
         try:
-            val = int(self.pool_size_input.value)
-            if val < 1 or val > 50:
+            pool_size = int(self.pool_size_input.value)
+            max_overflow = int(self.db_overflow_input.value)
+            timeout = int(self.db_timeout_input.value)
+
+            if pool_size < 1 or pool_size > 50:
                 self.show_snack(I18n.get("sys_snack_pool_range"), color=AppColors.ERROR)
                 return
-            ConfigHandler.set_db_connection_pool_size(val)
+            if max_overflow < 0 or max_overflow > 50:
+                self.show_snack(
+                    I18n.get("settings_db_overflow") + ": 0-50",
+                    color=AppColors.ERROR,
+                )
+                return
+            if timeout < 5 or timeout > 300:
+                self.show_snack(
+                    I18n.get("settings_db_timeout") + ": 5-300",
+                    color=AppColors.ERROR,
+                )
+                return
+
+            ConfigHandler.set_db_connection_pool_size(pool_size)
+            ConfigHandler.set_db_max_overflow(max_overflow)
+            ConfigHandler.set_db_pool_timeout(timeout)
+
             self.show_snack(
-                I18n.get("settings_db_pool") + " " + I18n.get("common_saved"),
+                I18n.get("settings_db_pool_saved"),
                 color=AppColors.SUCCESS,
             )
         except ValueError:
@@ -358,6 +406,8 @@ class SystemTab(ft.Container):
             self.concurrency_input,
             self.log_level_dropdown,
             self.pool_size_input,
+            self.db_overflow_input,
+            self.db_timeout_input,
             self.io_workers_input,
             self.cpu_workers_input,
             self.rate_limit_input,

@@ -53,20 +53,39 @@ class CacheManager:
             else config.DB_URL
         )
 
-        # Load pool settings from config
         try:
             db_pool_size = int(ConfigHandler.get_db_connection_pool_size())
         except (TypeError, ValueError):
-            db_pool_size = 5  # Safe fallback
+            db_pool_size = 10
+
+        try:
+            db_max_overflow = int(ConfigHandler.get_db_max_overflow())
+        except (TypeError, ValueError):
+            db_max_overflow = 5
+
+        try:
+            db_pool_timeout = int(ConfigHandler.get_db_pool_timeout())
+        except (TypeError, ValueError):
+            db_pool_timeout = 30
+
+        try:
+            db_pool_recycle = int(ConfigHandler.get_db_pool_recycle())
+        except (TypeError, ValueError):
+            db_pool_recycle = 1800
+
+        try:
+            db_pool_pre_ping = ConfigHandler.get_db_pool_pre_ping()
+        except (TypeError, ValueError):
+            db_pool_pre_ping = True
 
         self.engine = create_async_engine(
             connection_string,
             echo=False,
             pool_size=db_pool_size,
-            max_overflow=max(5, int(db_pool_size * 0.5)),
-            pool_timeout=60,
-            pool_recycle=1800,  # Recycle connections after 30 minutes
-            pool_pre_ping=True,  # Pessimistic disconnect handling (crucial for protecting against WinError 10054)
+            max_overflow=db_max_overflow,
+            pool_timeout=db_pool_timeout,
+            pool_recycle=db_pool_recycle,
+            pool_pre_ping=db_pool_pre_ping,
             future=True,
         )
 
@@ -158,9 +177,9 @@ class CacheManager:
             await self._maintenance_event.wait()
 
     @staticmethod
-    def _prepare_data_params(df, cols, date_cols=None):
+    def _prepare_data_params(df, cols, table_name=None):
         # Facade: Delegate to BaseDao static method
-        return BaseDao._prepare_data_params(df, cols, date_cols)
+        return BaseDao._prepare_data_params(df, cols, table_name)
 
     @staticmethod
     def normalize_news_item(item, default_source="CLS"):
@@ -354,15 +373,6 @@ class CacheManager:
             ts_code, start_date, end_date, limit,
         )
 
-    # --- Adj Factor ---
-    async def save_adj_factors(self, df, suppress_errors=True):
-        return await self.market_dao.save_adj_factors(
-            df, suppress_errors=suppress_errors,
-        )
-
-    async def get_adj_factors(self, ts_code, start_date=None, end_date=None):
-        return await self.market_dao.get_adj_factors(ts_code, start_date, end_date)
-
     async def get_latest_trade_date(self):
         await self.wait_for_maintenance()
         return await self.quote_dao.get_latest_trade_date()
@@ -370,6 +380,11 @@ class CacheManager:
     async def get_cached_trade_dates(self):
         await self.wait_for_maintenance()
         return await self.quote_dao.get_cached_trade_dates()
+
+    async def get_cached_dates_for_table(self, table_name: str) -> set:
+        """Proxy method for breakpoint resume check."""
+        await self.wait_for_maintenance()
+        return await self.quote_dao.get_cached_dates_for_table(table_name)
 
     # --- Indicators ---
 
@@ -383,8 +398,7 @@ class CacheManager:
     async def save_financial_reports(self, df):
         return await self.financial_dao.save_financial_reports(df)
 
-    async def get_latest_financials(self):
-        return await self.financial_dao.get_latest_financials()
+
 
     async def get_cached_financial_records(self, period=None):
         return await self.financial_dao.get_cached_financial_records(period)
@@ -548,9 +562,8 @@ class CacheManager:
                                 except Exception:
                                     continue  # Column doesn't exist in this table
                             if max_date:
-                                max_dt = datetime.datetime.strptime(
-                                    str(max_date)[:8], "%Y%m%d",
-                                )
+                                from utils.time_utils import parse_date
+                                max_dt = parse_date(max_date)
                                 age_days = (get_now() - max_dt).days
                                 # Fresh if within 7 days, decay linearly to 30 days
                                 if age_days <= 7:
@@ -772,11 +785,6 @@ class CacheManager:
 
     async def save_top10_holders(self, df):
         return await self.holder_dao.save_top10_holders(df)
-
-    async def get_holder_data_coverage(self, ts_codes):
-        return await self.holder_dao.check_holder_data_coverage(ts_codes)
-
-    # Extended Market (Adj Factor, Index Weight via MarketDao)
 
     async def save_index_weights(self, df):
         return await self.market_dao.save_index_weights(df)

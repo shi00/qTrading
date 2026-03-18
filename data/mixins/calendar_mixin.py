@@ -49,7 +49,7 @@ class CalendarMixin:
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
     )
     async def get_latest_trade_date(self):
-        """Get absolute latest trading date (today or previous trading day)."""
+        """Get absolute latest trading date (today or previous trading day) as native date."""
         # Initialize cache if missing (guard for edge-case hot paths)
         if not hasattr(self, "_trade_date_cache"):
             self._trade_date_cache = {"ts": 0, "val": None}
@@ -62,15 +62,14 @@ class CalendarMixin:
 
         now = get_now()
         if now.hour < MARKET_CLOSE_HOUR:
-            end_dt = now - datetime.timedelta(days=1)
+            end_dt = (now - datetime.timedelta(days=1)).date()
         else:
-            end_dt = now
+            end_dt = now.date()
 
-        end_str = end_dt.strftime("%Y%m%d")
-        start_str = (end_dt - datetime.timedelta(days=20)).strftime("%Y%m%d")
+        start_dt = end_dt - datetime.timedelta(days=20)
 
         try:
-            dates = await self.get_trade_dates(start_str, end_str)
+            dates = await self.get_trade_dates(start_dt, end_dt)
             if dates:
                 result = dates[-1]
                 # Update cache
@@ -85,8 +84,7 @@ class CalendarMixin:
         dt = end_dt
         while dt.weekday() >= 5:
             dt -= datetime.timedelta(days=1)
-        fallback_res = dt.strftime("%Y%m%d")
-        return fallback_res
+        return dt
 
     @log_async_operation(
         operation_name="get_trade_dates",
@@ -94,7 +92,18 @@ class CalendarMixin:
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
     )
     async def get_trade_dates(self, start_date, end_date):
-        """Get list of trade dates between start and end."""
+        """Get list of trade dates between start and end (inclusive) as native date objects."""
+        # Coerce strings securely if passed by accident
+        def to_date(d):
+            if isinstance(d, str):
+                return datetime.datetime.strptime(d.replace("-", ""), "%Y%m%d").date()
+            if isinstance(d, datetime.datetime):
+                return d.date()
+            return d
+            
+        start_date = to_date(start_date)
+        end_date = to_date(end_date)
+        
         try:
             await self.ensure_trade_cal(end_date, required_start_date=start_date)
             # Use strict type check for safety with generic read
@@ -103,9 +112,10 @@ class CalendarMixin:
             )
 
             if not cache_df.empty:
-                # Polars or Pandas? CacheManager returns DataFrame (Pandas)
-                # Ensure it's list of strings
-                return sorted(cache_df["cal_date"].astype(str).tolist())
+                # CacheManager returns DataFrame (Pandas)
+                # Convert explicitly to a list of native Python dates
+                dates = pd.to_datetime(cache_df["cal_date"]).dt.date.tolist()
+                return sorted(dates)
         except Exception as e:
             logger.error(
                 f"[DataProcessor] Calendar | ❌ Primary calendar sync rejected: {e}",
@@ -114,11 +124,10 @@ class CalendarMixin:
 
         # Fallback (Simple logic)
         dates = []
-        current = datetime.datetime.strptime(start_date, "%Y%m%d")
-        end = datetime.datetime.strptime(end_date, "%Y%m%d")
-        while current <= end:
+        current = start_date
+        while current <= end_date:
             if current.weekday() < 5:
-                dates.append(current.strftime("%Y%m%d"))
+                dates.append(current)
             current += datetime.timedelta(days=1)
         return dates
 
@@ -151,42 +160,56 @@ class CalendarMixin:
         Ensure trade calendar covers [required_start_date, end_date].
         """
         try:
-            min_db, max_db = await self.cache.get_trade_cal_range()
+            # Helper to coerce to native date
+            def to_date(d):
+                if d is None:
+                    return None
+                if isinstance(d, str):
+                    return datetime.datetime.strptime(d.replace("-", ""), "%Y%m%d").date()
+                if isinstance(d, datetime.datetime):
+                    return d.date()
+                return d
+                
+            end_date_obj = to_date(end_date) or datetime.date.today()
+            req_start_date_obj = to_date(required_start_date)
 
-            curr_year = int(end_date[:4])
+            min_db, max_db = await self.cache.get_trade_cal_range()
+            min_db_obj = to_date(min_db)
+            max_db_obj = to_date(max_db)
+
+            curr_year = end_date_obj.year
             # Default start to 4 years ago if not specified
-            target_start = (
-                required_start_date
-                if required_start_date
-                else datetime.date(curr_year - 4, 1, 1).strftime("%Y%m%d")
+            target_start_obj = (
+                req_start_date_obj
+                if req_start_date_obj
+                else datetime.date(curr_year - 4, 1, 1)
             )
 
-            async def fetch_and_save(s, e):
-                y = int(e[:4])
-                real_end = datetime.date(y, 12, 31).strftime("%Y%m%d")
-                e = max(e, real_end)
+            async def fetch_and_save(s_obj, e_obj):
+                y = e_obj.year
+                real_end = datetime.date(y, 12, 31)
+                e_obj = max(e_obj, real_end)
 
                 pass  # 动作已由装饰器覆盖
-                df = await self.api.get_trade_cal(start_date=s, end_date=e)
+                # Pass native date objects to the api
+                df = await self.api.get_trade_cal(start_date=s_obj, end_date=e_obj)
                 if df is not None and not df.empty:
                     await self.cache.save_trade_cal(df)
                     return True
                 return False
 
-            if not min_db or not max_db:
-                return await fetch_and_save(target_start, end_date)
+            if not min_db_obj or not max_db_obj:
+                return await fetch_and_save(target_start_obj, end_date_obj)
+                
             # Check coverage and fetch missing parts
             tasks = []
-            if target_start < min_db:
-                gap = (
-                    datetime.datetime.strptime(min_db, "%Y%m%d")
-                    - datetime.datetime.strptime(target_start, "%Y%m%d")
-                ).days
+            if target_start_obj < min_db_obj:
+                gap = (min_db_obj - target_start_obj).days
                 if gap > 10:
-                    tasks.append(fetch_and_save(target_start, min_db))
+                    tasks.append(fetch_and_save(target_start_obj, min_db_obj))
 
-            if max_db < end_date:
-                tasks.append(fetch_and_save(max_db, end_date))
+            if max_db_obj < end_date_obj:
+                tasks.append(fetch_and_save(max_db_obj, end_date_obj))
 
             if tasks:
                 results = await asyncio.gather(*tasks)

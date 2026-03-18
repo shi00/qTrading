@@ -1,5 +1,6 @@
 import logging
 import time
+import datetime
 
 import flet as ft
 import pandas as pd
@@ -538,11 +539,17 @@ class ScreenerView(ft.Container):
                 for date_str, strategies in tree_data.items():
                     total_cnt = sum(s["cnt"] for s in strategies)
                     # Format date for display
-                    display_date = (
-                        f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-                        if len(date_str) == 8
-                        else date_str
-                    )
+                    if isinstance(date_str, (datetime.date, datetime.datetime)):
+                        display_date = date_str.strftime("%Y-%m-%d")
+                        d_key = date_str.strftime("%Y-%m-%d") # Use ISO format for internal key tracking
+                    else:
+                        date_str_s = str(date_str)
+                        display_date = (
+                            f"{date_str_s[:4]}-{date_str_s[4:6]}-{date_str_s[6:]}"
+                            if len(date_str_s) == 8 and date_str_s.isdigit()
+                            else date_str_s
+                        )
+                        d_key = date_str_s
 
                     # Build subtiles (strategy items)
                     subtiles = []
@@ -556,7 +563,7 @@ class ScreenerView(ft.Container):
                                 f"{I18n.get('screener_all_strategies', '全部策略')} ({total_cnt})",
                                 size=13,
                             ),
-                            on_click=lambda e, d=date_str: self._on_tree_item_click(
+                            on_click=lambda e, d=d_key: self._on_tree_item_click(
                                 d, None,
                             ),
                             dense=True,
@@ -573,7 +580,7 @@ class ScreenerView(ft.Container):
                                 title=ft.Text(
                                     f"{s['strategy_name']} ({s['cnt']})", size=13,
                                 ),
-                                on_click=lambda e, d=date_str, sn=s["strategy_name"]: (
+                                on_click=lambda e, d=d_key, sn=s["strategy_name"]: (
                                     self._on_tree_item_click(d, sn)
                                 ),
                                 dense=True,
@@ -623,11 +630,17 @@ class ScreenerView(ft.Container):
     async def _load_history_for_date(self, trade_date, strategy_name):
         """Load historical data for a specific date/strategy and refresh table."""
         self._toggle_progress(True)
-        display = (
-            f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-            if len(trade_date) == 8
-            else trade_date
-        )
+        if isinstance(trade_date, (datetime.date, datetime.datetime)):
+            display = trade_date.strftime("%Y-%m-%d")
+            # Convert back to ISO string for backend query since UI handles string selection
+            trade_date = display
+        else:
+            ts = str(trade_date)
+            display = (
+                f"{ts[:4]}-{ts[4:6]}-{ts[6:]}"
+                if len(ts) == 8 and ts.isdigit()
+                else ts
+            )
         label = strategy_name or I18n.get("screener_all_strategies", "全部策略")
         self._update_status(f"{display} / {label}", "blue")
         await self.vm.load_history_data(trade_date, strategy_name)
@@ -1162,9 +1175,12 @@ class ScreenerView(ft.Container):
 
             # Format Dates safely
             if col in ["list_date", "trade_date"]:
-                date_str = str(val).split(".")[0]  # handle 20240101.0
-                if len(date_str) == 8:
-                    return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+                import datetime
+                if isinstance(val, (datetime.date, datetime.datetime)):
+                    return val.strftime("%Y-%m-%d")
+                val_str = str(val).split(".")[0]
+                if len(val_str) == 8 and val_str.isdigit():
+                    return f"{val_str[:4]}-{val_str[4:6]}-{val_str[6:]}"
                 return str(val)
 
             # Format Numerics

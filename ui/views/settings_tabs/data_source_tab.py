@@ -145,9 +145,9 @@ class DataSourceTab(ft.Container):
 
         self.action_doubao_rebuild = ActionChip(
             ft.Icons.AUTO_FIX_HIGH,
-            I18n.get("ds_btn_doubao_rebuild", "重塑豆包"),
+            I18n.get("ds_btn_doubao_rebuild", "AI概念重建"),
             I18n.get(
-                "ds_btn_doubao_rebuild_desc", "清空所有豆包专属概念并触发全量重新打标",
+                "ds_btn_doubao_rebuild_desc", "清空所有AI概念并重新生成",
             ),
             self.confirm_doubao_rebuild,
         )
@@ -702,10 +702,10 @@ class DataSourceTab(ft.Container):
                     task_id=task_id, cancel_event=cancel_event,
                 )
                 self.show_snack(
-                    I18n.get("snack_doubao_done", "豆包概念已全部重塑！"),
+                    I18n.get("snack_doubao_done", "AI概念已全部重建！"),
                     color=AppColors.SUCCESS,
                 )
-                return "重塑完成"
+                return "重建完成"
             except Exception as ex:
                 self.show_snack(
                     f"{I18n.get('common_error')}: {str(ex)[:30]}", color=AppColors.ERROR,
@@ -715,7 +715,7 @@ class DataSourceTab(ft.Container):
                 self._set_sync_busy(False)
 
         TaskManager().submit_task(
-            name=I18n.get("task_name_doubao_rebuild", "豆包概念手工重塑"),
+            name=I18n.get("task_name_doubao_rebuild", "AI概念重建"),
             task_type="AI打标",
             coroutine_factory=_doubao_logic,
             cancellable=True,

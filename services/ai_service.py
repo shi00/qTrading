@@ -395,7 +395,7 @@ class AIService:
         </stock_info>
 
         <technical_indicators>
-          {json.dumps(tech_info, ensure_ascii=False, indent=2)}
+          {json.dumps(tech_info, ensure_ascii=False, indent=2, default=str)}
         </technical_indicators>
 
         <recent_news>

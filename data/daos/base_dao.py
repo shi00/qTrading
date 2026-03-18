@@ -36,7 +36,7 @@ class BaseDao:
         self.engine = engine
 
     @staticmethod
-    def _prepare_data_params(df, cols, date_cols=None):
+    def _prepare_data_params(df, cols, table_name=None):
         if df is None or df.empty:
             return None
 
@@ -47,10 +47,24 @@ class BaseDao:
             if col not in df.columns:
                 df[col] = None
 
-        if date_cols:
-            for col in date_cols:
+        if table_name:
+            from data.models import DATE_COLUMNS, DATETIME_COLUMNS
+
+            target_date_cols = DATE_COLUMNS.get(table_name, [])
+            target_datetime_cols = DATETIME_COLUMNS.get(table_name, [])
+            for col in target_date_cols:
                 if col in df.columns:
-                    df[col] = df[col].astype(str)
+                    try:
+                        # Attempt to parse strictly with coerce, avoiding setting slice on copy
+                        df[col] = pd.to_datetime(df[col], format='mixed', errors='coerce').dt.date
+                    except Exception:
+                        pass
+            for col in target_datetime_cols:
+                if col in df.columns:
+                    try:
+                        df[col] = pd.to_datetime(df[col], format='mixed', errors='coerce')
+                    except Exception:
+                        pass
 
         df_clean = df[cols]
 
@@ -73,6 +87,8 @@ class BaseDao:
                 return float(val)
             if isinstance(val, (np.bool_)):
                 return bool(val)
+            if isinstance(val, pd.Timestamp):
+                return val.to_pydatetime().replace(tzinfo=None)
             return val
 
         return [
@@ -193,16 +209,29 @@ class BaseDao:
             columns = list(columns) + ["updated_at"]
             from datetime import datetime
 
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = datetime.now().replace(tzinfo=None)
             # Use .assign to safely create a copy with the new column for the slice we need
-            df_slice = df.assign(updated_at=now_str)[columns]
+            df_slice = df.assign(updated_at=now)[columns]
         else:
             # If the dataframe already has updated_at or the table doesn't need it, just slice
             df_slice = df[columns]
 
+        from data.models import DATE_COLUMNS, DATETIME_COLUMNS
+        target_date_cols = DATE_COLUMNS.get(table_name, [])
+        target_datetime_cols = DATETIME_COLUMNS.get(table_name, [])
+
         # Extracting out the CPU intensive conversion to allow async offloading
         def _prepare_records(df_slice):
-            records = df_slice.to_dict(orient="records")
+            df_clean = df_slice.copy()
+            
+            # Vectorized conversion to native date/datetime objects before dict generation
+            for col in df_clean.columns:
+                if col in target_date_cols:
+                    df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce').dt.date
+                elif col in target_datetime_cols:
+                    df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce')
+                    
+            records = df_clean.to_dict(orient="records")
 
             # Convert numpy types in dicts to python native types
             for record in records:
@@ -222,6 +251,8 @@ class BaseDao:
                         record[k] = float(v)
                     elif isinstance(v, np.bool_):
                         record[k] = bool(v)
+                    elif isinstance(v, pd.Timestamp):
+                        record[k] = v.to_pydatetime().replace(tzinfo=None)
             return records
 
         records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
