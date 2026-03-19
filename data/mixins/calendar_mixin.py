@@ -15,6 +15,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+import pandas as pd
+
 from data.constants import MARKET_CLOSE_HOUR
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
