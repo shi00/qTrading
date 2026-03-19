@@ -1,6 +1,8 @@
-# AStockScreener 全身代码检视方案
+# AStockScreener 代码检视计划
 
-> 基于 `code_review_guidelines.md` 8 大防区、70 条检查项制定的系统性代码审查计划
+> 基于 `code_review_guidelines.md` 制定的系统性代码检视方案
+> 
+> 最后更新：2026-03-19
 
 ---
 
@@ -8,547 +10,354 @@
 
 ### 1.1 检视目标
 
-- **发现潜在缺陷**：识别可能导致运行时错误、数据损坏或安全漏洞的代码
-- **提升代码质量**：消除技术债务，统一代码风格
-- **确保架构一致性**：验证各层职责清晰，契约完整
-- **建立质量基线**：为后续迭代提供可追溯的质量标准
+对 AStockScreener 项目进行全方位代码质量审查，确保：
+- 架构设计符合 `architecture_principles.md` 规范
+- 代码质量满足 `code_review_guidelines.md` 的 8 大防区、59 条检查项
+- 消除潜在的技术债务与安全隐患
 
 ### 1.2 检视范围
 
-| 模块 | 文件数 | 核心文件 |
-|------|--------|----------|
-| 策略引擎 | 12 | `strategies/*.py`, `viewmodels/screener_view_model.py` |
-| 数据存储 | 18 | `data/daos/*.py`, `data/cache_manager.py`, `data/models.py` |
-| 前端工程 | 15 | `ui/views/*.py`, `ui/components/*.py` |
-| AI 服务 | 5 | `services/ai_service.py`, `strategies/ai_*.py` |
-| 系统韧性 | 12 | `main.py`, `utils/*.py`, `data/tushare_client.py` |
-| 测试用例 | 22 | `tests/*.py` |
-
-### 1.3 检视周期
-
-| 阶段 | 内容 | 预计时间 |
-|------|------|----------|
-| 第一阶段 | 静态代码扫描 (防区八) | 0.5 天 |
-| 第二阶段 | 核心模块深度审查 (防区一~五) | 2 天 |
-| 第三阶段 | 代码质量与类型一致性 (防区六~七) | 1 天 |
-| 第四阶段 | 问题修复与验证 | 1 天 |
-| **总计** | | **4.5 天** |
+| 模块 | 目录 | 优先级 |
+|------|------|--------|
+| 策略引擎 | `strategies/` | P0 |
+| 数据访问层 | `data/daos/`, `data/cache_manager.py` | P0 |
+| 数据源层 | `data/tushare_client.py` | P0 |
+| 服务层 | `services/` | P1 |
+| UI 层 | `ui/views/`, `ui/components/` | P1 |
+| 工具层 | `utils/` | P2 |
 
 ---
 
-## 二、防区一：策略引擎与数据流转换
+## 二、检视阶段规划
 
-### 2.1 检查清单
+### 阶段一：静态代码扫描 (Day 1)
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 1 | 数据质量门控遗漏 | Grep 搜索 `@require_quality` 装饰器覆盖情况 | P0 |
-| 2 | ViewModel ↔ Strategy 契约断裂 | 对比 `context.get()` 调用与 `run_strategy()` 传参 | P0 |
-| 3 | 策略注册断链 | 检查 `all_strategies.py` 导入完整性 | P0 |
-| 4 | 未来函数穿越 | 搜索财报查询中的 `ann_date` vs `end_date` | P0 |
-| 5 | Join 笛卡尔爆破 | 审查 Polars join 操作的连接键 | P1 |
-| 6 | NaN/Null 隐式穿透 | 检查 filter 操作后的 null 处理 | P1 |
-| 7 | 价格复权对齐 | 确认策略使用 `adj_close` 而非 `close` | P1 |
+**目标**：使用自动化工具快速定位问题
 
-### 2.2 扫描命令
+| 检查项 | 工具 | 命令 |
+|--------|------|------|
+| 代码风格 | Ruff | `ruff check .` |
+| 类型检查 | MyPy | `mypy data/ services/ utils/` |
+| 安全扫描 | Ruff (S规则) | `ruff check . --select S` |
+| 导入清理 | Ruff | `ruff check . --select F401,F841` |
 
-```bash
-# 检查策略类是否都有 @require_quality 装饰器
-grep -rn "class.*Strategy" strategies/ --include="*.py" > strategy_classes.txt
-grep -rn "@require_quality" strategies/ --include="*.py" > quality_decorators.txt
-
-# 检查未来函数风险 (财报日期字段使用)
-grep -rn "end_date" strategies/ data/ --include="*.py" | grep -v "ann_date"
-
-# 检查 Join 操作
-grep -rn "\.join(" strategies/ data/ --include="*.py"
-```
-
-### 2.3 重点文件
-
-```
-strategies/
-├── fundamental.py      # 基本面策略，需检查财报日期字段
-├── market.py           # 行情策略，需检查复权价格
-├── oversold_strategy.py # 超跌策略
-├── ai_strategy.py      # AI 策略
-├── all_strategies.py   # 策略注册入口
-└── base_strategy.py    # 策略基类
-
-ui/viewmodels/
-└── screener_view_model.py  # ViewModel，需检查 context 传递
-```
-
-### 2.4 预期产出
-
-- [ ] 策略装饰器覆盖报告
-- [ ] ViewModel-Strategy 契约矩阵
-- [ ] 未来函数风险清单
-- [ ] Join 操作安全性评估
+**预期产出**：
+- 静态扫描报告
+- 可自动修复的问题清单
+- 需人工审查的问题清单
 
 ---
 
-## 三、防区二：本地存储与字典抽象
+### 阶段二：防区一检视 - 策略引擎与数据流 (Day 2-3)
 
-### 3.1 检查清单
+**重点文件**：`strategies/`, `viewmodels/screener_view_model.py`, `quality_gate.py`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 8 | Upsert 原则遵守 | 搜索 `DELETE` + `INSERT` 组合模式 | P0 |
-| 9 | 异步并发 DB 锁死 | 检查 `engine.begin()` 包裹情况 | P0 |
-| 10 | 维护锁屏蔽 | 搜索 `_maintenance_event` 使用 | P1 |
-| 11 | Schema Migration 完整性 | 对比 models.py 与 Alembic 迁移脚本 | P0 |
-| 12 | 数据字典缺位 | 对比 SQL 字段与 `data_dictionary.py` | P1 |
-| 13 | 单位换算陷阱 | 搜索市值相关计算中的 `/ 10000` | P1 |
-| 14-14h | 索引与查询优化 | EXPLAIN 分析高频查询 | P0 |
-| 14a-c | ORM 类型安全 | 检查 Column 定义与参数类型 | P0 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 1 | 数据质量门控遗漏 | 关键 | 搜索 `@require_quality` 装饰器覆盖情况 |
+| 2 | ViewModel ↔ Strategy 契约断裂 | 关键 | 检查 `context.get()` 与上游数据装载 |
+| 3 | 策略注册与装载断链 | 关键 | 验证 `all_strategies.py` 引用完整性 |
+| 4 | 未来函数穿越 | 关键 | 检查 SQL 连表使用 `ann_date` vs `end_date` |
+| 5 | Join 操作笛卡尔爆破 | 高 | 检查连接键是否覆盖联合主键 |
+| 6 | NaN/Null 隐式穿透 | 高 | 检查 `.filter()` 后是否 `.drop_nulls()` |
+| 7 | 价格复权对齐 | 高 | 检查历史 K 线使用复权价格列 |
 
-### 3.2 扫描命令
-
+**检查命令**：
 ```bash
-# 检查危险的全量删除模式
-grep -rn "DELETE FROM" data/ --include="*.py"
-grep -rn "DROP TABLE" data/ --include="*.py"
+# 搜索缺失质量门控的策略
+grep -r "def filter\|def _filter_logic" strategies/ --include="*.py" -A 1 | grep -v "@require_quality"
 
-# 检查事务包裹
-grep -rn "engine.begin()" data/ --include="*.py"
-grep -rn "async with.*engine" data/ --include="*.py"
+# 检查未来函数风险
+grep -r "end_date" strategies/ data/ --include="*.py" | grep -v "ann_date"
+```
+
+---
+
+### 阶段三：防区二检视 - 本地存储与字典抽象 (Day 4-5)
+
+**重点文件**：`daos/`, `cache_manager.py`, `data_dictionary.py`, `models.py`
+
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 8 | 无脑全量更新 | 高 | 检查是否使用 `_save_upsert` |
+| 9 | 异步并发 DB 锁死 | 高 | 检查 `async with engine.begin()` 包裹 |
+| 10 | 维护锁屏蔽 | 高 | 检查 `clear_cache` 是否触发 `_maintenance_event` |
+| 11 | 表结构升级静默失败 | 关键 | 检查 `_check_and_update_schema` 补丁 |
+| 12 | 数据字典缺位 | 中 | 检查 `data_dictionary.py` 字段注册 |
+| 13 | 量纲单位换算 | 高 | 检查市值单位转换 `/ 10000` |
+| 14 | 索引缺位 | 关键 | 使用 `EXPLAIN ANALYZE` 验证查询计划 |
+| 14a | ORM 列类型对齐 | 高 | 检查 `Column(Date)` vs `Column(DateTime)` |
+| 14b | DAO 方法返回类型一致性 | 中 | 检查同类方法返回类型 |
+| 14c | 原始 SQL 参数类型安全 | 高 | 检查 `_read_db`/`_write_db` 参数类型 |
+
+**检查命令**：
+```bash
+# 搜索 DELETE + INSERT 模式
+grep -r "DELETE FROM\|DROP TABLE" data/ --include="*.py" -B 2 -A 2
 
 # 检查索引定义
-grep -rn "Index\|INDEX" data/models.py data/daos/ --include="*.py"
-
-# 检查原始 SQL 参数化
-grep -rn "_read_db\|_write_db" data/ --include="*.py"
+grep -r "Index\|INDEX" data/models.py data/schema.sql
 ```
-
-### 3.3 重点文件
-
-```
-data/
-├── daos/
-│   ├── base_dao.py       # DAO 基类，Upsert 逻辑
-│   ├── quote_dao.py      # 行情 DAO，高频查询
-│   ├── stock_dao.py      # 股票 DAO
-│   └── financial_dao.py  # 财务 DAO
-├── models.py             # ORM 模型定义
-├── cache_manager.py      # 缓存管理
-├── data_dictionary.py    # 数据字典
-└── database_manager.py   # 数据库管理
-
-alembic/versions/         # 迁移脚本
-```
-
-### 3.4 预期产出
-
-- [ ] DAO 层事务安全报告
-- [ ] 索引覆盖率分析
-- [ ] 数据字典完整性检查
-- [ ] EXPLAIN 执行计划报告
 
 ---
 
-## 四、防区三：Flet 大前端工程
+### 阶段四：防区三检视 - Flet 大前端工程 (Day 6-7)
 
-### 4.1 检查清单
+**重点文件**：`ui/views/`, `ui/components/`, `ui/i18n.py`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 15 | PubSub 订阅泄漏 | 搜索 `subscribe` 与 `unsubscribe` 配对 | P0 |
-| 16 | 异步重绘安全 | 检查 `if self.page:` 保护 | P0 |
-| 17 | 路由栈管理 | 检查 `page.views.clear()` 使用 | P1 |
-| 18 | `__init__` 滥用 | 检查 `__init__` 中的 `self.page` 访问 | P1 |
-| 19 | UI 线程阻塞 | 搜索点击回调中的耗时操作 | P0 |
-| 20 | 高频重绘优化 | 检查循环中的 `.update()` 调用 | P1 |
-| 21 | DOM 渲染爆炸 | 检查 ListView/Column 中的大列表 | P1 |
-| 22 | 硬编码中文 | 搜索 `ft.Text("` 中的中文字符 | P2 |
-| 23 | 双语词典对齐 | 对比 i18n.py 中 en/zh 字典 | P1 |
-| 24 | i18n 冗余 | 检查重复翻译值 | P2 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 15 | PubSub 订阅泄漏 | 关键 | 检查 `_on_mount` 与 `_on_unmount` 配对 |
+| 16 | 异步重绘 AssertionError | 高 | 检查 `if self.page:` 安全校验 |
+| 17 | 路由栈迷失 | 高 | 检查 `page.views.clear()` 使用 |
+| 18 | __init__ 滥用 | 高 | 检查 `__init__` 中的 `self.page` 访问 |
+| 19 | UI 主线程堵塞 | 关键 | 检查 `page.run_task()` 委托 |
+| 20 | 高频重绘 | 中 | 检查循环中的 `.update()` 调用 |
+| 21 | 巨量 DOM 渲染 | 高 | 检查是否使用 `VirtualTable` |
+| 22 | 硬编码中文 | 中 | 搜索 `ft.Text("` 中的中文 |
+| 23 | 双语词典对齐 | 高 | 检查 `en`/`zh` 字典键一致性 |
+| 24 | 多语言字典冗余 | 低 | 检查重复翻译文本 |
 
-### 4.2 扫描命令
-
+**检查命令**：
 ```bash
-# 检查 PubSub 订阅配对
-grep -rn "pubsub.subscribe\|subscribe_topic" ui/ --include="*.py" > subscribe.txt
-grep -rn "unsubscribe\|unsubscribe_topic" ui/ --include="*.py" > unsubscribe.txt
+# 搜索 PubSub 订阅泄漏
+grep -r "pubsub.subscribe\|subscribe_topic" ui/ --include="*.py" -A 10 | grep -v "unsubscribe"
 
-# 检查异步重绘安全
-grep -rn "\.update()" ui/ --include="*.py" -A 2 -B 2
-
-# 检查硬编码中文
-grep -rn 'ft.Text("' ui/ --include="*.py" | grep -P '[\x{4e00}-\x{9fff}]'
-
-# 检查 UI 线程阻塞风险
-grep -rn "def on_click\|async def on_" ui/ --include="*.py" -A 10
+# 搜索硬编码中文
+grep -r "ft.Text(\"[^\"]*[\u4e00-\u9fa5]" ui/ --include="*.py"
 ```
-
-### 4.3 重点文件
-
-```
-ui/
-├── views/
-│   ├── home_view.py          # 首页
-│   ├── screener_view.py      # 选股页
-│   ├── data_view.py          # 数据页
-│   ├── settings_view.py      # 设置页
-│   └── task_center_view.py   # 任务中心
-├── components/
-│   ├── virtual_table.py      # 虚拟表格
-│   ├── market_dashboard.py   # 行情面板
-│   └── news_feed.py          # 新闻订阅
-├── viewmodels/
-│   └── screener_view_model.py
-└── i18n.py                   # 国际化
-```
-
-### 4.4 预期产出
-
-- [ ] PubSub 订阅泄漏报告
-- [ ] UI 线程阻塞风险清单
-- [ ] 硬编码字符串修复建议
-- [ ] i18n 完整性报告
 
 ---
 
-## 五、防区四：AI 混合调用边界
+### 阶段五：防区四检视 - AI 混合调用边界 (Day 8)
 
-### 5.1 检查清单
+**重点文件**：`services/ai_service.py`, `services/local_model_manager.py`, `strategies/ai_strategy.py`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 25 | 漏斗筛选口径 | 检查 AI 调用前的 `head()` 限制 | P0 |
-| 26 | JSON 幻觉容错 | 检查 `json.loads` 的 try-except 包裹 | P0 |
-| 27 | Prompt 注入防范 | 检查分隔符使用 | P1 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 25 | 漏斗筛选口径过大 | 关键 | 检查 AI 调用前的 `head(50)` 限制 |
+| 26 | 幻觉结构化容错 | 高 | 检查 `json.loads` 的 try-except 包裹 |
+| 27 | Prompt 注入防范 | 高 | 检查 `<news>` 等分隔符使用 |
 
-### 5.2 扫描命令
-
+**检查命令**：
 ```bash
-# 检查 AI 调用前的数量限制
-grep -rn "ai_service\|openai\|llm" strategies/ services/ --include="*.py" -B 5 -A 5
-
-# 检查 JSON 解析安全
-grep -rn "json.loads" strategies/ services/ --include="*.py" -B 2 -A 2
-
-# 检查 Prompt 分隔符
-grep -rn "prompt\|system_message" strategies/ services/ --include="*.py"
+# 搜索 AI 调用前的限制
+grep -r "openai\|llm\|ai_service" strategies/ services/ --include="*.py" -B 5 -A 5 | grep -E "head|limit|[:50]"
 ```
-
-### 5.3 重点文件
-
-```
-services/
-├── ai_service.py           # AI 服务核心
-└── local_model_manager.py  # 本地模型管理
-
-strategies/
-├── ai_strategy.py          # AI 策略
-├── ai_mixin.py             # AI 混入
-└── strategy_prompts.py     # Prompt 模板
-```
-
-### 5.4 预期产出
-
-- [ ] AI 调用安全评估
-- [ ] Prompt 注入风险报告
-- [ ] JSON 解析容错检查
 
 ---
 
-## 六、防区五：全局系统韧性与容灾
+### 阶段六：防区五检视 - 全局系统韧性 (Day 9-10)
 
-### 6.1 检查清单
+**重点文件**：`main.py`, `data/tushare_client.py`, `utils/`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 28 | 单例生命周期 | 检查 `_initialized` 防重入 | P0 |
-| 29 | 优雅关闭 | 检查 `atexit` 和 `shutdown` 注册 | P0 |
-| 30 | 配置原子写入 | 检查 `_save_json_atomically` 使用 | P0 |
-| 31 | 配置结构对齐 | 对比 DEFAULT_CONFIG 与实际使用 | P0 |
-| 32 | 断点续传 | 检查重试机制和切片逻辑 | P1 |
-| 33 | 凭证泄露 | 搜索日志中的 token/key 打印 | P0 |
-| 34 | 时区一致性 | 搜索 `datetime.now()` 使用 | P0 |
-| 35 | 路径穿越 | 检查文件路径拼接安全性 | P0 |
-| 36 | 异常兜底 | 检查后台任务的异常处理 | P1 |
-| 37 | 日志规范 | 检查日志级别和上下文 | P2 |
-| 38-38c | 并发安全 | 检查锁和 `return_exceptions` | P0 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 28 | 单例生命周期 | 关键 | 检查 `if self._initialized: return` |
+| 29 | 优雅关闭 | 关键 | 检查 `cleanup_resources` 注册 |
+| 30 | 配置文件原子写入 | 关键 | 检查 `_save_json_atomically` 使用 |
+| 31 | 配置结构断层 | 关键 | 检查 `DEFAULT_CONFIG` 与 `user_settings.json` 对齐 |
+| 32 | 网络封禁自愈 | 高 | 检查重试次数与请求间隔配置 |
+| 33 | 安全秘钥泄露 | 关键 | 检查日志中的 Token 打印 |
+| 34 | 时区一致性 | 关键 | 检查 `get_now()` 替代 `datetime.now()` |
+| 35 | 文件名安全 | 高 | 检查路径拼接的正则过滤 |
+| 36 | 系统兜底 | 中 | 检查后台任务的 UI 反馈 |
+| 37 | 日志规范 | 中 | 检查日志级别与上下文参数 |
+| 38 | 并发安全 | 高 | 检查 `asyncio.Lock` 使用 |
 
-### 6.2 扫描命令
-
+**检查命令**：
 ```bash
-# 检查单例模式
-grep -rn "_initialized\|_instance" data/ services/ utils/ --include="*.py"
+# 搜索原生 datetime.now() 调用
+grep -r "datetime.now()\|datetime.datetime.now()" --include="*.py" | grep -v "time_utils.py"
 
-# 检查原生 datetime.now() 使用
-grep -rn "datetime\.now()\|datetime\.datetime\.now()" . --include="*.py" | grep -v "get_now()"
-
-# 检查凭证泄露风险
-grep -rn "token\|password\|secret\|api_key" . --include="*.py" | grep -i "logger\|print\|log"
-
-# 检查并发安全
-grep -rn "asyncio.gather" . --include="*.py" -A 1
-grep -rn "Lock\|threading.Lock\|asyncio.Lock" . --include="*.py"
-
-# 检查路径拼接
-grep -rn "os.path.join\|f\".*{.*}\" " . --include="*.py" | grep -v "sanitize"
+# 搜索硬编码密码
+grep -r "password\s*=\s*\"" --include="*.py"
 ```
-
-### 6.3 重点文件
-
-```
-main.py                     # 应用入口
-utils/
-├── config_handler.py       # 配置管理
-├── scheduler_service.py    # 调度服务
-├── security_utils.py       # 安全工具
-└── time_utils.py           # 时间工具
-
-data/
-├── tushare_client.py       # Tushare 客户端
-└── database_manager.py     # 数据库管理
-```
-
-### 6.4 预期产出
-
-- [ ] 单例模式安全报告
-- [ ] 凭证泄露风险评估
-- [ ] 并发安全审计
-- [ ] 时区使用一致性报告
 
 ---
 
-## 七、防区六：量化系统代码坏味道
+### 阶段七：防区六检视 - 代码坏味道 (Day 11-12)
 
-### 7.1 检查清单
+**重点文件**：`strategies/*.py`, `data/daos/`, `ui/views/`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 39 | 魔术数字 | 搜索 filter 中的硬编码数值 | P1 |
-| 40 | 神级函数 | 统计函数行数 > 80 行 | P1 |
-| 41 | UI 计算泄漏 | 检查 View 中的 DataFrame 操作 | P1 |
-| 42 | 异常吞咽 | 搜索 `except.*pass` 模式 | P0 |
-| 43 | 重复代码 | 代码相似度检测 | P2 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 39 | 魔术数字硬编码 | 中 | 搜索 `.filter()` 中的裸数字 |
+| 40 | 神级函数肥胖症 | 高 | 检查超过 80 行的函数 |
+| 41 | 业务逻辑泄漏 | 高 | 检查 UI 回调中的 DataFrame 操作 |
+| 42 | 安静吞咽异常 | 关键 | 检查 `except: pass` 模式 |
+| 43 | 重复代码 | 中 | 使用 Ruff 检测或人工比对 |
+| 44 | 僵尸代码 | 低 | 检查未使用的导入和函数 |
 
-### 7.2 扫描命令
-
+**检查命令**：
 ```bash
-# 检查魔术数字
-grep -rn "\.filter.*>" strategies/ --include="*.py" | grep -v "context\|params\|constant"
+# 搜索安静吞咽异常
+grep -r "except.*:\s*pass" --include="*.py"
 
-# 检查异常吞咽
-grep -rn "except.*:" . --include="*.py" -A 1 | grep "pass"
-
-# 检查长函数 (需配合脚本)
-python -c "
-import ast
-import os
-for root, dirs, files in os.walk('.'):
-    for f in files:
-        if f.endswith('.py'):
-            path = os.path.join(root, f)
-            try:
-                with open(path, 'r', encoding='utf-8') as file:
-                    tree = ast.parse(file.read())
-                for node in ast.walk(tree):
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        lines = node.end_lineno - node.lineno + 1
-                        if lines > 80:
-                            print(f'{path}:{node.lineno} {node.name} ({lines} lines)')
-            except: pass
-"
+# 搜索大函数 (超过 80 行)
+find . -name "*.py" -exec awk 'BEGIN{c=0;f=""} /^def |^async def /{if(c>80)print f": "c;c=0;f=$0} {c++} END{if(c>80)print f": "c}' {} \;
 ```
-
-### 7.3 预期产出
-
-- [ ] 魔术数字清单
-- [ ] 长函数重构建议
-- [ ] 异常吞咽修复清单
 
 ---
 
-## 八、防区七：日期时间类型一致性
+### 阶段八：防区七检视 - 日期时间类型一致性 (Day 13-14)
 
-### 8.1 检查清单
+**重点文件**：`utils/time_utils.py`, `data/daos/*.py`, `data/sync_strategies/*.py`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 45 | strptime 非字符串 | 搜索 `strptime` 调用 | P0 |
-| 46 | date vs str 混合比较 | 检查日期比较操作 | P0 |
-| 47 | 字符串写入 Date 列 | 检查 DAO 参数类型 | P0 |
-| 48 | parse_date 规范 | 检查 `parse_date` 使用 | P1 |
-| 49 | 时区感知 datetime | 检查 `.replace(tzinfo=None)` | P0 |
-| 50 | ORM 类型对齐 | 检查 Column(Date/DateTime) | P0 |
-| 51 | set 差集类型 | 检查集合运算中的类型一致性 | P1 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 45 | strptime 接收非字符串 | 关键 | 检查 `strptime` 调用前的类型检查 |
+| 46 | date vs str 混合比较 | 关键 | 搜索 `!= "` 和 `== "` 日期比较 |
+| 47 | YYYYMMDD 字符串写入 Date 列 | 关键 | 检查 DAO 写入参数类型 |
+| 48 | parse_date 使用规范 | 中 | 检查是否统一使用 `parse_date()` |
+| 49 | 时区感知 datetime 写入 | 高 | 检查 `.replace(tzinfo=None)` |
+| 50 | ORM 列类型对齐 | 高 | 检查 `Column(Date)` vs `Column(DateTime)` |
+| 51 | set[date] 与 set[str] 差集失效 | 高 | 检查集合运算的类型一致性 |
 
-### 8.2 扫描命令
-
+**检查命令**：
 ```bash
-# 检查 strftime/isoformat 使用 (已在之前修复中完成)
-grep -rn "\.strftime\|\.isoformat" . --include="*.py" | grep -v "log_decorators\|test_"
+# 搜索原生 strptime 调用
+grep -r "strptime" --include="*.py" | grep -v "time_utils.py" | grep -v "parse_date"
 
-# 检查 strptime 调用
-grep -rn "strptime" . --include="*.py"
-
-# 检查日期比较
-grep -rn "!= \|== " . --include="*.py" | grep -E "date|time"
-
-# 检查时区处理
-grep -rn "tzinfo\|timezone" . --include="*.py"
+# 搜索日期字符串比较
+grep -rE "!= \"[0-9]{8}\"|== \"[0-9]{8}\"" --include="*.py"
 ```
-
-### 8.3 预期产出
-
-- [ ] 日期类型一致性报告
-- [ ] strftime/isoformat 残留检查
-- [ ] 时区处理规范性评估
 
 ---
 
-## 九、防区八：静态代码检查工具
+### 阶段九：防区八检视 - 静态代码检查工具 (Day 15)
 
-### 9.1 检查清单
+**重点工具**：`ruff`, `mypy`, `pre-commit`
 
-| 编号 | 检查项 | 检查方法 | 优先级 |
-|------|--------|----------|--------|
-| 52 | Ruff 代码风格 | `ruff check .` | P0 |
-| 53 | MyPy 类型检查 | `mypy data/ services/ strategies/` | P0 |
-| 54 | Pre-commit 配置 | 检查 `.pre-commit-config.yaml` | P1 |
-| 55 | CI/CD 门禁 | 检查 GitHub Actions 配置 | P1 |
-| 56 | noqa 规范 | 检查 `# noqa` 使用原因 | P2 |
-| 57 | 圈复杂度 | Ruff C901 规则 | P1 |
-| 58 | Docstring 规范 | Ruff D 系列规则 | P2 |
-| 59 | 安全漏洞 | Ruff S 系列规则 | P0 |
+| 序号 | 检查项 | 严重级别 | 检查方法 |
+|------|--------|----------|----------|
+| 52 | Ruff 代码风格检查 | 关键 | `ruff check .` |
+| 53 | MyPy 类型检查 | 关键 | `mypy data/ services/ utils/` |
+| 54 | pre-commit 钩子配置 | 高 | 检查 `.pre-commit-config.yaml` |
 
-### 9.2 执行命令
-
+**检查命令**：
 ```bash
-# 安装依赖
-pip install ruff mypy
-
-# Ruff 检查
-ruff check . --output-format=github > ruff_report.txt
-
-# Ruff 自动修复
-ruff check . --fix
+# Ruff 完整检查
+ruff check . --output-format=grouped
 
 # MyPy 类型检查
-mypy data/ services/ strategies/ --ignore-missing-imports > mypy_report.txt
+mypy data/ services/ utils/ --ignore-missing-imports
 
-# 安全规则专项
-ruff check . --select=S > security_report.txt
-```
-
-### 9.3 预期产出
-
-- [ ] Ruff 检查报告
-- [ ] MyPy 类型错误清单
-- [ ] 安全漏洞扫描结果
-- [ ] Pre-commit 配置建议
-
----
-
-## 十、执行计划
-
-### 10.1 第一阶段：静态扫描 (Day 1 上午)
-
-```
-09:00 - 10:00  安装 ruff/mypy，执行静态扫描
-10:00 - 11:00  分析扫描结果，分类问题
-11:00 - 12:00  生成初步报告
-```
-
-### 10.2 第二阶段：核心模块审查 (Day 1 下午 - Day 2)
-
-```
-Day 1 下午: 防区一 (策略引擎) + 防区二 (存储层)
-Day 2 上午: 防区三 (前端) + 防区四 (AI)
-Day 2 下午: 防区五 (系统韧性)
-```
-
-### 10.3 第三阶段：代码质量 (Day 3)
-
-```
-上午: 防区六 (代码坏味道) + 防区七 (日期类型)
-下午: 汇总问题，生成修复优先级清单
-```
-
-### 10.4 第四阶段：修复验证 (Day 4)
-
-```
-上午: 修复 P0 级别问题
-下午: 验证修复效果，更新文档
+# 安全规则检查
+ruff check . --select S --output-format=grouped
 ```
 
 ---
 
-## 十一、问题分级标准
+## 三、检视产出物
 
-| 级别 | 定义 | 处理时限 |
-|------|------|----------|
-| **P0 - 致命** | 可能导致数据损坏、安全漏洞、运行时崩溃 | 立即修复 |
-| **P1 - 严重** | 影响功能正确性、性能或可维护性 | 本周修复 |
-| **P2 - 一般** | 代码风格、文档缺失等非功能性问题 | 下版本修复 |
+### 3.1 检视报告模板
+
+```markdown
+# AStockScreener 代码检视报告
+
+## 检视概况
+- 检视日期：YYYY-MM-DD
+- 检视范围：[模块列表]
+- 检视人员：[姓名]
+
+## 问题清单
+
+### 关键问题 (P0)
+| 序号 | 文件 | 行号 | 问题描述 | 建议修复方案 |
+|------|------|------|----------|--------------|
+| 1 | xxx.py | 123 | ... | ... |
+
+### 高优先级问题 (P1)
+| 序号 | 文件 | 行号 | 问题描述 | 建议修复方案 |
+|------|------|------|----------|--------------|
+
+### 中优先级问题 (P2)
+| 序号 | 文件 | 行号 | 问题描述 | 建议修复方案 |
+|------|------|------|----------|--------------|
+
+## 统计汇总
+- 关键问题：X 个
+- 高优先级：X 个
+- 中优先级：X 个
+- 低优先级：X 个
+
+## 改进建议
+[整体改进建议]
+```
+
+### 3.2 问题跟踪
+
+所有发现的问题需记录到 Issue 跟踪系统，标签分类：
+- `bug`: 功能缺陷
+- `security`: 安全漏洞
+- `performance`: 性能问题
+- `code-quality`: 代码质量
+- `documentation`: 文档问题
 
 ---
 
-## 十二、交付物清单
+## 四、检视检查清单
 
-| 序号 | 交付物 | 格式 |
-|------|--------|------|
-| 1 | 静态扫描报告 | Markdown |
-| 2 | 各防区问题清单 | Markdown |
-| 3 | 修复优先级矩阵 | Excel/Markdown |
-| 4 | 修复后验证报告 | Markdown |
-| 5 | 代码质量改进总结 | Markdown |
+### 4.1 检视前准备
+
+- [ ] 确认检视范围与优先级
+- [ ] 准备检视环境（Python 环境、工具安装）
+- [ ] 读取最新的 `architecture_principles.md` 和 `code_review_guidelines.md`
+- [ ] 了解近期代码变更（`git log --oneline -20`）
+
+### 4.2 检视中执行
+
+- [ ] 按阶段顺序执行检视
+- [ ] 记录所有发现的问题
+- [ ] 对关键问题进行根因分析
+- [ ] 提出具体的修复建议
+
+### 4.3 检视后跟进
+
+- [ ] 输出检视报告
+- [ ] 创建 Issue 跟踪问题
+- [ ] 与开发团队沟通修复方案
+- [ ] 跟踪修复进度
 
 ---
 
-## 附录：快速检查脚本
+## 五、附录
+
+### 5.1 快速检查脚本
 
 ```bash
 #!/bin/bash
-# quick_check.sh - 快速代码检查脚本
+# quick_check.sh - 快速代码质量检查
 
-echo "=== AStockScreener 代码快速检查 ==="
+echo "=== Ruff 代码风格检查 ==="
+ruff check . --output-format=grouped
 
-echo "\n[1/8] Ruff 代码风格检查..."
-ruff check . --statistics
+echo ""
+echo "=== MyPy 类型检查 ==="
+mypy data/ services/ utils/ --ignore-missing-imports
 
-echo "\n[2/8] 安全漏洞扫描..."
-ruff check . --select=S
+echo ""
+echo "=== 安全规则检查 ==="
+ruff check . --select S --output-format=grouped
 
-echo "\n[3/8] 检查 datetime.now() 使用..."
-grep -rn "datetime\.now()\|datetime\.datetime\.now()" . --include="*.py" | grep -v "get_now()" | grep -v ".venv"
+echo ""
+echo "=== 未使用导入检查 ==="
+ruff check . --select F401,F841 --output-format=grouped
 
-echo "\n[4/8] 检查异常吞咽..."
-grep -rn "except.*:" . --include="*.py" -A 1 | grep "pass" | head -20
+echo ""
+echo "=== 原生 datetime.now() 检查 ==="
+grep -r "datetime.now()\|datetime.datetime.now()" --include="*.py" | grep -v "time_utils.py" | grep -v "__pycache__"
 
-echo "\n[5/8] 检查 strftime 残留..."
-grep -rn "\.strftime\|\.isoformat" . --include="*.py" | grep -v "log_decorators\|test_"
-
-echo "\n[6/8] 检查凭证泄露风险..."
-grep -rn "token\|password\|secret" . --include="*.py" | grep -i "logger\|print" | head -10
-
-echo "\n[7/8] 检查 PubSub 订阅配对..."
-echo "订阅数: $(grep -r "subscribe" ui/ --include="*.py" | wc -l)"
-echo "取消订阅数: $(grep -r "unsubscribe" ui/ --include="*.py" | wc -l)"
-
-echo "\n[8/8] 检查长函数 (>80行)..."
-python -c "
-import ast, os
-for root, dirs, files in os.walk('.'):
-    dirs[:] = [d for d in dirs if d not in ['.venv', '__pycache__', 'node_modules']]
-    for f in files:
-        if f.endswith('.py'):
-            path = os.path.join(root, f)
-            try:
-                with open(path, 'r', encoding='utf-8') as file:
-                    tree = ast.parse(file.read())
-                for node in ast.walk(tree):
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        lines = node.end_lineno - node.lineno + 1
-                        if lines > 80:
-                            print(f'{path}:{node.lineno} {node.name} ({lines} lines)')
-            except: pass
-" | head -20
-
-echo "\n=== 检查完成 ==="
+echo ""
+echo "=== 安静吞咽异常检查 ==="
+grep -r "except.*:\s*pass" --include="*.py" | grep -v "__pycache__"
 ```
+
+### 5.2 参考文档
+
+| 文档 | 说明 |
+|------|------|
+| [architecture_principles.md](architecture_principles.md) | 架构设计原则 |
+| [code_review_guidelines.md](code_review_guidelines.md) | 代码检视指南 |
+| [code_review_plan.md](code_review_plan.md) | 本文档 |
