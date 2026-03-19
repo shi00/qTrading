@@ -2,7 +2,7 @@
 
 这份指南是完全基于 **AStockScreener 智能选股系统**当前的真实技术栈（`Flet` + `Polars` + `PostgreSQL` + `llama.cpp/OpenAI`）以及业务域（离线数据落盘 + 定量粗筛 + LLM 定性精审）量身定制的架构师级 CR 规范。
 
-在处理这套系统的 Pull Request 时，审查者 (Reviewer) 需要严格按照以下 **6 个核心防区、43 条致命检查项**进行逐行排雷。
+在处理这套系统的 Pull Request 时，审查者 (Reviewer) 需要严格按照以下 **7 个核心防区、63 条致命检查项**进行逐行排雷。
 
 ---
 
@@ -45,6 +45,42 @@
     - **审查点**：Tushare 返回的市值单位往往是万元，而 UI 给用户看的是亿元。在 SQL 落盘前或过滤策略中，是否明确执行了 `/ 10000` 的拦截？这是数级差异最大的元凶。
 14. **索引缺位与全表扫描 (Schema Index Mismatch)**
     - **审查点**：任何在 DAO 或 Strategy 中新加的查询条件（例如 `WHERE ts_code = ? AND list_date > ?`），审查者必须强制要求开发者去到建表核心处（如 `data/schema.sql` 或 `CacheManager`）比对：**是否为这些高频查询列创建了正确的联合索引（INDEX）？** 针对千万级的历史行情库，哪怕缺少一个索引也会让单次跨表回测慢上 50 倍，这是量化提速的命根子。
+14d. **索引列顺序与查询条件匹配 (Index Column Order)**
+    - **审查点**：联合索引必须遵循**最左前缀原则**。查询条件 `WHERE trade_date = ? AND ts_code = ?` 无法利用索引 `INDEX(ts_code, trade_date)`，必须创建 `INDEX(trade_date, ts_code)` 或调整查询条件顺序。
+    - **正例**：
+      ```sql
+      -- 索引定义
+      CREATE INDEX idx_quote_date_code ON daily_quotes(trade_date, ts_code);
+      -- 查询能利用索引
+      SELECT * FROM daily_quotes WHERE trade_date = '2023-01-01' AND ts_code = '000001.SZ';
+      ```
+    - **反例**：
+      ```sql
+      -- 索引定义（顺序错误）
+      CREATE INDEX idx_quote_code_date ON daily_quotes(ts_code, trade_date);
+      -- 查询无法利用索引（trade_date 不是最左列）
+      SELECT * FROM daily_quotes WHERE trade_date = '2023-01-01';
+      ```
+14e. **范围查询后的索引失效 (Range Query Index Break)**
+    - **审查点**：联合索引中，范围查询（`>`, `<`, `BETWEEN`, `LIKE 'xxx%'`）之后的列无法利用索引。例如索引 `(trade_date, ts_code)`，查询 `WHERE trade_date > '2023-01-01' AND ts_code = '000001.SZ'` 中 `ts_code` 条件无法走索引。
+    - **优化建议**：将等值条件列放在范围条件列之前，或创建多个单列索引让优化器选择。
+14f. **冗余索引检测 (Redundant Index)**
+    - **审查点**：如果已存在联合索引 `INDEX(a, b, c)`，则 `INDEX(a)` 和 `INDEX(a, b)` 都是冗余的。冗余索引浪费存储空间并降低写入性能。
+14g. **排序与索引匹配 (ORDER BY Index)**
+    - **审查点**：`ORDER BY trade_date DESC` 如果能利用索引，可避免 filesort。检查排序字段是否在索引中，且顺序一致。对于分页查询（`LIMIT offset, count`），索引覆盖排序字段尤为重要。
+14h. **EXPLAIN 执行计划验证**
+    - **审查点**：新增或修改高频查询后，**必须**使用 `EXPLAIN ANALYZE` 验证执行计划。检查 `Seq Scan`（全表扫描）vs `Index Scan`（索引扫描），以及 `actual time` 是否在可接受范围内。
+    - **正例**：
+      ```sql
+      EXPLAIN ANALYZE SELECT * FROM daily_quotes WHERE trade_date = '2023-01-01';
+      -- 结果应显示 Index Scan，而非 Seq Scan
+      ```
+14a. **ORM 列定义与数据库类型对齐**
+    - **审查点**：`Column(Date)` 必须对应 PostgreSQL 的 `DATE` 类型，`Column(DateTime)` 对应 `TIMESTAMP` 类型。修改 `models.py` 后必须同步检查 Alembic 迁移脚本是否正确生成。
+14b. **DAO 方法返回类型一致性**
+    - **审查点**：同一 DAO 类中，类似功能的方法应返回一致的类型。例如 `get_latest_trade_date()` 应始终返回 `datetime.date` 对象，而非有时返回字符串、有时返回 date 对象。
+14c. **原始 SQL 参数类型安全**
+    - **审查点**：使用原始 SQL（`_read_db`/`_write_db`）时，参数类型必须与 PostgreSQL 列类型匹配。asyncpg 不会自动转换字符串到 DATE 类型，必须传入 `datetime.date` 对象。
 
 ---
 
@@ -114,6 +150,31 @@
     - **审查点**：① 日志级别不得滥用——`WARNING` 只用于可自愈的降级，`ERROR` 只用于需人工介入的故障，严禁把常规分支写成 WARNING 刷屏。② 关键操作日志必须携带上下文参数（如 `ts_code`, `trade_date`），否则日志回查时无法定位到具体股票。③ 严禁在大循环内逐条调用 `logger.info()`，应在循环外一次性汇总输出，防止日志文件被撑爆。
 38. **并发安全与协程隔离 (Concurrency Safety)**
     - **审查点**：① 使用 `asyncio.gather()` 时必须检查 `return_exceptions=True`，否则单个子任务异常会导致其余所有任务的结果被丢弃。② 多协程/多线程同时操作共享的 `dict`、`list` 或 Polars DataFrame 时，必须引入锁（`asyncio.Lock` 或 `threading.Lock`）保护临界区。③ 回调函数中不得直接修改 ViewModel 的共享状态而不经过事件总线。
+38a. **async 函数中调用同步阻塞**
+    - **审查点**：在 `async` 函数中调用 `time.sleep()`、同步文件 IO 或同步网络请求，会阻塞整个事件循环。必须使用 `asyncio.sleep()` 或 `loop.run_in_executor()` 委托到线程池执行。
+    - **正例**：
+      ```python
+      await asyncio.sleep(1)  # 异步等待
+      await loop.run_in_executor(None, sync_io_function)  # 委托线程池
+      ```
+    - **反例**：
+      ```python
+      time.sleep(1)  # 阻塞事件循环！
+      ```
+38b. **协程取消处理**
+    - **审查点**：长时间运行的协程必须响应 `CancelledError`，在 `finally` 块中清理资源。否则取消操作无法生效，导致后台任务"僵尸化"。
+    - **正例**：
+      ```python
+      try:
+          while not self._shutdown_event.is_set():
+              await asyncio.sleep(1)
+      except asyncio.CancelledError:
+          logger.info("Task cancelled, cleaning up...")
+      finally:
+          await self.cleanup()
+      ```
+38c. **异步上下文管理器资源泄漏**
+    - **审查点**：使用 `async with` 管理数据库连接、文件句柄等资源。严禁在异步代码中使用同步上下文管理器管理需要异步关闭的资源。
 
 ---
 
@@ -133,3 +194,95 @@
     - **审查点**：如果在两个策略或 DAO 中发现了超过 10 行以上结构高度雷同的逻辑（如几乎一样的 DataFrame 转换、指标计算），必须将其重构并上卷到基类或专属工具方法中。拒绝复制粘贴编程。
 44. **僵尸代码死海 (Dead Code & YAGNI)**
     - **审查点**：任何不再被使用的废弃函数、未引用的 Import、或是为了"未来大干一场"而提前写下的复杂且未激活的架构代码（YAGNI），必须无情剔除，严禁将代码库当作历史垃圾桶。
+
+---
+
+## 🛡️ 防区七：日期时间类型一致性 (Date/Time Type Consistency)
+*目标：杜绝 date/str/datetime 混用导致的运行时崩溃。*
+**重点文件**: `utils/time_utils.py`, `data/daos/*.py`, `data/sync_strategies/*.py`, `data/data_processor.py`
+
+45. **[关键] strptime 接收非字符串对象**
+    - **审查点**：`datetime.strptime(value, fmt)` 调用前必须检查 `isinstance(value, str)`，或使用 `parse_date()` 函数。当 `value` 是 `date` 或 `datetime` 对象时，直接传入 `strptime` 会抛出 `TypeError`。
+    - **正例**：
+      ```python
+      from utils.time_utils import parse_date
+      dt = parse_date(date_obj)  # 支持 date/datetime/str 多类型
+      ```
+    - **反例**：
+      ```python
+      dt = datetime.strptime(date_obj, "%Y%m%d")  # TypeError!
+      ```
+
+46. **[关键] date vs str 混合比较**
+    - **审查点**：比较操作 `date_obj != "20230101"` 恒为 True（Python 3 类型不兼容），必须统一类型后再比较。此类错误在首次初始化路径中极易触发。
+    - **正例**：
+      ```python
+      today = get_now().date()
+      if latest != today:  # date vs date
+      ```
+    - **反例**：
+      ```python
+      today_str = get_now().strftime("%Y%m%d")
+      if latest != today_str:  # date vs str → 恒 True!
+      ```
+
+47. **[关键] YYYYMMDD 字符串写入 Date 列**
+    - **审查点**：`update_sync_status(table, "20230101", count)` 错误！asyncpg 的 `DATE` 类型只接受 `datetime.date` 对象，不接受字符串。写入前必须转换类型。
+    - **正例**：
+      ```python
+      from datetime import datetime
+      await update_sync_status(table, datetime.strptime(day_str, "%Y%m%d").date(), count)
+      ```
+    - **反例**：
+      ```python
+      await update_sync_status(table, "20230101", count)  # asyncpg 报错!
+      ```
+
+48. **parse_date 使用规范**
+    - **审查点**：统一使用 `utils/time_utils.parse_date()` 而非原生 `strptime`。该函数已支持 `date`/`datetime`/`str`（YYYYMMDD 或 YYYY-MM-DD）多类型输入，并自动处理时区。
+    - **正例**：
+      ```python
+      dt = parse_date(latest)  # 自动识别类型
+      ```
+    - **反例**：
+      ```python
+      dt = parse_date(str(latest), "%Y%m%d")  # 冗余转换
+      ```
+
+49. **时区感知 datetime 写入**
+    - **审查点**：写入 naive `DateTime` 列前必须 `.replace(tzinfo=None)`，否则 asyncpg 报错。本项目统一使用 `Asia/Shanghai` 时区，但 ORM 列定义为 `timezone=False`。
+    - **正例**：
+      ```python
+      df["updated_at"] = get_now().replace(tzinfo=None)
+      ```
+    - **反例**：
+      ```python
+      df["updated_at"] = get_now()  # 带时区的 datetime 写入 naive 列
+      ```
+
+50. **ORM 列类型与 Python 类型对齐**
+    - **审查点**：`Column(Date)` 对应 `datetime.date`，`Column(DateTime)` 对应 `datetime.datetime`，严禁混用。修改 `models.py` 后必须同步生成 Alembic 迁移脚本。
+    - **正例**：
+      ```python
+      trade_date = Column(Date)  # 存储 datetime.date 对象
+      ```
+    - **反例**：
+      ```python
+      # 写入时传入字符串
+      record.trade_date = "20230101"  # 类型不匹配
+      ```
+
+51. **set[date] 与 set[str] 差集失效**
+    - **审查点**：`set([date(2023,1,1)]) - set(["20230101"])` 结果为 `{date(2023,1,1)}` 而非空集，因为类型不同无法匹配。日期集合运算必须统一类型。
+    - **正例**：
+      ```python
+      target_dates = set(date_series.dt.date)
+      expected_dates = set(trade_cal["cal_date"])  # 已是 date 类型
+      missing = expected_dates - target_dates
+      ```
+    - **反例**：
+      ```python
+      target_dates = set(date_series.dt.strftime("%Y%m%d"))  # 字符串
+      expected_dates = set(trade_cal["cal_date"])  # date 对象
+      missing = expected_dates - target_dates  # 类型不匹配，差集失效
+      ```

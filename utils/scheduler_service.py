@@ -224,8 +224,9 @@ class SchedulerService:
             logger.info("[Scheduler] Update skipped (Auto-update disabled)")
             return
 
-        today = get_now().strftime("%Y%m%d")
-        if self._last_update_date == today:
+        today = get_now().date()
+        today_str = today.strftime("%Y%m%d")
+        if self._last_update_date == today_str:
             logger.info("[Scheduler] Update skipped (Already updated today)")
             return
 
@@ -234,10 +235,10 @@ class SchedulerService:
             client = TushareClient()
             is_trading = await ThreadPoolManager().run_async(
                 TaskType.IO, client.is_trading_day, today,
-            )  # TODO: P0-4 Phase 2 will make this fully async
+            )
             if not is_trading:
                 logger.info(
-                    f"[Scheduler] Update skipped ({today} is not a trading day)",
+                    f"[Scheduler] Update skipped ({today_str} is not a trading day)",
                 )
                 return
         except Exception as e:
@@ -256,12 +257,12 @@ class SchedulerService:
                 tm.update_progress(task_id, current / total if total else 0, msg)
 
             result = await processor.run_daily_update(progress_callback=_progress)
-            self._last_update_date = today
+            self._last_update_date = today_str
             added = getattr(result, "added", result) if result else 0
             return I18n.get("sched_daily_done", added=added)
 
         TaskManager().submit_task(
-            name=I18n.get("sched_task_daily_update", date=today),
+            name=I18n.get("sched_task_daily_update", date=today_str),
             task_type=I18n.get("sched_task_type_daily"),
             coroutine_factory=_daily_update_logic,
             cancellable=False,
@@ -298,18 +299,19 @@ class SchedulerService:
         if not ConfigHandler.is_auto_update_enabled():
             return
 
-        today = get_now().strftime("%Y%m%d")
-        if self._last_pred_date == today:
+        today = get_now().date()
+        today_str = today.strftime("%Y%m%d")
+        if self._last_pred_date == today_str:
             return
 
         try:
             client = TushareClient()
             is_trading = await ThreadPoolManager().run_async(
                 TaskType.IO, client.is_trading_day, today,
-            )  # TODO: P0-4 Phase 2 will make this fully async
+            )
             if not is_trading:
                 logger.info(
-                    f"[Scheduler] Prediction skipped ({today} is not a trading day)",
+                    f"[Scheduler] Prediction skipped ({today_str} is not a trading day)",
                 )
                 return
         except Exception as e:
@@ -355,13 +357,13 @@ class SchedulerService:
                 tm.update_progress(task_id, 0.9, I18n.get("sched_pred_saving"))
                 rm = ReviewManager()
                 await rm.save_results("AI_Auto_Nightly", result_df)
-                self._last_pred_date = today
+                self._last_pred_date = today_str
                 return I18n.get("sched_pred_done_found", count=len(result_df))
-            self._last_pred_date = today
+            self._last_pred_date = today_str
             return I18n.get("sched_pred_done_empty")
 
         TaskManager().submit_task(
-            name=I18n.get("sched_task_prediction", date=today),
+            name=I18n.get("sched_task_prediction", date=today_str),
             task_type=I18n.get("task_type_ai_screening"),
             coroutine_factory=_prediction_logic,
             cancellable=False,

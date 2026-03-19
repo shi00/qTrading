@@ -41,7 +41,6 @@ class ReviewManager:
             logger.info("[Review] No pending predictions to review.")
             return
 
-        get_now().strftime("%Y%m%d")
         updated_count = 0
 
         # 2. Check each prediction
@@ -143,7 +142,7 @@ class ReviewManager:
         - Missing columns: Uses safe column access
         - Date edge cases: Uses 10-day lookback window
         """
-        date_threshold = (get_now() - datetime.timedelta(days=10)).strftime("%Y%m%d")
+        date_threshold = (get_now() - datetime.timedelta(days=10)).date()
 
         try:
             return await self.cache.screener_dao.get_pending_predictions(date_threshold)

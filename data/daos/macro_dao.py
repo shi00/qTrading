@@ -1,7 +1,6 @@
 import logging
 
 from data.daos.base_dao import BaseDao
-from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +12,7 @@ class MacroDao(BaseDao):
         """
         Save Macro Economy data (M2, CPI, etc.)
         Table: macro_economy
+        Note: created_at is handled by DB-level server_default, not injected here.
         """
         if df is None or df.empty:
             return 0
@@ -28,11 +28,6 @@ class MacroDao(BaseDao):
             "cpi",
             "ppi",
         ]
-
-        if "created_at" not in df.columns:
-            df = df.copy()
-            df["created_at"] = get_now().replace(tzinfo=None)
-            columns.append("created_at")
 
         return await self._save_upsert(
             df, "macro_economy", columns, pk_columns=["period"],

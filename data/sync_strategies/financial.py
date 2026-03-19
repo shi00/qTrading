@@ -124,6 +124,10 @@ class FinancialSyncStrategy(ISyncStrategy):
             f"[FinancialSync] FullSync | Starting comprehensive fundamentals (force={force})...",
         )
 
+        # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
+        total_mainbz_rows = 0
+        total_audit_rows = 0
+
         # Force Logic: Reset sync status for resume
         if force:
             logger.debug(
@@ -206,7 +210,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # Inner processing function
         async def process_one_stock(ts_code):
-            nonlocal completed_count
+            nonlocal completed_count, total_mainbz_rows, total_audit_rows
             if self._shutdown_event.is_set():
                 return
 
@@ -293,7 +297,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                     for i, result_data in enumerate(results):
                         if result_data is not None:
                             save_func = task_specs[i][1]
-                            await save_func(result_data)
+                            row_count = await save_func(result_data)
+                            
+                            # Accumulate for aux tables
+                            api_func = task_specs[i][0]
+                            if api_func == self.context.api.get_fina_mainbz:
+                                total_mainbz_rows += row_count if row_count is not None else len(result_data)
+                            elif api_func == self.context.api.get_fina_audit:
+                                total_audit_rows += row_count if row_count is not None else len(result_data)
 
                     if not has_error:
                         await self.context.cache.mark_stock_step4_completed(
@@ -348,6 +359,20 @@ class FinancialSyncStrategy(ISyncStrategy):
             "[FinancialSync] BatchSync | Starting corporate actions batch phase...",
         )
 
+        # Update sync status for aux tables (after all stocks processed)
+        today = get_now().date()
+        if total_mainbz_rows > 0:
+            await self.context.cache.update_sync_status(
+                "fina_mainbz", today, total_mainbz_rows,
+            )
+            logger.debug(f"[FinancialSync] fina_mainbz total: {total_mainbz_rows}")
+
+        if total_audit_rows > 0:
+            await self.context.cache.update_sync_status(
+                "fina_audit", today, total_audit_rows,
+            )
+            logger.debug(f"[FinancialSync] fina_audit total: {total_audit_rows}")
+
         def batch_progress(current, total, msg):
             if progress_callback:
                 # Batch phase occupies 80→100% of Step 4 progress
@@ -364,6 +389,10 @@ class FinancialSyncStrategy(ISyncStrategy):
         """
         if self._shutdown_event.is_set():
             return
+
+        # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
+        total_mainbz_rows = 0
+        total_audit_rows = 0
 
         status = await self.context.cache.get_sync_status("financial_reports")
         last_sync_str = status.get("last_sync_date")
@@ -412,7 +441,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             tasks = []
 
             async def sync_one_target(item):
-                nonlocal total_saved
+                nonlocal total_saved, total_mainbz_rows, total_audit_rows
                 ts_code = item["ts_code"]
                 period = item["end_date"]
 
@@ -422,9 +451,12 @@ class FinancialSyncStrategy(ISyncStrategy):
                             ConfigHandler.get_sync_request_delay(is_heavy=False),
                         )
                         # Use internal helper
-                        df = await self._fetch_comprehensive_financial_data(
+                        df, aux_counts = await self._fetch_comprehensive_financial_data(
                             ts_code, period=period,
                         )
+
+                        total_mainbz_rows += aux_counts["mainbz"]
+                        total_audit_rows += aux_counts["audit"]
 
                         if df is not None and not df.empty:
                             # Apply Schema
@@ -460,6 +492,20 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Sync Forecasts, Dividends, etc. by date
         await self._sync_corporate_actions_by_date(dates_to_sync)
 
+        # Update sync status for aux tables (after all stocks processed)
+        today = get_now().date()
+        if total_mainbz_rows > 0:
+            await self.context.cache.update_sync_status(
+                "fina_mainbz", today, total_mainbz_rows,
+            )
+            logger.debug(f"[FinancialSync] fina_mainbz total: {total_mainbz_rows}")
+
+        if total_audit_rows > 0:
+            await self.context.cache.update_sync_status(
+                "fina_audit", today, total_audit_rows,
+            )
+            logger.debug(f"[FinancialSync] fina_audit total: {total_audit_rows}")
+
         result_accumulator.added = total_saved
 
     async def _sync_corporate_actions_by_date(
@@ -487,6 +533,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     api_method = getattr(self.context.api, table_cfg["api"])
                     df = await api_method(ann_date=date_str)
 
+                    row_count = 0
                     if df is not None and not df.empty:
                         save_map = {
                             "fina_forecast": self.context.cache.save_fina_forecast,
@@ -496,10 +543,17 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                         save_func = save_map.get(table_name)
                         if save_func:
-                            await save_func(df)
+                            row_count = await save_func(df)
+                            row_count = row_count if row_count is not None else len(df)
                             logger.debug(
                                 f"[FinancialSync] BatchSync | Synced {table_name} for {date_str}: {len(df)} records",
                             )
+
+                    from datetime import datetime as dt_module
+                    date_obj = dt_module.strptime(date_str, "%Y%m%d").date()
+                    await self.context.cache.update_sync_status(
+                        table_name, date_obj, row_count,
+                    )
 
                 except Exception as e:
                     err_str = str(e).lower()
@@ -551,9 +605,10 @@ class FinancialSyncStrategy(ISyncStrategy):
 
     async def _fetch_comprehensive_financial_data(
         self, ts_code, start_date=None, end_date=None, period=None,
-    ):
+    ) -> tuple:
         """
         Helper: Fetch and merge Income, Balance Sheet, and Financial Indicators.
+        Returns: (merged_df, aux_counts) where aux_counts = {"mainbz": 0, "audit": 0}
         """
         api = self.context.api
 
@@ -573,31 +628,26 @@ class FinancialSyncStrategy(ISyncStrategy):
                 ts_code=ts_code, start_date=start_date, end_date=end_date, period=period,
             )
 
-        # New: Fetch Stock-Based Auxiliary Tables (MainBz, Audit, Pledge)
-        # We wrap these in individual try-except blocks to allow partial success (Graceful Degradation)
-        async def fetch_aux(api_func, save_func, table_name, **kwargs):
+        async def fetch_aux(api_func, save_func, **kwargs) -> int:
             try:
                 df = await api_func(**kwargs)
                 if isinstance(df, pd.DataFrame) and not df.empty:
-                    await save_func(df)
-                    # Mark success status
-                    # Note: We can't log date per row here easily, so we skip status update for aux tables per stock
-                    # or update a general status?
-                return True
+                    row_count = await save_func(df)
+                    return row_count if row_count is not None else len(df)
+                return 0
             except Exception as e:
                 err_str = str(e).lower()
                 if "permission" in err_str or "积分" in err_str:
                     logger.debug(
-                        f"[FinancialSync] Fetch | Permission denied for {table_name} on {ts_code}",
+                        f"[FinancialSync] Fetch | Permission denied for aux table on {ts_code}",
                     )
-                return False
+                return 0
 
         try:
             aux_tasks = [
                 fetch_aux(
                     api.get_fina_mainbz,
                     self.context.cache.save_fina_mainbz,
-                    "fina_mainbz",
                     ts_code=ts_code,
                     period=period,
                     start_date=start_date,
@@ -606,7 +656,6 @@ class FinancialSyncStrategy(ISyncStrategy):
                 fetch_aux(
                     api.get_fina_audit,
                     self.context.cache.save_fina_audit,
-                    "fina_audit",
                     ts_code=ts_code,
                     start_date=start_date,
                     end_date=end_date,
@@ -623,8 +672,14 @@ class FinancialSyncStrategy(ISyncStrategy):
             )
 
             # Unpack Core Results
-            # results[0-2] are core, results[3-5] are aux (bools)
+            # results[0-2] are core, results[3-4] are aux (row_counts)
             df_inc, df_bal, df_fina = results[0], results[1], results[2]
+
+            # Return aux counts as dict (for caller to accumulate)
+            aux_counts = {
+                "mainbz": results[3] if isinstance(results[3], int) else 0,
+                "audit": results[4] if isinstance(results[4], int) else 0,
+            }
 
             # 2. Proceed with Core Financial Merging (Income/Balance/Indicator)
             dfs = []
@@ -648,7 +703,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 )
 
             if not dfs:
-                return None
+                return None, aux_counts
 
             df_merged = dfs[0]
             for i in range(1, len(dfs)):
@@ -664,13 +719,13 @@ class FinancialSyncStrategy(ISyncStrategy):
                 if col.endswith("_drop"):
                     df_merged.drop(columns=[col], inplace=True)
 
-            return df_merged
+            return df_merged, aux_counts
 
         except Exception as e:
             logger.warning(
                 f"[FinancialSync] Fetch | ⚠️ Comprehensive data failed for {ts_code}: {e}",
             )
-            return None
+            return None, {"mainbz": 0, "audit": 0}
 
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
         """

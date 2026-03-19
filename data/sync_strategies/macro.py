@@ -78,6 +78,16 @@ class MacroSyncStrategy(ISyncStrategy):
                 count = await self.dao.save_macro_economy(merged)
                 result.added += count if count else 0
                 logger.debug(f"[MacroSync] Monthly | Saved {count} macro records")
+                latest_period = merged["period"].max() if "period" in merged.columns else get_now().date()
+                if isinstance(latest_period, str):
+                    from datetime import datetime as dt_module
+                    if len(latest_period) == 6:
+                        latest_period = dt_module.strptime(latest_period, "%Y%m").date()
+                    else:
+                        latest_period = dt_module.strptime(latest_period, "%Y%m%d").date()
+                await self.context.cache.update_sync_status(
+                    "macro_economy", latest_period, count or 0,
+                )
 
         except Exception as e:
             logger.warning(f"[MacroSync] Monthly | ⚠️ Error: {e}", exc_info=True)
@@ -161,6 +171,9 @@ class MacroSyncStrategy(ISyncStrategy):
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
                 logger.debug(f"[MacroSync] Shibor | Saved {count} records")
+                await self.context.cache.update_sync_status(
+                    "shibor_daily", today, count or 0,
+                )
 
         except Exception as e:
             logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
@@ -233,7 +246,11 @@ class MacroSyncStrategy(ISyncStrategy):
                     logger.warning(
                         f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}",
                     )
-                    # Continue to next index
+
+            await self.context.cache.update_sync_status(
+                "index_weight", today_date, result.added,
+            )
+            logger.debug(f"[MacroSync] IndexWeight | Total: {result.added} records")
 
         except Exception as e:
             logger.warning(

@@ -67,6 +67,11 @@ class HolderSyncStrategy(ISyncStrategy):
                     errors += 1
                 else:
                     result.added += count
+                    from datetime import datetime as dt_module
+                    qe_date = dt_module.strptime(qe, "%Y%m%d").date()
+                    await self.context.cache.update_sync_status(
+                        "stk_holdernumber", qe_date, count,
+                    )
 
                 if errors >= _MAX_ERRORS or self._cancelled:
                     break
@@ -82,6 +87,11 @@ class HolderSyncStrategy(ISyncStrategy):
                     errors += 1
                 else:
                     result.added += count
+                    from datetime import datetime as dt_module
+                    qe_date = dt_module.strptime(qe, "%Y%m%d").date()
+                    await self.context.cache.update_sync_status(
+                        "top10_holders", qe_date, count,
+                    )
 
                 if errors >= _MAX_ERRORS or self._cancelled:
                     break
@@ -95,6 +105,11 @@ class HolderSyncStrategy(ISyncStrategy):
                     errors += 1
                 else:
                     result.added += count
+                    import datetime as dt_module
+                    today = dt_module.date.today()
+                    await self.context.cache.update_sync_status(
+                        "pledge_stat", today, count,
+                    )
 
             if errors >= _MAX_ERRORS:
                 result.status = "partial"

@@ -77,10 +77,11 @@ class DataQualityService:
 
     @classmethod
     def check_recency(
-        cls, df: pd.DataFrame, date_col: str, ref_date: str,
+        cls, df: pd.DataFrame, date_col: str, ref_date,
     ) -> Dict[str, Any]:
         """
         Tier 2: Check data freshness against a reference date (usually latest trading day).
+        ref_date can be a string (YYYYMMDD), datetime.date, or datetime.datetime.
         """
         if df.empty:
             return {"lag_days": cls.LAG_DEFAULT, "latest_data_date": None}

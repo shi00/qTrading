@@ -1,6 +1,7 @@
 import logging
+from datetime import date, datetime
 
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 from .base_dao import BaseDao
 
@@ -12,6 +13,15 @@ class SyncDao(BaseDao):
     async def update_sync_status(
         self, table_name, last_data_date, record_count, status="success",
     ):
+        if isinstance(last_data_date, str):
+            last_data_date = parse_date(last_data_date).date()
+        elif isinstance(last_data_date, datetime):
+            last_data_date = last_data_date.date()
+        elif not isinstance(last_data_date, date):
+            raise TypeError(
+                f"last_data_date must be str, datetime, or date, got {type(last_data_date)}"
+            )
+
         now = get_now().replace(tzinfo=None)
         sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") 
                VALUES ($1, $2, $3, $4, $5, $6) 

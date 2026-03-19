@@ -460,8 +460,10 @@ class TaskManager:
             )
 
         # 4. Purge old records (>30 days)
+        cutoff_date = (get_now() - datetime.timedelta(days=30)).replace(tzinfo=None)
         await cache._write_db(
-            "DELETE FROM task_history WHERE completed_at < (NOW() - INTERVAL '30 days')::text",
+            "DELETE FROM task_history WHERE completed_at < $1",
+            (cutoff_date,),
         )
 
         self._db_ready = True
@@ -481,9 +483,9 @@ class TaskManager:
             task.description,
             task.error,
             str(task.result)[:500] if task.result else None,
-            task.created_at.isoformat() if task.created_at else None,
-            task.started_at.isoformat() if task.started_at else None,
-            task.completed_at.isoformat() if task.completed_at else None,
+            task.created_at.replace(tzinfo=None) if task.created_at else None,
+            task.started_at.replace(tzinfo=None) if task.started_at else None,
+            task.completed_at.replace(tzinfo=None) if task.completed_at else None,
         )
         self._schedule_coro(self._persist_snapshot(snapshot))
 
@@ -525,9 +527,9 @@ class TaskManager:
             task.description,
             task.error,
             str(task.result)[:500] if task.result else None,
-            task.created_at.isoformat() if task.created_at else None,
-            task.started_at.isoformat() if task.started_at else None,
-            task.completed_at.isoformat() if task.completed_at else None,
+            task.created_at.replace(tzinfo=None) if task.created_at else None,
+            task.started_at.replace(tzinfo=None) if task.started_at else None,
+            task.completed_at.replace(tzinfo=None) if task.completed_at else None,
         )
         await self._persist_snapshot(params)
 

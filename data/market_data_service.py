@@ -145,17 +145,17 @@ class MarketDataService:
     async def _fetch_market_data(self):
         """获取市场概览数据"""
         now = get_now()
-        today_str = now.strftime("%Y%m%d")
-        start_str = (now - datetime.timedelta(days=30)).strftime("%Y%m%d")
+        today_date = now.date()
+        start_date = (now - datetime.timedelta(days=30)).date()
 
         # 确保交易日历已缓存
-        await self._ensure_trade_cal(today_str)
+        await self._ensure_trade_cal(today_date)
 
         # 获取最近交易日
         cache_df = await self.cache.get_trade_cal(
-            start_date=start_str, end_date=today_str, is_open=1,
+            start_date=start_date, end_date=today_date, is_open=1,
         )
-        date = today_str
+        date = today_date
         if cache_df is not None and not cache_df.empty:
             date = sorted(cache_df["cal_date"].tolist())[-1]
 
@@ -222,13 +222,13 @@ class MarketDataService:
 
     # Instance methods forwarding to static equivalents (removed to avoid confusion)
 
-    async def _ensure_trade_cal(self, end_date: str):
+    async def _ensure_trade_cal(self, end_date):
         """确保交易日历已缓存"""
         from data.data_processor import DataProcessor
 
         await DataProcessor().ensure_trade_cal(end_date)
 
-    async def _get_index(self, code: str, name_key: str, date: str) -> dict:
+    async def _get_index(self, code: str, name_key: str, date) -> dict:
         """获取指数数据"""
         df = await self.api.get_index_daily(ts_code=code, trade_date=date)
         if df is not None and not df.empty:
@@ -254,7 +254,7 @@ class MarketDataService:
             "color": "grey",
         }
 
-    async def _get_hsgt(self, date: str) -> dict:
+    async def _get_hsgt(self, date) -> dict:
         """获取北向资金数据"""
         df = await self.api.get_moneyflow_hsgt(trade_date=date)
         if df is not None and not df.empty:

@@ -85,8 +85,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         """
         Sync historical data for the last N days.
         """
-        end_date = get_now().strftime("%Y%m%d")
-        start_date = (get_now() - datetime.timedelta(days=days)).strftime("%Y%m%d")
+        end_date = get_now().date()
+        start_date = (get_now() - datetime.timedelta(days=days)).date()
 
         # Use cached trade calendar (Step 2 already ensured calendar is available)
         try:
@@ -342,6 +342,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def save_if_ok(key, method, critical=False):
             df = data_map.get(key)
+            
+            if df is None:
+                if key in error_map:
+                    logger.warning(
+                        f"[HistoricalSync] DaySync | ⚠️ Fetch failed for {key}, skipping sync_status update"
+                    )
+                return None
+            
             if df is not None and not df.empty:
                 target_func = method
                 while hasattr(target_func, "__wrapped__"):
@@ -363,8 +371,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         )
                         raise e
                     logger.warning(
-                        f"[HistoricalSync] DaySync | ⚠️ Non-critical save {key} failed: {e}",
+                        f"[HistoricalSync] DaySync | ⚠️ Non-critical save {key} failed: {e}, skipping sync_status update",
                     )
+                    return None
+            
+            if df is not None and df.empty:
+                logger.debug(
+                    f"[HistoricalSync] DaySync | {key} returned empty data, will update sync_status with 0"
+                )
             return 0
 
         # 1. Quotes (Critical)
@@ -394,24 +408,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
 
         # 4. Others (Non-critical, can fail silently or log)
-        await save_if_ok("limit", cache.save_limit_list)
-        suspend_rows = await save_if_ok("suspend", cache.save_suspend_d)
+        limit_result = await save_if_ok("limit", cache.save_limit_list)
+        suspend_result = await save_if_ok("suspend", cache.save_suspend_d)
         await asyncio.sleep(0)
-        margin_rows = await save_if_ok("margin", cache.save_margin_daily)
-        await save_if_ok("lhb", cache.save_top_list)
+        margin_result = await save_if_ok("margin", cache.save_margin_daily)
+        lhb_result = await save_if_ok("lhb", cache.save_top_list)
         await asyncio.sleep(0)
-        await save_if_ok("block", cache.save_block_trade)
-        mf_rows = await save_if_ok("mf", cache.save_moneyflow)
+        block_result = await save_if_ok("block", cache.save_block_trade)
+        mf_result = await save_if_ok("mf", cache.save_moneyflow)
         await asyncio.sleep(0)
-        hsgt_rows = await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
-        await save_if_ok("index", cache.save_index_daily)
-        await save_if_ok("index_basic", cache.save_index_dailybasic)
+        hsgt_result = await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
+        index_result = await save_if_ok("index", cache.save_index_daily)
+        index_basic_result = await save_if_ok("index_basic", cache.save_index_dailybasic)
 
         # Yield before northbound special processing
         await asyncio.sleep(0)
 
         # Northbound special filter
-        north_rows = 0
+        north_result = None
         try:
             df_north = data_map.get("north")
             if df_north is not None and not df_north.empty:
@@ -420,45 +434,49 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 ]
                 if not df_north.empty:
                     north_rows = await cache.save_northbound(df_north)
-                    north_rows = north_rows if north_rows is not None else len(df_north)
+                    north_result = north_rows if north_rows is not None else len(df_north)
+            elif df_north is None and "north" in error_map:
+                north_result = None
+            else:
+                north_result = 0
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical): {e}",
             )
+            north_result = None
 
-        # Update sync status for all monitored tables
-        # Critical tables
-        if quotes_rows > 0:
-            await cache.update_sync_status("daily_quotes", trade_date, quotes_rows)
+        async def safe_update_status(table_name, result, trade_date):
+            if result is not None:
+                await cache.update_sync_status(table_name, trade_date, result or 0)
+            else:
+                logger.debug(
+                    f"[HistoricalSync] Skipping sync_status for {table_name} due to fetch/save failure"
+                )
 
-        if basic_rows > 0:
-            await cache.update_sync_status("daily_indicators", trade_date, basic_rows)
+        await safe_update_status("daily_quotes", quotes_rows, trade_date)
+        await safe_update_status("daily_indicators", basic_rows, trade_date)
+        await safe_update_status("moneyflow_daily", mf_result, trade_date)
+        await safe_update_status("northbound_holding", north_result, trade_date)
+        await safe_update_status("moneyflow_hsgt", hsgt_result, trade_date)
+        await safe_update_status("margin_daily", margin_result, trade_date)
+        await safe_update_status("suspend_d", suspend_result, trade_date)
+        await safe_update_status("limit_list", limit_result, trade_date)
+        await safe_update_status("top_list", lhb_result, trade_date)
+        await safe_update_status("block_trade", block_result, trade_date)
+        await safe_update_status("index_daily", index_result, trade_date)
+        await safe_update_status("index_dailybasic", index_basic_result, trade_date)
 
-        # Money Flow (critical for strategy analysis)
-        if mf_rows > 0:
-            await cache.update_sync_status("moneyflow_daily", trade_date, mf_rows)
-
-        # Non-critical but monitored tables
-        if north_rows > 0:
-            await cache.update_sync_status("northbound_holding", trade_date, north_rows)
-
-        if hsgt_rows > 0:
-            await cache.update_sync_status("moneyflow_hsgt", trade_date, hsgt_rows)
-
-        if margin_rows > 0:
-            await cache.update_sync_status("margin_daily", trade_date, margin_rows)
-
-        if suspend_rows > 0:
-            await cache.update_sync_status("suspend_d", trade_date, suspend_rows)
+        logger.debug(
+            f"[HistoricalSync] Sync status update for {trade_date}: "
+            f"quotes={quotes_rows}, basic={basic_rows}, mf={mf_result}, "
+            f"limit={limit_result}, lhb={lhb_result}, block={block_result}, "
+            f"index={index_result}, index_basic={index_basic_result}"
+        )
 
     async def sync_moneyflow(self, trade_date=None):
         """Sync money flow for a specific date (Standalone)."""
         if trade_date is None:
-            # This requires getting latest date. Strategy doesn't have it easily.
-            # Assume caller provides it or we use context to get it?
-            # For standalone, let's use datetime.now or assume today if not provided
-            # But better to let caller handle default.
-            trade_date = get_now().strftime("%Y%m%d")
+            trade_date = get_now().date()
 
         try:
             df = await self.context.api.get_moneyflow(trade_date=trade_date)
@@ -478,7 +496,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     async def sync_northbound(self, trade_date=None):
         """Sync northbound holding for a specific date (Standalone)."""
         if trade_date is None:
-            trade_date = get_now().strftime("%Y%m%d")
+            trade_date = get_now().date()
 
         try:
             df = await self.context.api.get_hk_hold(trade_date=trade_date)

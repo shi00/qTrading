@@ -31,6 +31,7 @@ def upgrade() -> None:
     sa.Column('seller', sa.String(), nullable=False),
     sa.Column('reason', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', 'buyer', 'seller', name=op.f('pk_block_trade'))
     )
     op.create_table('daily_indicators',
@@ -52,6 +53,7 @@ def upgrade() -> None:
     sa.Column('turnover_rate_f', sa.Float(), nullable=True),
     sa.Column('volume_ratio', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_daily_indicators'))
     )
     op.create_index('ix_daily_indicators_date_code', 'daily_indicators', ['trade_date', 'ts_code'], unique=False)
@@ -74,6 +76,7 @@ def upgrade() -> None:
     sa.Column('qfq_low', sa.Float(), nullable=True),
     sa.Column('qfq_close', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_daily_quotes'))
     )
     op.create_index('ix_daily_quotes_date_code', 'daily_quotes', ['trade_date', 'ts_code'], unique=False)
@@ -91,6 +94,7 @@ def upgrade() -> None:
     sa.Column('record_date', sa.Date(), nullable=True),
     sa.Column('ex_date', sa.Date(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', 'ann_date', name=op.f('pk_dividend'))
     )
     op.create_index(op.f('ix_dividend_ann_date'), 'dividend', ['ann_date'], unique=False)
@@ -102,6 +106,7 @@ def upgrade() -> None:
     sa.Column('audit_fees', sa.Float(), nullable=True),
     sa.Column('audit_agency', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', name=op.f('pk_fina_audit'))
     )
     op.create_table('fina_forecast',
@@ -114,6 +119,7 @@ def upgrade() -> None:
     sa.Column('net_profit_min', sa.Float(), nullable=True),
     sa.Column('net_profit_max', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', 'ann_date', name=op.f('pk_fina_forecast'))
     )
     op.create_index(op.f('ix_fina_forecast_ann_date'), 'fina_forecast', ['ann_date'], unique=False)
@@ -127,6 +133,7 @@ def upgrade() -> None:
     sa.Column('curr_type', sa.String(), nullable=True),
     sa.Column('update_flag', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', 'bz_item', name=op.f('pk_fina_mainbz'))
     )
     op.create_index(op.f('ix_fina_mainbz_end_date'), 'fina_mainbz', ['end_date'], unique=False)
@@ -152,6 +159,7 @@ def upgrade() -> None:
     sa.Column('goodwill', sa.Float(), nullable=True),
     sa.Column('audit_result', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', name=op.f('pk_financial_reports'))
     )
     op.create_index(op.f('ix_financial_reports_end_date'), 'financial_reports', ['end_date'], unique=False)
@@ -169,6 +177,7 @@ def upgrade() -> None:
     sa.Column('vol', sa.Float(), nullable=True),
     sa.Column('amount', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_index_daily'))
     )
     op.create_index(op.f('ix_index_daily_trade_date'), 'index_daily', ['trade_date'], unique=False)
@@ -186,6 +195,7 @@ def upgrade() -> None:
     sa.Column('pe_ttm', sa.Float(), nullable=True),
     sa.Column('pb', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_index_dailybasic'))
     )
     op.create_table('index_weight',
@@ -194,6 +204,7 @@ def upgrade() -> None:
     sa.Column('trade_date', sa.Date(), nullable=False),
     sa.Column('weight', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('index_code', 'con_code', 'trade_date', name=op.f('pk_index_weight'))
     )
     op.create_index(op.f('ix_index_weight_trade_date'), 'index_weight', ['trade_date'], unique=False)
@@ -213,6 +224,7 @@ def upgrade() -> None:
     sa.Column('strth', sa.Float(), nullable=True),
     sa.Column('limit_type', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('trade_date', 'ts_code', name=op.f('pk_limit_list'))
     )
     op.create_index(op.f('ix_limit_list_ts_code'), 'limit_list', ['ts_code'], unique=False)
@@ -226,7 +238,7 @@ def upgrade() -> None:
     sa.Column('m0_yoy', sa.Float(), nullable=True),
     sa.Column('cpi', sa.Float(), nullable=True),
     sa.Column('ppi', sa.Float(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('period', name=op.f('pk_macro_economy'))
     )
     op.create_table('margin_daily',
@@ -238,6 +250,7 @@ def upgrade() -> None:
     sa.Column('rqyl', sa.Float(), nullable=True),
     sa.Column('rzrqye', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_margin_daily'))
     )
     op.create_index(op.f('ix_margin_daily_trade_date'), 'margin_daily', ['trade_date'], unique=False)
@@ -247,7 +260,7 @@ def upgrade() -> None:
     sa.Column('tags', sa.String(), nullable=True),
     sa.Column('publish_time', sa.DateTime(), nullable=True),
     sa.Column('source', sa.String(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_market_news')),
     sa.UniqueConstraint('content', 'publish_time', name='uq_market_news_content_pub')
     )
@@ -273,6 +286,7 @@ def upgrade() -> None:
     sa.Column('net_mf_vol', sa.BigInteger(), nullable=True),
     sa.Column('net_mf_amount', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_moneyflow_daily'))
     )
     op.create_index('ix_moneyflow_daily_date_code', 'moneyflow_daily', ['trade_date', 'ts_code'], unique=False)
@@ -286,6 +300,7 @@ def upgrade() -> None:
     sa.Column('north_money', sa.Float(), nullable=True),
     sa.Column('south_money', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('trade_date', name=op.f('pk_moneyflow_hsgt'))
     )
     op.create_table('northbound_holding',
@@ -296,6 +311,7 @@ def upgrade() -> None:
     sa.Column('ratio', sa.Float(), nullable=True),
     sa.Column('exchange', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_northbound_holding'))
     )
     op.create_index(op.f('ix_northbound_holding_trade_date'), 'northbound_holding', ['trade_date'], unique=False)
@@ -308,6 +324,7 @@ def upgrade() -> None:
     sa.Column('total_share', sa.Float(), nullable=True),
     sa.Column('pledge_ratio', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', name=op.f('pk_pledge_stat'))
     )
     op.create_table('repurchase',
@@ -321,6 +338,7 @@ def upgrade() -> None:
     sa.Column('high_limit', sa.Float(), nullable=True),
     sa.Column('low_limit', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'ann_date', name=op.f('pk_repurchase'))
     )
     op.create_index(op.f('ix_repurchase_ann_date'), 'repurchase', ['ann_date'], unique=False)
@@ -355,7 +373,7 @@ def upgrade() -> None:
     sa.Column('ai_reason', sa.String(), nullable=True),
     sa.Column('thinking', sa.String(), nullable=True),
     sa.Column('prediction_result', sa.String(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_screening_history')),
     sa.UniqueConstraint('trade_date', 'strategy_name', 'ts_code', name='uq_screening_history_date_strategy_code')
     )
@@ -371,6 +389,7 @@ def upgrade() -> None:
     sa.Column('9m', sa.Float(), nullable=True),
     sa.Column('1y', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('date', name=op.f('pk_shibor_daily'))
     )
     op.create_table('stk_holdernumber',
@@ -381,6 +400,7 @@ def upgrade() -> None:
     sa.Column('holder_num_change', sa.Float(), nullable=True),
     sa.Column('holder_num_ratio', sa.Float(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', name=op.f('pk_stk_holdernumber'))
     )
     op.create_index(op.f('ix_stk_holdernumber_end_date'), 'stk_holdernumber', ['end_date'], unique=False)
@@ -394,6 +414,7 @@ def upgrade() -> None:
     sa.Column('list_date', sa.Date(), nullable=True),
     sa.Column('list_status', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', name=op.f('pk_stock_basic'))
     )
     op.create_index(op.f('ix_stock_basic_list_date'), 'stock_basic', ['list_date'], unique=False)
@@ -402,6 +423,7 @@ def upgrade() -> None:
     sa.Column('concept_name', sa.String(), nullable=True),
     sa.Column('concept_id', sa.String(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'concept_id', name=op.f('pk_stock_concepts'))
     )
     op.create_index(op.f('ix_stock_concepts_ts_code'), 'stock_concepts', ['ts_code'], unique=False)
@@ -410,6 +432,7 @@ def upgrade() -> None:
     sa.Column('step4_completed_at', sa.DateTime(), nullable=True),
     sa.Column('sync_version', sa.Integer(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', name=op.f('pk_stock_sync_status'))
     )
     op.create_table('suspend_d',
@@ -418,6 +441,7 @@ def upgrade() -> None:
     sa.Column('suspend_timing', sa.String(), nullable=True),
     sa.Column('suspend_type_name', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'trade_date', name=op.f('pk_suspend_d'))
     )
     op.create_index(op.f('ix_suspend_d_trade_date'), 'suspend_d', ['trade_date'], unique=False)
@@ -428,6 +452,7 @@ def upgrade() -> None:
     sa.Column('record_count', sa.Integer(), nullable=True),
     sa.Column('status', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('table_name', name=op.f('pk_sync_status'))
     )
     op.create_table('task_history',
@@ -439,7 +464,7 @@ def upgrade() -> None:
     sa.Column('description', sa.String(), nullable=True),
     sa.Column('error', sa.String(), nullable=True),
     sa.Column('result', sa.String(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
     sa.Column('started_at', sa.DateTime(), nullable=True),
     sa.Column('completed_at', sa.DateTime(), nullable=True),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_task_history'))
@@ -454,6 +479,7 @@ def upgrade() -> None:
     sa.Column('hold_ratio', sa.Float(), nullable=True),
     sa.Column('holder_type', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('ts_code', 'end_date', 'holder_name', name=op.f('pk_top10_holders'))
     )
     op.create_index(op.f('ix_top10_holders_holder_name'), 'top10_holders', ['holder_name'], unique=False)
@@ -474,6 +500,7 @@ def upgrade() -> None:
     sa.Column('float_values', sa.Float(), nullable=True),
     sa.Column('reason', sa.String(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('trade_date', 'ts_code', name=op.f('pk_top_list'))
     )
     op.create_index(op.f('ix_top_list_ts_code'), 'top_list', ['ts_code'], unique=False)
@@ -483,6 +510,7 @@ def upgrade() -> None:
     sa.Column('is_open', sa.Integer(), nullable=True),
     sa.Column('pretrade_date', sa.Date(), nullable=True),
     sa.Column('updated_at', sa.DateTime(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('cal_date', name=op.f('pk_trade_cal'))
     )
     # ### end Alembic commands ###

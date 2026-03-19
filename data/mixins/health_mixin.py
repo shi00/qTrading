@@ -217,7 +217,7 @@ class HealthCheckMixin:
             # Use a safe 2.0 multiplier for trade-days to natural-days conversion
             rough_start = (
                 end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))
-            ).strftime("%Y%m%d")
+            ).date()
             all_dates = await self.get_trade_dates(
                 start_date=rough_start, end_date=end_date,
             )
@@ -227,9 +227,7 @@ class HealthCheckMixin:
                 start_date = (
                     all_dates[0]
                     if all_dates
-                    else (end_date_obj - datetime.timedelta(days=365 * years)).strftime(
-                        "%Y%m%d",
-                    )
+                    else (end_date_obj - datetime.timedelta(days=365 * years)).date()
                 )
 
             official_dates = await self.get_trade_dates(start_date, end_date)
@@ -486,13 +484,11 @@ class HealthCheckMixin:
             # --- Architecture Optimization: One-Pass Batch Fetch ---
             # Fetch 1 year of data for all sampled stocks at once to avoid N+1 queries
             # and over-fetching entire 20-year history for single stocks.
-            start_date_str = (get_now() - datetime.timedelta(days=365)).strftime(
-                "%Y%m%d",
-            )
+            start_date_obj = (get_now() - datetime.timedelta(days=365)).date()
 
             # Only fetch open trading days within scan window (halves data vs full calendar)
             trade_cal_df = await self.cache.get_trade_cal(
-                start_date=start_date_str, is_open=1,
+                start_date=start_date_obj, is_open=1,
             )
             if trade_cal_df is None or trade_cal_df.empty:
                 logger.warning(
@@ -500,7 +496,7 @@ class HealthCheckMixin:
                 )
 
             batch_df = await self.cache.get_daily_quotes(
-                ts_code_list=sample, start_date=start_date_str,
+                ts_code_list=sample, start_date=start_date_obj,
             )
 
             # 3. Iterate Sample (DataFrame Slicing in Memory)
@@ -535,7 +531,7 @@ class HealthCheckMixin:
 
                     # Check Recency (vs today)
                     rec_res = DataQualityService.check_recency(
-                        df_daily, "trade_date", get_now().strftime("%Y%m%d"),
+                        df_daily, "trade_date", get_now().date(),
                     )
                     scan_results["recency"].append(rec_res["lag_days"])
 

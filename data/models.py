@@ -16,6 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
+from sqlalchemy.sql import func
 
 # Naming convention for Alembic migrations
 # Ensures consistent constraint naming across environments
@@ -42,6 +43,7 @@ class StockBasic(Base):
     list_date = Column(Date, index=True)
     list_status = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class StockConcepts(Base):
@@ -50,6 +52,7 @@ class StockConcepts(Base):
     concept_name = Column(String)
     concept_id = Column(String, primary_key=True)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class DailyQuotes(Base):
@@ -71,6 +74,7 @@ class DailyQuotes(Base):
     qfq_low = Column(Float)
     qfq_close = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
         Index("ix_daily_quotes_date_code", "trade_date", "ts_code"),
@@ -97,6 +101,7 @@ class DailyIndicators(Base):
     turnover_rate_f = Column(Float)
     volume_ratio = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
         Index("ix_daily_indicators_date_code", "trade_date", "ts_code"),
@@ -126,6 +131,7 @@ class MoneyflowDaily(Base):
     net_mf_vol = Column(BigInteger)
     net_mf_amount = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
         Index("ix_moneyflow_daily_date_code", "trade_date", "ts_code"),
@@ -141,6 +147,7 @@ class NorthboundHolding(Base):
     ratio = Column(Float)
     exchange = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class TopList(Base):
@@ -161,6 +168,7 @@ class TopList(Base):
     float_values = Column(Float)
     reason = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class SyncStatus(Base):
@@ -171,6 +179,7 @@ class SyncStatus(Base):
     record_count = Column(Integer)
     status = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class ScreeningHistory(Base):
@@ -205,7 +214,7 @@ class ScreeningHistory(Base):
     ai_reason = Column(String)
     thinking = Column(String)
     prediction_result = Column(String)
-    created_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint(
@@ -229,6 +238,7 @@ class BlockTrade(Base):
     seller = Column(String, primary_key=True)
     reason = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class MarketNews(Base):
@@ -238,7 +248,7 @@ class MarketNews(Base):
     tags = Column(String)
     publish_time = Column(DateTime(timezone=False))
     source = Column(String)
-    created_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("content", "publish_time", name="uq_market_news_content_pub"),
@@ -252,6 +262,7 @@ class TradeCal(Base):
     is_open = Column(Integer)
     pretrade_date = Column(Date)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class FinancialReports(Base):
@@ -280,6 +291,7 @@ class FinancialReports(Base):
         Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
     )
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class IndexDaily(Base):
@@ -296,6 +308,7 @@ class IndexDaily(Base):
     vol = Column(Float)
     amount = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class IndexDailyBasic(Base):
@@ -313,6 +326,7 @@ class IndexDailyBasic(Base):
     pe_ttm = Column(Float)
     pb = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class MarginDaily(Base):
@@ -325,6 +339,7 @@ class MarginDaily(Base):
     rqyl = Column(Float)
     rzrqye = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class SuspendD(Base):
@@ -334,6 +349,7 @@ class SuspendD(Base):
     suspend_timing = Column(String)
     suspend_type_name = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class LimitList(Base):
@@ -353,6 +369,7 @@ class LimitList(Base):
     strth = Column(Float)
     limit_type = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class FinaForecast(Base):
@@ -366,6 +383,7 @@ class FinaForecast(Base):
     net_profit_min = Column(Float)
     net_profit_max = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class FinaMainbz(Base):
@@ -379,6 +397,7 @@ class FinaMainbz(Base):
     curr_type = Column(String)
     update_flag = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class PledgeStat(Base):
@@ -391,6 +410,7 @@ class PledgeStat(Base):
     total_share = Column(Float)
     pledge_ratio = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class Repurchase(Base):
@@ -405,6 +425,7 @@ class Repurchase(Base):
     high_limit = Column(Float)
     low_limit = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class Dividend(Base):
@@ -421,6 +442,7 @@ class Dividend(Base):
     record_date = Column(Date)
     ex_date = Column(Date)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class StockSyncStatus(Base):
@@ -429,6 +451,7 @@ class StockSyncStatus(Base):
     step4_completed_at = Column(DateTime(timezone=False))
     sync_version = Column(Integer, default=1)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class FinaAudit(Base):
@@ -440,6 +463,7 @@ class FinaAudit(Base):
     audit_fees = Column(Float)
     audit_agency = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class MacroEconomy(Base):
@@ -453,7 +477,7 @@ class MacroEconomy(Base):
     m0_yoy = Column(Float)
     cpi = Column(Float)
     ppi = Column(Float)
-    created_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class ShiborDaily(Base):
@@ -468,6 +492,7 @@ class ShiborDaily(Base):
     m9 = Column(Float, name="9m")
     y1 = Column(Float, name="1y")
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class StkHoldernumber(Base):
@@ -479,6 +504,7 @@ class StkHoldernumber(Base):
     holder_num_change = Column(Float)
     holder_num_ratio = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class Top10Holders(Base):
@@ -491,6 +517,7 @@ class Top10Holders(Base):
     hold_ratio = Column(Float)
     holder_type = Column(String)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class IndexWeight(Base):
@@ -500,6 +527,7 @@ class IndexWeight(Base):
     trade_date = Column(Date, primary_key=True, index=True)
     weight = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class MoneyflowHsgt(Base):
@@ -512,6 +540,7 @@ class MoneyflowHsgt(Base):
     north_money = Column(Float)
     south_money = Column(Float)
     updated_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class TaskHistory(Base):
@@ -524,7 +553,7 @@ class TaskHistory(Base):
     description = Column(String)
     error = Column(String)
     result = Column(String)
-    created_at = Column(DateTime(timezone=False), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=False), server_default=func.now(), nullable=False, index=True)
     started_at = Column(DateTime(timezone=False))
     completed_at = Column(DateTime(timezone=False))
 
@@ -565,33 +594,34 @@ DATETIME_COLUMNS = {
     "market_news": ["publish_time", "created_at"],
     "screening_history": ["created_at"],
     "task_history": ["created_at", "started_at", "completed_at"],
-    "stock_sync_status": ["step4_completed_at", "updated_at"],
-    # 各表通用 updated_at 支持
-    "stock_basic": ["updated_at"],
-    "stock_concepts": ["updated_at"],
-    "daily_quotes": ["updated_at"],
-    "daily_indicators": ["updated_at"],
-    "moneyflow_daily": ["updated_at"],
-    "northbound_holding": ["updated_at"],
-    "top_list": ["updated_at"],
-    "sync_status": ["updated_at"],
-    "block_trade": ["updated_at"],
-    "trade_cal": ["updated_at"],
-    "financial_reports": ["updated_at"],
-    "index_daily": ["updated_at"],
-    "index_dailybasic": ["updated_at"],
-    "margin_daily": ["updated_at"],
-    "suspend_d": ["updated_at"],
-    "limit_list": ["updated_at"],
-    "fina_forecast": ["updated_at"],
-    "fina_mainbz": ["updated_at"],
-    "pledge_stat": ["updated_at"],
-    "repurchase": ["updated_at"],
-    "dividend": ["updated_at"],
-    "fina_audit": ["updated_at"],
-    "shibor_daily": ["updated_at"],
-    "stk_holdernumber": ["updated_at"],
-    "top10_holders": ["updated_at"],
-    "index_weight": ["updated_at"],
-    "moneyflow_hsgt": ["updated_at"],
+    "stock_sync_status": ["step4_completed_at", "updated_at", "created_at"],
+    "macro_economy": ["created_at"],
+    # 各表通用 updated_at + created_at 支持
+    "stock_basic": ["updated_at", "created_at"],
+    "stock_concepts": ["updated_at", "created_at"],
+    "daily_quotes": ["updated_at", "created_at"],
+    "daily_indicators": ["updated_at", "created_at"],
+    "moneyflow_daily": ["updated_at", "created_at"],
+    "northbound_holding": ["updated_at", "created_at"],
+    "top_list": ["updated_at", "created_at"],
+    "sync_status": ["updated_at", "created_at"],
+    "block_trade": ["updated_at", "created_at"],
+    "trade_cal": ["updated_at", "created_at"],
+    "financial_reports": ["updated_at", "created_at"],
+    "index_daily": ["updated_at", "created_at"],
+    "index_dailybasic": ["updated_at", "created_at"],
+    "margin_daily": ["updated_at", "created_at"],
+    "suspend_d": ["updated_at", "created_at"],
+    "limit_list": ["updated_at", "created_at"],
+    "fina_forecast": ["updated_at", "created_at"],
+    "fina_mainbz": ["updated_at", "created_at"],
+    "pledge_stat": ["updated_at", "created_at"],
+    "repurchase": ["updated_at", "created_at"],
+    "dividend": ["updated_at", "created_at"],
+    "fina_audit": ["updated_at", "created_at"],
+    "shibor_daily": ["updated_at", "created_at"],
+    "stk_holdernumber": ["updated_at", "created_at"],
+    "top10_holders": ["updated_at", "created_at"],
+    "index_weight": ["updated_at", "created_at"],
+    "moneyflow_hsgt": ["updated_at", "created_at"],
 }

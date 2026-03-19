@@ -193,6 +193,9 @@ class BaseDao:
             return 0
 
         # Auto-inject updated_at if the table supports it
+        # ⚠️ WARNING: Do NOT add similar auto-inject logic for `created_at`.
+        # `created_at` relies on DB-level `server_default` and must NEVER
+        # appear in the INSERT/UPDATE column list to preserve first-write semantics.
         has_updated_at = "updated_at" in table.columns.keys()
 
         # We must avoid modifying the passed 'df' in-place.

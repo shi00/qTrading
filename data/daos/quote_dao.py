@@ -142,6 +142,21 @@ class QuoteDao(BaseDao):
             )
             return set()
 
+    async def get_date_range(self):
+        """
+        Get the min and max trade dates from daily_quotes.
+        Used for health check baseline calculation.
+
+        Returns:
+            tuple: (min_date, max_date) or (None, None)
+        """
+        df = await self._read_db(
+            "SELECT MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM daily_quotes"
+        )
+        if df is None or df.empty:
+            return None, None
+        return df["min_date"].iloc[0], df["max_date"].iloc[0]
+
     # --- Index Data ---
     async def save_index_daily(self, df):
         cols = [

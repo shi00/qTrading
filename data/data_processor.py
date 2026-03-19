@@ -631,10 +631,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             from utils.config_handler import ConfigHandler
 
             years = ConfigHandler.get_init_history_years()
-            end_date = get_now().strftime("%Y%m%d")
+            end_date = get_now().date()
             rough_start = (
                 get_now() - datetime.timedelta(days=365 * years + 30)
-            ).strftime("%Y%m%d")
+            ).date()
             cal_success = await self.ensure_trade_cal(
                 end_date, required_start_date=rough_start,
             )
@@ -723,11 +723,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365):
-        end = get_now().strftime("%Y%m%d")
+        end = get_now().date()
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
-        rough_start = (get_now() - datetime.timedelta(days=int(days * 2.0))).strftime(
-            "%Y%m%d",
-        )
+        rough_start = (get_now() - datetime.timedelta(days=int(days * 2.0))).date()
         all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end)
         start = (
             all_dates[-days]

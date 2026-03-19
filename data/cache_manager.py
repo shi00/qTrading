@@ -5,6 +5,7 @@ import os
 import re
 import threading
 
+import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -184,13 +185,19 @@ class CacheManager:
     @staticmethod
     def normalize_news_item(item, default_source="CLS"):
         """Normalize news item dictionary for DB Insertion"""
+        publish_time = item.get("time", item.get("publish_time"))
+        if publish_time is None:
+            publish_time = get_now().replace(tzinfo=None)
+        elif isinstance(publish_time, str):
+            try:
+                publish_time = pd.to_datetime(publish_time).to_pydatetime()
+            except Exception:
+                publish_time = get_now().replace(tzinfo=None)
+
         return {
             "content": item.get("content", "").strip(),
             "tags": item.get("tags", ""),
-            "publish_time": item.get(
-                "time",
-                item.get("publish_time", get_now().strftime("%Y-%m-%d %H:%M:%S")),
-            ),
+            "publish_time": publish_time,
             "source": item.get("source", default_source),
         }
 
@@ -439,66 +446,41 @@ class CacheManager:
 
         logger.debug("[CacheManager] Health | Starting comprehensive check...")
 
-        async with self.engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            # Total Stocks
-            total_stocks = await self.stock_dao.get_active_stock_count()
-            total_stocks = total_stocks or 1
-            logger.debug(
-                f"[CacheManager] Health | Active stocks baseline: {total_stocks}",
+        # === Step 1: All DAO calls outside async with (avoid connection nesting) ===
+        # 1.1 Get active stock count
+        total_stocks = await self.stock_dao.get_active_stock_count()
+        total_stocks = total_stocks or 1
+        logger.debug(
+            f"[CacheManager] Health | Active stocks baseline: {total_stocks}",
+        )
+
+        # 1.2 Get global baseline using DAO methods
+        global_trade_days = 0
+        global_expected_rows = None
+        try:
+            g_min, g_max = await self.quote_dao.get_date_range()
+            if g_min and g_max:
+                global_trade_days = await self.stock_dao.count_trade_days(g_min, g_max)
+                global_expected_rows = await self.stock_dao.count_expected_rows(g_min, g_max)
+                logger.debug(
+                    f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
+                )
+        except Exception as e:
+            logger.warning(
+                f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}",
             )
 
-            # Tables Check (Dynamic iteration based on registry)
-            # Filter for quality monitored tables
-            monitored_tables = {
-                k: v
-                for k, v in TABLE_DEFINITIONS.items()
-                if v.get("quality_config", {}).get("monitor")
-            }
+        # Tables Check (Dynamic iteration based on registry)
+        # Filter for quality monitored tables
+        monitored_tables = {
+            k: v
+            for k, v in TABLE_DEFINITIONS.items()
+            if v.get("quality_config", {}).get("monitor")
+        }
 
-            # === Global baseline precomputation (outside loop, executed once) ===
-            global_trade_days = 0
-            global_expected_rows = None
-            try:
-                r_min = await conn.exec_driver_sql(
-                    "SELECT MIN(trade_date) FROM daily_quotes",
-                )
-                r_max = await conn.exec_driver_sql(
-                    "SELECT MAX(trade_date) FROM daily_quotes",
-                )
-                row_min = r_min.fetchone()
-                row_max = r_max.fetchone()
-                g_min = row_min[0] if row_min else None
-                g_max = row_max[0] if row_max else None
-                if g_min and g_max:
-                    r_days = await conn.exec_driver_sql(
-                        "SELECT COUNT(*) FROM trade_cal WHERE is_open=1 AND cal_date >= $1 AND cal_date <= $2",
-                        (str(g_min), str(g_max)),
-                    )
-                    row_days = r_days.fetchone()
-                    global_trade_days = (row_days[0] if row_days else 0) or 0
-                    # Precise expected rows: sum per-stock trading days using each stock's list_date
-                    r_exp = await conn.exec_driver_sql(
-                        """
-                        SELECT SUM(
-                            (SELECT COUNT(*) FROM trade_cal tc
-                             WHERE tc.is_open = 1
-                               AND tc.cal_date >= GREATEST(s.list_date, $1)
-                               AND tc.cal_date <= $2)
-                        ) FROM stock_basic s
-                        WHERE s.list_status = 'L'
-                        """,
-                        (str(g_min), str(g_max)),
-                    )
-                    row_exp = r_exp.fetchone()
-                    global_expected_rows = (row_exp[0] if row_exp else 1) or 1
-                    logger.debug(
-                        f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}",
-                )
+        # === Step 2: Use single connection for table checks (no DAO calls inside) ===
+        async with self.engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
 
             for table, meta in monitored_tables.items():
                 try:

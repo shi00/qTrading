@@ -75,6 +75,49 @@ class StockDao(BaseDao):
             return (df["min_d"].iloc[0], df["max_d"].iloc[0])
         return (None, None)
 
+    async def count_trade_days(self, start_date, end_date):
+        """
+        Count trading days in the given date range.
+
+        Args:
+            start_date: Start date (date object)
+            end_date: End date (date object)
+
+        Returns:
+            int: Number of trading days
+        """
+        sql = "SELECT COUNT(*) as cnt FROM trade_cal WHERE is_open=1 AND cal_date >= $1 AND cal_date <= $2"
+        df = await self._read_db(sql, (start_date, end_date))
+        if df is None or df.empty:
+            return 0
+        return df["cnt"].iloc[0] or 0
+
+    async def count_expected_rows(self, start_date, end_date):
+        """
+        Calculate expected rows: sum of trading days per stock after its list_date.
+        Used for data completeness check.
+
+        Args:
+            start_date: Start date (date object)
+            end_date: End date (date object)
+
+        Returns:
+            int: Expected row count (at least 1 to avoid division by zero)
+        """
+        sql = """
+            SELECT SUM(
+                (SELECT COUNT(*) FROM trade_cal tc
+                 WHERE tc.is_open = 1
+                   AND tc.cal_date >= GREATEST(s.list_date, $1)
+                   AND tc.cal_date <= $2)
+            ) as expected FROM stock_basic s
+            WHERE s.list_status = 'L'
+        """
+        df = await self._read_db(sql, (start_date, end_date))
+        if df is None or df.empty:
+            return 1
+        return df["expected"].iloc[0] or 1
+
     # --- Concepts ---
     async def save_concepts(self, df):
         if df is None or df.empty:
