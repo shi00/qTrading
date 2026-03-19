@@ -14,7 +14,7 @@ import pandas as pd
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager
-from utils.time_utils import get_now
+from utils.time_utils import CST_TZ, get_now
 
 logger = logging.getLogger(__name__)
 
@@ -401,13 +401,21 @@ class TaskManager:
 
     @staticmethod
     def _safe_dt(val) -> Optional[datetime.datetime]:
-        """Safely parse datetime from DB value, handling NaN/None/invalid."""
+        """
+        Safely parse datetime from DB value, handling NaN/None/invalid.
+        
+        Returns a timezone-aware datetime in CST (Asia/Shanghai) to ensure
+        consistency with get_now() which returns timezone-aware datetimes.
+        """
         if val is None:
             return None
         if isinstance(val, float) and pd.isna(val):
             return None
         try:
-            return datetime.datetime.fromisoformat(str(val))
+            dt = datetime.datetime.fromisoformat(str(val))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=CST_TZ)
+            return dt
         except (ValueError, TypeError):
             return None
 
