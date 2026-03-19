@@ -2,7 +2,7 @@
 
 这份指南是完全基于 **AStockScreener 智能选股系统**当前的真实技术栈（`Flet` + `Polars` + `PostgreSQL` + `llama.cpp/OpenAI`）以及业务域（离线数据落盘 + 定量粗筛 + LLM 定性精审）量身定制的架构师级 CR 规范。
 
-在处理这套系统的 Pull Request 时，审查者 (Reviewer) 需要严格按照以下 **7 个核心防区、63 条致命检查项**进行逐行排雷。
+在处理这套系统的 Pull Request 时，审查者 (Reviewer) 需要严格按照以下 **8 个核心防区、70 条致命检查项**进行逐行排雷。
 
 ---
 
@@ -285,4 +285,134 @@
       target_dates = set(date_series.dt.strftime("%Y%m%d"))  # 字符串
       expected_dates = set(trade_cal["cal_date"])  # date 对象
       missing = expected_dates - target_dates  # 类型不匹配，差集失效
+      ```
+
+---
+
+## 🛡️ 防区八：静态代码检查工具 (Static Code Analysis)
+*目标：在代码合并前自动捕获潜在缺陷，建立质量门禁。*
+**重点工具**: `ruff`, `mypy`, `pre-commit`
+
+52. **[关键] Ruff 代码风格检查**
+    - **审查点**：所有 PR 提交前必须通过 `ruff check .` 检查。Ruff 是本项目统一使用的 Linter，替代 flake8/pylint，检查范围包括：
+      - 未使用的导入与变量 (F401/F841)
+      - 不可达代码 (F501)
+      - 重复定义 (F811)
+      - 格式化字符串问题 (F5xx)
+    - **正例**：
+      ```bash
+      ruff check . --fix  # 自动修复可修复的问题
+      ```
+    - **反例**：
+      ```python
+      import os  # F401: 未使用的导入
+      def foo():
+          x = 1  # F841: 局部变量从未使用
+          return 2
+      ```
+
+53. **[关键] MyPy 类型检查**
+    - **审查点**：核心模块必须通过 `mypy` 静态类型检查。重点关注：
+      - 函数参数与返回值类型注解缺失
+      - 类型不匹配的赋值
+      - Optional 类型的 None 检查遗漏
+    - **正例**：
+      ```python
+      def get_stock_data(ts_code: str, start_date: date) -> pl.DataFrame:
+          ...
+      ```
+    - **反例**：
+      ```python
+      def get_stock_data(ts_code, start_date):  # 缺少类型注解
+          ...
+      ```
+
+54. **[关键] Pre-commit 钩子配置**
+    - **审查点**：项目应配置 `.pre-commit-config.yaml`，在 git commit 前自动执行：
+      - `ruff check --fix` (代码风格)
+      - `ruff format` (代码格式化)
+      - `mypy` (类型检查，可选)
+    - **配置示例**：
+      ```yaml
+      repos:
+        - repo: https://github.com/astral-sh/ruff-pre-commit
+          rev: v0.1.6
+          hooks:
+            - id: ruff
+              args: [--fix]
+            - id: ruff-format
+      ```
+
+55. **CI/CD 质量门禁**
+    - **审查点**：Pull Request 必须通过 CI 流水线的静态检查才能合并。检查项包括：
+      - `ruff check .` 返回 0
+      - 核心模块 `mypy` 无错误
+      - 单元测试覆盖率不低于阈值
+    - **GitHub Actions 示例**：
+      ```yaml
+      - name: Lint with ruff
+        run: ruff check --output-format=github .
+      - name: Type check with mypy
+        run: mypy data/ services/ strategies/
+      ```
+
+56. **忽略规则的审慎使用**
+    - **审查点**：`# noqa: E501` 或 `# type: ignore` 必须附带说明原因。禁止大面积使用 `# noqa` 抑制警告，应针对性修复问题。
+    - **正例**：
+      ```python
+      long_url = "https://very-long-url..."  # noqa: E501  # URL 不可拆分
+      ```
+    - **反例**：
+      ```python
+      def complex_function():  # noqa  # 禁止无说明的忽略
+          ...
+      ```
+
+57. **循环复杂度控制**
+    - **审查点**：单个函数的圈复杂度 (Cyclomatic Complexity) 不应超过 10。Ruff 规则 `C901` 会检测过复杂的函数。复杂函数应拆分为多个小函数。
+    - **正例**：
+      ```python
+      def process_data(data: pl.DataFrame) -> pl.DataFrame:
+          validated = validate_data(data)
+          cleaned = clean_data(validated)
+          return transform_data(cleaned)
+      ```
+    - **反例**：
+      ```python
+      def process_data(data):  # C901: 圈复杂度过高
+          if condition1:
+              if condition2:
+                  for item in data:
+                      if condition3:
+                          ...  # 嵌套过深
+      ```
+
+58. **文档字符串规范**
+    - **审查点**：公共函数和类必须有 docstring，格式统一使用 Google 风格或 NumPy 风格。Ruff 规则 `D` 系列会检查 docstring 格式。
+    - **正例**：
+      ```python
+      def calculate_ma(prices: list[float], window: int) -> list[float]:
+          """Calculate moving average.
+
+          Args:
+              prices: List of prices.
+              window: Moving average window size.
+
+          Returns:
+              List of moving average values.
+          """
+      ```
+
+59. **安全漏洞扫描**
+    - **审查点**：使用 `ruff` 的安全规则集 (S) 检测潜在安全问题：
+      - 硬编码密码 (S105/S106)
+      - SQL 注入风险 (S608)
+      - 不安全的随机数 (S311)
+    - **正例**：
+      ```python
+      password = os.environ.get("DB_PASSWORD")  # 从环境变量获取
+      ```
+    - **反例**：
+      ```python
+      password = "hardcoded_secret"  # S105: 硬编码密码
       ```
