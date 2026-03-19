@@ -302,7 +302,140 @@ except Exception as e:
 
 ---
 
-## 九、检查清单
+## 九、测试用例原则
+
+### 9.1 测试覆盖要求
+
+**原则**：所有新增代码、修改代码必须配套自动化测试用例。
+
+| 代码类型 | 测试要求 | 覆盖率目标 |
+|----------|----------|------------|
+| DAO 层方法 | 单元测试 + 集成测试 | ≥ 80% |
+| 服务层方法 | 单元测试 + Mock | ≥ 70% |
+| 数据源层方法 | 单元测试 + Mock API | ≥ 80% |
+| 工具函数 | 单元测试 | ≥ 90% |
+
+### 9.2 测试类型
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  单元测试 (tests/unit/)                                      │
+│  - 测试单个函数/方法                                          │
+│  - 使用 Mock 隔离外部依赖                                     │
+│  - 快速执行，无数据库连接                                      │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  集成测试 (tests/integration/)                               │
+│  - 测试模块间交互                                             │
+│  - 使用测试数据库                                             │
+│  - 验证数据流完整性                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.3 测试命名规范
+
+```python
+# 测试文件命名：test_<module_name>.py
+# 测试类命名：Test<ClassName>
+# 测试方法命名：test_<method_name>_<scenario>_<expected_result>
+
+class TestMacroSyncStrategy:
+    def test_merge_macro_data_with_valid_data_returns_merged_df(self):
+        ...
+    
+    def test_merge_macro_data_with_empty_cpi_returns_m2_only(self):
+        ...
+    
+    def test_merge_indicator_with_missing_period_column_logs_warning(self):
+        ...
+```
+
+### 9.4 测试数据管理
+
+```python
+# 使用 fixture 管理测试数据
+import pytest
+
+@pytest.fixture
+def sample_cpi_data():
+    """返回模拟的 CPI 数据"""
+    return pd.DataFrame({
+        "period": ["202401", "202402"],
+        "cpi": [101.5, 102.3]
+    })
+
+@pytest.fixture
+def sample_ppi_data():
+    """返回模拟的 PPI 数据"""
+    return pd.DataFrame({
+        "period": ["202401", "202402"],
+        "ppi": [-1.5, -1.2]
+    })
+
+def test_merge_macro_data(sample_cpi_data, sample_ppi_data):
+    result = MacroSyncStrategy._merge_macro_data(None, sample_cpi_data, sample_ppi_data)
+    assert result is not None
+    assert "period" in result.columns
+```
+
+### 9.5 Mock 使用规范
+
+```python
+from unittest.mock import AsyncMock, MagicMock, patch
+
+# Mock 异步方法
+@pytest.mark.asyncio
+async def test_save_macro_economy():
+    dao = MacroDao(engine)
+    dao._save_upsert = AsyncMock(return_value=10)
+    
+    df = pd.DataFrame({"period": ["202401"], "cpi": [101.5]})
+    result = await dao.save_macro_economy(df)
+    
+    assert result == 10
+    dao._save_upsert.assert_called_once()
+
+# Mock 外部 API
+@patch("data.tushare_client.TushareClient._handle_api_call")
+def test_get_cpi_data(mock_api):
+    mock_api.return_value = pd.DataFrame({
+        "month": ["202401"],
+        "nt_val": [101.5]
+    })
+    # 测试逻辑...
+```
+
+### 9.6 测试执行要求
+
+```bash
+# 运行所有测试
+pytest
+
+# 运行指定模块测试
+pytest tests/unit/test_macro.py
+
+# 运行并生成覆盖率报告
+pytest --cov=data --cov=services --cov-report=html
+
+# 运行快速测试（跳过集成测试）
+pytest -m "not integration"
+```
+
+### 9.7 测试检查清单
+
+每次代码提交前，请确认：
+
+- [ ] 新增方法是否有对应测试用例？
+- [ ] 修改的方法是否更新了测试用例？
+- [ ] 边界条件是否覆盖（空值、异常值）？
+- [ ] 测试是否独立（不依赖执行顺序）？
+- [ ] 测试命名是否清晰表达意图？
+- [ ] 是否使用 Mock 隔离外部依赖？
+
+---
+
+## 十、检查清单
 
 每次代码修改前，请确认：
 
@@ -314,10 +447,11 @@ except Exception as e:
 - [ ] SQL 是否使用参数化查询？
 - [ ] 异步操作是否正确使用线程池？
 - [ ] 异常是否正确处理和传播？
+- [ ] 新增/修改代码是否有测试用例？
 
 ---
 
-## 十、参考文件
+## 十一、参考文件
 
 | 文件 | 说明 |
 |------|------|
