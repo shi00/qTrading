@@ -31,6 +31,9 @@ class TushareClient:
         "block_trade": {"vol": "volume"},
         "limit_list": {"limit": "limit_type"},
         "suspend_d": {"suspend_type": "suspend_type_name"},
+        "cn_cpi": {"month": "period", "nt_val": "cpi"},
+        "cn_ppi": {"month": "period", "ppi_yoy": "ppi"},
+        "cn_m": {"month": "period"},
     }
 
     def __new__(cls, token=None):

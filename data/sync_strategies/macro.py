@@ -95,16 +95,22 @@ class MacroSyncStrategy(ISyncStrategy):
 
     @classmethod
     def _merge_macro_data(cls, df_m2, df_cpi, df_ppi):
-        """Merge M2/CPI/PPI DataFrames on period column."""
+        """
+        Merge M2/CPI/PPI DataFrames on period column.
+        
+        Note: Column renaming is handled by TushareClient._COLUMN_RENAMES:
+        - cn_m: month -> period
+        - cn_cpi: month -> period, nt_val -> cpi
+        - cn_ppi: month -> period, ppi_yoy -> ppi
+        """
         merged = None
 
         if df_m2 is not None and not df_m2.empty:
-            df_m2 = df_m2.rename(columns={"month": "period"})
             available = [c for c in cls._M2_COLUMNS if c in df_m2.columns]
             merged = df_m2[available].copy()
 
-        merged = cls._merge_indicator(merged, df_cpi, "nt_val", "cpi")
-        merged = cls._merge_indicator(merged, df_ppi, "ppi_yoy", "ppi")
+        merged = cls._merge_indicator(merged, df_cpi, "cpi")
+        merged = cls._merge_indicator(merged, df_ppi, "ppi")
 
         if merged is not None and not merged.empty:
             if "period" not in merged.columns:
@@ -117,17 +123,26 @@ class MacroSyncStrategy(ISyncStrategy):
         return merged
 
     @staticmethod
-    def _merge_indicator(merged, df, source_col, target_col):
-        """Merge a single indicator DataFrame into the merged result."""
+    def _merge_indicator(merged, df, target_col):
+        """
+        Merge a single indicator DataFrame into the merged result.
+        
+        Args:
+            merged: Existing merged DataFrame or None
+            df: Indicator DataFrame (columns already renamed by TushareClient._COLUMN_RENAMES)
+            target_col: Target column name (e.g., 'cpi', 'ppi')
+        """
         if df is None or df.empty:
             return merged
 
-        df = df.rename(columns={"month": "period", source_col: target_col})
         if target_col not in df.columns:
+            logger.warning(
+                f"[MacroSync] _merge_indicator | '{target_col}' column not found in data, skipping merge"
+            )
             return merged
         if "period" not in df.columns:
             logger.warning(
-                f"[MacroSync] _merge_indicator | 'month' column not found in {target_col} data, skipping merge"
+                f"[MacroSync] _merge_indicator | 'period' column not found in {target_col} data, skipping merge"
             )
             return merged
 
