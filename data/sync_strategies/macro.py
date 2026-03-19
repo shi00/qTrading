@@ -106,6 +106,14 @@ class MacroSyncStrategy(ISyncStrategy):
         merged = cls._merge_indicator(merged, df_cpi, "nt_val", "cpi")
         merged = cls._merge_indicator(merged, df_ppi, "ppi_yoy", "ppi")
 
+        if merged is not None and not merged.empty:
+            if "period" not in merged.columns:
+                logger.warning(
+                    "[MacroSync] _merge_macro_data | 'period' column missing after merge, returning None"
+                )
+                return None
+            merged = merged.dropna(subset=["period"])
+
         return merged
 
     @staticmethod
@@ -116,6 +124,11 @@ class MacroSyncStrategy(ISyncStrategy):
 
         df = df.rename(columns={"month": "period", source_col: target_col})
         if target_col not in df.columns:
+            return merged
+        if "period" not in df.columns:
+            logger.warning(
+                f"[MacroSync] _merge_indicator | 'month' column not found in {target_col} data, skipping merge"
+            )
             return merged
 
         indicator = df[["period", target_col]].drop_duplicates(subset="period")
