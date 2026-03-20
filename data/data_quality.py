@@ -58,7 +58,11 @@ class DataQualityService:
             & (trade_cal["cal_date"] <= end_date_obj)
         )
 
-        expected_dates = set(trade_cal[mask]["cal_date"])
+        cal_dates = trade_cal.loc[mask, "cal_date"]
+        if pd.api.types.is_datetime64_any_dtype(cal_dates):
+            expected_dates = set(cal_dates.dt.date)
+        else:
+            expected_dates = set(pd.to_datetime(cal_dates, errors='coerce').dt.date)
 
         missing = expected_dates - target_dates
         missing_list = sorted(list(missing))

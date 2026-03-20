@@ -7,6 +7,7 @@ import pandas as pd
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -210,10 +211,8 @@ class BaseDao:
 
         if has_updated_at and "updated_at" not in columns:
             columns = list(columns) + ["updated_at"]
-            from datetime import datetime
 
-            now = datetime.now().replace(tzinfo=None)
-            # Use .assign to safely create a copy with the new column for the slice we need
+            now = get_now().replace(tzinfo=None)
             df_slice = df.assign(updated_at=now)[columns]
         else:
             # If the dataframe already has updated_at or the table doesn't need it, just slice
