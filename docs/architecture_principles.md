@@ -12,31 +12,36 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  UI 层 (ui/)                                                 │
-│  - 用户界面组件                                               │
+│  UI 层 (ui/views, ui/components)                             │
+│  - 用户界面组件渲染                                            │
 │  - 事件处理                                                  │
-│  - 调用服务层                                                │
+│  - 绑定 ViewModel，监听数据更新                                │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  服务层 (services/)                                          │
-│  - 业务逻辑处理                                               │
-│  - 任务调度                                                  │
-│  - 调用 DAO 层                                               │
+│  视图模型 / 协调层 (ui/viewmodels, ui/controllers)              │
+│  - 状态管理                                                  │
+│  - 通过观察者模式 (Pub/Sub) 订阅后台服务的数据                    │
+│  - 隔离 UI 层对业务逻辑的直接阻断式调用                            │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  DAO 层 (data/daos/)                                         │
-│  - 数据访问抽象                                               │
-│  - SQL 执行                                                  │
-│  - 类型转换                                                  │
+│  服务层 (services/, data/news_subscription.py)                │
+│  - 后台轮询、业务逻辑处理与任务调度 (TaskManager)                  │
+│  - 提供 add_listener 等发布-订阅接口                           │
+│  - 业务流转中调用 DAO 层/外部 API                             │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  数据源层 (data/tushare_client.py)                           │
-│  - 外部 API 调用                                              │
-│  - 字段映射                                                  │
-│  - 数据获取                                                  │
+│  DAO 门面 (data/cache_manager.py)                            │
+│  - 聚合具体的具体领域 DAO (StockDao, MarketDao 等)              │
+│  - 数据库引擎生命周期、线程锁、Alembic 迁移调度                   │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  DAO 层与数据源 (data/daos/, data/tushare_client.py)           │
+│  - BaseDao (防并发写入、UPSERT 封装、内存序列化)                │
+│  - TushareClient (令牌桶限流、线程安全日历缓存、异常/网络超时重试)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,10 +49,12 @@
 
 | 层次 | 职责 | 禁止行为 |
 |------|------|----------|
-| UI 层 | 用户交互、事件处理、调用服务层 | 直接访问 DAO、直接操作数据库 |
-| 服务层 | 业务逻辑、任务调度、调用 DAO 层 | 直接执行 SQL、手动格式化日期 |
-| DAO 层 | 数据访问、SQL 执行、类型转换 | 调用外部 API、处理业务逻辑 |
-| 数据源层 | API 调用、字段映射、数据获取 | 处理业务逻辑、直接写入数据库 |
+| UI 层 | 用户交互、事件处理、数据呈现 | 直接访问 DAO、直接在 UI 线程执行长耗时同步 I/O |
+| 视图模型层 | 管理组件局部状态与全局服务订阅，充当视图与服务的桥梁 | 编写数据库游标操作、直接构造/执行 SQL |
+| 服务层 | 后台数据同步、数据处理策略、观察者派发、定时任务调度 | 直接拼接或执行 SQL，跨过 CacheManager 调用底层库 |
+| DAO 门面层 | `CacheManager` 作为聚合网关，控制数据库 Engine 与迁移生命周期 | 携带复杂的业务判定逻辑 (如新闻文本解析 AI 标签) |
+| DAO 层 | `BaseDao` 基类及其派生类，防并发、参数化查询及 UPSERT 抽象 | 调用外部 API、进行网络 I/O |
+| 数据源层 | API 限流请求、双检锁(DCL)日历缓存、基础字段清洗重命名 | 处理业务聚合逻辑、直接使用 SQL 写入数据库 |
 
 ---
 
@@ -206,33 +213,51 @@ await self._save_upsert(
 
 ## 六、异步处理原则
 
-### 6.1 线程池使用
+**原则**：为了防止大量数据转换和同步网络调用阻塞主 Event Loop，代码必须对不同类型的耗时操作进行物理线程池隔离卸载。
 
-| 任务类型 | 线程池 | 说明 |
+| 任务类型 | 线程池枚举 | 适用场景及要求 |
 |----------|--------|------|
-| CPU 密集型 | `TaskType.CPU` | pandas 操作、数据转换 |
-| IO 密集型 | `TaskType.IO` | HTTP 请求、文件操作 |
+| CPU 密集型 | `TaskType.CPU` | Pandas DataFrame 数据构造、过滤，以及 `pd.to_datetime` 日期格式强转等开销极高的运算。 |
+| IO 密集型 | `TaskType.IO` | 同步的第三方库调用 (如 Tushare 官方 SDK)、文件读写、Alembic 升级命令调度。 |
 
+**正确示例**：
 ```python
 from utils.thread_pool import ThreadPoolManager, TaskType
 
-# CPU 密集型操作
+# 1. CPU 密集型操作 (如 DAO 层的 Pandas 转换)
 result = await ThreadPoolManager().run_async(
     TaskType.CPU, pd.DataFrame, rows, columns=cols,
 )
+
+# 2. IO 密集型操作 (如同步的第三方 HTTP Client)
+# data_src._handle_api_call 中
+result = await loop.run_in_executor(
+    ThreadPoolManager().io_pool, functools.partial(func, **kwargs),
+)
 ```
 
-### 6.2 异步上下文
+### 6.2 异步上下文与状态锁定
 
 ```python
-# ✅ 正确：使用 async with 管理连接
+# ✅ 正确：使用 async with 管理数据库生命周期
 async with self.engine.begin() as conn:
     await conn.execute(stmt, records)
 
-# ❌ 禁止：手动管理连接生命周期
+# ✅ 正确：核心单例必须包含初始化阶段的双重检查锁定机制(DCL)防穿透
+class ExampleService:
+    _instance = None
+    _lock = threading.Lock()
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+# ❌ 禁止：手动管理连接或在多协程共享单例的初期裸奔
 conn = await self.engine.connect()
 await conn.execute(stmt)
-await conn.close()  # 可能遗漏
+await conn.close()  # 可能因为异常遗漏
 ```
 
 ---
@@ -439,14 +464,16 @@ pytest -m "not integration"
 
 每次代码修改前，请确认：
 
-- [ ] 是否遵循分层架构？
+- [ ] 是否在并发服务启动类中合理套用了防并发初始化的锁隔离？
+- [ ] UI 层是否严守通过 ViewModel 与基础服务沟通的限界（而非越级裸持 DAO）？
 - [ ] 字段映射是否在数据源层统一处理？
-- [ ] 时区处理是否一致（感知/无关）？
-- [ ] 日期是否以原生对象传递？
-- [ ] 数据库操作是否通过 DAO 层？
-- [ ] SQL 是否使用参数化查询？
-- [ ] 异步操作是否正确使用线程池？
-- [ ] 异常是否正确处理和传播？
+- [ ] 时区处理是否一致（内存使用 CST 感知，读写屏蔽差异）？
+- [ ] 日期是否以原生对象传递而未进行魔术字符串格式化？
+- [ ] 数据库操作是否完全经由 DAO 并在 `CacheManager` 中获得统一接管？
+- [ ] 原始 SQL 以及对 `_write_db`/`_read_db` 的访问代码是否已经从服务层绝迹？
+- [ ] SQL 是否使用参数化查询防御注入？
+- [ ] 复杂 Pandas 操作与同步 HTTP 调用是否被正确卸载至 `ThreadPoolManager` 的适当工作池？
+- [ ] 异常是否正确处理和传播（含网络超时退避与令牌桶容错等机制有效生效）？
 - [ ] 新增/修改代码是否有测试用例？
 
 ---
