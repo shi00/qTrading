@@ -1,8 +1,12 @@
+import logging
+
 import flet as ft
 import pandas as pd
 
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+
+logger = logging.getLogger(__name__)
 
 
 class NewsFeed(ft.Container):
@@ -132,6 +136,50 @@ class NewsFeed(ft.Container):
         if self.page:
             self.news_list.update()
 
+    def _translate_tag(self, raw_tag: str) -> str:
+        """Translate tag using I18n with fallback."""
+        if not raw_tag:
+            return ""
+        tags = [t.strip() for t in raw_tag.split(",") if t.strip()]
+        translated_parts = []
+        for t in tags:
+            tk = f"tag_{t.lower()}"
+            tv = I18n.get(tk, default=t)
+            translated_parts.append(tv)
+        return ",".join(translated_parts) if translated_parts else raw_tag
+
+    def update_news_tag(self, content: str, tags: str):
+        """
+        Update tag for a single news item by content match (TAG_UPDATE).
+        """
+        if not content or not self.news_list.controls:
+            return
+
+        translated_tag = self._translate_tag(tags)
+
+        for item in self.news_list.controls:
+            if item == self.load_more_btn:
+                continue
+            try:
+                col = item.content
+                if not isinstance(col, ft.Column):
+                    continue
+                row = col.controls[0] if col.controls else None
+                content_text = col.controls[1] if len(col.controls) > 1 else None
+                if not isinstance(row, ft.Row) or not isinstance(content_text, ft.Text):
+                    continue
+                if content_text.value != content:
+                    continue
+                for row_ctrl in row.controls:
+                    if isinstance(row_ctrl, ft.Text) and row_ctrl.weight == ft.FontWeight.BOLD:
+                        row_ctrl.value = translated_tag
+                        if self.page:
+                            self.news_list.update()
+                        return
+            except Exception as e:
+                logger.warning(f"[NewsFeed] Error updating tag: {e}")
+                continue
+
     def prepend_news(self, news_data: pd.DataFrame):
         """
         Insert new items at the top (Real-time updates).
@@ -197,23 +245,11 @@ class NewsFeed(ft.Container):
 
     def _build_news_item(self, row):
         raw_tag = row.get("tags", "") or ""
-
-        # We first split multiple tags. E.g "Stock, Policy" -> ["Stock", "Policy"]
-        tags = [t.strip() for t in raw_tag.split(",") if t.strip()]
-        translated_parts = []
-        for t in tags:
-            # Only use I18n if it's a known short code (e.g. stock, policy),
-            # Otherwise we pass the raw tag itself as the default fallback to prevent noisy "Missing translation" warnings
-            tk = f"tag_{t.lower()}"
-            tv = I18n.get(tk, default=t)
-            translated_parts.append(tv)
-
-        translated_tag = ",".join(translated_parts) if translated_parts else raw_tag
+        translated_tag = self._translate_tag(raw_tag)
 
         content = str(row.get("content", "") or "")
         time_str = str(row.get("publish_time", "") or "")
 
-        # Highlighting logic for positive news
         is_positive = "利好" in content or "Up" in content or "Gain" in content
         bg_color = (
             ft.Colors.with_opacity(0.1, AppColors.UP)

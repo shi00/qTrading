@@ -4,6 +4,8 @@ import logging
 import flet as ft
 import pandas as pd
 
+from data.cache_manager import CacheManager
+from data.news_subscription import NewsUpdateType
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.i18n import I18n
@@ -125,17 +127,22 @@ class HomeView(ft.Container):
             self._is_visible = visible
             logger.debug(f"[HomeView] Visibility | changed to: {visible}")
 
-    def refresh_news_if_visible(self):
-        self._run_if_visible(self._refresh_news_data, "Refreshing news list")
+    def refresh_news_if_visible(self, update_type=None, data=None):
+        if update_type == NewsUpdateType.TAG_UPDATE:
+            self._update_news_tag(data)
+        elif update_type == NewsUpdateType.NEW_ITEM:
+            self._run_if_visible(self._prepend_new_news, "Prepending new news", data)
+        else:
+            self._run_if_visible(self._refresh_news_data, "Refreshing news list")
 
     def refresh_market_if_visible(self):
         self._run_if_visible(self._refresh_market_data, "Refreshing market data")
 
-    def _run_if_visible(self, task_func, log_msg="Refreshing"):
+    def _run_if_visible(self, task_func, log_msg="Refreshing", data=None):
         if not self._is_visible or not self._is_mounted:
             return
         if self.page:
-            self.page.run_task(task_func)
+            self.page.run_task(task_func, data)
 
     def _on_broadcast_message(self, message):
         if message == "cache_cleared":
@@ -159,6 +166,29 @@ class HomeView(ft.Container):
         else:
             # Update button state (remove it if no more)
             self.news_feed.append_news(pd.DataFrame(), has_more)
+
+    def _update_news_tag(self, data):
+        """Update tag for a single news item (TAG_UPDATE)"""
+        if not data:
+            return
+        content = data.get("content", "")
+        tags = data.get("tags", "")
+        if content:
+            self.news_feed.update_news_tag(content, tags)
+
+    async def _prepend_new_news(self, data=None):
+        """Prepend new news items (NEW_ITEM) - insert at top without full refresh"""
+        if not data:
+            return
+
+        rows = []
+        for item in data:
+            normalized = CacheManager.normalize_news_item(item, default_source="CLS")
+            rows.append(normalized)
+
+        if rows:
+            news_df = pd.DataFrame(rows)
+            self.news_feed.prepend_news(news_df)
 
     def refresh_locale(self):
         """Update strings on locale change"""
@@ -208,7 +238,7 @@ class HomeView(ft.Container):
         await self._refresh_market_data()
         await self._refresh_news_data()
 
-    async def _refresh_market_data(self):
+    async def _refresh_market_data(self, _data=None):
         try:
             # VM handles retry logic if needed, or we just get cached
             data = await self.vm.load_market_data()
@@ -225,7 +255,7 @@ class HomeView(ft.Container):
         except Exception as e:
             logger.error(f"[HomeView] Market | ❌ Load failed: {e}", exc_info=True)
 
-    async def _refresh_news_data(self):
+    async def _refresh_news_data(self, _data=None):
         try:
             news_data, has_more = await self.vm.refresh_news()
             self.news_feed.set_news(news_data, has_more)

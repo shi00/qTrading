@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 import logging
 import threading
 
@@ -9,6 +10,12 @@ from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
+
+
+class NewsUpdateType:
+    NEW_ITEM = "new_item"
+    TAG_UPDATE = "tag_update"
+    INITIAL = "initial"
 
 
 class NewsSubscriptionService:
@@ -246,10 +253,11 @@ class NewsSubscriptionService:
                 )
                 await self.cache.save_market_news(normalized, wait=True)
 
-                # 3. Notify Listeners (Optional: to refresh UI with tags)
-                # Since UI might already have the raw news, this update might be subtle.
-                # If HomeView listens to DB changes or we just trigger a refresh:
-                self._notify_listeners()
+                # 3. Notify Listeners (TAG_UPDATE: only update tags, no full refresh)
+                self._notify_listeners(
+                    update_type=NewsUpdateType.TAG_UPDATE,
+                    data={"content": content, "tags": tags},
+                )
 
                 self.processing_queue.task_done()
 
@@ -266,19 +274,24 @@ class NewsSubscriptionService:
                 # Prevent tight error loop logging
                 await asyncio.sleep(5.0)
 
-    def _notify_listeners(self, listeners=None):
+    def _notify_listeners(self, listeners=None, update_type=None, data=None):
         target = listeners if listeners else self._listeners
         if not target:
             return
 
-        # CC-05: Track listener errors to prevent log flooding
         if not hasattr(self, "_listener_errors"):
             self._listener_errors = {}
 
         for listener in list(target):
             try:
-                listener()
-                # Reset error count on success
+                sig = inspect.signature(listener)
+                param_count = len(sig.parameters)
+                if param_count >= 2:
+                    listener(update_type, data)
+                elif param_count == 1:
+                    listener(update_type)
+                else:
+                    listener()
                 if listener in self._listener_errors:
                     del self._listener_errors[listener]
             except Exception as e:
@@ -350,17 +363,19 @@ class NewsSubscriptionService:
                     "[NewsService] Initial sync complete, queued for AI processing...",
                 )
 
-                # Notify listeners immediately (shows raw news)
-                self._notify_listeners()
+                # Notify listeners immediately (INITIAL: full refresh for initial load)
+                self._notify_listeners(update_type=NewsUpdateType.INITIAL)
                 return
 
             # Polling: Process all returned items to catch missed ones
             new_items_found = False
+            new_items = []
             for item in reversed(news_list):
                 h = get_hash(item)
                 if h not in self._seen_hashes:
                     self._seen_hashes.add(h)
                     new_items_found = True
+                    new_items.append(item)
 
                     # Maintain bounds
                     if len(self._seen_hashes) > self._MAX_SEEN:
@@ -400,8 +415,11 @@ class NewsSubscriptionService:
                                 logger.error(f"[NewsService] Alert listener error: {e}")
 
             if new_items_found:
-                # Notify UI of new content (Raw)
-                self._notify_listeners()
+                # Notify UI of new content (NEW_ITEM: prepend new news)
+                self._notify_listeners(
+                    update_type=NewsUpdateType.NEW_ITEM,
+                    data=new_items,
+                )
 
         except Exception as e:
             logger.warning(f"[NewsService] Poll failed: {e}", exc_info=True)

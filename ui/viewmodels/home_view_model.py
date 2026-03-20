@@ -5,7 +5,7 @@ import pandas as pd
 
 from data.data_processor import DataProcessor
 from data.market_data_service import MarketDataService
-from data.news_subscription import NewsSubscriptionService
+from data.news_subscription import NewsSubscriptionService, NewsUpdateType
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -56,9 +56,9 @@ class HomeViewModel:
             logger.warning(f"[HomeVM] Dispose error: {e}", exc_info=True)
 
     # --- Service Event Handlers ---
-    def _on_news_service_update(self):
+    def _on_news_service_update(self, update_type=None, data=None):
         if self.on_news_update:
-            self.on_news_update()
+            self.on_news_update(update_type, data)
 
     def _on_market_service_update(self):
         if self.on_market_update:
