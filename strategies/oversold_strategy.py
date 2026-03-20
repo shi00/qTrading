@@ -10,6 +10,7 @@ from strategies.base_strategy import BaseStrategy, register_strategy
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
+from utils.time_utils import parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
         # Safely extract native date object for math
         if isinstance(end_date, str):
-            end_date_obj = datetime.datetime.strptime(end_date.replace("-", ""), "%Y%m%d").date()
+            end_date_obj = parse_date(end_date.replace("-", "")).date()
         elif isinstance(end_date, datetime.datetime):
             end_date_obj = end_date.date()
         else:

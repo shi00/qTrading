@@ -18,7 +18,7 @@ from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +308,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             last_sync = status.get("last_sync_date")
             if isinstance(last_sync, str):
-                last_sync = datetime.datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S")
+                last_sync = parse_date(last_sync)
             days_since = (get_now() - last_sync.replace(tzinfo=None)).days
 
             if days_since >= 30:

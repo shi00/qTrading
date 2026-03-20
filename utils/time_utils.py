@@ -17,7 +17,7 @@ def get_now() -> datetime.datetime:
 def parse_date(date_input, fmt="%Y%m%d") -> datetime.datetime:
     """
     Parse a date input and make it CST-aware.
-    Supports: datetime.date, datetime.datetime, str (YYYYMMDD or YYYY-MM-DD).
+    Supports: datetime.date, datetime.datetime, str (YYYYMMDD, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS).
     Prevents TypeError when subtracting from get_now() (which is timezone-aware).
     """
     if isinstance(date_input, datetime.datetime):
@@ -27,7 +27,9 @@ def parse_date(date_input, fmt="%Y%m%d") -> datetime.datetime:
     if isinstance(date_input, datetime.date):
         return CST_TZ.localize(datetime.datetime.combine(date_input, datetime.time()))
     date_str = str(date_input)
-    if len(date_str) == 10 and '-' in date_str:
+    if len(date_str) == 19 and '-' in date_str:
+        fmt = "%Y-%m-%d %H:%M:%S"
+    elif len(date_str) == 10 and '-' in date_str:
         fmt = "%Y-%m-%d"
     return CST_TZ.localize(datetime.datetime.strptime(date_str, fmt))
 

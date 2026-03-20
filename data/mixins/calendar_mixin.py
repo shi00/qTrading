@@ -19,7 +19,7 @@ import pandas as pd
 
 from data.constants import MARKET_CLOSE_HOUR
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 if TYPE_CHECKING:
     from data.cache_manager import CacheManager
@@ -98,7 +98,7 @@ class CalendarMixin:
         # Coerce strings securely if passed by accident
         def to_date(d):
             if isinstance(d, str):
-                return datetime.datetime.strptime(d.replace("-", ""), "%Y%m%d").date()
+                return parse_date(d.replace("-", "")).date()
             if isinstance(d, datetime.datetime):
                 return d.date()
             return d
@@ -167,7 +167,7 @@ class CalendarMixin:
                 if d is None:
                     return None
                 if isinstance(d, str):
-                    return datetime.datetime.strptime(d.replace("-", ""), "%Y%m%d").date()
+                    return parse_date(d.replace("-", "")).date()
                 if isinstance(d, datetime.datetime):
                     return d.date()
                 return d

@@ -4,6 +4,8 @@ import logging
 import pandas as pd
 from pandas_market_calendars import get_calendar
 
+from utils.time_utils import parse_date
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +37,7 @@ class OfflineCalendar:
             if cal is None:
                 # Fallback if library fails
                 if isinstance(date_obj, str):
-                    date_obj = datetime.datetime.strptime(date_obj, "%Y%m%d")
+                    date_obj = parse_date(date_obj)
                 if hasattr(date_obj, "weekday"):
                     return date_obj.weekday() < 5
                 return True

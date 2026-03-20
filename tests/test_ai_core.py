@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.news_fetcher import NewsFetcher
 from data.review_manager import ReviewManager
 from strategies.ai_strategy import AISelectionStrategy
+from utils.time_utils import get_now
 
 # ==============================================================================
 # FIXTURES
@@ -27,7 +28,7 @@ from strategies.ai_strategy import AISelectionStrategy
 @pytest.fixture
 def sample_screening_df():
     """Sample DataFrame mimicking DataProcessor output"""
-    today = datetime.now().strftime("%Y%m%d")
+    today = get_now().strftime("%Y%m%d")
     return pd.DataFrame(
         [
             {

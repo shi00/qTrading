@@ -80,11 +80,10 @@ class MacroSyncStrategy(ISyncStrategy):
                 logger.debug(f"[MacroSync] Monthly | Saved {count} macro records")
                 latest_period = merged["period"].max() if "period" in merged.columns else get_now().date()
                 if isinstance(latest_period, str):
-                    from datetime import datetime as dt_module
                     if len(latest_period) == 6:
-                        latest_period = dt_module.strptime(latest_period, "%Y%m").date()
+                        latest_period = parse_date(latest_period, "%Y%m").date()
                     else:
-                        latest_period = dt_module.strptime(latest_period, "%Y%m%d").date()
+                        latest_period = parse_date(latest_period).date()
                 await self.context.cache.update_sync_status(
                     "macro_economy", latest_period, count or 0,
                 )

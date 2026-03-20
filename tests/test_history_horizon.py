@@ -6,6 +6,7 @@ import pytest
 from data.data_processor import DataProcessor
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.time_utils import get_now
 
 
 @pytest.mark.asyncio
@@ -17,11 +18,11 @@ async def test_config_and_calendar():
     print(f"Updated History Years: {ConfigHandler.get_init_history_years()}")
 
     dp = DataProcessor()
-    end_date = datetime.datetime.now().strftime("%Y%m%d")
+    end_date = get_now().strftime("%Y%m%d")
     # Test slicing
     years = ConfigHandler.get_init_history_years()
     rough_start = (
-        datetime.datetime.now() - datetime.timedelta(days=int(250 * years * 1.5))
+        get_now() - datetime.timedelta(days=int(250 * years * 1.5))
     ).strftime("%Y%m%d")
     all_dates = await dp.get_trade_dates(start_date=rough_start, end_date=end_date)
 

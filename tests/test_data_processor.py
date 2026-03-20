@@ -12,6 +12,7 @@ import pandas as pd
 from data.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.tushare_client import TushareClient
+from utils.time_utils import get_now
 
 
 class TestDataProcessor(unittest.TestCase):
@@ -350,8 +351,8 @@ class TestDataProcessor(unittest.TestCase):
                 {
                     "table_name": ["daily_quotes", "financial_reports"],
                     "last_data_date": [
-                        datetime.datetime.now().strftime("%Y%m%d"),
-                        datetime.datetime.now().strftime("%Y%m%d"),
+                        get_now().strftime("%Y%m%d"),
+                        get_now().strftime("%Y%m%d"),
                     ],
                     "record_count": [1000, 500],
                 },
@@ -735,7 +736,7 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_moneyflow_hsgt = AsyncMock(return_value=mock_result_df)
 
         # Pre-seed the _trade_cal_cache so that ensure_trade_cal sees a cache hit
-        today_str = datetime.datetime.now().strftime("%Y%m%d")
+        today_str = get_now().strftime("%Y%m%d")
         self.processor._trade_cal_cache = {"date": today_str}
 
         with patch.object(
@@ -963,7 +964,7 @@ class TestDataProcessor(unittest.TestCase):
             return_value=pd.DataFrame(
                 {
                     "table_name": ["daily_quotes"],
-                    "last_data_date": [dt.datetime.now().strftime("%Y%m%d")],
+                    "last_data_date": [get_now().strftime("%Y%m%d")],
                     "record_count": [1000],
                 },
             ),
