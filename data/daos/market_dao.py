@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 from .base_dao import BaseDao
@@ -11,14 +12,18 @@ class MarketDao(BaseDao):
     # --- Market News ---
     async def save_market_news(self, news_item, wait=False):
         """Save a single market news item."""
+        content = news_item.get("content", "") or ""
+        content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+
         sql = """
-              INSERT INTO market_news ("content","tags","publish_time","source","created_at")
-              VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-              ON CONFLICT("content","publish_time") DO
+              INSERT INTO market_news ("content","content_hash","tags","publish_time","source","created_at")
+              VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+              ON CONFLICT("content_hash","publish_time") DO
               UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags")
               """
         params = (
-            news_item.get("content"),
+            content,
+            content_hash,
             news_item.get("tags"),
             news_item.get("publish_time"),
             news_item.get("source", "Sina"),

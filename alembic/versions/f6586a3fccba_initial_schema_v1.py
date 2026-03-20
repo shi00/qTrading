@@ -257,12 +257,13 @@ def upgrade() -> None:
     op.create_table('market_news',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('content', sa.String(), nullable=True),
+    sa.Column('content_hash', sa.String(length=32), nullable=False),
     sa.Column('tags', sa.String(), nullable=True),
     sa.Column('publish_time', sa.DateTime(), nullable=True),
     sa.Column('source', sa.String(), nullable=True),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_market_news')),
-    sa.UniqueConstraint('content', 'publish_time', name='uq_market_news_content_pub')
+    sa.UniqueConstraint('content_hash', 'publish_time', name='uq_market_news_hash_pub')
     )
     op.create_table('moneyflow_daily',
     sa.Column('ts_code', sa.String(), nullable=False),

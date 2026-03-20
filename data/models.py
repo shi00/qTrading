@@ -245,13 +245,14 @@ class MarketNews(Base):
     __tablename__ = "market_news"
     id = Column(Integer, primary_key=True, autoincrement=True)
     content = Column(String)
+    content_hash = Column(String(32), nullable=False)
     tags = Column(String)
     publish_time = Column(DateTime(timezone=False))
     source = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("content", "publish_time", name="uq_market_news_content_pub"),
+        UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
     )
 
 

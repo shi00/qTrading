@@ -374,7 +374,9 @@ class TableViewerTab(ft.Container):
         self.btn_prev.disabled = loading or self.current_page <= 1
         self.btn_next.disabled = loading  # Will be updated after load
         self.table_selector.disabled = loading
-        self.update()
+        # Guard: only call update() if control is mounted to page
+        if self.page:
+            self.update()
 
     async def _load_schema_and_data(self):
         # Prevent concurrent loading (race condition guard)
@@ -383,8 +385,9 @@ class TableViewerTab(ft.Container):
             return
         self._is_loading = True
 
-        await self._toggle_loading(True)
         try:
+            await self._toggle_loading(True)
+
             # 1. Get Schema
             schema = await ThreadPoolManager().run_async(
                 TaskType.CPU, self.db_manager.get_table_schema, self.current_table,
@@ -463,7 +466,10 @@ class TableViewerTab(ft.Container):
                     I18n.get("data_err_load_schema", error="内部读取错误"), "error",
                 )
         finally:
-            await self._toggle_loading(False)
+            try:
+                await self._toggle_loading(False)
+            except Exception as toggle_err:
+                logger.debug(f"[_toggle_loading] finalization ignored: {toggle_err}")
             self._is_loading = False  # Release loading lock
 
     async def _refresh_data_rows(self):
@@ -1179,9 +1185,9 @@ class DataExplorerView(ft.Container):
 
             if self.page:
                 self.update()
-                # Trigger initial data load
-                # Ensure we don't block invalid state
-                await self.table_tab.did_mount_async()
+                # Yield to Flet event loop to ensure child controls are fully mounted
+                # before triggering data load (prevents 'Control must be added to page first')
+                await asyncio.sleep(0)
 
         except Exception as e:
             logger.error(f"Error building DataExplorerView: {e}")

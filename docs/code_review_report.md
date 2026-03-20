@@ -14,11 +14,13 @@
 
 | 优先级 | 问题数量 |
 |--------|----------|
-| 关键 (P0) | 3 |
+| 关键 (P0) | 2 |
 | 高优先级 (P1) | 8 |
 | 中优先级 (P2) | 5 |
-| 低优先级 (P3) | 2 |
+| 低优先级 (P3) | 3 |
 | **总计** | **18** |
+
+> **注**：原 P0-3（策略质量门控）经分析后降级为 P3，详见问题 19。
 
 ---
 
@@ -30,7 +32,8 @@
 |------|------|------|----------|--------------|
 | 1 | `data/daos/base_dao.py` | 215 | 使用 `datetime.now()` 而非 `get_now()`，与时区一致性原则冲突 | 替换为 `get_now().replace(tzinfo=None)` |
 | 2 | `data/data_quality.py` | 50-61 | `set(date_series.dt.date)` 与 `set(trade_cal["cal_date"])` 类型可能不一致，导致差集计算失效 | 确保 `trade_cal["cal_date"]` 已转换为 `date` 类型 |
-| 3 | `strategies/market.py` | 47-199 | 4 个策略类 (`TechnicalBreakoutStrategy`, `NorthboundStrategy`, `InstitutionalStrategy`, `BlockTradeStrategy`) 继承 `PolarsBaseStrategy`，但未独立添加 `@require_quality` 装饰器 | 虽然父类已有装饰器，但建议每个策略显式声明质量门控要求 |
+
+> **状态**：P0-1、P0-2 已修复并提交。
 
 ### 2.2 高优先级问题 (P1)
 
@@ -61,6 +64,7 @@
 |------|------|------|----------|--------------|
 | 17 | `strategies/ai_mixin.py` | 270, 434, 479-629 | 多处魔术数字（如 `0.7`, `1.3`, `1.5`, `5`, `60`）未提取为常量 | 提取为类常量或配置项 |
 | 18 | `data/sync_strategies/financial.py` | 57-730 | `_run_full_sync` 方法超过 100 行，职责过多 | 考虑拆分为多个私有方法 |
+| 19 | `strategies/market.py` | 47-199 | 4 个策略类继承 `PolarsBaseStrategy`，未独立添加 `@require_quality` 装饰器 | **已降级**：父类装饰器通过继承机制正确生效，功能无问题。建议在代码规范中记录模板方法模式的使用方式。 |
 
 ---
 
