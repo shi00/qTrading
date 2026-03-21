@@ -9,6 +9,7 @@ from data.cache_manager import CacheManager
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
 from data.news_fetcher import NewsFetcher
+from data.services.trade_calendar_service import TradeCalendarService
 from data.sync_strategies.base import SyncContext
 from data.sync_strategies.financial import FinancialSyncStrategy
 from data.sync_strategies.historical import HistoricalSyncStrategy
@@ -60,6 +61,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self._current_token = token
             self.api = TushareClient(token=token)
             self.cache = CacheManager()
+            
+            self.trade_calendar = TradeCalendarService(self.cache, self.api)
+            
             self._first_news_sync = True
             self._cancel_event = (
                 None  # ST-01: Lazy initialization to avoid loop binding issues
@@ -484,24 +488,24 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """
         Get market overview data for Home Screen.
         Returns Indices (SH, SZ, CYB) and Northbound Money Flow.
+        优先从缓存获取，缓存无数据时调用 API。
         """
         try:
             now = get_now()
             today_date = now.date()
-            start_date = today_date - datetime.timedelta(days=30)
 
-            await self.ensure_trade_cal(today_date)
+            latest_date = await self.trade_calendar.get_latest_trade_date()
+            if latest_date:
+                date = latest_date
+            else:
+                date = today_date
 
-            cache_df = await self.cache.get_trade_cal(
-                start_date=start_date, end_date=today_date, is_open=1,
-            )
-            date = today_date
-            if not cache_df.empty:
-                date = sorted(cache_df["cal_date"].tolist())[-1]
-
-            # Parallel Fetch
             async def get_idx(code, name_key):
-                df = await self.api.get_index_daily(ts_code=code, trade_date=date)
+                df = await self.cache.get_index_daily(ts_code=code, trade_date=date)
+                
+                if df is None or df.empty:
+                    df = await self.api.get_index_daily(ts_code=code, trade_date=date)
+                
                 name = I18n.get(name_key)
                 if df is not None and not df.empty:
                     row = df.iloc[0]
@@ -516,7 +520,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return {"name": name, "value": "-", "change": "-", "color": "grey"}
 
             async def get_hsgt():
-                df = await self.api.get_moneyflow_hsgt(trade_date=date)
+                df = await self.cache.get_moneyflow_hsgt(trade_date=date)
+                
+                if df is None or df.empty:
+                    df = await self.api.get_moneyflow_hsgt(trade_date=date)
+                
                 name = I18n.get("home_northbound")
                 if df is not None and not df.empty:
                     val = float(df.iloc[0]["north_money"])

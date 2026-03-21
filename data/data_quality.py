@@ -52,10 +52,16 @@ class DataQualityService:
         start_date_obj = start_date.date() if hasattr(start_date, 'date') else start_date
         end_date_obj = end_date.date() if hasattr(end_date, 'date') else end_date
 
+        # Convert trade_cal cal_date to datetime for proper comparison
+        if not pd.api.types.is_datetime64_any_dtype(trade_cal["cal_date"]):
+            trade_cal_dates = pd.to_datetime(trade_cal["cal_date"], errors="coerce")
+        else:
+            trade_cal_dates = trade_cal["cal_date"]
+
         mask = (
             (trade_cal["is_open"] == 1)
-            & (trade_cal["cal_date"] >= start_date_obj)
-            & (trade_cal["cal_date"] <= end_date_obj)
+            & (trade_cal_dates.dt.date >= start_date_obj)
+            & (trade_cal_dates.dt.date <= end_date_obj)
         )
 
         cal_dates = trade_cal.loc[mask, "cal_date"]

@@ -11,10 +11,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from data.data_processor import DataProcessor
 from data.review_manager import ReviewManager
-from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -232,10 +230,8 @@ class SchedulerService:
 
         # Check Trading Day
         try:
-            client = TushareClient()
-            is_trading = await ThreadPoolManager().run_async(
-                TaskType.IO, client.is_trading_day, today,
-            )
+            processor = DataProcessor()
+            is_trading = await processor.trade_calendar.is_trading_day(today)
             if not is_trading:
                 logger.info(
                     f"[Scheduler] Update skipped ({today_str} is not a trading day)",
@@ -305,10 +301,8 @@ class SchedulerService:
             return
 
         try:
-            client = TushareClient()
-            is_trading = await ThreadPoolManager().run_async(
-                TaskType.IO, client.is_trading_day, today,
-            )
+            processor = DataProcessor()
+            is_trading = await processor.trade_calendar.is_trading_day(today)
             if not is_trading:
                 logger.info(
                     f"[Scheduler] Prediction skipped ({today_str} is not a trading day)",

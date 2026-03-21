@@ -45,6 +45,7 @@ class BaseStrategy(ABC):
     def __init__(self, name_key: str, desc_key: str):
         self._name_key = name_key
         self._desc_key = desc_key
+        super().__init__()
 
     @property
     def name(self) -> str:

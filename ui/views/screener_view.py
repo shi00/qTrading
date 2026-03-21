@@ -697,6 +697,8 @@ class ScreenerView(ft.Container):
 
     def _render_strategy_params(self):
         """Dynamically render UI controls based on the selected strategy's parameter definitions."""
+        from ui.theme import PARAM_GROUP_ORDER, DEFAULT_GROUP_LABELS
+
         self.params_container.controls.clear()
 
         if not self.selected_strategy:
@@ -708,13 +710,105 @@ class ScreenerView(ft.Container):
             self.params_container.update()
             return
 
-        basic_controls = []
-        advanced_controls = []
+        groups = {g: [] for g in PARAM_GROUP_ORDER}
+        custom_groups = {}
+        group_labels = {}
 
         for p in params_def:
+            group = p.get("group", "default")
+            if group not in groups:
+                custom_groups[group] = p.get("group_label_key")
+                groups[group] = []
+            groups[group].append(p)
+            if group not in group_labels:
+                group_labels[group] = p.get("group_label_key")
+
+        rendered_groups = []
+
+        for group_name in PARAM_GROUP_ORDER:
+            if group_name == "default":
+                continue
+            if groups[group_name]:
+                group_controls = self._build_param_controls(groups[group_name])
+                if group_controls:
+                    title = self._resolve_group_title(group_name, group_labels.get(group_name))
+                    rendered_groups.append((group_name, title, group_controls))
+
+        if groups["default"]:
+            default_controls = self._build_param_controls(groups["default"])
+            if default_controls:
+                title = self._resolve_group_title("default", group_labels.get("default"))
+                rendered_groups.append(("default", title, default_controls))
+
+        for group_name in custom_groups:
+            if groups[group_name]:
+                group_controls = self._build_param_controls(groups[group_name])
+                if group_controls:
+                    title = self._resolve_group_title(group_name, custom_groups[group_name])
+                    rendered_groups.append((group_name, title, group_controls))
+
+        for group_name, title, controls in rendered_groups:
+            if group_name == "advanced":
+                continue
+            group_card = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(title, size=13, weight=ft.FontWeight.W_500, color=AppColors.TEXT_PRIMARY),
+                        ft.Divider(height=1, color=AppColors.DIVIDER),
+                        ft.Column(controls, spacing=8),
+                    ],
+                    spacing=8,
+                ),
+                padding=ft.padding.all(12),
+                bgcolor=AppColors.SURFACE_VARIANT,
+                border_radius=8,
+                margin=ft.margin.only(bottom=8),
+            )
+            self.params_container.controls.append(group_card)
+
+        if groups["advanced"]:
+            advanced_controls = self._build_param_controls(groups["advanced"])
+            if advanced_controls:
+                exp_tile = ft.ExpansionTile(
+                    title=ft.Text(
+                        I18n.get("ai_advanced_settings", "⚙️ 高级设置"),
+                        size=14,
+                        weight=ft.FontWeight.W_500,
+                    ),
+                    subtitle=ft.Text(
+                        I18n.get(
+                            "ai_advanced_settings_desc",
+                            "仅供专业用户调整的底层策略参数或大模型系统提示词",
+                        ),
+                        size=12,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    controls=advanced_controls,
+                    collapsed_text_color=AppColors.TEXT_PRIMARY,
+                    text_color=AppColors.PRIMARY,
+                    initially_expanded=False,
+                )
+                self.params_container.controls.append(exp_tile)
+
+        self.params_container.update()
+
+    def _resolve_group_title(self, group_name: str, label_key: str = None) -> str:
+        """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
+        from ui.theme import DEFAULT_GROUP_LABELS
+
+        if label_key:
+            return I18n.get(label_key)
+        if group_name in DEFAULT_GROUP_LABELS:
+            return DEFAULT_GROUP_LABELS[group_name]
+        return group_name
+
+    def _build_param_controls(self, params: list) -> list:
+        """Build UI controls for a list of parameter definitions."""
+        controls = []
+
+        for p in params:
             label = I18n.get(p.get("label_key", p["name"]))
             p_type = p.get("type", "number")
-            is_advanced = p_type == "textarea" or p.get("advanced")
 
             if p_type == "slider":
                 min_val = p.get("min", 0)
@@ -723,7 +817,6 @@ class ScreenerView(ft.Container):
                 step = p.get("step", 1)
                 divisions = int((max_val - min_val) / step) if step > 0 else 10
 
-                # Value display text — format consistently with on_change handler
                 init_display = (
                     int(default) if default == int(default) else round(default, 1)
                 )
@@ -738,7 +831,6 @@ class ScreenerView(ft.Container):
                         vt.value = f"{lbl}: {display}"
                         vt.update()
 
-                        # Trigger dynamic strategy description update
                         if self.selected_strategy:
                             strategy_obj = self.vm.strategy_mgr.get_strategy(
                                 self.selected_strategy,
@@ -762,14 +854,10 @@ class ScreenerView(ft.Container):
                     active_color=AppColors.PRIMARY,
                     on_change=make_on_change(value_text, label),
                 )
-                slider.data = p["name"]  # Store param name for collection
+                slider.data = p["name"]
 
-                if is_advanced:
-                    advanced_controls.append(value_text)
-                    advanced_controls.append(slider)
-                else:
-                    basic_controls.append(value_text)
-                    basic_controls.append(slider)
+                controls.append(value_text)
+                controls.append(slider)
 
             elif p_type == "number":
                 ctrl = ft.TextField(
@@ -783,10 +871,7 @@ class ScreenerView(ft.Container):
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
                 )
                 ctrl.data = p["name"]
-                if is_advanced:
-                    advanced_controls.append(ctrl)
-                else:
-                    basic_controls.append(ctrl)
+                controls.append(ctrl)
 
             elif p_type == "dropdown":
                 options = p.get("options", [])
@@ -801,10 +886,7 @@ class ScreenerView(ft.Container):
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
                 )
                 ctrl.data = p["name"]
-                if is_advanced:
-                    advanced_controls.append(ctrl)
-                else:
-                    basic_controls.append(ctrl)
+                controls.append(ctrl)
 
             elif p_type == "textarea":
                 if p["name"] == "ai_system_prompt" and self.selected_strategy:
@@ -830,7 +912,7 @@ class ScreenerView(ft.Container):
 
                 reset_btn = None
                 if p["name"] == "ai_system_prompt":
-                    ctrl.label = None  # Remove internal label to use custom Row label
+                    ctrl.label = None
 
                     def make_restore_default(strat):
                         def restore_default(e):
@@ -883,62 +965,36 @@ class ScreenerView(ft.Container):
                     )
 
                 ctrl.data = p["name"]
-                if is_advanced:
-                    if p["name"] == "ai_system_prompt" and reset_btn:
-                        wrapper = ft.Container(
-                            content=ft.Column(
-                                [
-                                    ft.Row(
-                                        [
-                                            ft.Text(
-                                                label,
-                                                size=12,
-                                                color=AppColors.TEXT_SECONDARY,
-                                            ),
-                                            ft.Container(expand=True),
-                                            save_btn,
-                                            reset_btn,
-                                        ],
-                                    ),
-                                    ctrl,
-                                ],
-                                spacing=5,
-                            ),
-                            margin=ft.margin.only(top=10, bottom=5),
-                        )
-                    else:
-                        wrapper = ft.Container(
-                            content=ctrl, margin=ft.margin.only(top=10, bottom=5),
-                        )
-                    advanced_controls.append(wrapper)
+                if p["name"] == "ai_system_prompt" and reset_btn:
+                    wrapper = ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Text(
+                                            label,
+                                            size=12,
+                                            color=AppColors.TEXT_SECONDARY,
+                                        ),
+                                        ft.Container(expand=True),
+                                        save_btn,
+                                        reset_btn,
+                                    ],
+                                ),
+                                ctrl,
+                            ],
+                            spacing=5,
+                        ),
+                        margin=ft.margin.only(top=10, bottom=5),
+                    )
+                    controls.append(wrapper)
                 else:
-                    basic_controls.append(ctrl)
+                    wrapper = ft.Container(
+                        content=ctrl, margin=ft.margin.only(top=10, bottom=5),
+                    )
+                    controls.append(wrapper)
 
-        self.params_container.controls.extend(basic_controls)
-
-        if advanced_controls:
-            exp_tile = ft.ExpansionTile(
-                title=ft.Text(
-                    I18n.get("ai_advanced_settings", "⚙️ 高级设置"),
-                    size=14,
-                    weight=ft.FontWeight.W_500,
-                ),
-                subtitle=ft.Text(
-                    I18n.get(
-                        "ai_advanced_settings_desc",
-                        "仅供专业用户调整的底层策略参数或大模型系统提示词",
-                    ),
-                    size=12,
-                    color=AppColors.TEXT_SECONDARY,
-                ),
-                controls=advanced_controls,
-                collapsed_text_color=AppColors.TEXT_PRIMARY,
-                text_color=AppColors.PRIMARY,
-                initially_expanded=False,
-            )
-            self.params_container.controls.append(exp_tile)
-
-        self.params_container.update()
+        return controls
 
     def _collect_params(self) -> dict:
         """Collect current parameter values from dynamic UI controls."""
@@ -1144,6 +1200,7 @@ class ScreenerView(ft.Container):
             "name": 120,
             "ai_score": 80,
             "ai_reason": 250,
+            "confidence": 70,
             "industry": 120,
             "strategy_name": 120,
         }

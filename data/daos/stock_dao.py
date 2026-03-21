@@ -92,6 +92,28 @@ class StockDao(BaseDao):
             return 0
         return df["cnt"].iloc[0] or 0
 
+    async def get_start_date_by_trade_days(self, end_date, trade_days: int):
+        """
+        Get the start date by looking back N trading days from end_date.
+
+        Args:
+            end_date: End date (date object)
+            trade_days: Number of trading days to look back
+
+        Returns:
+            date: The start date (N trading days before end_date)
+        """
+        sql = """
+            SELECT cal_date FROM trade_cal
+            WHERE is_open = 1 AND cal_date <= $1
+            ORDER BY cal_date DESC
+            LIMIT $2
+        """
+        df = await self._read_db(sql, (end_date, trade_days))
+        if df is None or df.empty or len(df) < trade_days:
+            return None
+        return df["cal_date"].iloc[-1]
+
     async def count_expected_rows(self, start_date, end_date):
         """
         Calculate expected rows: sum of trading days per stock after its list_date.

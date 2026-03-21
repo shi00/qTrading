@@ -380,6 +380,17 @@ class CacheManager:
             ts_code, start_date, end_date, limit,
         )
 
+    async def get_daily_indicators_bulk(
+        self, ts_code_list: list, start_date=None, end_date=None,
+    ):
+        """
+        批量获取多只股票的 daily_indicators 数据。
+        解决 N+1 查询问题。
+        """
+        return await self.market_dao.get_daily_indicators_bulk(
+            ts_code_list, start_date, end_date,
+        )
+
     async def get_latest_trade_date(self):
         await self.wait_for_maintenance()
         return await self.quote_dao.get_latest_trade_date()
@@ -679,6 +690,16 @@ class CacheManager:
     async def get_index_daily(self, ts_code=None, trade_date=None):
         return await self.quote_dao.get_index_daily(ts_code, trade_date)
 
+    async def get_index_daily_range(
+        self, ts_code_list: list, start_date=None, end_date=None,
+    ):
+        """
+        批量获取多只指数的日线数据。
+        """
+        return await self.quote_dao.get_index_daily_range(
+            ts_code_list, start_date, end_date,
+        )
+
     async def save_limit_list(self, df):
         return await self.quote_dao.save_limit_list(df)
 
@@ -748,6 +769,9 @@ class CacheManager:
 
     async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
         return await self.stock_dao.get_trade_cal(start_date, end_date, is_open)
+
+    async def get_start_date_by_trade_days(self, end_date, trade_days: int):
+        return await self.stock_dao.get_start_date_by_trade_days(end_date, trade_days)
 
     async def get_latest_northbound(self):
         return await self.quote_dao.get_latest_northbound()

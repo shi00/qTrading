@@ -120,6 +120,7 @@ COMMON_COLUMNS = {
     "ai_score": "col_ai_score",
     "ai_reason": "col_ai_reason",
     "thinking": "col_thinking",
+    "confidence": "col_confidence",
     # Technical Indicators (dynamic columns)
     "rsi_6": "col_rsi_6",
 }

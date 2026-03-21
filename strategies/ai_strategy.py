@@ -70,8 +70,8 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         pe = row.get("pe_ttm", "N/A")
         pct_chg = row.get("pct_chg", "N/A")
         return (
-            f"Selected by AI Active strategy: "
-            f"Turnover={turnover}% (high activity), "
-            f"PE(TTM)={pe} (profitable), "
-            f"Daily Change={pct_chg}%"
+            f"该股票由 AI 主动策略筛选："
+            f"换手率={turnover}%（高活跃度），"
+            f"PE(TTM)={pe}（盈利），"
+            f"日涨跌幅={pct_chg}%"
         )

@@ -601,3 +601,26 @@ def apply_page_theme(page: ft.Page, theme_name: str = None):
     # Step 3: 设置模式
     page.theme_mode = target_mode
     page.bgcolor = None  # 让 Flet 根据 ColorScheme.background 自动设置
+
+
+# ============================================================================
+# 策略参数分组常量 (Strategy Parameter Grouping Constants)
+# ============================================================================
+
+PARAM_GROUP_ORDER = [
+    "core_signal",
+    "volume_confirm",
+    "fundamental",
+    "risk_control",
+    "default",
+    "advanced",
+]
+
+DEFAULT_GROUP_LABELS = {
+    "core_signal": "🎯 核心触发信号",
+    "volume_confirm": "📊 量价资金确认",
+    "fundamental": "🏢 基本面滤网",
+    "risk_control": "🛑 严格风控红线",
+    "default": "🎛️ 基础设置",
+    "advanced": "⚙️ 高级调优",
+}

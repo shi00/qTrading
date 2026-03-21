@@ -5,6 +5,7 @@ Any strategy that inherits this Mixin gains Level-2 AI analysis capability.
 The strategy only needs to:
   1. Call `self.run_ai_analysis(candidates_df, context)` after its math filtering.
   2. Override `get_ai_context(row)` to inject strategy-specific context into the AI prompt.
+  3. (Optional) Register custom context builders via `register_context_builder()`.
 
 The Mixin handles:
   - Sequential analysis with streaming output support
@@ -12,23 +13,51 @@ The Mixin handles:
   - Graceful degradation when AI is not configured
   - Cancellation detection
   - Candidate count capping (cost control)
+  - Pluggable context builder mechanism for strategy-specific enhancements
 """
 
 import asyncio
 import logging
 import math
+from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Callable, Optional
 
 import pandas as pd
 
 from data.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from ui.i18n import I18n
-from utils.config_handler import ConfigHandler  # Used by get_ai_max_candidates
+from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PreFetchedContext:
+    """
+    Container for pre-fetched data shared across all stock analyses in a batch.
+    
+    This dataclass encapsulates all pre-fetched data to avoid parameter bloat
+    in method signatures and enable clean extension for future enhancements.
+    """
+    capital: dict = field(default_factory=dict)
+    history: dict = field(default_factory=dict)
+    concepts_map: dict = field(default_factory=dict)
+    news_tasks: dict = field(default_factory=dict)
+    history_context: str = ""
+    global_context: str = ""
+    trade_date: Optional[object] = None
+    
+    indicators: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sector_stats: dict = field(default_factory=dict)
+    market_context: dict = field(default_factory=dict)
+    market_context_str: str = ""
+
+
+ContextBuilder = Callable[[dict, PreFetchedContext], str]
 
 
 class AIStrategyMixin:
@@ -37,13 +66,59 @@ class AIStrategyMixin:
 
     Usage:
         class OversoldStrategy(BaseStrategy, AIStrategyMixin):
+            def __init__(self):
+                super().__init__()
+                # Register custom context builders
+                self.register_context_builder("turnover", self._build_turnover_context)
+                self.register_context_builder("sector", self._build_sector_context)
+            
             async def filter(self, context):
                 candidates = ... # Math filtering
                 return await self.run_ai_analysis(candidates, context)
 
             def get_ai_context(self, row: dict) -> str:
                 return f"RSI({row.get('_rsi_period', 14)})={row.get('rsi_14', 'N/A')} — oversold candidate"
+    
+    Attributes:
+        _context_builders: Dict of registered context builder functions.
+            Key: context block name (e.g., "turnover", "sector")
+            Value: Callable[[row: dict, prefetched: PreFetchedContext], str]
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._context_builders: dict[str, ContextBuilder] = {}
+    
+    def register_context_builder(self, name: str, builder: ContextBuilder) -> None:
+        """
+        Register a custom context builder for this strategy.
+        
+        Args:
+            name: Context block name (e.g., "turnover", "sector", "market")
+            builder: Function(row: dict, prefetched: PreFetchedContext) -> str
+        """
+        self._context_builders[name] = builder
+        logger.debug(f"[AIStrategyMixin] Registered context builder: {name}")
+    
+    def get_context_blocks(self) -> list[str]:
+        """Get list of context block names to build for this strategy."""
+        return list(self._context_builders.keys())
+
+    async def _prefetch_strategy_specific(
+        self, candidates_df: pd.DataFrame, context: dict, prefetched: PreFetchedContext
+    ) -> PreFetchedContext:
+        """
+        Hook for strategy-specific pre-fetching. Override in subclasses.
+        
+        Args:
+            candidates_df: DataFrame of candidate stocks.
+            context: Full strategy context dict.
+            prefetched: PreFetchedContext with base pre-fetched data.
+        
+        Returns:
+            Updated PreFetchedContext with strategy-specific data added.
+        """
+        return prefetched
 
     def get_ai_context(self, row: dict) -> str:
         """
@@ -198,13 +273,26 @@ class AIStrategyMixin:
             f"[AIStrategyMixin] Pre-fetched capital data: moneyflow={len(moneyflow_df)}, top_list={len(top_list_df)}, northbound={len(northbound_df)}",
         )
 
-        # Bundle pre-fetched data for the loop
-        prefetched_capital = {
-            "moneyflow_df": moneyflow_df,
-            "top_list_df": top_list_df,
-            "northbound_df": northbound_df,
-            "trade_date": trade_date,
-        }
+        # --- Bundle all pre-fetched data into PreFetchedContext ---
+        prefetched = PreFetchedContext(
+            capital={
+                "moneyflow_df": moneyflow_df,
+                "top_list_df": top_list_df,
+                "northbound_df": northbound_df,
+                "trade_date": trade_date,
+            },
+            history=prefetched_history,
+            concepts_map=concepts_map,
+            news_tasks=news_tasks,
+            history_context=history_context,
+            global_context=global_context,
+            trade_date=trade_date,
+        )
+
+        # --- Strategy-specific prefetch hook ---
+        prefetched = await self._prefetch_strategy_specific(
+            candidates_df, context, prefetched
+        )
 
         # --- Sequential Analysis Loop ---
         total_tasks = len(candidates_df)
@@ -241,25 +329,23 @@ class AIStrategyMixin:
                         I18n.get("ai_analyzing_stock", name=stock_name),
                     )
 
-                hist_df = prefetched_history.get(
+                hist_df = prefetched.history.get(
                     row_data.get("ts_code"), pd.DataFrame(),
                 )
                 news_list = []
-                if row_data.get("ts_code") in news_tasks:
-                    news_list = await news_tasks[row_data.get("ts_code")]
+                if row_data.get("ts_code") in prefetched.news_tasks:
+                    news_list = await prefetched.news_tasks[row_data.get("ts_code")]
 
                 res = await self._mixin_analyze_single(
                     row_data,
                     dp,
                     ai_client,
-                    global_context,
-                    concepts_map,
-                    prefetched_capital=prefetched_capital,
+                    prefetched,
                     on_chunk=on_chunk_callback,
                     history_df=hist_df,
                     news=news_list,
-                    history_context=history_context,
                     ui_prompt_override=ui_prompt_override,
+                    vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
                 )
 
                 completed_count += 1
@@ -279,9 +365,37 @@ class AIStrategyMixin:
 
                 # Valid result — enrich row
                 row_dict = dict(row_data)
-                row_dict["ai_score"] = res.get("score", 0)
-                row_dict["ai_reason"] = res.get("summary", "")
-                row_dict["thinking"] = res.get("thinking", "")
+                
+                # 组装置信度与风险点到 summary 中，实现 UI 无感展示
+                summary_raw = res.get("summary", "")
+                summary = str(summary_raw) if summary_raw else ""
+                confidence = res.get("confidence")
+                uncertainty = res.get("uncertainty_factors")
+                
+                if confidence is not None:
+                    summary = f"[置信度: {confidence}%] {summary}"
+                if uncertainty:
+                    if isinstance(uncertainty, list):
+                        uncertainty_str = ", ".join(str(u) for u in uncertainty if u)
+                    else:
+                        uncertainty_str = str(uncertainty).strip()
+                    if uncertainty_str and uncertainty_str not in ["", "None", "无", "无。", "[]"]:
+                        summary += f" (风险点: {uncertainty_str})"
+                
+                score_raw = res.get("score", 0)
+                row_dict["ai_score"] = (
+                    min(100, max(0, int(score_raw))) 
+                    if isinstance(score_raw, (int, float)) 
+                    else 0
+                )
+                row_dict["ai_reason"] = summary
+                thinking_raw = res.get("thinking", "")
+                row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
+                row_dict["confidence"] = (
+                    min(100, max(1, int(confidence))) 
+                    if isinstance(confidence, (int, float)) 
+                    else 50
+                )
                 final_rows.append(row_dict)
 
                 # Stream to UI
@@ -317,7 +431,7 @@ class AIStrategyMixin:
         )
 
         # Cleanup: Cancel any orphan news tasks that were never awaited (e.g. user cancelled early)
-        for code, task in news_tasks.items():
+        for code, task in prefetched.news_tasks.items():
             if not task.done():
                 task.cancel()
 
@@ -332,18 +446,26 @@ class AIStrategyMixin:
         row: dict,
         dp,
         ai_client: AIService,
-        global_context: str,
-        concepts_map: dict,
-        prefetched_capital: dict = None,
+        prefetched: PreFetchedContext,
         on_chunk=None,
         history_df=None,
         news=None,
-        history_context: str = None,
         ui_prompt_override: str = None,
+        vol_ratio_threshold: float = 1.5,
     ):
         """
         Analyze a single stock. Fetches history, tech indicators, news,
         capital flow, financials, then calls AI with strategy-specific context injected.
+        
+        Args:
+            row: Dict of stock data for a single candidate.
+            dp: DataProcessor instance.
+            ai_client: AIService instance.
+            prefetched: PreFetchedContext containing all pre-fetched batch data.
+            on_chunk: Optional streaming callback.
+            history_df: Optional pre-fetched history DataFrame.
+            news: Optional pre-fetched news list.
+            ui_prompt_override: Optional user-provided prompt override.
         """
         try:
             ts_code = row["ts_code"]
@@ -365,8 +487,21 @@ class AIStrategyMixin:
             }
 
             # 2b. Technical Structure (MA alignment + volume trend from history_df)
-            tech_structure = self._compute_technical_structure(history_df)
+            tech_structure = self._compute_technical_structure(history_df, vol_ratio_threshold=vol_ratio_threshold)
             tech_context.update(tech_structure)
+
+            # 2c. RSI Oversold Features (for oversold strategy enhancement)
+            if history_df is not None and not history_df.empty and len(history_df) >= 30:
+                df_sorted = history_df.sort_values("trade_date", ascending=True)
+                rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(
+                    df_sorted["close"], period=14
+                )
+                row["_rsi_feature_text"] = rsi_features.get("feature_text", "")
+                row["_rsi_consecutive_days"] = rsi_features.get("consecutive_oversold_days", 0)
+                row["_rsi_days_since_healthy"] = rsi_features.get("days_since_healthy", 99)
+                row["_rsi_stagnation"] = rsi_features.get("stagnation_detected", False)
+            else:
+                row["_rsi_feature_text"] = ""
 
             # 3. News
             if news is None:
@@ -374,25 +509,40 @@ class AIStrategyMixin:
 
             # 4. Concepts (use pre-fetched map)
             concepts = []
-            if concepts_map and ts_code in concepts_map:
-                concepts = concepts_map[ts_code]
-            elif not concepts_map:
+            if prefetched.concepts_map and ts_code in prefetched.concepts_map:
+                concepts = prefetched.concepts_map[ts_code]
+            elif not prefetched.concepts_map:
                 cmap = await dp.cache.get_concepts([ts_code])
                 concepts = cmap.get(ts_code, [])
 
             # 5. Strategy-specific context (The Hook!)
             strategy_ctx = self.get_ai_context(row)
+            
+            # 5b. Registered context builders
+            custom_context_blocks = []
+            for name, builder in self._context_builders.items():
+                try:
+                    block_text = builder(row, prefetched)
+                    if block_text:
+                        custom_context_blocks.append(f"### {name}\n{block_text}")
+                except Exception as e:
+                    logger.warning(f"[AIStrategyMixin] Context builder '{name}' failed: {e}")
+            
+            if custom_context_blocks:
+                strategy_ctx = strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
 
             # 6. Capital Flow (filter pre-fetched batch data by ts_code)
             capital_flow_text = self._build_capital_flow_text(
-                ts_code, prefetched_capital or {},
+                ts_code, prefetched.capital or {},
             )
 
             # 7. Financials (extract from stock_info which already has screening data)
             financials_text = self._build_financials_text(row)
 
             # 7b. History Feature Summary (Level-3: Factor Extraction + Summarization)
-            history_text = self._build_history_text(history_df)
+            history_text = self._build_history_text(
+                history_df, ts_code=ts_code, stock_name=row.get("name", ""), vol_ratio_threshold=vol_ratio_threshold
+            )
 
             # 8. Build stock_info and call AI
             stock_info = dict(row)
@@ -402,13 +552,13 @@ class AIStrategyMixin:
                 stock_info,
                 tech_context,
                 news,
-                global_context,
+                prefetched.global_context,
                 strategy_context=strategy_ctx,
                 capital_flow_text=capital_flow_text,
                 financials_text=financials_text,
                 history_text=history_text,
                 on_chunk=on_chunk,
-                history_context=history_context,
+                history_context=prefetched.history_context,
                 strategy_key=getattr(self, "key", None),
                 ui_prompt_override=ui_prompt_override,
             )
@@ -425,16 +575,16 @@ class AIStrategyMixin:
     # ============================================================
 
     @staticmethod
-    def _compute_technical_structure(history_df) -> dict:
+    def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.5) -> dict:
         """
         Compute MA alignment and volume trend from history DataFrame.
         Returns a dict of human-readable technical structure signals.
         """
         result = {}
         if history_df is None or history_df.empty or len(history_df) < 5:
-            result["ma_alignment"] = "Insufficient data"
-            result["volume_trend"] = "Insufficient data"
-            result["price_trend_5d"] = "Insufficient data"
+            result["ma_alignment"] = "数据不足"
+            result["volume_trend"] = "数据不足"
+            result["price_trend_5d"] = "数据不足"
             return result
 
         try:
@@ -452,25 +602,24 @@ class AIStrategyMixin:
             if ma5 is not None and ma10 is not None and ma20 is not None:
                 if ma5 > ma10 > ma20:
                     result["ma_alignment"] = (
-                        f"Bullish (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
+                        f"多头排列 (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
                     )
                 elif ma5 < ma10 < ma20:
                     result["ma_alignment"] = (
-                        f"Bearish (MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f})"
+                        f"空头排列 (MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f})"
                     )
                 else:
                     result["ma_alignment"] = (
-                        f"Mixed (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
+                        f"交叉缠绕 (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
                     )
 
-                # Price deviation from MA20
                 if ma20 != 0:
                     deviation = ((current_price - ma20) / ma20) * 100
-                    result["price_vs_ma20"] = f"{deviation:+.1f}% from MA20"
+                    result["price_vs_ma20"] = f"偏离 MA20 {deviation:+.1f}%"
                 else:
-                    result["price_vs_ma20"] = "MA20 is zero"
+                    result["price_vs_ma20"] = "MA20 为零"
             else:
-                result["ma_alignment"] = "Insufficient history for MA calculation"
+                result["ma_alignment"] = "历史数据不足以计算均线"
 
             # Volume Trend (last 5 days)
             if "vol" in df.columns and len(df) >= 10:
@@ -480,20 +629,20 @@ class AIStrategyMixin:
                     vol_ratio = vol_5d / vol_10d
                     if vol_ratio < 0.7:
                         result["volume_trend"] = (
-                            f"Shrinking (5d/10d ratio: {vol_ratio:.2f})"
+                            f"缩量 (5日/10日比值: {vol_ratio:.2f})"
                         )
-                    elif vol_ratio > 1.3:
+                    elif vol_ratio > vol_ratio_threshold:
                         result["volume_trend"] = (
-                            f"Expanding (5d/10d ratio: {vol_ratio:.2f})"
+                            f"放量 (5日/10日比值: {vol_ratio:.2f})"
                         )
                     else:
                         result["volume_trend"] = (
-                            f"Stable (5d/10d ratio: {vol_ratio:.2f})"
+                            f"平稳 (5日/10日比值: {vol_ratio:.2f})"
                         )
                 else:
-                    result["volume_trend"] = "No volume data"
+                    result["volume_trend"] = "无成交量数据"
             else:
-                result["volume_trend"] = "Insufficient data"
+                result["volume_trend"] = "数据不足"
 
             # 5-day Price Trend
             if len(df) >= 5:
@@ -504,23 +653,42 @@ class AIStrategyMixin:
                     pct_5d = 0.0
                 closes_5d = ", ".join([f"{c:.2f}" for c in close.tail(5).tolist()])
                 result["price_trend_5d"] = (
-                    f"{pct_5d:+.1f}% over 5 days (closes: {closes_5d})"
+                    f"5日涨跌 {pct_5d:+.1f}% (收盘序列: {closes_5d})"
                 )
             else:
-                result["price_trend_5d"] = "Insufficient data"
+                result["price_trend_5d"] = "数据不足"
 
         except Exception as e:
             logger.warning(
                 f"[AIStrategyMixin] Technical structure computation failed: {e}",
             )
-            result["ma_alignment"] = "Computation error"
-            result["volume_trend"] = "Computation error"
-            result["price_trend_5d"] = "Computation error"
+            result["ma_alignment"] = "计算错误"
+            result["volume_trend"] = "计算错误"
+            result["price_trend_5d"] = "计算错误"
 
         return result
 
     @staticmethod
-    def _build_history_text(history_df: pd.DataFrame) -> str:
+    def _get_limit_pct(ts_code: str, name: str = "") -> float:
+        """
+        根据股票代码和名称判断涨跌停幅度。
+        
+        规则：
+        - ST/*ST 股：±5%
+        - 北交所 (8开头)：±30%
+        - 创业板 (3开头) / 科创板 (68开头)：±20%
+        - 主板 (其他)：±10%
+        """
+        if name and ("ST" in name.upper()):
+            return 5.0
+        if ts_code.startswith("8"):
+            return 30.0
+        if ts_code.startswith("3") or ts_code.startswith("68"):
+            return 20.0
+        return 10.0
+
+    @staticmethod
+    def _build_history_text(history_df: pd.DataFrame, ts_code: str = "", stock_name: str = "", vol_ratio_threshold: float = 1.5) -> str:
         """
         Build a semantic summary of recent price action using quantitative factor extraction.
         This provides the LLM with "vision" into the actual OHLCV structure.
@@ -555,7 +723,7 @@ class AIStrategyMixin:
                 df = df.tail(60).reset_index(drop=True)
 
             if len(df) < 5:
-                return "Insufficient historical data (<5 days)."
+                return "历史数据不足（少于5天）。"
 
             # 1. Extract Base Series
             close = df["close"]
@@ -600,9 +768,9 @@ class AIStrategyMixin:
                         else:
                             break
                 consec_str = (
-                    f"Consecutive {'Up' if sign_last > 0 else 'Down'} for {consec_days} days"
+                    f"连续{'上涨' if sign_last > 0 else '下跌'} {consec_days} 天"
                     if consec_days > 1
-                    else "Consolidation"
+                    else "横盘整理"
                 )
 
             # 3. Drawdown Factor
@@ -611,7 +779,7 @@ class AIStrategyMixin:
             mdd = drawdowns.min() * 100
 
             # 4. Volume Factor (graceful fallback if 'vol' column is missing)
-            vol_line = "- Volume data not available."
+            vol_line = "- 成交量数据不可用。"
             if has_vol:
                 vol = df["vol"]
                 vol_5d_avg = vol.tail(5).mean()
@@ -623,32 +791,32 @@ class AIStrategyMixin:
                     vol_older_avg = 0.0
                 vol_ratio_5d = vol_5d_avg / vol_older_avg if vol_older_avg > 0 else 1.0
                 vol_desc = (
-                    "Significant Expansion"
-                    if vol_ratio_5d > 1.5
-                    else "Significant Contraction"
+                    "显著放量"
+                    if vol_ratio_5d > vol_ratio_threshold
+                    else "显著缩量"
                     if vol_ratio_5d < 0.7
-                    else "Flat"
+                    else "平稳"
                 )
-                vol_line = f"- Volume State: {vol_desc} vs historical baseline, Vol Ratio = {vol_ratio_5d:.2f}."
+                vol_line = f"- 成交量状态: {vol_desc}（相对历史基准），量比 = {vol_ratio_5d:.2f}。"
 
-            # 5. Build Semantic Prompt (WITHOUT XML wrapper tags — caller adds them)
+            limit_pct = AIStrategyMixin._get_limit_pct(ts_code, stock_name)
+
             lines = [
-                "【Macro Horizon】(Configured Baseline)",
-                f"- Long-Term: Total Return {macro_cagr}, Max Drawdown {macro_mdd}.",
+                "【宏观周期】（配置基准线）",
+                f"- 长期: 总收益 {macro_cagr}，最大回撤 {macro_mdd}。",
                 "",
-                f"【Trend & Swing Characteristics】(Over last {len(df)} trading days)",
-                f"- Swing: Total return {pct_all:+.2f}%, Max Drawdown {mdd:.2f}%.",
-                f"- Short-term Momentum: 5-day return {pct_5d:+.2f}%, currently {consec_str}.",
-                f"- MA20 Bias: {bias_str}.",
+                f"【趋势与波动特征】（近 {len(df)} 个交易日）",
+                f"- 波动: 总收益 {pct_all:+.2f}%，最大回撤 {mdd:.2f}%。",
+                f"- 短期动量: 5日收益 {pct_5d:+.2f}%，当前 {consec_str}。",
+                f"- MA20 偏离: {bias_str}。",
                 "",
-                "【Volume & Price Coordination】",
+                "【量价配合】",
                 vol_line,
                 "",
-                "【Micro 3-Day Action】",
-                "Date | Close | Pct_Chg | Vol",
+                "【近3日微观K线】",
+                "日期 | 收盘 | 涨跌幅 | 成交量",
             ]
 
-            # Append last 3 micro candles
             import datetime
             for _, r in df.tail(3).iterrows():
                 td = r.get("trade_date")
@@ -661,13 +829,21 @@ class AIStrategyMixin:
                 p = f"{p_val:+.2f}%" if not pd.isna(p_val) else "N/A"
                 v_val = r.get("vol", 0)
                 v = f"{v_val:.0f}" if (has_vol and not pd.isna(v_val)) else "N/A"
-                lines.append(f"{d} | {c} | {p} | {v}")
+                
+                limit_tag = ""
+                if not pd.isna(p_val):
+                    if p_val >= limit_pct - 0.5:
+                        limit_tag = " 🔴涨停"
+                    elif p_val <= -(limit_pct - 0.5):
+                        limit_tag = " 🟢跌停"
+                
+                lines.append(f"{d} | {c} | {p}{limit_tag} | {v}")
 
             return "\n".join(lines)
 
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to build history text: {e}")
-            return "Error extracting price action features."
+            return "提取价格行为特征时出错。"
 
     @staticmethod
     def _safe_float(val, default=0.0):

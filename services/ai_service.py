@@ -350,7 +350,6 @@ class AIService:
         }
 
         stock_xml = "\n".join([f"  {k}: {v}" for k, v in clean_stock_info.items()])
-        "\n".join([f"  {k}: {v}" for k, v in tech_info.items()])
 
         # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
         if history_context is None:
@@ -389,41 +388,47 @@ class AIService:
             else "(Data not available yet, assume neutral)"
         )
 
-        user_prompt = f"""
-        <stock_info>
-        {stock_xml}
-        </stock_info>
+        # 倒金字塔结构：核心策略指令置于最末尾，贴近生成区
+        # 解决 "Lost in the Middle" 注意力衰减问题
+        user_prompt_parts = []
 
-        <technical_indicators>
-          {json.dumps(tech_info, ensure_ascii=False, indent=2, default=str)}
-        </technical_indicators>
+        # 1. 基础信息 (Top - 锚定分析实体)
+        user_prompt_parts.append(f"<stock_info>\n{stock_xml}\n</stock_info>")
 
-        <recent_news>
-          {news_text}
-        </recent_news>
+        # 2. 技术指标 (重要参考)
+        user_prompt_parts.append(
+            f"<technical_indicators>\n{json.dumps(tech_info, ensure_ascii=False, indent=2, default=str)}\n</technical_indicators>"
+        )
 
-        <global_context>
-          {self._safe_truncate(global_context, 2000)}
-        </global_context>
+        # 3. 外部辅助与噪音偏多的长文本 (Middle - 允许注意力分散)
+        if global_context:
+            user_prompt_parts.append(
+                f"<global_context>\n{self._safe_truncate(global_context, 2000)}\n</global_context>"
+            )
+        if news_text and news_text != "No recent news found.":
+            user_prompt_parts.append(f"<recent_news>\n{news_text}\n</recent_news>")
+        if financials_content and "Data not available" not in financials_content:
+            user_prompt_parts.append(f"<financials>\n{financials_content}\n</financials>")
+        if capital_flow_content and "Data not available" not in capital_flow_content:
+            user_prompt_parts.append(f"<capital_flow>\n{capital_flow_content}\n</capital_flow>")
 
-        <strategy_context>
-          {self._safe_truncate(strategy_context, 1000) if strategy_context else "No specific strategy context provided."}
-        </strategy_context>
+        # 4. 历史价格序列 (Bottom-Mid)
+        if history_text:
+            user_prompt_parts.append(
+                f"<recent_price_action>\n{history_text}\n</recent_price_action>"
+            )
 
-        <recent_price_action>
-          {history_text if history_text else "No historical price data available."}
-        </recent_price_action>
+        # 5. Few-Shot 学习样例
+        if history_context:
+            user_prompt_parts.append(self._safe_truncate(history_context, 3000))
 
-        {self._safe_truncate(history_context, 3000)}
+        # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考)
+        if strategy_context:
+            user_prompt_parts.append(
+                f"<strategy_context>\n{self._safe_truncate(strategy_context, 1000)}\n</strategy_context>"
+            )
 
-        <capital_flow>
-          {capital_flow_content}
-        </capital_flow>
-
-        <financials>
-          {financials_content}
-        </financials>
-        """
+        user_prompt = "\n\n".join(user_prompt_parts)
 
         messages = [
             {"role": "system", "content": system_prompt},

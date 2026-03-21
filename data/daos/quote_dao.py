@@ -209,6 +209,42 @@ class QuoteDao(BaseDao):
         sql += " ORDER BY trade_date DESC"
         return await self._read_db(sql, p)
 
+    async def get_index_daily_range(
+        self, ts_code_list: list, start_date=None, end_date=None,
+    ):
+        """
+        批量获取多只指数的日线数据。
+        
+        Args:
+            ts_code_list: 指数代码列表 (如 ['000001.SH', '399001.SZ'])
+            start_date: 开始日期
+            end_date: 结束日期
+        
+        Returns:
+            DataFrame 包含所有指定指数的日线数据
+        """
+        if not ts_code_list:
+            return await self._read_db("SELECT * FROM index_daily WHERE 1=0", [])
+        
+        sql = "SELECT ts_code, trade_date, close, pct_chg, vol, amount FROM index_daily WHERE 1=1"
+        params = []
+        idx = 1
+        
+        if start_date:
+            sql += f" AND trade_date >= ${idx}"
+            params.append(start_date)
+            idx += 1
+        if end_date:
+            sql += f" AND trade_date <= ${idx}"
+            params.append(end_date)
+            idx += 1
+        
+        placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])
+        sql += f" AND ts_code IN ({placeholders})"
+        params.extend(ts_code_list)
+        sql += " ORDER BY ts_code, trade_date"
+        return await self._read_db(sql, params)
+
     # --- Block Trade ---
     async def save_block_trade(self, df):
         cols = ["trade_date", "ts_code", "price", "volume", "amount", "buyer", "seller"]

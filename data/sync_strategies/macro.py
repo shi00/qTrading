@@ -1,6 +1,8 @@
 import datetime
 import logging
 
+import pandas as pd
+
 from data.constants import MAJOR_INDICES
 from data.daos.macro_dao import MacroDao
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -15,6 +17,27 @@ logger = logging.getLogger(__name__)
 _SHIBOR_RESUME_OFFSET_DAYS = 1
 # Fallback lookback when date parsing fails
 _SHIBOR_FALLBACK_LOOKBACK_DAYS = 365
+
+
+def _parse_period(p):
+    """Parse Tushare macro period format (YYYYMM) to standard date string.
+    
+    Tushare macro APIs (cn_m, cn_cpi, cn_ppi) return period as 'YYYYMM' string.
+    This function converts it to 'YYYY-MM-01' format for proper date parsing.
+    
+    Args:
+        p: Period value (string, None, or NaN)
+        
+    Returns:
+        str: 'YYYY-MM-01' format string, or original value if not YYYYMM format
+        None: If input is NaN/None
+    """
+    if pd.isna(p):
+        return None
+    p_str = str(p).strip()
+    if len(p_str) == 6 and p_str.isdigit():
+        return f"{p_str[:4]}-{p_str[4:]}-01"
+    return p_str
 
 
 class MacroSyncStrategy(ISyncStrategy):
@@ -117,6 +140,12 @@ class MacroSyncStrategy(ISyncStrategy):
                     "[MacroSync] _merge_macro_data | 'period' column missing after merge, returning None"
                 )
                 return None
+
+            # Tushare macro APIs (cn_m, cn_cpi, cn_ppi) return period as 'YYYYMM' string.
+            # base_dao.py's pd.to_datetime(format='mixed') parses 'YYYYMM' as NaT.
+            # Here we ensure it's either cleanly parsed or dropped if completely invalid.
+            merged["period"] = merged["period"].apply(_parse_period)
+            merged["period"] = pd.to_datetime(merged["period"], format="mixed", errors="coerce").dt.date
             merged = merged.dropna(subset=["period"])
 
         return merged

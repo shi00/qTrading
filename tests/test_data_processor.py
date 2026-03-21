@@ -62,6 +62,11 @@ class TestDataProcessor(unittest.TestCase):
         self.processor.cache = self.mock_cache
         self.processor._cancel_event = asyncio.Event()  # Updated from _shutdown_event
 
+        # CRITICAL: Inject mocks into TradeCalendarService
+        if hasattr(self.processor, "trade_calendar"):
+            self.processor.trade_calendar._cache = self.mock_cache
+            self.processor.trade_calendar._api = self.mock_api
+
         # CRITICAL: Propagate mocks to SyncContext used by Strategies
         if hasattr(self.processor, "context"):
             self.processor.context.api = self.processor.api
@@ -167,12 +172,10 @@ class TestDataProcessor(unittest.TestCase):
     # ==========================================================
 
     async def async_test_get_latest_trade_date_weekday_pre_market(self):
-        fixed_dt = datetime.datetime(2023, 10, 25, 10, 0, 0)  # Wed
-        with patch("data.mixins.calendar_mixin.get_now", return_value=fixed_dt):
-            # Reset TTL cache to force re-evaluation
-            self.processor._trade_date_cache = {"ts": 0, "val": None}
+        fixed_dt = datetime.datetime(2023, 10, 25, 10, 0, 0)  # Wed pre-market
+        with patch("data.services.trade_calendar_service.get_now", return_value=fixed_dt):
+            self.processor.trade_calendar._latest_trade_date_cache = {"ts": 0, "val": None}
 
-            # Mock get_trade_cal to return trade days
             self.mock_cache.get_trade_cal = AsyncMock(
                 return_value=pd.DataFrame(
                     {
@@ -197,17 +200,17 @@ class TestDataProcessor(unittest.TestCase):
                 ),
             )
 
-            date_str = await self.processor.get_latest_trade_date()
+            date_obj = await self.processor.get_latest_trade_date()
             # Pre-market Wednesday → should be Tuesday 20231024
-            self.assertEqual(date_str, "20231024")
+            self.assertEqual(date_obj, datetime.date(2023, 10, 24))
 
     def test_get_latest_trade_date_weekday_pre_market(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekday_pre_market())
 
     async def async_test_get_latest_trade_date_weekday_post_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 17, 0, 0)  # Wed post-market
-        with patch("data.mixins.calendar_mixin.get_now", return_value=fixed_dt):
-            self.processor._trade_date_cache = {"ts": 0, "val": None}
+        with patch("data.services.trade_calendar_service.get_now", return_value=fixed_dt):
+            self.processor.trade_calendar._latest_trade_date_cache = {"ts": 0, "val": None}
 
             self.mock_cache.get_trade_cal = AsyncMock(
                 return_value=pd.DataFrame(
@@ -234,8 +237,8 @@ class TestDataProcessor(unittest.TestCase):
                 ),
             )
 
-            date_str = await self.processor.get_latest_trade_date()
-            self.assertEqual(date_str, "20231025")
+            date_obj = await self.processor.get_latest_trade_date()
+            self.assertEqual(date_obj, datetime.date(2023, 10, 25))
 
     def test_get_latest_trade_date_weekday_post_market(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekday_post_market())
@@ -243,8 +246,8 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_latest_trade_date_weekend(self):
         """Test weekend -> should skip to Friday"""
         fixed_dt = datetime.datetime(2023, 10, 28, 12, 0, 0)  # Sat
-        with patch("data.mixins.calendar_mixin.get_now", return_value=fixed_dt):
-            self.processor._trade_date_cache = {"ts": 0, "val": None}
+        with patch("data.services.trade_calendar_service.get_now", return_value=fixed_dt):
+            self.processor.trade_calendar._latest_trade_date_cache = {"ts": 0, "val": None}
 
             self.mock_cache.get_trade_cal = AsyncMock(
                 return_value=pd.DataFrame(
@@ -267,20 +270,20 @@ class TestDataProcessor(unittest.TestCase):
                 ),
             )
 
-            date_str = await self.processor.get_latest_trade_date()
-            self.assertEqual(date_str, "20231027")
+            date_obj = await self.processor.get_latest_trade_date()
+            self.assertEqual(date_obj, datetime.date(2023, 10, 27))
 
     def test_get_latest_trade_date_weekend(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekend())
 
     async def async_test_get_latest_trade_date_ttl_cache(self):
         """Test that TTL cache returns cached value within 5 min"""
-        self.processor._trade_date_cache = {
+        self.processor.trade_calendar._latest_trade_date_cache = {
             "ts": __import__("time").time(),  # just now
-            "val": "20230101",
+            "val": datetime.date(2023, 1, 1),
         }
         result = await self.processor.get_latest_trade_date()
-        self.assertEqual(result, "20230101")
+        self.assertEqual(result, datetime.date(2023, 1, 1))
         # No cache mock calls should have been made (cache hit)
         self.mock_cache.get_trade_cal.assert_not_called()
 
@@ -288,14 +291,18 @@ class TestDataProcessor(unittest.TestCase):
         asyncio.run(self.async_test_get_latest_trade_date_ttl_cache())
 
     async def async_test_get_trade_dates(self):
-        """Test get_trade_dates returns sorted list"""
+        """Test get_trade_dates returns sorted list of date objects"""
         mock_df = pd.DataFrame(
             {"cal_date": ["20230103", "20230101", "20230102"], "is_open": [1, 1, 1]},
         )
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
         dates = await self.processor.get_trade_dates("20230101", "20230103")
-        self.assertEqual(dates, ["20230101", "20230102", "20230103"])
+        self.assertEqual(dates, [
+            datetime.date(2023, 1, 1),
+            datetime.date(2023, 1, 2),
+            datetime.date(2023, 1, 3),
+        ])
 
     def test_get_trade_dates(self):
         asyncio.run(self.async_test_get_trade_dates())
@@ -308,34 +315,25 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.get_trade_cal = AsyncMock(side_effect=Exception("DB Error"))
 
         dates = await self.processor.get_trade_dates("20230102", "20230106")
-        # Fallback should return weekday-only dates (Mon-Fri)
+        # Fallback should return weekday-only dates via OfflineCalendar
+        # Note: 2023-01-02 is Monday but 元旦假期调休, A股休市
+        # 2023-01-03 (Tue) to 2023-01-06 (Fri) are trading days
         self.assertEqual(
-            dates, ["20230102", "20230103", "20230104", "20230105", "20230106"],
+            dates, [
+                datetime.date(2023, 1, 3),
+                datetime.date(2023, 1, 4),
+                datetime.date(2023, 1, 5),
+                datetime.date(2023, 1, 6),
+            ],
         )
 
     def test_get_trade_dates_fallback(self):
         asyncio.run(self.async_test_get_trade_dates_fallback())
 
     async def async_test_ensure_trade_cal_memory_cache(self):
-        """Test ensure_trade_cal memory cache prevents repeated DB/API calls"""
-        # First call: should invoke _ensure_trade_cal_impl
-        self.processor._trade_cal_cache = {}
-
-        with patch.object(
-            self.processor,
-            "_ensure_trade_cal_impl",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as mock_impl:
-            result1 = await self.processor.ensure_trade_cal("20230101")
-            self.assertTrue(result1)
-            mock_impl.assert_called_once()
-
-            # Second call with same date: should use memory cache
-            mock_impl.reset_mock()
-            result2 = await self.processor.ensure_trade_cal("20230101")
-            self.assertTrue(result2)
-            mock_impl.assert_not_called()
+        """Test ensure_trade_cal is now a no-op (delegated to TradeCalendarService)"""
+        result = await self.processor.ensure_trade_cal("20230101")
+        self.assertTrue(result)
 
     def test_ensure_trade_cal_memory_cache(self):
         asyncio.run(self.async_test_ensure_trade_cal_memory_cache())
@@ -573,12 +571,9 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_trade_cal.return_value = mock_df
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
-        self.mock_cache.get_cached_trade_dates = AsyncMock(
-            return_value={"20230105", "20230104"},
-        )
-        self.mock_cache.get_cached_indicator_dates = AsyncMock(
-            return_value={"20230105", "20230104"},
-        )
+        # Mock get_cached_dates_for_table for breakpoint resume
+        cached_dates = {"20230105", "20230104"}
+        self.mock_cache.get_cached_dates_for_table = AsyncMock(return_value=cached_dates)
 
         historical_strategy = self.processor.strategies["historical"]
         with patch.object(
@@ -586,6 +581,7 @@ class TestDataProcessor(unittest.TestCase):
         ) as mock_sync:
             await self.processor.sync_historical_data(days=days)
 
+            # Should skip 2 cached dates, sync remaining 3
             self.assertEqual(mock_sync.call_count, 3)
             call_args = [c.args[0] for c in mock_sync.call_args_list]
             self.assertIn("20230103", call_args)
@@ -722,7 +718,7 @@ class TestDataProcessor(unittest.TestCase):
     # --- Market Overview with Cache ---
 
     async def async_test_get_market_overview_uses_memory_cache(self):
-        """Verify get_market_overview uses memory cache to skip ensure_trade_cal"""
+        """Verify get_market_overview works with TradeCalendarService"""
 
         self.mock_cache.get_trade_cal.return_value = pd.DataFrame(
             {"cal_date": ["20230101", "20230102"], "is_open": [1, 1]},
@@ -735,20 +731,8 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_index_daily = AsyncMock(return_value=mock_result_df)
         self.mock_api.get_moneyflow_hsgt = AsyncMock(return_value=mock_result_df)
 
-        # Pre-seed the _trade_cal_cache so that ensure_trade_cal sees a cache hit
-        today_str = get_now().strftime("%Y%m%d")
-        self.processor._trade_cal_cache = {"date": today_str}
-
-        with patch.object(
-            self.processor,
-            "_ensure_trade_cal_impl",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as mock_impl:
-            await self.processor.get_market_overview()
-            # Because _trade_cal_cache is pre-seeded with today's date,
-            # ensure_trade_cal should SKIP the _ensure_trade_cal_impl call
-            mock_impl.assert_not_called()
+        # get_market_overview should work without errors
+        await self.processor.get_market_overview()
 
     def test_get_market_overview_uses_memory_cache(self):
         asyncio.run(self.async_test_get_market_overview_uses_memory_cache())
@@ -899,58 +883,8 @@ class TestDataProcessor(unittest.TestCase):
         asyncio.run(self.async_test_run_quality_scan_cancellation())
 
     # ==========================================================
-    # Section 6: _ensure_trade_cal_impl (CalendarMixin)
+    # Section 6: CalendarMixin tests removed - now covered by TradeCalendarService tests
     # ==========================================================
-
-    async def async_test_ensure_trade_cal_impl_no_data(self):
-        """Test _ensure_trade_cal_impl when DB has no calendar data → full fetch"""
-        self.mock_cache.get_trade_cal_range = AsyncMock(return_value=(None, None))
-        # api.get_trade_cal is called with await, so must be AsyncMock
-        self.processor.api.get_trade_cal = AsyncMock(
-            return_value=pd.DataFrame({"cal_date": ["20230101"], "is_open": [1]}),
-        )
-        self.mock_cache.save_trade_cal = AsyncMock()
-
-        result = await self.processor._ensure_trade_cal_impl("20230301")
-        self.assertTrue(result)
-        self.mock_cache.save_trade_cal.assert_called_once()
-
-    def test_ensure_trade_cal_impl_no_data(self):
-        asyncio.run(self.async_test_ensure_trade_cal_impl_no_data())
-
-    async def async_test_ensure_trade_cal_impl_already_covered(self):
-        """Test _ensure_trade_cal_impl when DB already covers the range → no API call"""
-        self.mock_cache.get_trade_cal_range = AsyncMock(
-            return_value=("20200101", "20261231"),
-        )
-
-        result = await self.processor._ensure_trade_cal_impl("20260305")
-        self.assertTrue(result)
-        # API should NOT have been called
-        self.processor.api.get_trade_cal.assert_not_called()
-
-    def test_ensure_trade_cal_impl_already_covered(self):
-        asyncio.run(self.async_test_ensure_trade_cal_impl_already_covered())
-
-    async def async_test_ensure_trade_cal_impl_gap_fill(self):
-        """Test _ensure_trade_cal_impl fills gaps when DB range doesn't extend to end_date"""
-        self.mock_cache.get_trade_cal_range = AsyncMock(
-            return_value=("20200101", "20250101"),
-        )
-        # api.get_trade_cal is called with await, so must be AsyncMock
-        self.processor.api.get_trade_cal = AsyncMock(
-            return_value=pd.DataFrame(
-                {"cal_date": ["20250102", "20250103"], "is_open": [1, 1]},
-            ),
-        )
-        self.mock_cache.save_trade_cal = AsyncMock()
-
-        result = await self.processor._ensure_trade_cal_impl("20260301")
-        self.assertTrue(result)
-        self.mock_cache.save_trade_cal.assert_called()
-
-    def test_ensure_trade_cal_impl_gap_fill(self):
-        asyncio.run(self.async_test_ensure_trade_cal_impl_gap_fill())
 
     # ==========================================================
     # Section 7: _assign_basic_tier Silver path
@@ -977,28 +911,8 @@ class TestDataProcessor(unittest.TestCase):
         asyncio.run(self.async_test_assign_basic_tier_silver())
 
     # ==========================================================
-    # Section 8: ensure_trade_cal with required_start_date bypasses cache
+    # Section 8: ensure_trade_cal tests removed - now a no-op facade
     # ==========================================================
-
-    async def async_test_ensure_trade_cal_required_start_bypasses_cache(self):
-        """Test that ensure_trade_cal with required_start_date always calls impl"""
-        self.processor._trade_cal_cache = {"date": "20230101"}  # Pre-seed cache
-
-        with patch.object(
-            self.processor,
-            "_ensure_trade_cal_impl",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as mock_impl:
-            # With required_start_date, cache should be bypassed even if date matches
-            result = await self.processor.ensure_trade_cal(
-                "20230101", required_start_date="20200101",
-            )
-            self.assertTrue(result)
-            mock_impl.assert_called_once_with("20230101", "20200101")
-
-    def test_ensure_trade_cal_required_start_bypasses_cache(self):
-        asyncio.run(self.async_test_ensure_trade_cal_required_start_bypasses_cache())
 
     # ==========================================================
     # Section 9: sync_daily_market_snapshot auto-resolves trade_date
@@ -1010,7 +924,7 @@ class TestDataProcessor(unittest.TestCase):
             self.processor,
             "get_latest_trade_date",
             new_callable=AsyncMock,
-            return_value="20230103",
+            return_value=datetime.date(2023, 1, 3),
         ) as mock_latest:
             self.mock_cache.check_data_exists = AsyncMock(return_value=True)
             self.mock_cache.get_screening_data = AsyncMock(

@@ -3,6 +3,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest
+import datetime
 
 import pandas as pd
 
@@ -121,24 +122,25 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         """Test Oversold: Pct < -3, PE < 30"""
         s = OversoldStrategy()
 
-        # Mock DataProcessor
         from unittest.mock import AsyncMock, MagicMock
 
         dp_mock = MagicMock()
-        dp_mock._quality_tier = 2  # SILVER
-        dp_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
+        dp_mock._quality_tier = 2
 
-        # Mock CacheManager
+        trade_calendar_mock = MagicMock()
+        trade_calendar_mock.get_latest_trade_date = AsyncMock(
+            return_value=datetime.date(2023, 1, 1)
+        )
+        trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(
+            return_value=datetime.date(2022, 8, 1)
+        )
+        dp_mock.trade_calendar = trade_calendar_mock
+
         cache_mock = MagicMock()
         cache_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
 
-        # Create dummy history for RSI
-        # Stock C needs to have RSI < 20
-        # We need significant drop in recent days.
-        # 30 days of data to pass `day_count >= 28` guard
         dates = pd.date_range(end="20230101", periods=30).strftime("%Y%m%d").tolist()
 
-        # Stock C logs: Drop from 30 to 5 -> Low RSI
         c_prices = list(range(35, 5, -1))
 
         history_data = []

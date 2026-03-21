@@ -105,6 +105,61 @@ class MarketDao(BaseDao):
 
         return await self._read_db(sql, params)
 
+    async def get_daily_indicators_bulk(
+        self, ts_code_list: list, start_date=None, end_date=None,
+    ):
+        """
+        批量获取多只股票的 daily_indicators 数据。
+        解决 N+1 查询问题，一次查询获取所有候选股票的指标数据。
+        
+        Args:
+            ts_code_list: 股票代码列表
+            start_date: 开始日期
+            end_date: 结束日期
+        
+        Returns:
+            DataFrame 包含所有指定股票的指标数据
+        """
+        if not ts_code_list:
+            return await self._read_db("SELECT * FROM daily_indicators WHERE 1=0", [])
+        
+        sql = "SELECT ts_code, trade_date, turnover_rate, turnover_rate_f, volume_ratio, pe, pe_ttm, pb, total_mv, circ_mv FROM daily_indicators WHERE 1=1"
+        params = []
+        idx = 1
+        
+        if start_date:
+            sql += f" AND trade_date >= ${idx}"
+            params.append(start_date)
+            idx += 1
+        if end_date:
+            sql += f" AND trade_date <= ${idx}"
+            params.append(end_date)
+            idx += 1
+        
+        chunk_size = 500
+        if len(ts_code_list) > chunk_size:
+            all_results = []
+            base_sql = sql
+            base_params = params.copy()
+            base_idx = idx
+            for i in range(0, len(ts_code_list), chunk_size):
+                chunk = ts_code_list[i:i + chunk_size]
+                placeholders = ",".join([f"${base_idx + j}" for j in range(len(chunk))])
+                chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
+                df_chunk = await self._read_db(chunk_sql, base_params + chunk)
+                if df_chunk is not None and not df_chunk.empty:
+                    all_results.append(df_chunk)
+            if all_results:
+                import pandas as pd
+                return pd.concat(all_results, ignore_index=True)
+            return await self._read_db("SELECT * FROM daily_indicators WHERE 1=0", [])
+        
+        placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])
+        sql += f" AND ts_code IN ({placeholders})"
+        params.extend(ts_code_list)
+        sql += " ORDER BY ts_code, trade_date"
+        return await self._read_db(sql, params)
+
     # --- Index Weights ---
     async def save_index_weights(self, df):
         """Save Index Component Weights. Table: index_weight"""

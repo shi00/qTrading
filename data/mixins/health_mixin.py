@@ -486,8 +486,7 @@ class HealthCheckMixin:
             # and over-fetching entire 20-year history for single stocks.
             start_date_obj = (get_now() - datetime.timedelta(days=365)).date()
 
-            # Only fetch open trading days within scan window (halves data vs full calendar)
-            trade_cal_df = await self.cache.get_trade_cal(
+            trade_cal_df = await self.trade_calendar.get_trade_cal_df(
                 start_date=start_date_obj, is_open=1,
             )
             if trade_cal_df is None or trade_cal_df.empty:

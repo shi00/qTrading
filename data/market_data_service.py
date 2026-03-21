@@ -13,6 +13,7 @@ import threading
 
 from data.cache_manager import CacheManager
 from data.news_fetcher import NewsFetcher
+from data.services.trade_calendar_service import TradeCalendarService
 from data.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
@@ -56,10 +57,10 @@ class MarketDataService:
 
         self.api = TushareClient()
         self.cache = CacheManager()
+        self.trade_calendar = TradeCalendarService(self.cache, self.api)
         self._running = False
         self._task = None
-        self._cached_data = None  # 内存缓存
-        # Observer Pattern: List of listeners
+        self._cached_data = None
         self._listeners = set()
         self._initialized = True
 
@@ -146,18 +147,12 @@ class MarketDataService:
         """获取市场概览数据"""
         now = get_now()
         today_date = now.date()
-        start_date = (now - datetime.timedelta(days=30)).date()
 
-        # 确保交易日历已缓存
-        await self._ensure_trade_cal(today_date)
-
-        # 获取最近交易日
-        cache_df = await self.cache.get_trade_cal(
-            start_date=start_date, end_date=today_date, is_open=1,
-        )
-        date = today_date
-        if cache_df is not None and not cache_df.empty:
-            date = sorted(cache_df["cal_date"].tolist())[-1]
+        latest_date = await self.trade_calendar.get_latest_trade_date()
+        if latest_date:
+            date = latest_date.strftime("%Y%m%d")
+        else:
+            date = today_date.strftime("%Y%m%d")
 
         # 构建所有任务
         tasks = [self._get_index(code, key, date) for code, key in self.INDICES_CONFIG]
@@ -220,17 +215,13 @@ class MarketDataService:
             "hot_concepts": hot_concepts,
         }
 
-    # Instance methods forwarding to static equivalents (removed to avoid confusion)
-
-    async def _ensure_trade_cal(self, end_date):
-        """确保交易日历已缓存"""
-        from data.data_processor import DataProcessor
-
-        await DataProcessor().ensure_trade_cal(end_date)
-
     async def _get_index(self, code: str, name_key: str, date) -> dict:
-        """获取指数数据"""
-        df = await self.api.get_index_daily(ts_code=code, trade_date=date)
+        """获取指数数据 - 优先从缓存获取，缓存无数据时调用 API"""
+        df = await self.cache.get_index_daily(ts_code=code, trade_date=date)
+        
+        if df is None or df.empty:
+            df = await self.api.get_index_daily(ts_code=code, trade_date=date)
+        
         if df is not None and not df.empty:
             row = df.iloc[0]
             c = self._safe_float(row.get("pct_chg"))
@@ -255,8 +246,12 @@ class MarketDataService:
         }
 
     async def _get_hsgt(self, date) -> dict:
-        """获取北向资金数据"""
-        df = await self.api.get_moneyflow_hsgt(trade_date=date)
+        """获取北向资金数据 - 优先从缓存获取，缓存无数据时调用 API"""
+        df = await self.cache.get_moneyflow_hsgt(trade_date=date)
+        
+        if df is None or df.empty:
+            df = await self.api.get_moneyflow_hsgt(trade_date=date)
+        
         if df is not None and not df.empty:
             val = self._safe_float(df.iloc[0].get("north_money"))
             # north_money unit: 百万元 (1 Million CNY). >100 (=1亿) -> 亿 display.

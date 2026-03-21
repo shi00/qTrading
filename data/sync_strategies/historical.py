@@ -88,18 +88,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
         end_date = get_now().date()
         start_date = (get_now() - datetime.timedelta(days=days)).date()
 
-        # Use cached trade calendar (Step 2 already ensured calendar is available)
         try:
-            df_cal = await self.context.cache.get_trade_cal(
-                start_date=start_date, end_date=end_date, is_open=1,
+            trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(
+                start_date, end_date
             )
-            if df_cal is not None and not df_cal.empty:
-                trade_dates = sorted(df_cal["cal_date"].tolist(), reverse=True)
-            else:
-                trade_dates = []
+            trade_dates = [d.strftime("%Y%m%d") for d in reversed(trade_date_objs)]
         except Exception as e:
             logger.warning(
-                f"[HistoricalSync] Calendar | ⚠️ Cache calendar retrieval failed: {e}",
+                f"[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed: {e}",
             )
             trade_dates = []
 
