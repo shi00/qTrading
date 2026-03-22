@@ -14,7 +14,7 @@ class StockDetailDialog(ft.AlertDialog):
     Stock detail popup dialog showing comprehensive stock information.
     """
 
-    def __init__(self, stock_data: dict = None, data_processor=None):
+    def __init__(self, stock_data: dict = None, data_processor=None):  # type: ignore
         self.stock_data = stock_data or {}
         self.data_processor = data_processor
 
@@ -92,7 +92,9 @@ class StockDetailDialog(ft.AlertDialog):
                     [
                         self._info_chip(I18n.get("detail_price"), close),
                         self._info_chip(
-                            I18n.get("detail_pct_chg"), pct_str, color=pct_color,
+                            I18n.get("detail_pct_chg"),
+                            pct_str,
+                            color=pct_color,
                         ),
                         self._info_chip(
                             I18n.get("detail_turnover"),
@@ -103,10 +105,12 @@ class StockDetailDialog(ft.AlertDialog):
                 ft.Row(
                     [
                         self._info_chip(
-                            I18n.get("detail_vol"), self._format_vol("vol"),
+                            I18n.get("detail_vol"),
+                            self._format_vol("vol"),
                         ),
                         self._info_chip(
-                            I18n.get("detail_amount"), self._format_amount("amount"),
+                            I18n.get("detail_amount"),
+                            self._format_amount("amount"),
                         ),
                     ],
                 ),
@@ -127,24 +131,29 @@ class StockDetailDialog(ft.AlertDialog):
                 ft.Row(
                     [
                         self._info_chip(
-                            I18n.get("detail_pe"), self._format_val("pe_ttm"),
+                            I18n.get("detail_pe"),
+                            self._format_val("pe_ttm"),
                         ),
                         self._info_chip(I18n.get("detail_pb"), self._format_val("pb")),
                         self._info_chip(
-                            I18n.get("detail_ps"), self._format_val("ps_ttm"),
+                            I18n.get("detail_ps"),
+                            self._format_val("ps_ttm"),
                         ),
                     ],
                 ),
                 ft.Row(
                     [
                         self._info_chip(
-                            I18n.get("detail_dividend"), self._format_val("dv_ttm", "%"),
+                            I18n.get("detail_dividend"),
+                            self._format_val("dv_ttm", "%"),
                         ),
                         self._info_chip(
-                            I18n.get("detail_total_mv"), self._format_mv("total_mv"),
+                            I18n.get("detail_total_mv"),
+                            self._format_mv("total_mv"),
                         ),
                         self._info_chip(
-                            I18n.get("detail_circ_mv"), self._format_mv("circ_mv"),
+                            I18n.get("detail_circ_mv"),
+                            self._format_mv("circ_mv"),
                         ),
                     ],
                 ),
@@ -165,7 +174,8 @@ class StockDetailDialog(ft.AlertDialog):
                 ft.Row(
                     [
                         self._info_chip(
-                            I18n.get("detail_roe"), self._format_val("roe", "%"),
+                            I18n.get("detail_roe"),
+                            self._format_val("roe", "%"),
                         ),
                         self._info_chip(
                             I18n.get("detail_gpm"),
@@ -180,7 +190,8 @@ class StockDetailDialog(ft.AlertDialog):
                 ft.Row(
                     [
                         self._info_chip(
-                            I18n.get("detail_rev_yoy"), self._format_val("or_yoy", "%"),
+                            I18n.get("detail_rev_yoy"),
+                            self._format_val("or_yoy", "%"),
                         ),
                         self._info_chip(
                             I18n.get("detail_profit_yoy"),
@@ -289,7 +300,8 @@ class StockDetailDialog(ft.AlertDialog):
                             ft.Container(
                                 content=ft.Markdown(
                                     self.stock_data.get(
-                                        "thinking", I18n.get("detail_ai_no_thinking"),
+                                        "thinking",
+                                        I18n.get("detail_ai_no_thinking"),
                                     ),
                                     extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                                     selectable=True,
@@ -404,7 +416,8 @@ class StockDetailDialog(ft.AlertDialog):
         """Asynchronously load history data and render an inline K-line chart."""
         if not self.data_processor:
             self.chart_container.content = ft.Text(
-                I18n.get("detail_err_no_processor"), color=AppColors.ERROR,
+                I18n.get("detail_err_no_processor"),
+                color=AppColors.ERROR,
             )
             self.chart_container.update()
             return
@@ -430,7 +443,8 @@ class StockDetailDialog(ft.AlertDialog):
 
             if df.empty:
                 self.chart_container.content = ft.Text(
-                    I18n.get("detail_no_history"), color=AppColors.TEXT_HINT,
+                    I18n.get("detail_no_history"),
+                    color=AppColors.TEXT_HINT,
                 )
                 self.chart_container.update()
                 return

@@ -193,7 +193,7 @@ class ConfigHandler:
 
             if os.path.exists(CONFIG_FILE):
                 try:
-                    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    with open(CONFIG_FILE, encoding="utf-8") as f:
                         ConfigHandler._config_cache = json.load(f)
                         return ConfigHandler._config_cache.copy()
                 except Exception:
@@ -217,14 +217,15 @@ class ConfigHandler:
                         current_config = ConfigHandler._config_cache.copy()
                     elif os.path.exists(CONFIG_FILE):
                         try:
-                            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                            with open(CONFIG_FILE, encoding="utf-8") as f:
                                 current_config = json.load(f)
                         except (json.JSONDecodeError, OSError):
                             pass
                     current_config.update(config_data)
 
                 success = ConfigHandler._save_json_atomically(
-                    current_config, CONFIG_FILE,
+                    current_config,
+                    CONFIG_FILE,
                 )
 
                 if success:
@@ -294,7 +295,7 @@ class ConfigHandler:
     def get_init_history_years(cls) -> int:
         """获取初始化数据年限，默认 3 年"""
         # Note: Using get_setting internally via class method or static
-        return int(ConfigHandler.get_setting("init_history_years", 3))
+        return int(ConfigHandler.get_setting("init_history_years", 3))  # type: ignore
 
     @classmethod
     def set_init_history_years(cls, years: int):
@@ -414,7 +415,7 @@ class ConfigHandler:
     @staticmethod
     def set_no_proxy_domains(domains):
         if not isinstance(domains, list) or not all(
-                isinstance(x, str) for x in domains
+            isinstance(x, str) for x in domains
         ):
             logger.error("Invalid no-proxy domains format: must be list of strings")
             return False
@@ -486,10 +487,10 @@ class ConfigHandler:
         """
         try:
             val = ConfigHandler.get_setting("local_model_timeout")
-            return int(val) if val is not None else None
+            return int(val) if val is not None else None  # type: ignore
         except (ValueError, TypeError):
             # If config is corrupted/invalid, treat as not set (no default provided)
-            return None
+            return None  # type: ignore
 
     @staticmethod
     def set_local_ai_timeout(seconds: int):
@@ -694,7 +695,7 @@ class ConfigHandler:
     def get_max_cpu_workers():
         """Get max CPU threads from config."""
         config = ConfigHandler.load_config()
-        val = config.get("max_cpu_workers", os.cpu_count() / 2)
+        val = config.get("max_cpu_workers", os.cpu_count() / 2)  # type: ignore
         try:
             return int(val)
         except (ValueError, TypeError):

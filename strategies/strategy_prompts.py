@@ -1,3 +1,5 @@
+import typing
+
 # -*- coding: utf-8 -*-
 """
 Default LLM system prompts for each stock screening strategy.
@@ -273,7 +275,7 @@ def get_base_prompt(strategy_key: str) -> str:
     """
     from utils.config_handler import ConfigHandler
 
-    def _clean_rules(text):
+    def _clean_rules(text: typing.Any):
         if not text:
             return ""
         text = text.strip()

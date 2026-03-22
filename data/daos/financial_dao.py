@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class FinancialDao(BaseDao):
     # --- Financial Reports ---
-    async def save_financial_reports(self, df):
+    async def save_financial_reports(self, df: pd.DataFrame):
         if df is None or df.empty:
             return 0
         cols = [
@@ -70,9 +70,7 @@ class FinancialDao(BaseDao):
         )
         return await self._write_db(sql, params, is_many=True)
 
-
-
-    async def get_cached_financial_records(self, period=None):
+    async def get_cached_financial_records(self, period: str | None = None):
         if period:
             df = await self._read_db(
                 "SELECT ts_code, end_date FROM financial_reports WHERE end_date = $1",
@@ -86,7 +84,7 @@ class FinancialDao(BaseDao):
 
     # --- Daily Indicators (Read Only — writes go through MarketDao) ---
 
-    async def get_latest_indicators(self, trade_date=None):
+    async def get_latest_indicators(self, trade_date: str | None = None):
         with_date = trade_date
         if not with_date:
             df = await self._read_db(
@@ -100,7 +98,8 @@ class FinancialDao(BaseDao):
         if not with_date:
             return pd.DataFrame()
         return await self._read_db(
-            "SELECT * FROM daily_indicators WHERE trade_date = $1", (with_date,),
+            "SELECT * FROM daily_indicators WHERE trade_date = $1",
+            (with_date,),
         )
 
     async def get_cached_indicator_dates(self):
@@ -110,7 +109,7 @@ class FinancialDao(BaseDao):
         return set(df["trade_date"])
 
     # --- Extra Savers (Boilerplate) ---
-    async def save_fina_forecast(self, df):
+    async def save_fina_forecast(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "end_date",
@@ -122,10 +121,13 @@ class FinancialDao(BaseDao):
             "net_profit_max",
         ]
         return await self._save_upsert(
-            df, "fina_forecast", cols, pk_columns=["ts_code", "end_date", "ann_date"],
+            df,
+            "fina_forecast",
+            cols,
+            pk_columns=["ts_code", "end_date", "ann_date"],
         )
 
-    async def save_fina_mainbz(self, df):
+    async def save_fina_mainbz(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "end_date",
@@ -136,10 +138,13 @@ class FinancialDao(BaseDao):
             "curr_type",
         ]
         return await self._save_upsert(
-            df, "fina_mainbz", cols, pk_columns=["ts_code", "end_date", "bz_item"],
+            df,
+            "fina_mainbz",
+            cols,
+            pk_columns=["ts_code", "end_date", "bz_item"],
         )
 
-    async def save_fina_audit(self, df):
+    async def save_fina_audit(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "end_date",
@@ -149,10 +154,13 @@ class FinancialDao(BaseDao):
             "audit_agency",
         ]
         return await self._save_upsert(
-            df, "fina_audit", cols, pk_columns=["ts_code", "end_date"],
+            df,
+            "fina_audit",
+            cols,
+            pk_columns=["ts_code", "end_date"],
         )
 
-    async def save_pledge_stat(self, df):
+    async def save_pledge_stat(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "end_date",
@@ -163,10 +171,13 @@ class FinancialDao(BaseDao):
             "pledge_ratio",
         ]
         return await self._save_upsert(
-            df, "pledge_stat", cols, pk_columns=["ts_code", "end_date"],
+            df,
+            "pledge_stat",
+            cols,
+            pk_columns=["ts_code", "end_date"],
         )
 
-    async def save_repurchase(self, df):
+    async def save_repurchase(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "ann_date",
@@ -179,10 +190,13 @@ class FinancialDao(BaseDao):
             "low_limit",
         ]
         return await self._save_upsert(
-            df, "repurchase", cols, pk_columns=["ts_code", "ann_date"],
+            df,
+            "repurchase",
+            cols,
+            pk_columns=["ts_code", "ann_date"],
         )
 
-    async def save_dividend(self, df):
+    async def save_dividend(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "end_date",
@@ -196,5 +210,8 @@ class FinancialDao(BaseDao):
             "ex_date",
         ]
         return await self._save_upsert(
-            df, "dividend", cols, pk_columns=["ts_code", "end_date", "ann_date"],
+            df,
+            "dividend",
+            cols,
+            pk_columns=["ts_code", "end_date", "ann_date"],
         )

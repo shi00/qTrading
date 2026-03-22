@@ -1,5 +1,6 @@
 import datetime
 import logging
+import typing
 
 import pandas as pd
 from pandas_market_calendars import get_calendar
@@ -28,7 +29,7 @@ class OfflineCalendar:
         return cls._calendar
 
     @staticmethod
-    def is_trading_day(date_obj):
+    def is_trading_day(date_obj: typing.Any):
         """
         Check if a date is a trading day.
         """
@@ -43,7 +44,9 @@ class OfflineCalendar:
                 return True
 
             # Convert to Timestamp
-            if isinstance(date_obj, str) or isinstance(date_obj, (datetime.date, datetime.datetime)):
+            if isinstance(date_obj, str) or isinstance(
+                date_obj, (datetime.date, datetime.datetime)
+            ):
                 ts = pd.Timestamp(date_obj)
             else:
                 ts = date_obj  # Hope it's compatible
@@ -59,7 +62,7 @@ class OfflineCalendar:
             return True
 
     @staticmethod
-    def get_trade_dates(start_date, end_date):
+    def get_trade_dates(start_date: str | None, end_date: str | None):
         """
         Get list of trading dates between start and end (inclusive).
         Returns list of strings in YYYYMMDD format.

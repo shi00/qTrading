@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import logging
 import threading
+import typing
 
 from data.cache_manager import CacheManager
 from services.ai_service import AIService
@@ -66,7 +67,9 @@ class NewsSubscriptionService:
 
         self._initialized = True
 
-    def add_listener(self, callback, is_alert=False):
+    def add_listener(
+        self, callback: typing.Callable | None, is_alert: typing.Any = False
+    ):
         """
         Add a listener for news updates.
         Args:
@@ -81,7 +84,9 @@ class NewsSubscriptionService:
             self._listeners.add(callback)
             logger.info(f"[NewsService] Added news listener: {callback}")
 
-    def remove_listener(self, callback, is_alert=False):
+    def remove_listener(
+        self, callback: typing.Callable | None, is_alert: typing.Any = False
+    ):
         """Remove a listener."""
         if is_alert:
             self._alert_listeners.discard(callback)
@@ -155,7 +160,7 @@ class NewsSubscriptionService:
 
             # Simple error handling for the loop itself (unlikely to fail here)
             try:
-                await asyncio.sleep(base_interval)
+                await asyncio.sleep(base_interval)  # type: ignore
             except asyncio.CancelledError:
                 break
 
@@ -168,12 +173,13 @@ class NewsSubscriptionService:
             await self._fetch_and_notify()
         except Exception as e:
             logger.error(
-                f"[NewsService] Error in background fetch task: {e}", exc_info=True,
+                f"[NewsService] Error in background fetch task: {e}",
+                exc_info=True,
             )
             # Optional: Implement retry logic here if needed, but for periodic polling,
             # just failing and waiting for next interval is often cleaner.
 
-    async def _generate_tags(self, content):
+    async def _generate_tags(self, content: typing.Any):
         """Generate tags for news content using AI or Rule-based fallback"""
         clean_content = content.strip()
         tag = ""
@@ -230,7 +236,8 @@ class NewsSubscriptionService:
                 # Wait for item with timeout to allow checking self._running
                 try:
                     item = await asyncio.wait_for(
-                        self.processing_queue.get(), timeout=1.0,
+                        self.processing_queue.get(),  # type: ignore
+                        timeout=1.0,
                     )
                 except asyncio.TimeoutError:
                     continue
@@ -238,7 +245,7 @@ class NewsSubscriptionService:
                 # Process Item
                 content = item.get("content", "")
                 if not content:
-                    self.processing_queue.task_done()
+                    self.processing_queue.task_done()  # type: ignore
                     continue
 
                 # 1. Generate Tags (AI call happens here, correctly managed by ThreadPool in ai_service)
@@ -249,7 +256,8 @@ class NewsSubscriptionService:
                 # 2. Update DB with tags
                 # Normalize again to ensure consistent keys
                 normalized = CacheManager.normalize_news_item(
-                    item, default_source="CLS",
+                    item,
+                    default_source="CLS",
                 )
                 await self.cache.save_market_news(normalized, wait=True)
 
@@ -259,7 +267,7 @@ class NewsSubscriptionService:
                     data={"content": content, "tags": tags},
                 )
 
-                self.processing_queue.task_done()
+                self.processing_queue.task_done()  # type: ignore
 
                 # 4. Cooperative yield: let event loop handle pending UI
                 # events (Flet WebSocket dispatch) before next item.
@@ -269,12 +277,18 @@ class NewsSubscriptionService:
                 break
             except Exception as e:
                 logger.error(
-                    f"[NewsService] Error in processing loop: {e}", exc_info=True,
+                    f"[NewsService] Error in processing loop: {e}",
+                    exc_info=True,
                 )
                 # Prevent tight error loop logging
                 await asyncio.sleep(5.0)
 
-    def _notify_listeners(self, listeners=None, update_type=None, data=None):
+    def _notify_listeners(
+        self,
+        listeners: typing.Any = None,
+        update_type: typing.Any = None,
+        data: typing.Any = None,
+    ):
         target = listeners if listeners else self._listeners
         if not target:
             return
@@ -322,11 +336,11 @@ class NewsSubscriptionService:
 
             news_list = await NewsFetcher.get_latest_global_news(limit=fetch_limit)
 
-            def get_hash(item):
+            def get_hash(item: dict):
                 # Combined hash of content and optionally time
                 content = item.get("content", "").strip()
                 time_str = item.get("time", "")
-                return hashlib.md5(f"{time_str}_{content}".encode("utf-8")).hexdigest()
+                return hashlib.md5(f"{time_str}_{content}".encode()).hexdigest()
 
             if not news_list:
                 return
@@ -343,12 +357,13 @@ class NewsSubscriptionService:
 
                         # Save RAW content first for immediate UI display
                         normalized = CacheManager.normalize_news_item(
-                            item, default_source="CLS",
+                            item,
+                            default_source="CLS",
                         )
                         await self.cache.save_market_news(normalized)
 
                         # Queue for AI tagging
-                        await self.processing_queue.put(item)
+                        await self.processing_queue.put(item)  # type: ignore
 
                 # Maintain bounds
                 if len(self._seen_hashes) > self._MAX_SEEN:
@@ -402,7 +417,7 @@ class NewsSubscriptionService:
                     await self.cache.save_market_news(normalized, wait=True)
 
                     # Queue for AI
-                    await self.processing_queue.put(item)
+                    await self.processing_queue.put(item)  # type: ignore
 
                     # Handle Alerts (Popup)
                     display_msg = clean_content

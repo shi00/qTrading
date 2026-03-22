@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -37,14 +37,14 @@ class ScreenerViewModel:
         self.review_mgr = ReviewManager()
 
         # State
-        self._full_results: Optional[pd.DataFrame] = None
+        self._full_results: pd.DataFrame | None = None
         self.page_no = 1
         self.page_size = 50
         self.total_pages = 0
         self.total_items = 0
 
         # Sorting State
-        self.sort_column: Optional[str] = None
+        self.sort_column: str | None = None
         self.sort_ascending = True
 
         # AI Stream Buffer
@@ -58,11 +58,11 @@ class ScreenerViewModel:
         self._realtime_snapshot = None  # Snapshot for mode switching
 
         # Callbacks (View binders)
-        self.on_update: Optional[Callable] = None
-        self.on_log: Optional[Callable[[str, int, str], None]] = None
-        self.on_status: Optional[Callable[[str, str], None]] = None
-        self.on_progress: Optional[Callable[[float], None]] = None
-        self.on_log_stream_start: Optional[Callable[[str], Callable]] = None
+        self.on_update: Callable | None = None
+        self.on_log: Callable[[str, int, str], None] | None = None
+        self.on_status: Callable[[str, str], None] | None = None
+        self.on_progress: Callable[[float], None] | None = None
+        self.on_log_stream_start: Callable[[str], Callable] | None = None
         self._main_loop = None
 
     def bind(self, on_update, on_log, on_status, on_progress, on_log_stream_start=None):
@@ -96,7 +96,7 @@ class ScreenerViewModel:
 
     # --- Data Actions ---
 
-    async def get_strategies(self) -> Dict[str, str]:
+    async def get_strategies(self) -> dict[str, str]:
         return self.strategy_mgr.get_all_names()
 
     def get_strategy_desc(self, key: str) -> str:
@@ -123,7 +123,10 @@ class ScreenerViewModel:
         return params
 
     async def run_strategy(
-        self, strategy_key: str, save_results: bool = True, params: dict = None,
+        self,
+        strategy_key: str,
+        save_results: bool = True,
+        params: dict = None,  # type: ignore
     ):
         """Execute strategy screening via the global TaskManager."""
         strategy = self.strategy_mgr.get_strategy(strategy_key)
@@ -138,12 +141,16 @@ class ScreenerViewModel:
             try:
                 # 1. Prepare Context (may trigger massive data load)
                 TaskManager().update_progress(
-                    task_id, 0.05, I18n.get("task_loading_data"),
+                    task_id,
+                    0.05,
+                    I18n.get("task_loading_data"),
                 )
                 context = await self.data_processor.get_strategy_data()
                 if not context:
                     TaskManager().update_progress(
-                        task_id, 0.1, I18n.get("task_cache_empty_init"),
+                        task_id,
+                        0.1,
+                        I18n.get("task_cache_empty_init"),
                     )
                     await self.data_processor.init_data()
                     context = await self.data_processor.get_strategy_data()
@@ -186,11 +193,15 @@ class ScreenerViewModel:
                     result_df = await strategy.filter(context)
                 else:
                     result_df = await ThreadPoolManager().run_async(
-                        TaskType.CPU, strategy.filter, context,
+                        TaskType.CPU,
+                        strategy.filter,
+                        context,
                     )
 
                 TaskManager().update_progress(
-                    task_id, 0.95, I18n.get("task_aggregating_results"),
+                    task_id,
+                    0.95,
+                    I18n.get("task_aggregating_results"),
                 )
 
                 if result_df is not None and not result_df.empty:
@@ -234,20 +245,23 @@ class ScreenerViewModel:
                 )
                 if self.on_status:
                     self.on_status(
-                        I18n.get("screener_blocked", reason=str(e)), "orange",
+                        I18n.get("screener_blocked", reason=str(e)),
+                        "orange",
                     )
                 if self.on_progress:
                     self.on_progress(False)
                 return I18n.get("screener_blocked", reason=str(e))
             except Exception as e:
                 logger.error(
-                    f"[ScreenerVM] Strategy execution failed: {e}", exc_info=True,
+                    f"[ScreenerVM] Strategy execution failed: {e}",
+                    exc_info=True,
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
                 safe_msg = I18n.get("screener_internal_error")
                 if self.on_status:
                     self.on_status(
-                        I18n.get("screener_exec_error").format(error=safe_msg), "red",
+                        I18n.get("screener_exec_error").format(error=safe_msg),
+                        "red",
                     )
                 if self.on_progress:
                     self.on_progress(False)
@@ -261,7 +275,8 @@ class ScreenerViewModel:
             self.on_progress(True)
         if self.on_status:
             self.on_status(
-                I18n.get("screener_running_strategy").format(name=strategy.name), "blue",
+                I18n.get("screener_running_strategy").format(name=strategy.name),
+                "blue",
             )
 
         # Dispatch to TaskManager!
@@ -359,7 +374,9 @@ class ScreenerViewModel:
         if self.on_status:
             self.on_status(
                 I18n.get("screener_ai_analyzing").format(
-                    done=current, total=total, msg=msg,
+                    done=current,
+                    total=total,
+                    msg=msg,
                 ),
                 "blue",
             )
@@ -400,7 +417,8 @@ class ScreenerViewModel:
                 except RuntimeError:
                     if self._main_loop and self._main_loop.is_running():
                         asyncio.run_coroutine_threadsafe(
-                            self._flush_ai_buffer(), self._main_loop,
+                            self._flush_ai_buffer(),
+                            self._main_loop,
                         )
                     else:
                         self._flush_pending = False
@@ -446,7 +464,7 @@ class ScreenerViewModel:
                 )
 
                 # Pin ai_score and ai_reason to the front (after name)
-                cols = list(self._full_results.columns)
+                cols = list(self._full_results.columns)  # type: ignore
                 # Remove if exists
                 if "ai_score" in cols:
                     cols.remove("ai_score")
@@ -460,7 +478,7 @@ class ScreenerViewModel:
                 cols.insert(insert_idx, "ai_score")
                 cols.insert(insert_idx + 1, "ai_reason")
 
-                self._full_results = self._full_results[cols]
+                self._full_results = self._full_results[cols]  # type: ignore
 
             self._update_pagination()
 
@@ -530,11 +548,11 @@ class ScreenerViewModel:
             if date not in tree:
                 tree[date] = []
             tree[date].append(
-                {"strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},
+                {"strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore
             )
         return tree
 
-    async def load_history_data(self, trade_date: str, strategy_name: str = None):
+    async def load_history_data(self, trade_date: str, strategy_name: str = None):  # type: ignore
         """Load historical screening records for a specific date/strategy."""
         cache = CacheManager()
         df = await cache.get_history_records(trade_date, strategy_name)

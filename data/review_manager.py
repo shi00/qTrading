@@ -1,5 +1,6 @@
 import datetime
 import logging
+import typing
 
 import pandas as pd
 
@@ -26,7 +27,8 @@ class ReviewManager:
         self.config = ConfigHandler()
 
     @log_async_operation(
-        operation_name="t1_review", threshold_ms=PerfThreshold.DB_BULK_IO,
+        operation_name="t1_review",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run_review(self):
         """
@@ -55,7 +57,8 @@ class ReviewManager:
 
             # Fetch prices since pred_date
             df_quotes = await self.cache.get_daily_quotes(
-                start_date=pred_date, ts_code=ts_code,
+                start_date=pred_date,
+                ts_code=ts_code,
             )
             if df_quotes.empty:
                 # Try fetching from API if not in cache (e.g. today's close)
@@ -77,8 +80,8 @@ class ReviewManager:
 
                 # Check T+1
                 t1_pct = None
-                if len(df_quotes) > t0_idx + 1:
-                    t1_row = df_quotes.iloc[t0_idx + 1]
+                if len(df_quotes) > t0_idx + 1:  # type: ignore
+                    t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
                     t1_row["close"]
                     t1_pct = t1_row["pct_chg"]
 
@@ -89,7 +92,8 @@ class ReviewManager:
                     # We need Index Return for this date to calculate Alpha.
                     # Default benchmark: 000300.SH (CSI 300) or 000001.SH (Shanghai Composite)
                     index_code = ConfigHandler.get_config(
-                        "benchmark_index", "000001.SH",
+                        "benchmark_index",
+                        "000001.SH",
                     )
 
                     # Fetch Index Quote for T+1
@@ -145,13 +149,13 @@ class ReviewManager:
         date_threshold = (get_now() - datetime.timedelta(days=10)).date()
 
         try:
-            return await self.cache.screener_dao.get_pending_predictions(date_threshold)
+            return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore
 
         except Exception as e:
             logger.error(f"[Review] Error fetching pending predictions: {e}")
             return pd.DataFrame()
 
-    async def get_learning_context(self, limit=3):
+    async def get_learning_context(self, limit: int | None = 3):
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
         Returns formatted XML string for few-shot learning.
@@ -166,7 +170,8 @@ class ReviewManager:
 
         try:
             df_wins = await self.cache.screener_dao.get_learning_context(
-                limit=limit, is_win=True,
+                limit=limit,
+                is_win=True,
             )
             if df_wins is not None and not df_wins.empty:
                 for _, row in df_wins.iterrows():
@@ -177,13 +182,14 @@ class ReviewManager:
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "reason": str(row["ai_reason"])[:50]
-                            if row["ai_reason"]
+                            if row["ai_reason"]  # type: ignore
                             else "",
                         },
                     )
 
             df_losses = await self.cache.screener_dao.get_learning_context(
-                limit=limit, is_win=False,
+                limit=limit,
+                is_win=False,
             )
             if df_losses is not None and not df_losses.empty:
                 for _, row in df_losses.iterrows():
@@ -194,7 +200,7 @@ class ReviewManager:
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "reason": str(row["ai_reason"])[:50]
-                            if row["ai_reason"]
+                            if row["ai_reason"]  # type: ignore
                             else "",
                         },
                     )
@@ -222,11 +228,17 @@ class ReviewManager:
         xml += "</history_context>"
         return xml
 
-    async def _update_result(self, record_id, pct, label, index_pct=0.0):
+    async def _update_result(
+        self,
+        record_id: typing.Any,
+        pct: typing.Any,
+        label: typing.Any,
+        index_pct: typing.Any = 0.0,
+    ):
         """Update DB with result. index_pct reserved for future alpha storage."""
         await self.cache.screener_dao.update_prediction_result(record_id, pct, label)
 
-    async def save_results(self, strategy_name, df):
+    async def save_results(self, strategy_name: str | None, df: pd.DataFrame):
         """
         Save screening results to history for future review.
         Persists the full strategy execution snapshot including financial indicators and AI thinking.
@@ -237,7 +249,7 @@ class ReviewManager:
         current_date = get_now().date()
 
         # Helpers to safely extract fields
-        def _f(row_data, key, default=None):
+        def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):
             v = row_data.get(key, default)
             if pd.isnull(v):
                 return default
@@ -246,7 +258,7 @@ class ReviewManager:
             except (ValueError, TypeError):
                 return default
 
-        def _s(row_data, key, default=""):
+        def _s(row_data: typing.Any, key: typing.Any, default: typing.Any = ""):
             v = row_data.get(key, default)
             if pd.isnull(v):
                 return default

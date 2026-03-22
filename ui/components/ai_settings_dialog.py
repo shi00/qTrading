@@ -40,7 +40,8 @@ class AISettingsDialog(ft.AlertDialog):
             options=[
                 ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
                 ft.dropdown.Option(
-                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)",
+                    "deepseek-reasoner",
+                    "DeepSeek-R1 (deepseek-reasoner)",
                 ),
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
@@ -111,8 +112,8 @@ class AISettingsDialog(ft.AlertDialog):
         self.prompt_field.update()
 
     async def save_settings(self, e):
-        api_key = self.api_key_field.value.strip()
-        base_url = self.base_url_field.value.strip()
+        api_key = self.api_key_field.value.strip()  # type: ignore
+        base_url = self.base_url_field.value.strip()  # type: ignore
         model_name = self.model_field.value
 
         if not api_key:
@@ -128,6 +129,6 @@ class AISettingsDialog(ft.AlertDialog):
         await AIService().reload_config()
 
         # Show success
-        self.page_ref.snack_bar = ft.SnackBar(ft.Text(I18n.get("ai_settings_saved")))
-        self.page_ref.snack_bar.open = True
+        self.page_ref.snack_bar = ft.SnackBar(ft.Text(I18n.get("ai_settings_saved")))  # type: ignore
+        self.page_ref.snack_bar.open = True  # type: ignore
         self.close(e)

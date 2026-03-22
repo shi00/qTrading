@@ -2,7 +2,7 @@
 
 > 本文档总结了项目的核心架构设计原则，所有代码修改、方案设计必须遵循此文档。
 > 
-> 最后更新：2026-03-19
+> 最后更新：2026-03-21
 
 ---
 
@@ -213,6 +213,38 @@ await self._save_upsert(
 
 ## 六、异步处理原则
 
+### 6.1 公共线程池原则
+
+**原则**：所有异步任务执行必须使用系统公共线程池 `ThreadPoolManager`，禁止私自创建线程池。
+
+**原因**：
+- 统一资源管理，避免线程池泛滥
+- 防止资源泄露和竞争
+- 便于监控和调优
+
+**正确示例**：
+```python
+from utils.thread_pool import ThreadPoolManager, TaskType
+
+# ✅ 正确：使用公共线程池
+result = await ThreadPoolManager().run_async(
+    TaskType.CPU, expensive_computation, data
+)
+```
+
+**错误示例**：
+```python
+# ❌ 禁止：私自创建线程池
+import concurrent.futures
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+result = await loop.run_in_executor(executor, func)
+
+# ❌ 禁止：直接使用 asyncio 默认线程池
+result = await loop.run_in_executor(None, func)  # 绕过公共线程池管理
+```
+
+### 6.2 任务类型隔离
+
 **原则**：为了防止大量数据转换和同步网络调用阻塞主 Event Loop，代码必须对不同类型的耗时操作进行物理线程池隔离卸载。
 
 | 任务类型 | 线程池枚举 | 适用场景及要求 |
@@ -307,7 +339,46 @@ except Exception as e:
 - 类型转换集中在 `BaseDao._prepare_data_params`
 - 时区处理集中在 `time_utils.py`
 
-### 8.3 防御性编程
+### 8.3 问题解决原则
+
+**原则**：发现一个问题，必须解决一类问题。
+
+**原因**：
+- 根因分析比症状修复更重要
+- 避免同类问题反复出现
+- 提升代码质量和系统稳定性
+
+**正确做法**：
+```python
+# 发现：asyncpg 日期类型转换报错
+# ❌ 错误：只修复报错的那一行
+await dao.save_data(date.strftime("%Y%m%d"))  # 仅修复此处
+
+# ✅ 正确：在 BaseDao 层统一处理日期类型转换
+class BaseDao:
+    @staticmethod
+    def _convert_param_for_asyncpg(val):
+        if isinstance(val, str):
+            # 统一处理所有字符串日期转换
+            if len(val) == 8 and val.isdigit():
+                return datetime.date(int(val[:4]), int(val[4:6]), int(val[6:8]))
+        return val
+```
+
+**实践要点**：
+1. **根因分析**：遇到问题时，先分析根本原因，而非仅修复表面症状
+2. **全面排查**：发现一处问题，检查整个代码库是否存在同类问题
+3. **统一修复**：在合适的抽象层次统一解决，而非分散修复
+4. **预防机制**：添加测试用例和代码规范，防止同类问题再次发生
+
+**典型案例**：
+| 发现的问题 | 错误修复 | 正确修复 |
+|------------|----------|----------|
+| asyncpg 日期转换错误 | 仅修复报错处 | BaseDao 统一转换 |
+| 测试使用 SQLite | 仅跳过测试 | 统一使用 PostgreSQL |
+| 字段映射分散 | 各处手动重命名 | TushareClient 集中映射 |
+
+### 8.4 防御性编程
 
 ```python
 # 空值检查
@@ -472,8 +543,10 @@ pytest -m "not integration"
 - [ ] 数据库操作是否完全经由 DAO 并在 `CacheManager` 中获得统一接管？
 - [ ] 原始 SQL 以及对 `_write_db`/`_read_db` 的访问代码是否已经从服务层绝迹？
 - [ ] SQL 是否使用参数化查询防御注入？
+- [ ] 异步任务是否使用公共线程池 `ThreadPoolManager`（禁止私自创建线程池）？
 - [ ] 复杂 Pandas 操作与同步 HTTP 调用是否被正确卸载至 `ThreadPoolManager` 的适当工作池？
 - [ ] 异常是否正确处理和传播（含网络超时退避与令牌桶容错等机制有效生效）？
+- [ ] 发现问题时是否解决了一类问题（根因分析 + 全面排查 + 统一修复）？
 - [ ] 新增/修改代码是否有测试用例？
 
 ---

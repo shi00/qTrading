@@ -109,7 +109,7 @@ class ToastManager:
 
         # Start timer with centralized task tracking
         task = self.page.run_task(self._run_toast_lifecycle, toast_card)
-        self._register_task(task)
+        self._register_task(task)  # type: ignore
 
     async def _run_toast_lifecycle(self, toast_card: "ToastCard") -> None:
         """
@@ -266,13 +266,13 @@ class ToastCard(ft.Container):
 
         if self.is_expanded:
             self.text_control.max_lines = None  # Show all
-            self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_UP
-            self.expand_btn.tooltip = I18n.get("common_collapse")
+            self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_UP  # type: ignore
+            self.expand_btn.tooltip = I18n.get("common_collapse")  # type: ignore
             # Timer logic handled in start_timer loop
         else:
             self.text_control.max_lines = self.COLLAPSED_MAX_LINES
-            self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN
-            self.expand_btn.tooltip = I18n.get("common_expand")
+            self.expand_btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN  # type: ignore
+            self.expand_btn.tooltip = I18n.get("common_expand")  # type: ignore
 
         self.update()
 

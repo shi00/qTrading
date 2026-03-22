@@ -43,7 +43,7 @@ async def main(page: ft.Page):
     scheduler.start()
 
     page.title = I18n.get("app_title")
-    page.window_icon = "icon.png"
+    page.window_icon = "icon.png"  # type: ignore
 
     # ... (Cleanup resources code) ...
 
@@ -85,13 +85,13 @@ async def main(page: ft.Page):
 
             # Stop Toasts (Cancel pending timers)
             logger.info("[Main] Step 3: Stopping Toast Manager...")
-            if hasattr(page, "toast") and page.toast:
+            if hasattr(page, "toast") and page.toast:  # type: ignore
                 try:
                     import inspect
 
                     # Robust shutdown: handle sync or async stop_all
-                    if hasattr(page.toast, "stop_all"):
-                        res = page.toast.stop_all()
+                    if hasattr(page.toast, "stop_all"):  # type: ignore
+                        res = page.toast.stop_all()  # type: ignore
                         if inspect.isawaitable(res):
                             await res
                 except Exception as ex:
@@ -106,6 +106,7 @@ async def main(page: ft.Page):
             logger.info("[Main] Step 4.5: Closing async DB connection pool...")
             try:
                 from data.cache_manager import CacheManager
+
                 await CacheManager().close()
             except Exception:
                 pass
@@ -149,12 +150,12 @@ async def main(page: ft.Page):
     apply_page_theme(page)
 
     # --- Toast Manager (Proposal A) ---
-    page.toast = ToastManager(page)
+    page.toast = ToastManager(page)  # type: ignore
 
     def show_toast(message, type="info"):
-        page.toast.show(message, type)
+        page.toast.show(message, type)  # type: ignore
 
-    page.show_toast = show_toast  # Helper for views
+    page.show_toast = show_toast  # Helper for views  # type: ignore
 
     # --- Initialize App Layout ---
     from ui.app_layout import AppLayout
@@ -166,8 +167,8 @@ async def main(page: ft.Page):
 
         # Register Global News Alert (Decoupled from AppLayout)
         def on_news_alert(msg):
-            if hasattr(page, "toast") and page.toast:
-                page.toast.show(f"📰 {msg}", type="info")
+            if hasattr(page, "toast") and page.toast:  # type: ignore
+                page.toast.show(f"📰 {msg}", type="info")  # type: ignore
 
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
 

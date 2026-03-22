@@ -1,0 +1,22 @@
+[tool.ruff]
+# 设置支持的最大行长
+line-length = 88
+# 匹配 Black 的缩进选项
+indent-width = 4
+target-version = "py310"
+
+[tool.ruff.lint]
+# 默认开启 F(Pyflakes), E(pycodestyle errors), W(pycodestyle warnings), I(isort), UP(pyupgrade)
+select = ["F", "E", "W", "I", "UP", "B", "SIM"]
+# 忽略一些偶尔引发冲突的格式规则
+ignore = []
+
+# 允许自动修复的规则列表
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

@@ -394,7 +394,8 @@ class AppColors:
         # 加载自定义色
         # 使用 TypedDict key 确保完整性 (防止主题缺键导致旧值残留)
         preset = CUSTOM_COLOR_PRESETS.get(
-            theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK],
+            theme_name,
+            CUSTOM_COLOR_PRESETS[ThemeName.DARK],
         )
 
         # 强制遍历 ThemeColors 的所有字段，而不是 preset 的 keys
@@ -527,7 +528,8 @@ def _build_theme(theme_name: str) -> ft.Theme:
     包含 ColorScheme + 全局组件样式（滚动条、分割线、数据表）。
     """
     color_scheme = THEME_COLOR_SCHEMES.get(
-        theme_name, THEME_COLOR_SCHEMES[ThemeName.DARK],
+        theme_name,
+        THEME_COLOR_SCHEMES[ThemeName.DARK],
     )
     custom = CUSTOM_COLOR_PRESETS.get(theme_name, CUSTOM_COLOR_PRESETS[ThemeName.DARK])
 
@@ -539,10 +541,12 @@ def _build_theme(theme_name: str) -> ft.Theme:
             thumb_visibility=True,
             thumb_color={
                 ft.ControlState.HOVERED: ft.Colors.with_opacity(
-                    0.4, ft.Colors.ON_SURFACE_VARIANT,
+                    0.4,
+                    ft.Colors.ON_SURFACE_VARIANT,
                 ),
                 ft.ControlState.DEFAULT: ft.Colors.with_opacity(
-                    0.2, ft.Colors.ON_SURFACE_VARIANT,
+                    0.2,
+                    ft.Colors.ON_SURFACE_VARIANT,
                 ),
             },
             thickness=6,
@@ -570,7 +574,7 @@ def _build_theme(theme_name: str) -> ft.Theme:
     )
 
 
-def apply_page_theme(page: ft.Page, theme_name: str = None):
+def apply_page_theme(page: ft.Page, theme_name: str = None):  # type: ignore
     """
     应用全局页面主题。
 

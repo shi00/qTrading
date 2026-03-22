@@ -1,6 +1,7 @@
 import functools
 import inspect
 import logging
+import typing
 from enum import IntEnum
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ class QualityGate:
     """
 
 
-def _find_processor(instance, args, kwargs):
+def _find_processor(instance: typing.Any, args: typing.Any, kwargs: typing.Any):
     """Shared logic to locate the DataProcessor instance.
 
     Args:
@@ -42,7 +43,7 @@ def _find_processor(instance, args, kwargs):
     return processor
 
 
-def _check_tier(processor, min_tier, func_name):
+def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.Any):
     """Shared logic to verify quality tier."""
     if processor is None:
         logger.warning(
@@ -73,19 +74,19 @@ def require_quality(min_tier: QualityTier):
 
     Usage:
         @require_quality(QualityTier.SILVER)
-        def _filter_logic(self, lf, context):
+        def _filter_logic(self, lf: typing.Any, context: typing.Any):
             ...
 
         @require_quality(QualityTier.SILVER)
-        async def filter(self, context):
+        async def filter(self, context: typing.Any):
             ...
     """
 
-    def decorator(func):
+    def decorator(func: typing.Callable):
         if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
-            async def async_wrapper(self, *args, **kwargs):
+            async def async_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
                 processor = _find_processor(self, args, kwargs)
                 _check_tier(processor, min_tier, func.__name__)
                 return await func(self, *args, **kwargs)
@@ -93,7 +94,7 @@ def require_quality(min_tier: QualityTier):
             return async_wrapper
 
         @functools.wraps(func)
-        def sync_wrapper(self, *args, **kwargs):
+        def sync_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
             processor = _find_processor(self, args, kwargs)
             _check_tier(processor, min_tier, func.__name__)
             return func(self, *args, **kwargs)

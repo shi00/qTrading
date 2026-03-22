@@ -1,4 +1,5 @@
 import logging
+import typing
 
 import pandas as pd
 
@@ -24,7 +25,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         self.limit = ConfigHandler.get_ai_max_candidates()
 
     @require_quality(QualityTier.SILVER)
-    async def filter(self, context):
+    async def filter(self, context: typing.Any):
         if context is None:
             return pd.DataFrame()
 

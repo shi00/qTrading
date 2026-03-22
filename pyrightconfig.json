@@ -8,11 +8,11 @@
     "alembic"
   ],
   "typeCheckingMode": "basic",
-  "reportUnknownVariableType": "none",
-  "reportUnknownMemberType": "none",
-  "reportUnknownArgumentType": "none",
-  "reportGeneralTypeIssues": "warning",
-  "reportMissingParameterType": "none",
-  "reportMissingTypeArgument": "none",
-  "reportMissingTypeStubs": "none"
+  "reportMissingTypeStubs": "warning",
+  "reportUnknownMemberType": "warning",
+  "reportUnknownArgumentType": "warning",
+  "reportUnknownVariableType": "warning",
+  "reportMissingParameterType": "error",
+  "reportMissingTypeArgument": "error",
+  "reportGeneralTypeIssues": "error"
 }

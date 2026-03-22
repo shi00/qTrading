@@ -329,7 +329,7 @@ class SystemTab(ft.Container):
             from ui.theme import apply_page_theme
 
             if self.page:
-                apply_page_theme(self.page, theme_name)
+                apply_page_theme(self.page, theme_name)  # type: ignore
                 self.page.update()
 
             self.show_snack(I18n.get("settings_snack_theme_updated"))
@@ -340,21 +340,25 @@ class SystemTab(ft.Container):
     def on_log_level_change(self, e):
         """Handle log level change"""
         UILogger.log_action(
-            "SystemTab", "Select", f"log_level={self.log_level_dropdown.value}",
+            "SystemTab",
+            "Select",
+            f"log_level={self.log_level_dropdown.value}",
         )
         level = self.log_level_dropdown.value
         ConfigHandler.set_log_level(level)
         from utils.logger import update_log_level
+
         update_log_level(level)
-        self.show_snack(I18n.get("sys_log_label") + ": " + level)
+        self.show_snack(I18n.get("sys_log_label") + ": " + level)  # type: ignore
 
     def save_concurrency(self, e):
         """Save concurrency setting"""
         try:
-            val = int(self.concurrency_input.value)
+            val = int(self.concurrency_input.value)  # type: ignore
             if val < 1 or val > 32:
                 self.show_snack(
-                    I18n.get("sys_snack_concurrency_range"), color=AppColors.ERROR,
+                    I18n.get("sys_snack_concurrency_range"),
+                    color=AppColors.ERROR,
                 )
                 return
             ConfigHandler.set_sync_max_concurrent_heavy(val)
@@ -368,9 +372,9 @@ class SystemTab(ft.Container):
     def save_db_pool_settings(self, e):
         """Save DB connection pool settings (pool_size, max_overflow, timeout)"""
         try:
-            pool_size = int(self.pool_size_input.value)
-            max_overflow = int(self.db_overflow_input.value)
-            timeout = int(self.db_timeout_input.value)
+            pool_size = int(self.pool_size_input.value)  # type: ignore
+            max_overflow = int(self.db_overflow_input.value)  # type: ignore
+            timeout = int(self.db_timeout_input.value)  # type: ignore
 
             if pool_size < 1 or pool_size > 50:
                 self.show_snack(I18n.get("sys_snack_pool_range"), color=AppColors.ERROR)
@@ -428,12 +432,13 @@ class SystemTab(ft.Container):
         from utils.thread_pool import ThreadPoolManager
 
         try:
-            io_str = self.io_workers_input.value.strip()
-            cpu_str = self.cpu_workers_input.value.strip()
+            io_str = self.io_workers_input.value.strip()  # type: ignore
+            cpu_str = self.cpu_workers_input.value.strip()  # type: ignore
 
             if not io_str or not cpu_str:
                 self.show_snack(
-                    I18n.get("sys_snack_threads_empty"), color=AppColors.ERROR,
+                    I18n.get("sys_snack_threads_empty"),
+                    color=AppColors.ERROR,
                 )
                 return
 
@@ -467,13 +472,14 @@ class SystemTab(ft.Container):
                 color=AppColors.ERROR,
             )
             logger.error(
-                f"[SystemTab] ThreadPool | ❌ Save failed: {ex}", exc_info=True,
+                f"[SystemTab] ThreadPool | ❌ Save failed: {ex}",
+                exc_info=True,
             )
 
     def save_rate_limit(self, e):
         """Save API rate limit setting."""
         try:
-            limit_str = self.rate_limit_input.value.strip()
+            limit_str = self.rate_limit_input.value.strip()  # type: ignore
 
             if not limit_str:
                 ConfigHandler.set_tushare_api_limit(0)
@@ -508,7 +514,8 @@ class SystemTab(ft.Container):
 
             ConfigHandler.set_no_proxy_domains(domains)
             self.show_snack(
-                I18n.get("settings_snack_no_proxy_saved"), color=AppColors.SUCCESS,
+                I18n.get("settings_snack_no_proxy_saved"),
+                color=AppColors.SUCCESS,
             )
             logger.info(f"No-Proxy domains updated: {domains}")
 
@@ -516,7 +523,8 @@ class SystemTab(ft.Container):
             from utils.thread_pool import TaskType, ThreadPoolManager
 
             ThreadPoolManager().submit(
-                TaskType.IO, ProxyManager.apply_smart_proxy_policy,
+                TaskType.IO,
+                ProxyManager.apply_smart_proxy_policy,
             )
 
         except Exception as ex:

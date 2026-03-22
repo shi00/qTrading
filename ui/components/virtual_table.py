@@ -111,7 +111,8 @@ class VirtualTable(ft.Column):
             )
 
             width = col.get(
-                "width", 100,
+                "width",
+                100,
             )  # Default to 100 if missing for safe width calculation
             total_width += width
 
@@ -121,7 +122,8 @@ class VirtualTable(ft.Column):
 
         # Enforce minimum width to trigger horizontal scrolling in the parent Row
         self.inner_column.width = max(
-            total_width, 800,
+            total_width,
+            800,
         )  # Ensure it doesn't shrink too small on empty
         self.header_container.width = max(total_width, 800)
 
@@ -206,14 +208,15 @@ class VirtualTable(ft.Column):
                             ft.TextSpan(
                                 parts[0],
                                 ft.TextStyle(
-                                    weight=ft.FontWeight.BOLD, color=text_color,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=text_color,
                                 ),
                             ),
                             ft.TextSpan(
                                 "." + parts[1],
                                 ft.TextStyle(
                                     size=10,
-                                    color=AppColors.TEXT_TERTIARY
+                                    color=AppColors.TEXT_TERTIARY  # type: ignore
                                     if hasattr(AppColors, "TEXT_TERTIARY")
                                     else "#888888",
                                 ),

@@ -3,6 +3,7 @@ Scheduler service for automatic data updates.
 Runs as a background task within the Flet application using APScheduler.
 """
 
+import asyncio
 import logging
 import threading
 
@@ -13,6 +14,7 @@ from data.data_processor import DataProcessor
 from data.review_manager import ReviewManager
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -115,12 +117,12 @@ class SchedulerService:
 
     async def _watch_config_changes(self):
         """Monitor config changes and reload jobs if needed"""
-        import asyncio
 
         # Run sync config check in thread pool to avoid blocking event loop
         try:
             current_config = await ThreadPoolManager().run_async(
-                TaskType.IO, self._check_config_sync,
+                TaskType.IO,
+                self._check_config_sync,
             )
         except asyncio.CancelledError:
             logger.info(
@@ -254,7 +256,7 @@ class SchedulerService:
 
             result = await processor.run_daily_update(progress_callback=_progress)
             self._last_update_date = today_str
-            added = getattr(result, "added", result) if result else 0
+            added = getattr(result, "added", result) if result else 0  # type: ignore
             return I18n.get("sched_daily_done", added=added)
 
         TaskManager().submit_task(
@@ -278,7 +280,8 @@ class SchedulerService:
             processor = DataProcessor()
             tm.update_progress(task_id, 0.05, "清空历史AI概念...")
             await processor.run_doubao_tagging(
-                task_id=task_id, cancel_event=cancel_event,
+                task_id=task_id,
+                cancel_event=cancel_event,
             )
             return "AI概念重建完成"
 

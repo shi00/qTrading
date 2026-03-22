@@ -1,6 +1,7 @@
 import datetime
 import logging
 import threading
+import typing
 
 import pandas as pd
 import requests
@@ -18,6 +19,7 @@ class TushareClient:
     Enhanced Tushare API client with timeout, retry, trade calendar support, and TokenBucket Rate Limiting.
     """
 
+    pro: typing.Any
     # Singleton instance
     _instance = None
     _lock = threading.Lock()  # Thread safety lock
@@ -36,7 +38,7 @@ class TushareClient:
         "cn_m": {"month": "period"},
     }
 
-    def __new__(cls, token=None):
+    def __new__(cls, token: str | None = None):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -44,7 +46,7 @@ class TushareClient:
                     cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, token=None):
+    def __init__(self, token: str | None = None):
         # Double-check locking for initialization to prevent race conditions
         if self._initialized:
             if token and token != self.token:
@@ -70,7 +72,9 @@ class TushareClient:
                 # Capacity allows for small bursts (e.g. 5 seconds worth or fixed 10)
                 capacity = max(10, rate_per_sec * 5)
                 self._rate_limiter = TokenBucket(
-                    start_tokens=capacity, capacity=capacity, rate=rate_per_sec,
+                    start_tokens=capacity,
+                    capacity=capacity,
+                    rate=rate_per_sec,
                 )
                 logger.info(
                     f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
@@ -91,7 +95,7 @@ class TushareClient:
 
             self._initialized = True
 
-    def set_token(self, token):
+    def set_token(self, token: str | None):
         self.token = token
         ts.set_token(token)
         # Re-initialize with timeout
@@ -100,11 +104,10 @@ class TushareClient:
             f"[API] Token updated. Client re-initialized with timeout={self.timeout}s",
         )
 
-    async def _handle_api_call(self, func, **kwargs):
+    async def _handle_api_call(self, func: typing.Callable, **kwargs: typing.Any):
         """Async wrapper that yields to event loop during rate limit / backoff"""
         import asyncio
         import functools
-        import datetime
 
         # Tushare SDK wraps API methods as functools.partial(DataApi.query, 'api_name').
         # Standard __name__ doesn't exist on partial objects, so extract from partial.args[0].
@@ -139,7 +142,8 @@ class TushareClient:
                 loop = asyncio.get_running_loop()
                 # Run the actual synchronous HTTP call in the IO thread pool
                 result = await loop.run_in_executor(
-                    ThreadPoolManager().io_pool, functools.partial(func, **kwargs),
+                    ThreadPoolManager().io_pool,
+                    functools.partial(func, **kwargs),
                 )
 
                 # Apply unified column renaming if this API needs it
@@ -189,7 +193,9 @@ class TushareClient:
                 await asyncio.sleep(1)
         return None
 
-    async def _handle_api_call_paginated(self, func, max_pages=20, **kwargs):
+    async def _handle_api_call_paginated(
+        self, func: typing.Callable, max_pages: int = 20, **kwargs: typing.Any
+    ):
         import pandas as pd
 
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -231,22 +237,24 @@ class TushareClient:
             return None
         return pd.concat(df_list, ignore_index=True)
 
-    def get_trade_dates(self, start_date, end_date):
+    def get_trade_dates(self, start_date: str | None, end_date: str | None):
         """Get list of actual trading dates (includes holidays handling).
         NOTE: This is a SYNC method — must remain sync for APScheduler (non-asyncio thread).
         For async contexts, use get_trade_cal() instead."""
-        import datetime
         if not self.pro:
             raise Exception("Tushare Token not set. Please set your token in settings.")
-        
+
         if isinstance(start_date, (datetime.date, datetime.datetime)):
             start_date = start_date.strftime("%Y%m%d")
         if isinstance(end_date, (datetime.date, datetime.datetime)):
             end_date = end_date.strftime("%Y%m%d")
-            
+
         try:
             df = self.pro.trade_cal(
-                exchange="SSE", start_date=start_date, end_date=end_date, is_open="1",
+                exchange="SSE",
+                start_date=start_date,
+                end_date=end_date,
+                is_open="1",
             )
             if df is not None and not df.empty:
                 return df["cal_date"].tolist()
@@ -254,7 +262,7 @@ class TushareClient:
             logger.warning(f"[API] get_trade_dates sync call failed: {e}")
         return []
 
-    def is_trading_day(self, date_str=None):
+    def is_trading_day(self, date_str: typing.Any = None):
         """
         Check if a given date is a trading day with optimized caching.
         Strategy: Year-based lazy loading with Double-Checked Locking.
@@ -265,7 +273,6 @@ class TushareClient:
         Returns:
             bool: True if trading day, False if holiday/weekend
         """
-        import datetime
         if date_str is None:
             date_str = get_now().strftime("%Y%m%d")
         elif isinstance(date_str, (datetime.date, datetime.datetime)):
@@ -315,7 +322,7 @@ class TushareClient:
                 logger.warning(
                     f"[Cache] Failed to load calendar for {year} (Empty response)",
                 )
-                    # Do not mark as loaded so we retry next time, or logic below deals with it
+                # Do not mark as loaded so we retry next time, or logic below deals with it
 
         except Exception as e:
             logger.warning(
@@ -346,11 +353,13 @@ class TushareClient:
     # Whitelist of allowed macro API names to prevent arbitrary API injection
     _MACRO_API_WHITELIST = {"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"}
 
-    async def get_trade_cal(self, start_date, end_date, exchange="SSE"):
+    async def get_trade_cal(
+        self, start_date: str | None, end_date: str | None, exchange: str = "SSE"
+    ):
         """
         Get trade calendar.
         Note: This is the raw API wrapper. For is_trading_day checks, use is_trading_day()
-        which implements optimized year-based caching.
+        which implements optimized year-based caching.  # type: ignore
         """
         return await self._handle_api_call(
             self.pro.trade_cal,
@@ -360,7 +369,7 @@ class TushareClient:
             is_open="1",
         )
 
-    async def get_stock_basic(self):
+    async def get_stock_basic(self):  # type: ignore
         """Get basic list of all stocks"""
         return await self._handle_api_call(
             self.pro.stock_basic,
@@ -374,10 +383,14 @@ class TushareClient:
         return await self.get_stock_basic()
 
     async def get_daily_quotes(
-        self, trade_date=None, start_date=None, end_date=None, ts_code=None,
+        self,
+        trade_date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ts_code: str | None = None,
     ):
         """Get daily quotes with adj_factor joined"""
-
+        # type: ignore
         # 1. Fetch Daily Quotes
         df_daily = await self._handle_api_call(
             self.pro.daily,
@@ -391,7 +404,7 @@ class TushareClient:
             return df_daily
 
         # 2. Fetch Adj Factor
-        # Tushare adj_factor API has same signature logic
+        # Tushare adj_factor API has same signature logic  # type: ignore
         try:
             df_adj = await self._handle_api_call(
                 self.pro.adj_factor,
@@ -423,7 +436,9 @@ class TushareClient:
 
         return df_daily
 
-    async def get_daily_basic(self, trade_date=None, ts_code=None):
+    async def get_daily_basic(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):  # type: ignore
         """Get daily basic indicators (PE, PB, Turnover, etc.)"""
         return await self._handle_api_call(
             self.pro.daily_basic,
@@ -433,9 +448,13 @@ class TushareClient:
         )
 
     async def get_income(
-        self, period=None, start_date=None, end_date=None, ts_code=None,
+        self,
+        period: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ts_code: str | None = None,
     ):
-        """Get income statement data"""
+        """Get income statement data"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.income,
@@ -447,9 +466,13 @@ class TushareClient:
         )
 
     async def get_cashflow(
-        self, period=None, start_date=None, end_date=None, ts_code=None,
+        self,
+        period: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ts_code: str | None = None,
     ):
-        """Get cashflow statement data"""
+        """Get cashflow statement data"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.cashflow,
@@ -461,9 +484,13 @@ class TushareClient:
         )
 
     async def get_balancesheet(
-        self, period=None, start_date=None, end_date=None, ts_code=None,
+        self,
+        period: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ts_code: str | None = None,
     ):
-        """Get balance sheet data"""
+        """Get balance sheet data"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.balancesheet,
@@ -474,40 +501,44 @@ class TushareClient:
             fields="ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill",
         )
 
-    async def get_top_list(self, trade_date):
+    async def get_top_list(self, trade_date: str | None):  # type: ignore
         """Dragon Tiger Board (LHB) data"""
 
         return await self._handle_api_call(self.pro.top_list, trade_date=trade_date)
 
-    async def get_top_inst(self, trade_date):
+    async def get_top_inst(self, trade_date: str | None):  # type: ignore
         """LHB Institutional Seat Transaction Detail"""
 
         return await self._handle_api_call(self.pro.top_inst, trade_date=trade_date)
 
-    async def get_hk_hold(self, trade_date):
+    async def get_hk_hold(self, trade_date: str | None):  # type: ignore
         """Northbound (HK->Connect) holdings"""
 
         return await self._handle_api_call(self.pro.hk_hold, trade_date=trade_date)
 
-    async def get_moneyflow(self, trade_date):
+    async def get_moneyflow(self, trade_date: str | None):  # type: ignore
         """Individual stock money flow (Main force)"""
 
         return await self._handle_api_call(self.pro.moneyflow, trade_date=trade_date)
 
-    async def get_block_trade(self, trade_date):
+    async def get_block_trade(self, trade_date: str | None):  # type: ignore
         """Block trade data"""
 
         return await self._handle_api_call(self.pro.block_trade, trade_date=trade_date)
 
     async def get_fina_indicator(
-        self, ts_code=None, period=None, start_date=None, end_date=None,
+        self,
+        ts_code: str | None = None,
+        period: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ):
         """
         Get financial indicators (ROE, growth rates, etc.)
         Can query by:
         1. ts_code + start_date/end_date (Get history for one stock)
         2. period (Get all stocks for one quarter - Requires permissions)
-        """
+        """  # type: ignore
 
         return await self._handle_api_call(
             self.pro.fina_indicator,
@@ -518,11 +549,11 @@ class TushareClient:
             fields="ts_code,ann_date,end_date,roe,roe_waa,roe_dt,netprofit_margin,grossprofit_margin,debt_to_assets,q_sales_yoy,q_profit_yoy,or_yoy,netprofit_yoy",
         )
 
-    async def get_disclosure_date(self, date):
+    async def get_disclosure_date(self, date: str):
         """
         Get disclosure list for a specific date (Incremental Sync).
         Uses 'actual_date' to find reports released on this day.
-        """
+        """  # type: ignore
 
         return await self._handle_api_call(
             self.pro.disclosure_date,
@@ -530,31 +561,38 @@ class TushareClient:
             fields="ts_code,ann_date,end_date,actual_date",
         )
 
-    async def get_concept_list(self, src="ts"):
+    # type: ignore
+    async def get_concept_list(self, src: str = "ts"):
         """Get all concept categories"""
         return await self._handle_api_call(self.pro.concept, src=src)
 
-    async def get_concept_detail_by_id(self, concept_id):
+    async def get_concept_detail_by_id(self, concept_id: str):
         """
-        Get all stocks in a specific concept group by concept ID.
+        Get all stocks in a specific concept group by concept ID.  # type: ignore
         Unlike get_concept_detail(ts_code), this fetches members of a concept.
         """
         return await self._handle_api_call(self.pro.concept_detail, id=concept_id)
 
-    async def get_concept_detail(self, ts_code):
+    async def get_concept_detail(self, ts_code: str | None):
         """
         Get concepts for a specific stock (e.g. Lithium, Sora, etc.)
-        """
+        """  # type: ignore
 
         return await self._handle_api_call(
-            self.pro.concept_detail, ts_code=ts_code, fields="id,concept_name",
+            self.pro.concept_detail,
+            ts_code=ts_code,
+            fields="id,concept_name",
         )
 
     async def get_index_daily(
-        self, ts_code=None, trade_date=None, start_date=None, end_date=None,
+        self,
+        ts_code: str | None = None,
+        trade_date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ):
         """Get index daily data"""
-
+        # type: ignore
         # Index Daily
         return await self._handle_api_call(
             self.pro.index_daily,
@@ -564,15 +602,18 @@ class TushareClient:
             end_date=end_date,
         )
 
-    async def get_moneyflow_hsgt(self, trade_date=None):
-        """Get Northbound (HSGT) money flow"""
+    async def get_moneyflow_hsgt(self, trade_date: str | None = None):
+        """Get Northbound (HSGT) money flow"""  # type: ignore
 
         return await self._handle_api_call(
-            self.pro.moneyflow_hsgt, trade_date=trade_date,
+            self.pro.moneyflow_hsgt,
+            trade_date=trade_date,
         )
 
-    async def get_index_dailybasic(self, trade_date=None, ts_code=None):
-        """Get index daily indicators (PE, PB, etc.)"""
+    async def get_index_dailybasic(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
+        """Get index daily indicators (PE, PB, etc.)"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.index_dailybasic,
@@ -581,8 +622,8 @@ class TushareClient:
             fields="ts_code,trade_date,total_mv,float_mv,total_share,float_share,free_share,turnover_rate,turnover_rate_f,pe,pe_ttm,pb",
         )
 
-    async def get_limit_list(self, trade_date=None):
-        """Get daily limit up/down list"""
+    async def get_limit_list(self, trade_date: str | None = None):
+        """Get daily limit up/down list"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.limit_list,
@@ -590,8 +631,10 @@ class TushareClient:
             # fields='trade_date,ts_code,name,close,pct_chg,amp,fc_ratio,fl_ratio,fd_amount,first_time,last_time,open_times,strth,limit_type'
         )
 
-    async def get_suspend_d(self, trade_date=None, ts_code=None):
-        """Get daily suspension list"""
+    async def get_suspend_d(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
+        """Get daily suspension list"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.suspend_d,
@@ -600,17 +643,26 @@ class TushareClient:
             suspend_type="S",  # Only stop
         )
 
-    async def get_margin_detail(self, trade_date=None, ts_code=None):
+    async def get_margin_detail(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
         """Get individual stock margin detail"""
 
-        # Note: API might be 'margin_detail' or 'margin' depending on permissions
+        # Note: API might be 'margin_detail' or 'margin' depending on permissions  # type: ignore
         # Usually 'margin_detail' is for individual stocks
         return await self._handle_api_call(
-            self.pro.margin_detail, trade_date=trade_date, ts_code=ts_code,
+            self.pro.margin_detail,
+            trade_date=trade_date,
+            ts_code=ts_code,
         )
 
-    async def get_fina_audit(self, ts_code, start_date=None, end_date=None):
-        """Get financial audit opinion"""
+    async def get_fina_audit(
+        self,
+        ts_code: str | None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get financial audit opinion"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.fina_audit,
@@ -621,9 +673,14 @@ class TushareClient:
         )
 
     async def get_forecast(
-        self, ts_code=None, period=None, start_date=None, end_date=None, ann_date=None,
+        self,
+        ts_code: str | None = None,
+        period: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ann_date: str | None = None,
     ):
-        """Get performance forecast"""
+        """Get performance forecast"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.forecast,
@@ -636,9 +693,13 @@ class TushareClient:
         )
 
     async def get_fina_mainbz(
-        self, ts_code=None, period=None, start_date=None, end_date=None,
+        self,
+        ts_code: str | None = None,
+        period: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ):
-        """Get main business composition"""
+        """Get main business composition"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.fina_mainbz,
@@ -649,17 +710,25 @@ class TushareClient:
             type="P",  # By Product
         )
 
-    async def get_pledge_stat(self, ts_code=None, end_date=None):
-        """Get share pledge statistics"""
+    async def get_pledge_stat(
+        self, ts_code: str | None = None, end_date: str | None = None
+    ):
+        """Get share pledge statistics"""  # type: ignore
 
         return await self._handle_api_call_paginated(
-            self.pro.pledge_stat, ts_code=ts_code, end_date=end_date,
+            self.pro.pledge_stat,
+            ts_code=ts_code,
+            end_date=end_date,
         )
 
     async def get_repurchase(
-        self, ts_code=None, start_date=None, end_date=None, ann_date=None,
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ann_date: str | None = None,
     ):
-        """Get share repurchase"""
+        """Get share repurchase"""  # type: ignore
 
         return await self._handle_api_call(
             self.pro.repurchase,
@@ -670,11 +739,15 @@ class TushareClient:
         )
 
     async def get_dividend(
-        self, ts_code=None, start_date=None, end_date=None, ann_date=None,
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ann_date: str | None = None,
     ):
         """Get dividend history"""
 
-        # Tushare dividend API standard fields
+        # Tushare dividend API standard fields  # type: ignore
         # Note: ann_date is a valid param in pro.dividend
         return await self._handle_api_call(
             self.pro.dividend,
@@ -684,15 +757,23 @@ class TushareClient:
             # Tushare dividend has diverse params, ann_date is key for batch
         )
 
-    async def get_shibor(self, start_date=None, end_date=None):
+    async def get_shibor(
+        self, start_date: str | None = None, end_date: str | None = None
+    ):  # type: ignore
         """Get Shibor rates"""
         return await self._handle_api_call(
-            self.pro.shibor, start_date=start_date, end_date=end_date,
+            self.pro.shibor,
+            start_date=start_date,
+            end_date=end_date,
         )
 
     async def get_top10_holders(
-        self, ts_code=None, end_date=None, start_date=None, ann_date=None,
-    ):
+        self,
+        ts_code: str | None = None,
+        end_date: str | None = None,
+        start_date: str | None = None,
+        ann_date: str | None = None,
+    ):  # type: ignore
         """Get Top 10 Holders"""
         return await self._handle_api_call_paginated(
             self.pro.top10_holders,
@@ -703,8 +784,12 @@ class TushareClient:
         )
 
     async def get_index_weight(
-        self, index_code=None, trade_date=None, start_date=None, end_date=None,
-    ):
+        self,
+        index_code: str | None = None,
+        trade_date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):  # type: ignore
         """Get Index Component Weights"""
         return await self._handle_api_call(
             self.pro.index_weight,
@@ -715,8 +800,12 @@ class TushareClient:
         )
 
     async def get_stk_holdernumber(
-        self, ts_code=None, end_date=None, start_date=None, ann_date=None,
-    ):
+        self,
+        ts_code: str | None = None,
+        end_date: str | None = None,
+        start_date: str | None = None,
+        ann_date: str | None = None,
+    ):  # type: ignore
         """Get Stock Holder Number (Chip Concentration)"""
         return await self._handle_api_call_paginated(
             self.pro.stk_holdernumber,
@@ -726,7 +815,9 @@ class TushareClient:
             start_date=start_date,
         )
 
-    async def get_macro_data(self, api_name, start_m=None, end_m=None):
+    async def get_macro_data(
+        self, api_name: str, start_m: str | None = None, end_m: str | None = None
+    ):
         if api_name not in self._MACRO_API_WHITELIST:
             logger.error(f"[API] Rejected macro API: {api_name} (not in whitelist)")
             return None

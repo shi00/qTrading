@@ -1,5 +1,6 @@
 import datetime
 import logging
+import typing
 
 from utils.log_decorators import PerfThreshold, log_async_operation
 
@@ -27,7 +28,7 @@ class HolderSyncStrategy(ISyncStrategy):
       Total: ~13 API calls for 100% market coverage
     """
 
-    def __init__(self, context):
+    def __init__(self, context: typing.Any):
         super().__init__(context)
         self._cancelled = False
 
@@ -37,9 +38,10 @@ class HolderSyncStrategy(ISyncStrategy):
         logger.debug("[HolderSync] Stop | Cancellation requested.")
 
     @log_async_operation(
-        operation_name="HolderSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO,
+        operation_name="HolderSyncStrategy.run",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def run(self, **kwargs) -> SyncResult:
+    async def run(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
         errors = 0
@@ -68,9 +70,12 @@ class HolderSyncStrategy(ISyncStrategy):
                 else:
                     result.added += count
                     from datetime import datetime as dt_module
+
                     qe_date = dt_module.strptime(qe, "%Y%m%d").date()
                     await self.context.cache.update_sync_status(
-                        "stk_holdernumber", qe_date, count,
+                        "stk_holdernumber",
+                        qe_date,
+                        count,
                     )
 
                 if errors >= _MAX_ERRORS or self._cancelled:
@@ -88,9 +93,12 @@ class HolderSyncStrategy(ISyncStrategy):
                 else:
                     result.added += count
                     from datetime import datetime as dt_module
+
                     qe_date = dt_module.strptime(qe, "%Y%m%d").date()
                     await self.context.cache.update_sync_status(
-                        "top10_holders", qe_date, count,
+                        "top10_holders",
+                        qe_date,
+                        count,
                     )
 
                 if errors >= _MAX_ERRORS or self._cancelled:
@@ -106,9 +114,12 @@ class HolderSyncStrategy(ISyncStrategy):
                 else:
                     result.added += count
                     import datetime as dt_module
+
                     today = dt_module.date.today()
                     await self.context.cache.update_sync_status(
-                        "pledge_stat", today, count,
+                        "pledge_stat",
+                        today,
+                        count,
                     )
 
             if errors >= _MAX_ERRORS:
@@ -126,7 +137,13 @@ class HolderSyncStrategy(ISyncStrategy):
 
         return result
 
-    async def _sync_one_table(self, api_func, save_func, table_name, end_date):
+    async def _sync_one_table(
+        self,
+        api_func: typing.Any,
+        save_func: typing.Any,
+        table_name: str,
+        end_date: str | None,
+    ):
         """
         Fetch a full-market snapshot for one table by end_date.
         Returns row count on success, -1 on error.
@@ -192,7 +209,7 @@ class HolderSyncStrategy(ISyncStrategy):
             return -1
 
     @staticmethod
-    def _get_recent_quarter_ends(count=2):
+    def _get_recent_quarter_ends(count: typing.Any = 2):
         """
         Return the most recent `count` quarter-end dates (YYYYMMDD strings)
         that have already passed, ordered newest first.

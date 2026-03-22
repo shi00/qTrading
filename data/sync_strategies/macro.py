@@ -1,5 +1,6 @@
 import datetime
 import logging
+import typing
 
 import pandas as pd
 
@@ -19,15 +20,15 @@ _SHIBOR_RESUME_OFFSET_DAYS = 1
 _SHIBOR_FALLBACK_LOOKBACK_DAYS = 365
 
 
-def _parse_period(p):
+def _parse_period(p: typing.Any):
     """Parse Tushare macro period format (YYYYMM) to standard date string.
-    
+
     Tushare macro APIs (cn_m, cn_cpi, cn_ppi) return period as 'YYYYMM' string.
     This function converts it to 'YYYY-MM-01' format for proper date parsing.
-    
+
     Args:
         p: Period value (string, None, or NaN)
-        
+
     Returns:
         str: 'YYYY-MM-01' format string, or original value if not YYYYMM format
         None: If input is NaN/None
@@ -48,7 +49,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
     _M2_COLUMNS = ["period", "m2", "m2_yoy", "m1", "m1_yoy", "m0", "m0_yoy"]
 
-    def __init__(self, context):
+    def __init__(self, context: typing.Any):
         super().__init__(context)
         self.dao = MacroDao(context.cache.engine)
         self._cancelled = False
@@ -59,9 +60,10 @@ class MacroSyncStrategy(ISyncStrategy):
         logger.debug("[MacroSync] Stop | Cancellation requested.")
 
     @log_async_operation(
-        operation_name="MacroSyncStrategy.run", threshold_ms=PerfThreshold.DB_BULK_IO,
+        operation_name="MacroSyncStrategy.run",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def run(self, **kwargs) -> SyncResult:
+    async def run(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
 
@@ -83,7 +85,7 @@ class MacroSyncStrategy(ISyncStrategy):
             )
         return result
 
-    async def _sync_macro_monthly(self, result):
+    async def _sync_macro_monthly(self, result: typing.Any):
         """
         Fetch M2, CPI, PPI and merge into a single DataFrame before save.
         Merging in-memory avoids INSERT OR REPLACE wiping other columns.
@@ -101,14 +103,20 @@ class MacroSyncStrategy(ISyncStrategy):
                 count = await self.dao.save_macro_economy(merged)
                 result.added += count if count else 0
                 logger.debug(f"[MacroSync] Monthly | Saved {count} macro records")
-                latest_period = merged["period"].max() if "period" in merged.columns else get_now().date()
+                latest_period = (
+                    merged["period"].max()
+                    if "period" in merged.columns
+                    else get_now().date()
+                )
                 if isinstance(latest_period, str):
                     if len(latest_period) == 6:
                         latest_period = parse_date(latest_period, "%Y%m").date()
                     else:
                         latest_period = parse_date(latest_period).date()
                 await self.context.cache.update_sync_status(
-                    "macro_economy", latest_period, count or 0,
+                    "macro_economy",
+                    latest_period,
+                    count or 0,
                 )
 
         except Exception as e:
@@ -116,10 +124,12 @@ class MacroSyncStrategy(ISyncStrategy):
             result.errors.append(f"Macro Monthly: {e}")
 
     @classmethod
-    def _merge_macro_data(cls, df_m2, df_cpi, df_ppi):
+    def _merge_macro_data(
+        cls, df_m2: typing.Any, df_cpi: typing.Any, df_ppi: typing.Any
+    ):
         """
         Merge M2/CPI/PPI DataFrames on period column.
-        
+
         Note: Column renaming is handled by TushareClient._COLUMN_RENAMES:
         - cn_m: month -> period
         - cn_cpi: month -> period, nt_val -> cpi
@@ -145,16 +155,18 @@ class MacroSyncStrategy(ISyncStrategy):
             # base_dao.py's pd.to_datetime(format='mixed') parses 'YYYYMM' as NaT.
             # Here we ensure it's either cleanly parsed or dropped if completely invalid.
             merged["period"] = merged["period"].apply(_parse_period)
-            merged["period"] = pd.to_datetime(merged["period"], format="mixed", errors="coerce").dt.date
+            merged["period"] = pd.to_datetime(
+                merged["period"], format="mixed", errors="coerce"
+            ).dt.date
             merged = merged.dropna(subset=["period"])
 
         return merged
 
     @staticmethod
-    def _merge_indicator(merged, df, target_col):
+    def _merge_indicator(merged: typing.Any, df: pd.DataFrame, target_col: typing.Any):
         """
         Merge a single indicator DataFrame into the merged result.
-        
+
         Args:
             merged: Existing merged DataFrame or None
             df: Indicator DataFrame (columns already renamed by TushareClient._COLUMN_RENAMES)
@@ -179,7 +191,7 @@ class MacroSyncStrategy(ISyncStrategy):
             return merged.merge(indicator, on="period", how="outer")
         return indicator
 
-    async def _sync_shibor_daily(self, result):
+    async def _sync_shibor_daily(self, result: typing.Any):
         try:
             latest = await self.dao.get_shibor_latest_date()
             today = get_now().date()
@@ -188,9 +200,12 @@ class MacroSyncStrategy(ISyncStrategy):
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
-                all_dates = await self.context.processor.get_trade_dates(
-                    start_date=rough_start_date, end_date=today,
+                rough_start_date = get_now().date() - datetime.timedelta(
+                    days=int(250 * years * 2.0)
+                )
+                all_dates = await self.context.processor.get_trade_dates(  # type: ignore
+                    start_date=rough_start_date,
+                    end_date=today,
                 )
                 start_date = (
                     all_dates[-(250 * years)]
@@ -204,38 +219,48 @@ class MacroSyncStrategy(ISyncStrategy):
             else:
                 try:
                     last_dt = parse_date(latest)
-                    start_date = last_dt.date() + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)
+                    start_date = last_dt.date() + datetime.timedelta(
+                        days=_SHIBOR_RESUME_OFFSET_DAYS
+                    )
                 except ValueError:
                     logger.warning(
                         f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.",
                     )
-                    start_date = (
-                        get_now().date()
-                        - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)
+                    start_date = get_now().date() - datetime.timedelta(
+                        days=_SHIBOR_FALLBACK_LOOKBACK_DAYS
                     )
 
             if start_date > today:
                 logger.debug("[MacroSync] Shibor already up to date.")
                 return
 
-            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, 'strftime') else str(start_date)
-            end_str = today.strftime("%Y%m%d") if hasattr(today, 'strftime') else str(today)
+            start_str = (
+                start_date.strftime("%Y%m%d")
+                if hasattr(start_date, "strftime")
+                else str(start_date)
+            )
+            end_str = (
+                today.strftime("%Y%m%d") if hasattr(today, "strftime") else str(today)
+            )
             df = await self.context.api.get_shibor(
-                start_date=start_str, end_date=end_str,
+                start_date=start_str,
+                end_date=end_str,
             )
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
                 logger.debug(f"[MacroSync] Shibor | Saved {count} records")
                 await self.context.cache.update_sync_status(
-                    "shibor_daily", today, count or 0,
+                    "shibor_daily",
+                    today,
+                    count or 0,
                 )
 
         except Exception as e:
             logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Shibor: {e}")
 
-    async def _sync_index_weights(self, result):
+    async def _sync_index_weights(self, result: typing.Any):
         try:
             market_dao = self.context.cache.market_dao
             latest = await market_dao.get_latest_index_weight_date()
@@ -249,9 +274,12 @@ class MacroSyncStrategy(ISyncStrategy):
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                rough_start_date = today_date - datetime.timedelta(days=int(250 * years * 2.0))
-                all_dates = await self.context.processor.get_trade_dates(
-                    start_date=rough_start_date, end_date=today_date,
+                rough_start_date = today_date - datetime.timedelta(
+                    days=int(250 * years * 2.0)
+                )
+                all_dates = await self.context.processor.get_trade_dates(  # type: ignore
+                    start_date=rough_start_date,
+                    end_date=today_date,
                 )
                 start_date = (
                     all_dates[-(250 * years)]
@@ -274,7 +302,11 @@ class MacroSyncStrategy(ISyncStrategy):
                 logger.debug("[MacroSync] Index weights up to date (monthly).")
                 return
 
-            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, 'strftime') else str(start_date)
+            start_str = (
+                start_date.strftime("%Y%m%d")
+                if hasattr(start_date, "strftime")
+                else str(start_date)
+            )
             end_date = today.strftime("%Y%m%d")
             logger.debug(
                 f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",
@@ -292,7 +324,9 @@ class MacroSyncStrategy(ISyncStrategy):
 
                 try:
                     df = await self.context.api.get_index_weight(
-                        index_code=idx_code, start_date=start_str, end_date=end_date,
+                        index_code=idx_code,
+                        start_date=start_str,
+                        end_date=end_date,
                     )
 
                     if df is not None and not df.empty:
@@ -304,12 +338,15 @@ class MacroSyncStrategy(ISyncStrategy):
                     )
 
             await self.context.cache.update_sync_status(
-                "index_weight", today_date, result.added,
+                "index_weight",
+                today_date,
+                result.added,
             )
             logger.debug(f"[MacroSync] IndexWeight | Total: {result.added} records")
 
         except Exception as e:
             logger.warning(
-                f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}", exc_info=True,
+                f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}",
+                exc_info=True,
             )
             result.errors.append(f"IndexWeight: {e}")

@@ -27,9 +27,9 @@ def parse_date(date_input, fmt="%Y%m%d") -> datetime.datetime:
     if isinstance(date_input, datetime.date):
         return CST_TZ.localize(datetime.datetime.combine(date_input, datetime.time()))
     date_str = str(date_input)
-    if len(date_str) == 19 and '-' in date_str:
+    if len(date_str) == 19 and "-" in date_str:
         fmt = "%Y-%m-%d %H:%M:%S"
-    elif len(date_str) == 10 and '-' in date_str:
+    elif len(date_str) == 10 and "-" in date_str:
         fmt = "%Y-%m-%d"
     return CST_TZ.localize(datetime.datetime.strptime(date_str, fmt))
 

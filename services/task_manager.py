@@ -57,7 +57,7 @@ class AppTask:
     error: str = ""
 
     # Internal fields for execution
-    _coroutine_gen: Callable = None  # Function that returns a coroutine
+    _coroutine_gen: Callable = None  # Function that returns a coroutine  # type: ignore
     _asyncio_task: Optional[asyncio.Task] = None
     _cancel_event: Optional[asyncio.Event] = None
     unique_key: Optional[str] = None  # For deduplication
@@ -168,7 +168,7 @@ class TaskManager:
         task_type: str,
         coroutine_factory: Callable,
         cancellable: bool = False,
-        unique_key: str = None,
+        unique_key: str = None,  # type: ignore
         **kwargs,
     ) -> Optional[str]:
         """
@@ -219,7 +219,7 @@ class TaskManager:
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
-    def update_progress(self, task_id: str, progress: float, description: str = None):
+    def update_progress(self, task_id: str, progress: float, description: str = None):  # type: ignore
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
         Throttled to avoid flooding subscribers with high-frequency updates."""
         task = self._tasks.get(task_id)
@@ -403,7 +403,7 @@ class TaskManager:
     def _safe_dt(val) -> Optional[datetime.datetime]:
         """
         Safely parse datetime from DB value, handling NaN/None/invalid.
-        
+
         Returns a timezone-aware datetime in CST (Asia/Shanghai) to ensure
         consistency with get_now() which returns timezone-aware datetimes.
         """
@@ -448,9 +448,9 @@ class TaskManager:
             for _, row in df.iterrows():
                 try:
                     t = AppTask(
-                        id=row.get("id", ""),
-                        name=row.get("name", ""),
-                        task_type=row.get("task_type", "System"),
+                        id=row.get("id", ""),  # type: ignore
+                        name=row.get("name", ""),  # type: ignore
+                        task_type=row.get("task_type", "System"),  # type: ignore
                         status=TaskStatus(row.get("status", "COMPLETED")),
                         progress=float(row.get("progress", 0) or 0),
                         description=str(row.get("description", "") or ""),

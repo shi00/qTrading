@@ -1,4 +1,4 @@
-from typing import Optional
+import typing
 
 from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
 
@@ -26,7 +26,7 @@ class MetaDataManager:
         return table_name
 
     @classmethod
-    def get_column_alias(cls, table_name: Optional[str], col_name: str) -> str:
+    def get_column_alias(cls, table_name: str | None, col_name: str) -> str:
         """
         Get alias for a column with context awareness using I18n.
         """
@@ -56,7 +56,7 @@ class MetaDataManager:
         return col_name
 
     @classmethod
-    def get_raw_alias(cls, term, context_table=None):
+    def get_raw_alias(cls, term: typing.Any, context_table: typing.Any = None):
         """
         Get just the translated alias string without formatting.
         Useful for tooltips or other UI elements.

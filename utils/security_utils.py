@@ -119,10 +119,14 @@ class SecurityManager:
             # Hide the file on Windows
             if os.name == "nt":
                 subprocess.run(
-                    ["attrib", "+h", cls.KEY_FILE], check=False, capture_output=True,
+                    ["attrib", "+h", cls.KEY_FILE],
+                    check=False,
+                    capture_output=True,
                 )
                 subprocess.run(
-                    ["attrib", "+h", cls.KEY_FILE_BAK], check=False, capture_output=True,
+                    ["attrib", "+h", cls.KEY_FILE_BAK],
+                    check=False,
+                    capture_output=True,
                 )
         except Exception as e:
             logger.error(f"Error saving key: {e}")

@@ -1,3 +1,5 @@
+import typing
+
 """
 Base interfaces and data structures for sync strategies.
 """
@@ -5,7 +7,7 @@ Base interfaces and data structures for sync strategies.
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, List
+from typing import Any
 
 # Forward declaration for type hinting if needed,
 # but usually avoid circular imports by strict typing or Protocol
@@ -35,7 +37,7 @@ class SyncResult:
 
     added: int = 0
     updated: int = 0
-    errors: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     status: str = "success"  # success, partial, failed, cancelled
     message: str = ""
 
@@ -63,7 +65,7 @@ class ISyncStrategy(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
 
     @abstractmethod
-    async def run(self, **kwargs) -> SyncResult:
+    async def run(self, **kwargs: typing.Any) -> SyncResult:
         """
         Execute the synchronization logic.
         """

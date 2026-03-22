@@ -3,7 +3,8 @@ import hashlib
 import logging
 import os
 import threading
-from typing import Any, Dict, Optional
+import typing
+from typing import Any, Optional
 
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -62,15 +63,15 @@ class LocalModelManager:
                 async def __aenter__(self):
                     return
 
-                async def __aexit__(self, *args):
+                async def __aexit__(self, *args: typing.Any):
                     return
 
             return DummyLock()
 
         if not hasattr(current_loop, "_local_load_lock"):
-            current_loop._local_load_lock = asyncio.Lock()
+            current_loop._local_load_lock = asyncio.Lock()  # type: ignore
 
-        return current_loop._local_load_lock
+        return current_loop._local_load_lock  # type: ignore
 
     @classmethod
     async def get_instance(cls):
@@ -106,7 +107,7 @@ class LocalModelManager:
             return ""
 
     async def load_model(
-        self, model_path: str, config: Optional[Dict[str, Any]] = None,
+        self, model_path: str, config: dict[str, Any] | None = None
     ) -> bool:
         """
         Load the model from GGUF file.
@@ -157,13 +158,18 @@ class LocalModelManager:
                 # Let's do it before, as verification. It takes time, but only happens ONCE per file change now.
                 logger.info("[LocalModel] Verifying file integrity (MD5)...")
                 target_md5 = await ThreadPoolManager().run_async(
-                    TaskType.IO, self.calculate_file_md5, model_path,
+                    TaskType.IO,
+                    self.calculate_file_md5,
+                    model_path,
                 )
 
                 # 2. Load Model (Async CPU)
                 logger.info("[LocalModel] Scheduling model load on TaskType.CPU...")
                 self._llm = await ThreadPoolManager().run_async(
-                    TaskType.CPU, self._create_llama_instance, model_path, config,
+                    TaskType.CPU,
+                    self._create_llama_instance,
+                    model_path,
+                    config,
                 )
 
                 # Update State
@@ -186,7 +192,7 @@ class LocalModelManager:
                 self._is_loading = False
 
     @staticmethod
-    def _create_llama_instance(model_path: str, config: Dict[str, Any]) -> "Llama":
+    def _create_llama_instance(model_path: str, config: dict[str, Any]) -> "Llama":
         """
         Sync factory method to create Llama instance with config.
         """
@@ -288,7 +294,7 @@ class LocalModelManager:
                 raise RuntimeError(f"Inference execution failed: {e}") from e
 
     def _generate_sync(
-        self, prompt: str, max_tokens: int, temperature: float, system_prompt: str,
+        self, prompt: str, max_tokens: int, temperature: float, system_prompt: str
     ) -> str:
         """
         Sync generation logic.
@@ -314,7 +320,7 @@ class LocalModelManager:
             # which caused valid JSON truncation and len=0 outputs.
         )
 
-        return response["choices"][0]["message"]["content"]
+        return response["choices"][0]["message"]["content"]  # type: ignore
 
     def unload_model(self):
         """Free memory"""

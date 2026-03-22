@@ -111,7 +111,9 @@ class TaskCenterView(ft.Container):
             content=ft.Column(
                 [
                     ft.Icon(
-                        ft.Icons.INBOX_OUTLINED, size=64, color=AppColors.TEXT_HINT,
+                        ft.Icons.INBOX_OUTLINED,
+                        size=64,
+                        color=AppColors.TEXT_HINT,
                     ),
                     ft.Text(
                         I18n.get("task_empty_title", "暂无任务"),
@@ -136,7 +138,9 @@ class TaskCenterView(ft.Container):
 
         # --- Scrollable area ---
         self.scroll_area = ft.ListView(
-            expand=True, spacing=0, padding=ft.padding.only(top=8),
+            expand=True,
+            spacing=0,
+            padding=ft.padding.only(top=8),
         )
 
         # --- Pagination footer ---
@@ -234,7 +238,8 @@ class TaskCenterView(ft.Container):
         total = len(tasks)
         running = sum(1 for t in tasks if t.status == TaskStatus.RUNNING)
         self.stats_text.value = I18n.get(
-            "task_stats_fmt", "总计 {total} 项 · 运行中 {running}",
+            "task_stats_fmt",
+            "总计 {total} 项 · 运行中 {running}",
         ).format(total=total, running=running)
 
         # Pagination
@@ -420,7 +425,7 @@ class TaskCenterView(ft.Container):
                 spacing=6,
             ),
             **AppStyles.card(padding=14, border_radius=8, with_border=False),
-            border=ft.border.only(
+            border=ft.border.only(  # type: ignore
                 left=ft.BorderSide(3, left_border_color),
                 top=ft.BorderSide(1, AppColors.BORDER),
                 right=ft.BorderSide(1, AppColors.BORDER),
@@ -434,7 +439,9 @@ class TaskCenterView(ft.Container):
 
     def _handle_cancel(self, task_id: str):
         UILogger.log_action(
-            "TaskCenterView", "Click", f"btn_cancel | task_id={task_id}",
+            "TaskCenterView",
+            "Click",
+            f"btn_cancel | task_id={task_id}",
         )
         self.task_manager.cancel_task(task_id)
 

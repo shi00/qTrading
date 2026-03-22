@@ -1,0 +1,406 @@
+"""
+Tests for market strategies (TechnicalBreakout, Northbound, Institutional, BlockTrade).
+
+验证市场策略筛选逻辑的正确性。
+"""
+
+import unittest
+
+import pandas as pd
+import polars as pl
+
+from strategies.market import (
+    BlockTradeStrategy,
+    InstitutionalStrategy,
+    NorthboundStrategy,
+    TechnicalBreakoutStrategy,
+)
+
+
+class TestTechnicalBreakoutStrategy(unittest.TestCase):
+    """测试技术突破策略"""
+
+    def setUp(self):
+        self.strategy = TechnicalBreakoutStrategy()
+        self.sample_df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "突破股A",
+                    "pct_chg": 5.0,
+                    "turnover_rate": 8.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "突破股B",
+                    "pct_chg": 3.5,
+                    "turnover_rate": 5.0,
+                },
+                {
+                    "ts_code": "000003.SZ",
+                    "name": "涨幅过大",
+                    "pct_chg": 9.5,
+                    "turnover_rate": 12.0,
+                },
+                {
+                    "ts_code": "000004.SZ",
+                    "name": "涨幅过小",
+                    "pct_chg": 1.0,
+                    "turnover_rate": 4.0,
+                },
+                {
+                    "ts_code": "000005.SZ",
+                    "name": "换手率低",
+                    "pct_chg": 4.0,
+                    "turnover_rate": 1.0,
+                },
+            ]
+        )
+
+    def test_breakout_normal(self):
+        """正常突破筛选"""
+        lf = pl.from_pandas(self.sample_df).lazy()
+        context = {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 3}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertIn("000002.SZ", ts_codes)
+        self.assertNotIn("000003.SZ", ts_codes)
+        self.assertNotIn("000004.SZ", ts_codes)
+
+    def test_breakout_pct_chg_range(self):
+        """涨跌幅范围过滤"""
+        lf = pl.from_pandas(self.sample_df).lazy()
+        context = {"params": {"pct_chg_min": 4, "pct_chg_max": 6, "turnover_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        for row in result.iter_rows(named=True):
+            self.assertGreaterEqual(row["pct_chg"], 4)
+            self.assertLessEqual(row["pct_chg"], 6)
+
+    def test_breakout_turnover_filter(self):
+        """换手率过滤"""
+        lf = pl.from_pandas(self.sample_df).lazy()
+        context = {"params": {"pct_chg_min": 0, "pct_chg_max": 10, "turnover_min": 6}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        for row in result.iter_rows(named=True):
+            self.assertGreater(row["turnover_rate"], 6)
+
+    def test_breakout_empty_result(self):
+        """无匹配结果"""
+        lf = pl.from_pandas(self.sample_df).lazy()
+        context = {"params": {"pct_chg_min": 8, "pct_chg_max": 9, "turnover_min": 15}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_breakout_sort_by_pct_chg(self):
+        """按涨跌幅降序排列"""
+        lf = pl.from_pandas(self.sample_df).lazy()
+        context = {"params": {"pct_chg_min": 0, "pct_chg_max": 10, "turnover_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        pct_values = result["pct_chg"].to_list()
+        self.assertEqual(pct_values, sorted(pct_values, reverse=True))
+
+
+class TestNorthboundStrategy(unittest.TestCase):
+    """测试北向资金策略"""
+
+    def setUp(self):
+        self.strategy = NorthboundStrategy()
+        self.base_df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "平安银行",
+                    "industry": "银行",
+                    "pe_ttm": 6.5,
+                    "total_mv": 1000000,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "万科A",
+                    "industry": "房地产",
+                    "pe_ttm": 8.0,
+                    "total_mv": 800000,
+                },
+                {
+                    "ts_code": "600000.SH",
+                    "name": "浦发银行",
+                    "industry": "银行",
+                    "pe_ttm": 5.0,
+                    "total_mv": 1200000,
+                },
+            ]
+        )
+        self.northbound_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "ratio": 5.5, "shares": 10000},
+                {"ts_code": "000002.SZ", "ratio": 2.0, "shares": 5000},
+                {"ts_code": "600000.SH", "ratio": 4.0, "shares": 8000},
+                {"ts_code": "000003.BJ", "ratio": 6.0, "shares": 3000},
+            ]
+        )
+
+    def test_northbound_normal(self):
+        """正常北向筛选"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"nb_ratio_min": 3},
+            "northbound_data": self.northbound_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertIn("600000.SH", ts_codes)
+        self.assertNotIn("000002.SZ", ts_codes)
+        self.assertNotIn("000003.BJ", ts_codes)
+
+    def test_northbound_ratio_filter(self):
+        """持股比例过滤"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"nb_ratio_min": 5},
+            "northbound_data": self.northbound_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        for row in result.iter_rows(named=True):
+            self.assertGreater(row["ratio"], 5)
+
+    def test_northbound_missing_data(self):
+        """北向数据缺失"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"nb_ratio_min": 3},
+            "northbound_data": None,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_northbound_empty_data(self):
+        """北向数据为空"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"nb_ratio_min": 3},
+            "northbound_data": pd.DataFrame(),
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_northbound_exchange_filter(self):
+        """交易所过滤 - 排除北交所"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"nb_ratio_min": 0},
+            "northbound_data": self.northbound_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        for code in ts_codes:
+            self.assertTrue(code.endswith(".SH") or code.endswith(".SZ"))
+
+    def test_northbound_sort_by_ratio(self):
+        """按持股比例降序排列"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"nb_ratio_min": 0},
+            "northbound_data": self.northbound_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ratio_values = result["ratio"].to_list()
+        self.assertEqual(ratio_values, sorted(ratio_values, reverse=True))
+
+
+class TestInstitutionalStrategy(unittest.TestCase):
+    """测试机构策略"""
+
+    def setUp(self):
+        self.strategy = InstitutionalStrategy()
+        self.base_df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "机构买入股",
+                    "industry": "银行",
+                    "pe_ttm": 6.5,
+                    "total_mv": 1000000,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "普通股",
+                    "industry": "房地产",
+                    "pe_ttm": 8.0,
+                    "total_mv": 800000,
+                },
+            ]
+        )
+        self.lhb_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "net_amount": 5000.0},
+                {"ts_code": "000002.SZ", "net_amount": 1000.0},
+            ]
+        )
+
+    def test_institutional_normal(self):
+        """正常机构筛选"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"inst_net_min": 3000},
+            "top_list": self.lhb_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertNotIn("000002.SZ", ts_codes)
+
+    def test_institutional_missing_data(self):
+        """龙虎榜数据缺失"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"inst_net_min": 3000},
+            "top_list": None,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_institutional_missing_column(self):
+        """龙虎榜缺失 net_amount 列"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        lhb_missing_col = pd.DataFrame([{"ts_code": "000001.SZ", "other_col": 100}])
+        context = {
+            "params": {"inst_net_min": 3000},
+            "top_list": lhb_missing_col,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_institutional_empty_result(self):
+        """无匹配结果"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"inst_net_min": 10000},
+            "top_list": self.lhb_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_institutional_sort_by_net_amount(self):
+        """按净买入金额降序排列"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"inst_net_min": 0},
+            "top_list": self.lhb_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        net_values = result["net_amount"].to_list()
+        self.assertEqual(net_values, sorted(net_values, reverse=True))
+
+
+class TestBlockTradeStrategy(unittest.TestCase):
+    """测试大宗交易策略"""
+
+    def setUp(self):
+        self.strategy = BlockTradeStrategy()
+        self.base_df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "大宗交易股",
+                    "industry": "银行",
+                    "pe_ttm": 6.5,
+                    "total_mv": 1000000,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "普通股",
+                    "industry": "房地产",
+                    "pe_ttm": 8.0,
+                    "total_mv": 800000,
+                },
+            ]
+        )
+        self.block_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "amount": 1500.0, "vol": 100, "price": 10.0},
+                {"ts_code": "000001.SZ", "amount": 800.0, "vol": 50, "price": 10.5},
+                {"ts_code": "000002.SZ", "amount": 500.0, "vol": 30, "price": 8.0},
+            ]
+        )
+
+    def test_block_trade_normal(self):
+        """正常大宗交易筛选"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"block_amount_min": 1000},
+            "block_trade": self.block_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertNotIn("000002.SZ", ts_codes)
+
+    def test_block_trade_missing_data(self):
+        """大宗交易数据缺失"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"block_amount_min": 1000},
+            "block_trade": None,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_block_trade_missing_column(self):
+        """大宗交易缺失 amount 列"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        block_missing_col = pd.DataFrame([{"ts_code": "000001.SZ", "other_col": 100}])
+        context = {
+            "params": {"block_amount_min": 1000},
+            "block_trade": block_missing_col,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+    def test_block_trade_aggregation(self):
+        """大宗交易聚合计算"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"block_amount_min": 0},
+            "block_trade": self.block_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        row_000001 = result.filter(pl.col("ts_code") == "000001.SZ").row(0, named=True)
+        self.assertEqual(row_000001["amount"], 2300.0)
+        self.assertEqual(row_000001["vol"], 150)
+
+    def test_block_trade_empty_result(self):
+        """无匹配结果"""
+        lf = pl.from_pandas(self.base_df).lazy()
+        context = {
+            "params": {"block_amount_min": 5000},
+            "block_trade": self.block_df,
+        }
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

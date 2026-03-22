@@ -22,29 +22,50 @@ class MarketDashboard(ft.Column):
         # --- Internal State Refs for UI Updates ---
         # Indices Values
         self.sh_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY,
+            "--",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
         )
         self.sh_chg = ft.Text(
-            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
+            "--",
+            size=14,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_SECONDARY,
         )
 
         self.sz_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY,
+            "--",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
         )
         self.sz_chg = ft.Text(
-            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
+            "--",
+            size=14,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_SECONDARY,
         )
 
         self.cyb_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY,
+            "--",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
         )
         self.cyb_chg = ft.Text(
-            "--", size=14, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
+            "--",
+            size=14,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_SECONDARY,
         )
 
         # Northbound Values
         self.hsgt_val = ft.Text(
-            "--", size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_SECONDARY,
+            "--",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_SECONDARY,
         )
         self.hsgt_sub = ft.Text("--", size=12, color=AppColors.TEXT_SECONDARY)
 
@@ -83,7 +104,9 @@ class MarketDashboard(ft.Column):
         # Hot Concepts Container (Dynamic Content)
         self.concepts_row = ft.ResponsiveRow(run_spacing=10)
         self.concepts_placeholder = ft.Text(
-            I18n.get("home_hot_concepts_empty"), size=12, color=AppColors.TEXT_HINT,
+            I18n.get("home_hot_concepts_empty"),
+            size=12,
+            color=AppColors.TEXT_HINT,
         )
 
         # --- Layout Construction ---
@@ -97,7 +120,8 @@ class MarketDashboard(ft.Column):
         )
 
         self.concepts_section = ft.Column(
-            [self.concepts_title, self.concepts_row], spacing=10,
+            [self.concepts_title, self.concepts_row],
+            spacing=10,
         )
         # Init with placeholder
         self.concepts_row.controls = [self.concepts_placeholder]
@@ -255,7 +279,7 @@ class MarketDashboard(ft.Column):
         # Update content of all controls
         for i, item in enumerate(hot_concepts):
             if i < len(self.concepts_row.controls):
-                self._update_concept_card(self.concepts_row.controls[i], item)
+                self._update_concept_card(self.concepts_row.controls[i], item)  # type: ignore
 
         if self.page:
             self.concepts_row.update()

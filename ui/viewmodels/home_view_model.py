@@ -5,7 +5,7 @@ import pandas as pd
 
 from data.data_processor import DataProcessor
 from data.market_data_service import MarketDataService
-from data.news_subscription import NewsSubscriptionService, NewsUpdateType
+from data.news_subscription import NewsSubscriptionService
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,8 @@ class HomeViewModel:
         try:
             offset = page * self.PAGE_SIZE
             return await self.processor.cache.get_market_news(
-                limit=self.PAGE_SIZE, offset=offset,
+                limit=self.PAGE_SIZE,
+                offset=offset,
             )
         except Exception as e:
             logger.error(f"[HomeVM] Error fetching news: {e}", exc_info=True)

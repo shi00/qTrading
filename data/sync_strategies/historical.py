@@ -1,3 +1,5 @@
+import typing
+
 """
 Historical Sync Strategy.
 Handles daily market snapshots, historical backfill, and retry logic.
@@ -26,7 +28,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     Strategy for syncing historical market data (Quotes, Indicators, MoneyFlow, etc.)
     """
 
-    def __init__(self, context):
+    def __init__(self, context: typing.Any):
         super().__init__(context)
         self._lazy_event = None  # ST-01: Lazy init
         self._tasks_lock = threading.Lock()
@@ -41,9 +43,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             return asyncio.Event()
 
         if not hasattr(current_loop, "_hist_shutdown_evt"):
-            current_loop._hist_shutdown_evt = asyncio.Event()
+            current_loop._hist_shutdown_evt = asyncio.Event()  # type: ignore
 
-        return current_loop._hist_shutdown_evt
+        return current_loop._hist_shutdown_evt  # type: ignore
 
     async def cancel(self):
         """Signal cancellation."""
@@ -59,7 +61,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run(
-        self, days: int = 365, progress_callback=None, **kwargs,
+        self,
+        days: int = 365,
+        progress_callback: typing.Callable | None = None,
+        **kwargs: typing.Any,
     ) -> SyncResult:
         """
         Main entry point for historical sync.
@@ -74,14 +79,20 @@ class HistoricalSyncStrategy(ISyncStrategy):
             result.status = "cancelled"
         except Exception as e:
             logger.error(
-                f"[HistoricalSync] Run | ❌ Top-level failure: {e}", exc_info=True,
+                f"[HistoricalSync] Run | ❌ Top-level failure: {e}",
+                exc_info=True,
             )
             result.status = "failed"
             result.errors.append(str(e))
 
         return result
 
-    async def _run_historical_sync(self, days, progress_callback, result: SyncResult):
+    async def _run_historical_sync(
+        self,
+        days: typing.Any,
+        progress_callback: typing.Callable | None,
+        result: SyncResult,
+    ):
         """
         Sync historical data for the last N days.
         """
@@ -89,8 +100,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         start_date = (get_now() - datetime.timedelta(days=days)).date()
 
         try:
-            trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(
-                start_date, end_date
+            trade_date_objs = (
+                await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore
+                    start_date, end_date
+                )
             )
             trade_dates = [d.strftime("%Y%m%d") for d in reversed(trade_date_objs)]
         except Exception as e:
@@ -109,7 +122,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
         try:
             cached_dates_per_table = {}
             for table in CRITICAL_TABLES:
-                cached_dates_per_table[table] = await self.context.cache.get_cached_dates_for_table(table)
+                cached_dates_per_table[
+                    table
+                ] = await self.context.cache.get_cached_dates_for_table(table)
 
             existing = set()
             if all(cached_dates_per_table.values()):
@@ -140,7 +155,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         processed_count = 0
         BATCH_SIZE = 20
 
-        async def sync_one_day(date):
+        async def sync_one_day(date: str):
             nonlocal abort_sync, processed_count
             if self._shutdown_event.is_set() or abort_sync:
                 return
@@ -215,7 +230,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 failed_dates = []
                 retry_sem = asyncio.Semaphore(2)
 
-                async def retry_one(date):
+                async def retry_one(date: str):
                     if self._shutdown_event.is_set():
                         return
                     async with retry_sem:
@@ -261,7 +276,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 f"[HistoricalSync] Run | ✅ Complete. Added={result.added}, FailedDates={len(failed_dates)}",
             )
 
-    async def sync_daily_market_snapshot(self, trade_date, force=False):
+    async def sync_daily_market_snapshot(
+        self, trade_date: str | None, force: bool = False
+    ):
         """
         Sync ALL data types for a single day.
         """
@@ -292,7 +309,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             ("index_basic", self.context.api.get_index_dailybasic, "Index Indicators"),
         ]
 
-        async def fetch_wrapper(key, func, name):
+        async def fetch_wrapper(
+            key: typing.Any, func: typing.Callable, name: typing.Any
+        ):
             try:
                 # Return (key, data, error)
                 return (key, await func(trade_date=trade_date), None)
@@ -336,16 +355,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # Save Logic
         cache = self.context.cache
 
-        async def save_if_ok(key, method, critical=False):
+        async def save_if_ok(
+            key: typing.Any, method: typing.Any, critical: typing.Any = False
+        ):
             df = data_map.get(key)
-            
+
             if df is None:
                 if key in error_map:
                     logger.warning(
                         f"[HistoricalSync] DaySync | ⚠️ Fetch failed for {key}, skipping sync_status update"
                     )
                 return None
-            
+
             if df is not None and not df.empty:
                 target_func = method
                 while hasattr(target_func, "__wrapped__"):
@@ -370,7 +391,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         f"[HistoricalSync] DaySync | ⚠️ Non-critical save {key} failed: {e}, skipping sync_status update",
                     )
                     return None
-            
+
             if df is not None and df.empty:
                 logger.debug(
                     f"[HistoricalSync] DaySync | {key} returned empty data, will update sync_status with 0"
@@ -397,7 +418,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # 3. Basic / Daily Indicators (Critical)
         basic_rows = await save_if_ok(
-            "basic", cache.save_daily_indicators, critical=True,
+            "basic",
+            cache.save_daily_indicators,
+            critical=True,
         )
 
         # Yield control
@@ -415,7 +438,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
         hsgt_result = await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
         index_result = await save_if_ok("index", cache.save_index_daily)
-        index_basic_result = await save_if_ok("index_basic", cache.save_index_dailybasic)
+        index_basic_result = await save_if_ok(
+            "index_basic", cache.save_index_dailybasic
+        )
 
         # Yield before northbound special processing
         await asyncio.sleep(0)
@@ -430,7 +455,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 ]
                 if not df_north.empty:
                     north_rows = await cache.save_northbound(df_north)
-                    north_result = north_rows if north_rows is not None else len(df_north)
+                    north_result = (
+                        north_rows if north_rows is not None else len(df_north)
+                    )
             elif df_north is None and "north" in error_map:
                 north_result = None
             else:
@@ -441,7 +468,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
             north_result = None
 
-        async def safe_update_status(table_name, result, trade_date):
+        async def safe_update_status(
+            table_name: str, result: typing.Any, trade_date: str | None
+        ):
             if result is not None:
                 await cache.update_sync_status(table_name, trade_date, result or 0)
             else:
@@ -469,7 +498,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             f"index={index_result}, index_basic={index_basic_result}"
         )
 
-    async def sync_moneyflow(self, trade_date=None):
+    async def sync_moneyflow(self, trade_date: str | None = None):
         """Sync money flow for a specific date (Standalone)."""
         if trade_date is None:
             trade_date = get_now().date()
@@ -480,7 +509,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 count = await self.context.cache.save_moneyflow(df)
                 if count is not None and count > 0:
                     await self.context.cache.update_sync_status(
-                        "moneyflow_daily", trade_date, count,
+                        "moneyflow_daily",
+                        trade_date,
+                        count,
                     )
                 return count
         except Exception as e:
@@ -489,7 +520,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
         return 0
 
-    async def sync_northbound(self, trade_date=None):
+    async def sync_northbound(self, trade_date: str | None = None):
         """Sync northbound holding for a specific date (Standalone)."""
         if trade_date is None:
             trade_date = get_now().date()
@@ -502,7 +533,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     count = await self.context.cache.save_northbound(df)
                     if count is not None and count > 0:
                         await self.context.cache.update_sync_status(
-                            "northbound_holding", trade_date, count,
+                            "northbound_holding",
+                            trade_date,
+                            count,
                         )
                     return count
         except Exception as e:

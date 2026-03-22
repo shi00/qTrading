@@ -56,7 +56,8 @@ class HealthScoreCard(ft.Container):
         super().__init__()
 
         self.color, self.icon, i18n_key = self._STATUS_MAP.get(
-            status, self._DEFAULT_STATUS,
+            status,
+            self._DEFAULT_STATUS,
         )
         self.text = I18n.get(i18n_key)
         self.bg_gradient = self._make_gradient(self.color)
@@ -110,14 +111,17 @@ class MetricTile(ft.Container):
         label: str,
         value: str,
         trend_color: str = AppColors.TEXT_PRIMARY,
-        sub_text: str = None,
+        sub_text: str = None,  # type: ignore
     ):
         super().__init__()
         self.content = ft.Column(
             controls=[
                 ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
                 ft.Text(
-                    str(value), size=18, weight=ft.FontWeight.BOLD, color=trend_color,
+                    str(value),
+                    size=18,
+                    weight=ft.FontWeight.BOLD,
+                    color=trend_color,
                 ),
             ],
             spacing=4,
@@ -170,7 +174,9 @@ class KeyMetricsGrid(ft.Column):
                     ),
                     MetricTile(I18n.get("health_gap_count"), str(gap_count), gap_color),
                     MetricTile(
-                        I18n.get("health_sanity_err"), str(sanity_errors), sanity_color,
+                        I18n.get("health_sanity_err"),
+                        str(sanity_errors),
+                        sanity_color,
                     ),
                 ],
             ),
@@ -527,7 +533,8 @@ class HealthReportDialog(ft.AlertDialog):
                     ft.Column(
                         [
                             ft.Container(
-                                content=coverage, padding=ft.padding.only(right=15),
+                                content=coverage,
+                                padding=ft.padding.only(right=15),
                             ),
                         ],
                         scroll=ft.ScrollMode.AUTO,
@@ -563,10 +570,14 @@ class HealthScanDialog(ft.AlertDialog):
     def __init__(self, page):
         self.page_ref = page
         self.progress_bar = ft.ProgressBar(
-            width=400, color=AppColors.PRIMARY, bgcolor=AppColors.SURFACE_VARIANT,
+            width=400,
+            color=AppColors.PRIMARY,
+            bgcolor=AppColors.SURFACE_VARIANT,
         )
         self.status_text = ft.Text(
-            I18n.get("scan_step_init"), size=12, color=AppColors.TEXT_SECONDARY,
+            I18n.get("scan_step_init"),
+            size=12,
+            color=AppColors.TEXT_SECONDARY,
         )
         self.result_content = ft.Column(visible=False)
 
@@ -612,7 +623,8 @@ class HealthScanDialog(ft.AlertDialog):
                 self.page_ref.update()
 
             result = await dp.run_quality_scan(
-                sample_size=50, progress_callback=on_progress,
+                sample_size=50,
+                progress_callback=on_progress,
             )
             self.show_results(result)
         except Exception as e:

@@ -9,7 +9,6 @@
 """
 
 import re
-from typing import Optional
 
 import pandas as pd
 
@@ -42,7 +41,7 @@ class DataSanitizer:
         return f"{token[:3]}***{token[-4:]}"
 
     @staticmethod
-    def sanitize_dataframe(df: Optional[pd.DataFrame], max_cols: int = 5) -> str:
+    def sanitize_dataframe(df: pd.DataFrame | None, max_cols: int = 5) -> str:
         """
         DataFrame安全摘要
 
@@ -106,7 +105,9 @@ class DataSanitizer:
             import traceback
 
             tb_lines = traceback.format_exception(
-                type(exception), exception, exception.__traceback__,
+                type(exception),
+                exception,
+                exception.__traceback__,
             )
             # 过滤敏感路径
             tb_clean = [
@@ -117,7 +118,7 @@ class DataSanitizer:
         return msg
 
     @staticmethod
-    def sanitize_dict(data: dict, sensitive_keys: list = None) -> dict:
+    def sanitize_dict(data: dict, sensitive_keys: list = None) -> dict:  # type: ignore
         """
         字典脱敏处理
 
@@ -148,7 +149,7 @@ class DataSanitizer:
         return result
 
     @staticmethod
-    def sanitize_args(*args, sensitive_patterns: list = None, **kwargs) -> tuple:
+    def sanitize_args(*args, sensitive_patterns: list = None, **kwargs) -> tuple:  # type: ignore
         """
         函数参数脱敏
 

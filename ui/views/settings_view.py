@@ -72,7 +72,8 @@ class SettingsView(ft.Container):
                 self.header_title,
                 tab_bar,
                 ft.Divider(
-                    height=1, thickness=1,
+                    height=1,
+                    thickness=1,
                 ),  # Color defaults to DIVIDER (Outline Variant) which is correct
                 self.tab_body,
             ],
@@ -170,14 +171,17 @@ class SettingsView(ft.Container):
                 msg_type = "success"
             elif color == ft.Colors.ORANGE or color == ft.Colors.AMBER:
                 msg_type = "warning"
-            self.page.show_toast(message, type=msg_type)
+            self.page.show_toast(message, type=msg_type)  # type: ignore
         else:
             # Clean up old snackbars to prevent overlay bloat
-            self.page.overlay = [
+            self.page.overlay = [  # type: ignore
                 o for o in self.page.overlay if not isinstance(o, ft.SnackBar)
             ]
             snack = ft.SnackBar(
-                content=ft.Text(message), open=True, bgcolor=color, **kwargs,
+                content=ft.Text(message),
+                open=True,
+                bgcolor=color,
+                **kwargs,
             )
             self.page.overlay.append(snack)
             self.page.update()

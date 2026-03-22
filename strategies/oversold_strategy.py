@@ -1,5 +1,6 @@
 import datetime
 import logging
+import typing
 
 import pandas as pd
 import polars as pl
@@ -10,7 +11,6 @@ from strategies.base_strategy import BaseStrategy, register_strategy
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
-from utils.time_utils import parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
     def __init__(self):
         super().__init__("strategy_oversold_name", "strategy_oversold_desc")
-        
+
         self.register_context_builder("turnover", self._build_turnover_context)
         self.register_context_builder("sector", self._build_sector_context)
         self.register_context_builder("market", self._build_market_context)
@@ -79,7 +79,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         period = current_params.get("rsi_period", 14)
         threshold = current_params.get("rsi_threshold", 30)
         return I18n.get(
-            "strategy_oversold_dynamic_desc", f"RSI({period}) < {threshold}",
+            "strategy_oversold_dynamic_desc",
+            f"RSI({period}) < {threshold}",
         ).format(period=period, threshold=threshold)
 
     # ============================================================
@@ -90,27 +91,27 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         rsi = row.get(f"rsi_{period}", "N/A")
         threshold = row.get("_rsi_threshold", 30)
         rsi_feature = row.get("_rsi_feature_text", "")
-        
+
         context_parts = [
-            f"该股票由 RSI 超跌反弹策略筛选。",
+            "该股票由 RSI 超跌反弹策略筛选。",
             f"当前 RSI({period}) = {rsi}（阈值 < {threshold}），表明处于极端超卖状态。",
         ]
-        
+
         if rsi_feature:
             context_parts.append(f"【形态反馈】{rsi_feature}")
-        
+
         context_parts.append(
             "请评估：这是「黄金坑」反弹机会（如恐慌急跌/钝化），"
             "还是基本面恶化导致的「无底洞」下跌？"
         )
-        
+
         return "\n".join(context_parts)
 
     # ============================================================
     # Main Filter Logic
     # ============================================================
     @require_quality(QualityTier.SILVER)
-    async def filter(self, context):
+    async def filter(self, context: typing.Any):
         """
         Two-phase filtering:
         Phase 1: RSI math filter (Polars) → top N oversold candidates
@@ -138,7 +139,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         # --- Phase 2: AI Analysis (via Mixin) ---
         return await self.run_ai_analysis(candidates, context)
 
-    async def _math_filter(self, context, rsi_period, rsi_threshold):
+    async def _math_filter(
+        self, context: typing.Any, rsi_period: typing.Any, rsi_threshold: typing.Any
+    ):
         """
         Phase 1: Pure mathematical RSI filtering using Polars.
         Returns a Pandas DataFrame of candidates sorted by RSI ascending.
@@ -165,7 +168,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             return pd.DataFrame()
 
         # Use trading days instead of calendar days for accurate RSI calculation
-        start_date_obj = await dp.trade_calendar.get_start_date_by_trade_days(end_date_obj, 120)
+        start_date_obj = await dp.trade_calendar.get_start_date_by_trade_days(
+            end_date_obj, 120
+        )
         if not start_date_obj:
             logger.warning(
                 "[OversoldStrategy] Failed to get start date by trade days, falling back to calendar days.",
@@ -179,7 +184,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         try:
             valid_codes = snapshot_df["ts_code"].tolist()
             history_pdf = await dp.cache.get_daily_quotes(
-                start_date=start_date_obj, end_date=end_date_obj, ts_code_list=valid_codes,
+                start_date=start_date_obj,
+                end_date=end_date_obj,
+                ts_code_list=valid_codes,
             )
 
             if history_pdf is None or history_pdf.empty:
@@ -216,7 +223,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             # Calculate Dynamic RSI
             rsi_col_name = f"rsi_{rsi_period}"
             rsi_expr = TechnicalAnalysis.get_rsi_expr(
-                col_name="qfq_close", period=rsi_period, alias=rsi_col_name,
+                col_name="qfq_close",
+                period=rsi_period,
+                alias=rsi_col_name,
             )
 
             result_df = (
@@ -247,14 +256,15 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             raise
         except Exception as e:
             logger.error(
-                f"[OversoldStrategy] Error during execution: {e}", exc_info=True,
+                f"[OversoldStrategy] Error during execution: {e}",
+                exc_info=True,
             )
             raise RuntimeError(f"Strategy internal error: {e}")
 
     # ============================================================
     # Context Builders — Strategy-specific enhancements
     # ============================================================
-    
+
     async def _prefetch_strategy_specific(
         self, candidates_df: pd.DataFrame, context: dict, prefetched: PreFetchedContext
     ) -> PreFetchedContext:
@@ -267,16 +277,18 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         dp = context.get("data_processor")
         if dp is None:
             return prefetched
-        
+
         ts_codes = candidates_df["ts_code"].tolist() if not candidates_df.empty else []
-        
+
         try:
             if hasattr(dp.cache, "get_daily_indicators_bulk"):
                 end_date = prefetched.trade_date
                 if end_date:
-                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(end_date, 30)
+                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(
+                        end_date, 30
+                    )
                     if not start_date:
-                        start_date = end_date - datetime.timedelta(days=45)
+                        start_date = end_date - datetime.timedelta(days=45)  # type: ignore
                     prefetched.indicators = await dp.cache.get_daily_indicators_bulk(
                         ts_code_list=ts_codes,
                         start_date=start_date,
@@ -284,49 +296,63 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     )
         except Exception as e:
             logger.warning(f"[OversoldStrategy] Failed to prefetch indicators: {e}")
-        
+
         try:
             screening_data = context.get("screening_data")
             if screening_data is not None and not screening_data.empty:
                 prefetched.sector_stats = self._compute_sector_stats(screening_data)
         except Exception as e:
             logger.warning(f"[OversoldStrategy] Failed to compute sector stats: {e}")
-        
+
         try:
             if hasattr(dp.cache, "get_index_daily_range"):
                 trade_date = prefetched.trade_date
                 if trade_date:
-                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(trade_date, 30)
+                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(
+                        trade_date, 30
+                    )
                     if not start_date:
-                        start_date = trade_date - datetime.timedelta(days=45)
-                    
+                        start_date = trade_date - datetime.timedelta(days=45)  # type: ignore
+
                     indices = ["000001.SH", "399001.SZ", "399006.SZ"]
                     idx_df = await dp.cache.get_index_daily_range(
                         ts_code_list=indices,
                         start_date=start_date,
                         end_date=trade_date,
                     )
-                    
+
                     if idx_df is not None and not idx_df.empty:
                         market_context = {}
                         for idx_code in indices:
                             idx_data = idx_df[idx_df["ts_code"] == idx_code].copy()
                             if idx_data.empty:
                                 continue
-                            
-                            idx_data = idx_data.sort_values("trade_date", ascending=True)
-                            
-                            current_row = idx_data[idx_data["trade_date"] == trade_date.strftime("%Y%m%d")]
+
+                            idx_data = idx_data.sort_values(
+                                "trade_date", ascending=True
+                            )
+
+                            current_row = idx_data[
+                                idx_data["trade_date"] == trade_date.strftime("%Y%m%d")  # type: ignore
+                            ]
                             if current_row.empty:
                                 current_row = idx_data.tail(1)
-                            
-                            pct_chg = current_row["pct_chg"].iloc[0] if "pct_chg" in current_row.columns else 0
-                            
+
+                            pct_chg = (
+                                current_row["pct_chg"].iloc[0]
+                                if "pct_chg" in current_row.columns
+                                else 0
+                            )
+
                             ma20 = None
                             trend = "未知"
                             if len(idx_data) >= 20 and "close" in idx_data.columns:
                                 ma20 = idx_data["close"].tail(20).mean()
-                                current_close = current_row["close"].iloc[0] if "close" in current_row.columns else 0
+                                current_close = (
+                                    current_row["close"].iloc[0]
+                                    if "close" in current_row.columns
+                                    else 0
+                                )
                                 if ma20 and current_close:
                                     if current_close > ma20 * 1.02:
                                         trend = "多头趋势"
@@ -334,7 +360,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                                         trend = "空头趋势"
                                     else:
                                         trend = "震荡整理"
-                            
+
                             market_context[idx_code] = {
                                 "pct_chg": pct_chg if not pd.isna(pct_chg) else 0,
                                 "ma20": ma20,
@@ -343,16 +369,19 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         prefetched.market_context = market_context
         except Exception as e:
             logger.warning(f"[OversoldStrategy] Failed to prefetch market data: {e}")
-        
+
         return prefetched
-    
+
     def _compute_sector_stats(self, screening_data: pd.DataFrame) -> dict:
         """
         计算各行业的涨跌统计。
         """
-        if "industry" not in screening_data.columns or "pct_chg" not in screening_data.columns:
+        if (
+            "industry" not in screening_data.columns
+            or "pct_chg" not in screening_data.columns
+        ):
             return {}
-        
+
         stats = {}
         for industry, group in screening_data.groupby("industry"):
             stats[industry] = {
@@ -362,7 +391,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 "avg_pct_chg": group["pct_chg"].mean(),
             }
         return stats
-    
+
     def _build_turnover_context(self, row: dict, prefetched: PreFetchedContext) -> str:
         """
         构建换手率趋势上下文。
@@ -370,50 +399,52 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         """
         ts_code = row.get("ts_code", "")
         indicators_df = prefetched.indicators
-        
+
         if indicators_df is None or indicators_df.empty:
             return "换手率数据: 暂不可用"
-        
+
         stock_indicators = indicators_df[indicators_df["ts_code"] == ts_code]
         if stock_indicators.empty:
             return "换手率数据: 当日无记录"
-        
+
         parts = []
         turnover_col = "turnover_rate"
-        
+
         if turnover_col in stock_indicators.columns:
-            sorted_df = stock_indicators.sort_values("trade_date", ascending=False)
+            sorted_df = stock_indicators.sort_values("trade_date", ascending=False)  # type: ignore
             recent_5 = sorted_df.head(5)
             recent_20 = sorted_df.head(20)
-            
+
             if len(recent_5) >= 3:
                 current_turnover = recent_5[turnover_col].iloc[0]
                 avg_5d = recent_5[turnover_col].mean()
-                avg_20d = recent_20[turnover_col].mean() if len(recent_20) >= 20 else None
-                
-                if pd.isna(current_turnover) or pd.isna(avg_5d):
+                avg_20d = (
+                    recent_20[turnover_col].mean() if len(recent_20) >= 20 else None
+                )
+
+                if pd.isna(current_turnover) or pd.isna(avg_5d):  # type: ignore
                     return "换手率数据: 包含无效值"
-                
+
                 parts.append(f"当前换手率: {current_turnover:.2f}%")
                 parts.append(f"5日均值: {avg_5d:.2f}%")
-                
-                if avg_20d is not None and not pd.isna(avg_20d):
+
+                if avg_20d is not None and not pd.isna(avg_20d):  # type: ignore
                     parts.append(f"20日均值: {avg_20d:.2f}%")
                     ratio_5_20 = avg_5d / avg_20d if avg_20d > 0 else 1
                     if ratio_5_20 < 0.7:
                         parts.append("趋势: 持续缩量 (5日均值低于20日均值的70%)")
                     elif ratio_5_20 > 1.3:
                         parts.append("趋势: 近期放量 (5日均值高于20日均值的130%)")
-                
+
                 if current_turnover < avg_5d * 0.7:
                     parts.append("当日: 缩量下跌 (换手率低于5日均值的70%)")
                 elif current_turnover > avg_5d * 1.3:
                     parts.append("当日: 放量下跌 (换手率高于5日均值的130%)")
                 else:
                     parts.append("当日: 换手率相对平稳")
-        
+
         return "\n".join(parts) if parts else "换手率数据: 无有效数据"
-    
+
     def _build_sector_context(self, row: dict, prefetched: PreFetchedContext) -> str:
         """
         构建行业统计上下文。
@@ -421,20 +452,20 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         """
         sector_stats = prefetched.sector_stats
         industry = row.get("industry", "")
-        
+
         if not sector_stats or industry not in sector_stats:
             return f"行业统计: {industry or '未知'} (暂无数据)"
-        
+
         stats = sector_stats[industry]
         parts = [f"行业: {industry}"]
         parts.append(f"行业内股票数: {stats.get('count', 0)}")
         parts.append(f"上涨家数: {stats.get('up_count', 0)}")
         parts.append(f"下跌家数: {stats.get('down_count', 0)}")
-        avg_pct = stats.get('avg_pct_chg') or 0
+        avg_pct = stats.get("avg_pct_chg") or 0
         parts.append(f"平均涨跌幅: {avg_pct:.2f}%")
-        
+
         return "\n".join(parts)
-    
+
     def _build_market_context(self, row: dict, prefetched: PreFetchedContext) -> str:
         """
         构建大盘环境上下文。
@@ -443,31 +474,31 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         market_context_str = prefetched.market_context_str
         if market_context_str:
             return market_context_str
-        
+
         market_data = prefetched.market_context
         if not market_data:
             return "大盘环境: 数据暂不可用"
-        
+
         index_names = {
             "000001.SH": "上证指数",
             "399001.SZ": "深证成指",
             "399006.SZ": "创业板指",
         }
-        
+
         parts = ["大盘环境"]
         for idx_code, data in market_data.items():
             if not isinstance(data, dict):
                 continue
-            
+
             name = index_names.get(idx_code, idx_code)
             pct_chg = data.get("pct_chg") or 0
             trend = data.get("trend", "未知")
-            
+
             direction = "上涨" if pct_chg > 0 else "下跌" if pct_chg < 0 else "平盘"
             parts.append(f"{name}: {pct_chg:+.2f}% ({direction}, {trend})")
-        
+
         return "\n".join(parts)
-    
+
     def _build_support_context(self, row: dict, prefetched: PreFetchedContext) -> str:
         """
         构建多维量化支撑位分析上下文。
@@ -475,25 +506,25 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         """
         ts_code = row.get("ts_code", "")
         history_dict = prefetched.history
-        
+
         if not history_dict or ts_code not in history_dict:
             return "支撑位分析: 历史数据暂不可用"
-        
+
         history_df = history_dict[ts_code]
         if history_df is None or history_df.empty or len(history_df) < 20:
             return "支撑位分析: 数据不足"
-        
+
         parts = []
         current_close = row.get("close")
-        
+
         if current_close is None or current_close <= 0:
             return "支撑位分析: 当前价格数据无效"
-        
+
         if "trade_date" in history_df.columns:
             history_df = history_df.sort_values("trade_date", ascending=True)
-        
+
         recent_60 = history_df.tail(60) if len(history_df) >= 60 else history_df
-        
+
         # 1. 布林带下轨 (动态支撑) - 随波动率自适应
         if len(history_df) >= 20:
             close_20 = history_df["close"].tail(20)
@@ -503,33 +534,51 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 boll_lower = ma20 - 2 * std20
                 if pd.notna(boll_lower) and boll_lower > 0:
                     dist_boll = (current_close - boll_lower) / boll_lower * 100
-                    parts.append(f"布林下轨(动态支撑): {boll_lower:.2f} (距离 {dist_boll:+.2f}%)")
-        
+                    parts.append(
+                        f"布林下轨(动态支撑): {boll_lower:.2f} (距离 {dist_boll:+.2f}%)"
+                    )
+
         # 2. 60日量价均价 (VWAC) - 筹码成本区
-        if len(recent_60) >= 20 and "vol" in recent_60.columns and "close" in recent_60.columns:
+        if (
+            len(recent_60) >= 20
+            and "vol" in recent_60.columns
+            and "close" in recent_60.columns
+        ):
             vol_sum = recent_60["vol"].sum()
             if vol_sum > 0:
                 vwac_60 = (recent_60["close"] * recent_60["vol"]).sum() / vol_sum
                 if pd.notna(vwac_60) and vwac_60 > 0:
                     dist_vwac = (current_close - vwac_60) / vwac_60 * 100
-                    parts.append(f"60日量价均价(VWAC): {vwac_60:.2f} (距离 {dist_vwac:+.2f}%)")
-        
+                    parts.append(
+                        f"60日量价均价(VWAC): {vwac_60:.2f} (距离 {dist_vwac:+.2f}%)"
+                    )
+
         # 3. 近60日最大放量柱支撑 - 主力成本区
-        if len(recent_60) >= 5 and "vol" in recent_60.columns and "close" in recent_60.columns:
+        if (
+            len(recent_60) >= 5
+            and "vol" in recent_60.columns
+            and "close" in recent_60.columns
+        ):
             vol_values = recent_60["vol"].values
             if len(vol_values) > 0 and vol_values.max() > 0:
                 max_vol_pos = vol_values.argmax()
                 max_vol_support = recent_60["close"].iloc[max_vol_pos]
                 if pd.notna(max_vol_support) and max_vol_support > 0:
-                    dist_vol_peak = (current_close - max_vol_support) / max_vol_support * 100
-                    parts.append(f"近60日最大放量柱支撑: {max_vol_support:.2f} (距离 {dist_vol_peak:+.2f}%)")
-        
+                    dist_vol_peak = (
+                        (current_close - max_vol_support) / max_vol_support * 100
+                    )
+                    parts.append(
+                        f"近60日最大放量柱支撑: {max_vol_support:.2f} (距离 {dist_vol_peak:+.2f}%)"
+                    )
+
         # 4. 120日价值区下沿 (前低集群) - 结构支撑
         if len(history_df) >= 120:
             close_120 = history_df["close"].tail(120)
             val_120 = close_120.quantile(0.1)
             if pd.notna(val_120) and val_120 > 0:
                 dist_val = (current_close - val_120) / val_120 * 100
-                parts.append(f"120日价值区下沿(前低集群): {val_120:.2f} (距离 {dist_val:+.2f}%)")
-        
+                parts.append(
+                    f"120日价值区下沿(前低集群): {val_120:.2f} (距离 {dist_val:+.2f}%)"
+                )
+
         return "\n".join(parts) if parts else "支撑位分析: 无有效数据"

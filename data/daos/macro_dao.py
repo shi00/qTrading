@@ -1,5 +1,7 @@
 import logging
 
+import pandas as pd
+
 from data.daos.base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -8,7 +10,7 @@ logger = logging.getLogger(__name__)
 class MacroDao(BaseDao):
     """DAO for Macroeconomic data (M2, CPI, PPI) and Interbank Rates (Shibor)."""
 
-    async def save_macro_economy(self, df):
+    async def save_macro_economy(self, df: pd.DataFrame):
         """
         Save Macro Economy data (M2, CPI, etc.)
         Table: macro_economy
@@ -30,10 +32,13 @@ class MacroDao(BaseDao):
         ]
 
         return await self._save_upsert(
-            df, "macro_economy", columns, pk_columns=["period"],
+            df,
+            "macro_economy",
+            columns,
+            pk_columns=["period"],
         )
 
-    async def save_shibor_daily(self, df):
+    async def save_shibor_daily(self, df: pd.DataFrame):
         """
         Save Daily Shibor rates.
         Table: shibor_daily
@@ -46,7 +51,10 @@ class MacroDao(BaseDao):
         columns = ["date", "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y"]
         available = [c for c in columns if c in df.columns]
         return await self._save_upsert(
-            df, "shibor_daily", available, pk_columns=["date"],
+            df,
+            "shibor_daily",
+            available,
+            pk_columns=["date"],
         )
 
     async def get_macro_latest_date(self):

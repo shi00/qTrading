@@ -90,7 +90,8 @@ class HealthCheckMixin:
 
             # Check daily_quotes first (primary gate)
             latest_quote_date = sync_dict.get("daily_quotes", {}).get(
-                "last_data_date", "",
+                "last_data_date",
+                "",
             )
 
             # Fast verification: if sync_status is missing or stale, double check actual table MAX(date)
@@ -155,7 +156,9 @@ class HealthCheckMixin:
                     last_date = info.get("last_data_date", "") if info else ""
                     if last_date:
                         try:
-                            table_lag = (get_now() - parse_date(str(last_date), "%Y%m%d")).days
+                            table_lag = (
+                                get_now() - parse_date(str(last_date), "%Y%m%d")
+                            ).days
                             if table_lag > TIER_QUOTE_FRESHNESS_DAYS:
                                 stale_critical.append(table)
                         except (ValueError, TypeError):
@@ -174,7 +177,9 @@ class HealthCheckMixin:
                     fin_date = fin_info.get("last_data_date", "") if fin_info else ""
                     if fin_date:
                         try:
-                            fin_lag = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
+                            fin_lag = (
+                                get_now() - parse_date(str(fin_date), "%Y%m%d")
+                            ).days
                             if fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS:
                                 self._quality_tier = 3  # GOLD
                         except (ValueError, TypeError):
@@ -208,8 +213,9 @@ class HealthCheckMixin:
             return self._health_cache["data"]
 
         try:
-            end_date = await self.get_latest_trade_date()
+            end_date = await self.get_latest_trade_date()  # type: ignore
             from utils.time_utils import parse_date
+
             end_date_obj = parse_date(end_date)
             from utils.config_handler import ConfigHandler
 
@@ -218,8 +224,9 @@ class HealthCheckMixin:
             rough_start = (
                 end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))
             ).date()
-            all_dates = await self.get_trade_dates(
-                start_date=rough_start, end_date=end_date,
+            all_dates = await self.get_trade_dates(  # type: ignore
+                start_date=rough_start,
+                end_date=end_date,
             )
             if all_dates and len(all_dates) >= (years * 250):
                 start_date = all_dates[-(years * 250)]
@@ -230,7 +237,7 @@ class HealthCheckMixin:
                     else (end_date_obj - datetime.timedelta(days=365 * years)).date()
                 )
 
-            official_dates = await self.get_trade_dates(start_date, end_date)
+            official_dates = await self.get_trade_dates(start_date, end_date)  # type: ignore
 
             if not official_dates:
                 return {"status": "red", "msg": I18n.get("health_err_calendar")}
@@ -317,10 +324,14 @@ class HealthCheckMixin:
                     # Strategy classes may use @property, requiring instantiation to evaluate
                     obj = cls()
                     days = obj.required_history_days
-                    if not isinstance(days, property) and isinstance(days, (int, float)):
+                    if not isinstance(days, property) and isinstance(
+                        days, (int, float)
+                    ):
                         max_required = max(max_required, int(days))
                 except Exception as e:
-                    logger.debug(f"Unable to read required_history_days from {cls.__name__}: {e}")
+                    logger.debug(
+                        f"Unable to read required_history_days from {cls.__name__}: {e}"
+                    )
             depth_threshold = (
                 min(
                     1.0,
@@ -407,7 +418,8 @@ class HealthCheckMixin:
                 status_desc = I18n.get("health_status_lag_short", days=lag_days)
 
             status_msg = I18n.get("init_complete").format(
-                status=status_desc, coverage=f"{sys_coverage:.1f}%",
+                status=status_desc,
+                coverage=f"{sys_coverage:.1f}%",
             )
             # Append concept info
             status_msg += f" | {I18n.get('health_concepts_count', count=concept_count)}"
@@ -446,7 +458,8 @@ class HealthCheckMixin:
             return {"status": "red", "msg": f"Check failed: {e!s}"}
 
     @log_async_operation(
-        operation_name="run_quality_scan", threshold_ms=PerfThreshold.DB_BULK_IO,
+        operation_name="run_quality_scan",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def run_quality_scan(self, sample_size=50, progress_callback=None):
         """
@@ -460,7 +473,7 @@ class HealthCheckMixin:
         import random
 
         # Reset cancel event (prevents immediate skipped scan if previous op was cancelled)
-        self.clear_cancel()
+        self.clear_cancel()  # type: ignore
 
         if progress_callback:
             progress_callback(0, 100, I18n.get("scan_step_init"))
@@ -486,8 +499,9 @@ class HealthCheckMixin:
             # and over-fetching entire 20-year history for single stocks.
             start_date_obj = (get_now() - datetime.timedelta(days=365)).date()
 
-            trade_cal_df = await self.trade_calendar.get_trade_cal_df(
-                start_date=start_date_obj, is_open=1,
+            trade_cal_df = await self.trade_calendar.get_trade_cal_df(  # type: ignore
+                start_date=start_date_obj,
+                is_open=1,
             )
             if trade_cal_df is None or trade_cal_df.empty:
                 logger.warning(
@@ -495,7 +509,8 @@ class HealthCheckMixin:
                 )
 
             batch_df = await self.cache.get_daily_quotes(
-                ts_code_list=sample, start_date=start_date_obj,
+                ts_code_list=sample,
+                start_date=start_date_obj,
             )
 
             # 3. Iterate Sample (DataFrame Slicing in Memory)
@@ -503,7 +518,7 @@ class HealthCheckMixin:
             total_steps = len(sample)
 
             for idx, ts_code in enumerate(sample):
-                if self.is_cancelled():
+                if self.is_cancelled():  # type: ignore
                     break
 
                 # Update Progress
@@ -519,24 +534,29 @@ class HealthCheckMixin:
 
                 if df_daily is not None and not df_daily.empty:
                     # Sort explicitly to guarantee recency check safety
-                    df_daily = df_daily.sort_values("trade_date", ascending=False)
+                    df_daily = df_daily.sort_values("trade_date", ascending=False)  # type: ignore
 
                     # Check Continuity (only if trade_cal is available)
                     if trade_cal_df is not None and not trade_cal_df.empty:
                         cont_res = DataQualityService.check_continuity(
-                            df_daily, "trade_date", trade_cal_df,
+                            df_daily,
+                            "trade_date",
+                            trade_cal_df,
                         )
                         scan_results["continuity"].append(cont_res["coverage_ratio"])
 
                     # Check Recency (vs today)
                     rec_res = DataQualityService.check_recency(
-                        df_daily, "trade_date", get_now().date(),
+                        df_daily,
+                        "trade_date",
+                        get_now().date(),
                     )
                     scan_results["recency"].append(rec_res["lag_days"])
 
                     # Check Nulls (Close price)
                     null_res = DataQualityService.check_nulls(
-                        df_daily, ["close", "vol"],
+                        df_daily,
+                        ["close", "vol"],
                     )
                     scan_results["nulls"].append(null_res.get("close", 0.0))
 
@@ -583,4 +603,4 @@ class HealthCheckMixin:
             return {"score": 0, "tier": 0, "error": str(e)}
         finally:
             # Ensure cancel state doesn't leak into subsequent operations
-            self.clear_cancel()
+            self.clear_cancel()  # type: ignore

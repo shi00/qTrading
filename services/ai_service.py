@@ -69,9 +69,9 @@ class AIService:
             # Enforce minimum concurrency of 1 to prevent deadlock
             raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
             concurrency = max(1, int(raw_val)) if raw_val else 5
-            current_loop._ai_semaphore = asyncio.Semaphore(concurrency)
+            current_loop._ai_semaphore = asyncio.Semaphore(concurrency)  # type: ignore
 
-        return current_loop._ai_semaphore
+        return current_loop._ai_semaphore  # type: ignore
 
     def _setup_client(self):
         """
@@ -132,7 +132,7 @@ class AIService:
     async def _chat_completion(
         self,
         messages: list,
-        model: str = None,
+        model: str = None,  # type: ignore
         provider: str = "cloud",
         temperature: float = 0.3,
         timeout: float = 30.0,
@@ -165,7 +165,8 @@ class AIService:
                 "You are a helpful assistant.",
             )
             user_prompt = next(
-                (m["content"] for m in messages if m["role"] == "user"), "",
+                (m["content"] for m in messages if m["role"] == "user"),
+                "",
             )
 
             if not manager.get_loaded_model_path():
@@ -183,7 +184,7 @@ class AIService:
             if not self.client:
                 raise ValueError("Cloud Client not initialized")
 
-            model = model or ConfigHandler.get_setting("ai_model_name")
+            model = model or ConfigHandler.get_setting("ai_model_name")  # type: ignore
             if not model:
                 raise ValueError("Model not configured")
 
@@ -192,11 +193,11 @@ class AIService:
                     f"[AIService] Cloud | Invoking {model} ({len(messages)} messages)",
                 )
 
-                response = await self.client.chat.completions.create(
+                response = await self.client.chat.completions.create(  # type: ignore
                     model=model,
                     messages=messages,
                     # When streaming, response_format json_object is often unsupported by providers, so we disable it
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_object"}  # type: ignore
                     if json_mode and not on_chunk
                     else None,
                     temperature=temperature,
@@ -217,7 +218,8 @@ class AIService:
                         ):
                             reasoning_content += delta.reasoning_content
                             on_chunk(
-                                delta.reasoning_content, True,
+                                delta.reasoning_content,
+                                True,
                             )  # True for is_reasoning
                         if delta.content:
                             response_content += delta.content
@@ -281,9 +283,9 @@ class AIService:
         financials_text: str = "",
         history_text: str = "",
         on_chunk=None,
-        history_context: str = None,
-        strategy_key: str = None,
-        ui_prompt_override: str = None,
+        history_context: str = None,  # type: ignore
+        strategy_key: str = None,  # type: ignore
+        ui_prompt_override: str = None,  # type: ignore
     ) -> dict:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
@@ -292,7 +294,7 @@ class AIService:
         if not self.client:
             # Minimal check, though _chat_completion checks it too.
             # But analyze_stock might return specific error dicts expected by Strategy.
-            return None
+            return None  # type: ignore
 
         # Build Prompt
         import pandas as pd
@@ -408,9 +410,13 @@ class AIService:
         if news_text and news_text != "No recent news found.":
             user_prompt_parts.append(f"<recent_news>\n{news_text}\n</recent_news>")
         if financials_content and "Data not available" not in financials_content:
-            user_prompt_parts.append(f"<financials>\n{financials_content}\n</financials>")
+            user_prompt_parts.append(
+                f"<financials>\n{financials_content}\n</financials>"
+            )
         if capital_flow_content and "Data not available" not in capital_flow_content:
-            user_prompt_parts.append(f"<capital_flow>\n{capital_flow_content}\n</capital_flow>")
+            user_prompt_parts.append(
+                f"<capital_flow>\n{capital_flow_content}\n</capital_flow>"
+            )
 
         # 4. 历史价格序列 (Bottom-Mid)
         if history_text:
@@ -459,7 +465,8 @@ class AIService:
 
                 # Removed "prompt_" prefix as requested by user. Timestamp is up to seconds.
                 dump_file = os.path.join(
-                    dump_dir, f"{strat_str}_{stock_code}_{timestamp}.md",
+                    dump_dir,
+                    f"{strat_str}_{stock_code}_{timestamp}.md",
                 )
 
                 with open(dump_file, "w", encoding="utf-8") as f:
@@ -487,12 +494,14 @@ class AIService:
 
         except asyncio.TimeoutError:
             logger.error(
-                "[AIService] Analyze | ❌ Timeout (120s exceeded)", exc_info=True,
+                "[AIService] Analyze | ❌ Timeout (120s exceeded)",
+                exc_info=True,
             )
             return {"error": "Analysis timeout", "score": 0}
         except Exception as e:
             logger.error(
-                f"[AIService] Analyze | ❌ Top-level failure: {e}", exc_info=True,
+                f"[AIService] Analyze | ❌ Top-level failure: {e}",
+                exc_info=True,
             )
             return {"error": str(e), "score": 0}
 
@@ -515,9 +524,9 @@ class AIService:
             return DummyLock()
 
         if not hasattr(current_loop, "_ai_setup_lock"):
-            current_loop._ai_setup_lock = asyncio.Lock()
+            current_loop._ai_setup_lock = asyncio.Lock()  # type: ignore
 
-        return current_loop._ai_setup_lock
+        return current_loop._ai_setup_lock  # type: ignore
 
     async def _setup_local_model(self):
         """
@@ -554,7 +563,8 @@ class AIService:
         return raw_result
 
     @log_async_operation(
-        operation_name="classify_news", threshold_ms=PerfThreshold.AI_INFERENCE,
+        operation_name="classify_news",
+        threshold_ms=PerfThreshold.AI_INFERENCE,
     )
     async def classify_news(self, text: str) -> dict:
         """
@@ -569,7 +579,9 @@ class AIService:
         # 1. Try Local Model
         try:
             raw_result = await self._chat_completion(
-                messages, provider="local", json_mode=True,
+                messages,
+                provider="local",
+                json_mode=True,
             )
             result = self._parse_news_result(raw_result)
             logger.debug(
@@ -597,7 +609,9 @@ class AIService:
             # Inner cloud call had 30s timeout on client.
             # We will use 30s default.
             raw_result = await self._chat_completion(
-                messages, provider="cloud", json_mode=True,
+                messages,
+                provider="cloud",
+                json_mode=True,
             )
             result = self._parse_news_result(raw_result)
             logger.debug(
@@ -606,9 +620,10 @@ class AIService:
             return result
         except Exception as e:
             logger.error(
-                f"[AIService] Classify | ❌ All providers failed: {e}", exc_info=True,
+                f"[AIService] Classify | ❌ All providers failed: {e}",
+                exc_info=True,
             )
-            return None
+            return None  # type: ignore
 
     async def verify_connection(self) -> bool:
         """
@@ -624,7 +639,9 @@ class AIService:
 
             # Minimal request to test auth
             await self.client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1,
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=1,
             )
             return True
         except Exception as e:
@@ -653,11 +670,14 @@ class AIService:
 
             # Simple test request
             await client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1,
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=1,
             )
             return True
         except Exception as e:
             logger.error(
-                f"[AIService] TestConn | ❌ Test connection failed: {e}", exc_info=True,
+                f"[AIService] TestConn | ❌ Test connection failed: {e}",
+                exc_info=True,
             )
             raise e

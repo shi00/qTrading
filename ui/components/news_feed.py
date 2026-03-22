@@ -19,8 +19,8 @@ class NewsFeed(ft.Container):
         style = AppStyles.card()
         super().__init__()
         self.expand = True
-        self.bgcolor = style["bgcolor"]
-        self.border_radius = style["border_radius"]
+        self.bgcolor = style["bgcolor"]  # type: ignore
+        self.border_radius = style["border_radius"]  # type: ignore
         self.border = style.get("border")
         self.padding = 10
         self.on_load_more_click = on_load_more_click
@@ -30,12 +30,16 @@ class NewsFeed(ft.Container):
         self._cached_has_more = False
 
         self.news_list = ft.ListView(
-            spacing=10, padding=10, auto_scroll=False, expand=True,
+            spacing=10,
+            padding=10,
+            auto_scroll=False,
+            expand=True,
         )
 
         # I18n Refs
         self.empty_text = ft.Text(
-            I18n.get("home_news_empty"), color=AppColors.TEXT_HINT,
+            I18n.get("home_news_empty"),
+            color=AppColors.TEXT_HINT,
         )
 
         self.empty_state = ft.Container(
@@ -79,14 +83,14 @@ class NewsFeed(ft.Container):
     def update_locale(self):
         """Update static text when locale changes"""
         self.empty_text.value = I18n.get("home_news_empty")
-        self.load_more_btn.content.content.value = I18n.get("news_load_more")
+        self.load_more_btn.content.content.value = I18n.get("news_load_more")  # type: ignore
         self.update()
 
     def update_theme(self):
         """Re-render list on theme change"""
         style = AppStyles.card()
-        self.bgcolor = style["bgcolor"]
-        self.bgcolor = style["bgcolor"]
+        self.bgcolor = style["bgcolor"]  # type: ignore
+        self.bgcolor = style["bgcolor"]  # type: ignore
         # Update static texts (only if not using semantic tokens, but here we are)
         # self.empty_text.color = AppColors.TEXT_HINT  <-- Automatic
         # self.load_more_text.color = AppColors.PRIMARY_LIGHT <-- Automatic
@@ -161,7 +165,7 @@ class NewsFeed(ft.Container):
             if item == self.load_more_btn:
                 continue
             try:
-                col = item.content
+                col = item.content  # type: ignore
                 if not isinstance(col, ft.Column):
                     continue
                 row = col.controls[0] if col.controls else None
@@ -171,7 +175,10 @@ class NewsFeed(ft.Container):
                 if content_text.value != content:
                     continue
                 for row_ctrl in row.controls:
-                    if isinstance(row_ctrl, ft.Text) and row_ctrl.weight == ft.FontWeight.BOLD:
+                    if (
+                        isinstance(row_ctrl, ft.Text)
+                        and row_ctrl.weight == ft.FontWeight.BOLD
+                    ):
                         row_ctrl.value = translated_tag
                         if self.page:
                             self.news_list.update()
@@ -192,7 +199,8 @@ class NewsFeed(ft.Container):
             self._cached_news = news_data
         else:
             self._cached_news = pd.concat(
-                [news_data, self._cached_news], ignore_index=True,
+                [news_data, self._cached_news],
+                ignore_index=True,
             )
 
         # Ensure we are in list mode
@@ -233,7 +241,8 @@ class NewsFeed(ft.Container):
                 self._cached_news = news_data
             else:
                 self._cached_news = pd.concat(
-                    [self._cached_news, news_data], ignore_index=True,
+                    [self._cached_news, news_data],
+                    ignore_index=True,
                 )
         self._cached_has_more = has_more
 
@@ -269,7 +278,9 @@ class NewsFeed(ft.Container):
                                 size=12,
                             ),
                             ft.Text(
-                                time_str[-8:], color=AppColors.TEXT_SECONDARY, size=12,
+                                time_str[-8:],
+                                color=AppColors.TEXT_SECONDARY,
+                                size=12,
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

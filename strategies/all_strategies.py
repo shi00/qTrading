@@ -1,3 +1,5 @@
+import typing
+
 """
 Strategy Manager — Auto-discovers strategies via @register_strategy decorator.
 
@@ -53,13 +55,13 @@ class StrategyManager:
                     f"[StrategyManager] ⚠ Missing i18n key: '{s._desc_key}' (strategy: {key})",
                 )
 
-    def get_strategy(self, key):
+    def get_strategy(self, key: typing.Any):
         return self.strategies.get(key)
 
     def get_all_names(self):
         return {k: v.name for k, v in self.strategies.items()}
 
-    def get_strategy_params(self, key):
+    def get_strategy_params(self, key: typing.Any):
         """Get dynamic parameter definitions for a strategy."""
         s = self.strategies.get(key)
         return s.get_parameters() if s else []

@@ -9,7 +9,12 @@ logger = logging.getLogger(__name__)
 
 class QuoteDao(BaseDao):
     # --- Daily Quotes ---
-    async def save_daily_quotes(self, df, priority=None, suppress_errors=True):
+    async def save_daily_quotes(
+        self,
+        df: pd.DataFrame,
+        priority: int | None = None,
+        suppress_errors: bool = True,
+    ):
         cols = [
             "ts_code",
             "trade_date",
@@ -43,7 +48,11 @@ class QuoteDao(BaseDao):
             return False
 
     async def get_daily_quotes(
-        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None,
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ts_code_list: list | None = None,
     ):
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
@@ -158,7 +167,7 @@ class QuoteDao(BaseDao):
         return df["min_date"].iloc[0], df["max_date"].iloc[0]
 
     # --- Index Data ---
-    async def save_index_daily(self, df):
+    async def save_index_daily(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "trade_date",
@@ -173,10 +182,13 @@ class QuoteDao(BaseDao):
             "amount",
         ]
         return await self._save_upsert(
-            df, "index_daily", cols, pk_columns=["ts_code", "trade_date"],
+            df,
+            "index_daily",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
         )
 
-    async def save_index_dailybasic(self, df):
+    async def save_index_dailybasic(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "trade_date",
@@ -192,10 +204,15 @@ class QuoteDao(BaseDao):
             "pb",
         ]
         return await self._save_upsert(
-            df, "index_dailybasic", cols, pk_columns=["ts_code", "trade_date"],
+            df,
+            "index_dailybasic",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
         )
 
-    async def get_index_daily(self, ts_code=None, trade_date=None):
+    async def get_index_daily(
+        self, ts_code: str | None = None, trade_date: str | None = None
+    ):
         sql = "SELECT * FROM index_daily WHERE 1=1"
         p = []
         idx = 1
@@ -210,26 +227,29 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, p)
 
     async def get_index_daily_range(
-        self, ts_code_list: list, start_date=None, end_date=None,
+        self,
+        ts_code_list: list,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ):
         """
         批量获取多只指数的日线数据。
-        
+
         Args:
             ts_code_list: 指数代码列表 (如 ['000001.SH', '399001.SZ'])
             start_date: 开始日期
             end_date: 结束日期
-        
+
         Returns:
             DataFrame 包含所有指定指数的日线数据
         """
         if not ts_code_list:
             return await self._read_db("SELECT * FROM index_daily WHERE 1=0", [])
-        
+
         sql = "SELECT ts_code, trade_date, close, pct_chg, vol, amount FROM index_daily WHERE 1=1"
         params = []
         idx = 1
-        
+
         if start_date:
             sql += f" AND trade_date >= ${idx}"
             params.append(start_date)
@@ -238,7 +258,7 @@ class QuoteDao(BaseDao):
             sql += f" AND trade_date <= ${idx}"
             params.append(end_date)
             idx += 1
-        
+
         placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])
         sql += f" AND ts_code IN ({placeholders})"
         params.extend(ts_code_list)
@@ -246,7 +266,7 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, params)
 
     # --- Block Trade ---
-    async def save_block_trade(self, df):
+    async def save_block_trade(self, df: pd.DataFrame):
         cols = ["trade_date", "ts_code", "price", "volume", "amount", "buyer", "seller"]
         return await self._save_upsert(
             df,
@@ -255,7 +275,7 @@ class QuoteDao(BaseDao):
             pk_columns=["ts_code", "trade_date", "buyer", "seller"],
         )
 
-    async def get_block_trade(self, trade_date=None):
+    async def get_block_trade(self, trade_date: str | None = None):
         sql = "SELECT * FROM block_trade WHERE 1=1"
         p = []
         if trade_date:
@@ -264,7 +284,7 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, p)
 
     # --- Limit List ---
-    async def save_limit_list(self, df):
+    async def save_limit_list(self, df: pd.DataFrame):
         cols = [
             "trade_date",
             "ts_code",
@@ -282,11 +302,14 @@ class QuoteDao(BaseDao):
             "limit_type",
         ]
         return await self._save_upsert(
-            df, "limit_list", cols, pk_columns=["trade_date", "ts_code"],
+            df,
+            "limit_list",
+            cols,
+            pk_columns=["trade_date", "ts_code"],
         )
 
     # --- Top List ---
-    async def save_top_list(self, df):
+    async def save_top_list(self, df: pd.DataFrame):
         cols = [
             "trade_date",
             "ts_code",
@@ -305,10 +328,13 @@ class QuoteDao(BaseDao):
             "reason",
         ]
         return await self._save_upsert(
-            df, "top_list", cols, pk_columns=["trade_date", "ts_code"],
+            df,
+            "top_list",
+            cols,
+            pk_columns=["trade_date", "ts_code"],
         )
 
-    async def get_top_list(self, trade_date=None):
+    async def get_top_list(self, trade_date: str | None = None):
         sql = "SELECT * FROM top_list WHERE 1=1"
         p = []
         if trade_date:
@@ -317,21 +343,27 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, p)
 
     # --- Margin ---
-    async def save_margin_daily(self, df):
+    async def save_margin_daily(self, df: pd.DataFrame):
         cols = ["ts_code", "trade_date", "rzye", "rqye", "rzmre", "rqyl", "rzrqye"]
         return await self._save_upsert(
-            df, "margin_daily", cols, pk_columns=["ts_code", "trade_date"],
+            df,
+            "margin_daily",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
         )
 
     # --- Suspend ---
-    async def save_suspend_d(self, df):
+    async def save_suspend_d(self, df: pd.DataFrame):
         cols = ["ts_code", "trade_date", "suspend_timing", "suspend_type_name"]
         return await self._save_upsert(
-            df, "suspend_d", cols, pk_columns=["ts_code", "trade_date"],
+            df,
+            "suspend_d",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
         )
 
     # --- Moneyflow ---
-    async def save_moneyflow(self, df):
+    async def save_moneyflow(self, df: pd.DataFrame):
         cols = [
             "ts_code",
             "trade_date",
@@ -348,10 +380,15 @@ class QuoteDao(BaseDao):
             "net_mf_amount",
         ]
         return await self._save_upsert(
-            df, "moneyflow_daily", cols, pk_columns=["ts_code", "trade_date"],
+            df,
+            "moneyflow_daily",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
         )
 
-    async def get_moneyflow(self, trade_date=None, ts_code=None):
+    async def get_moneyflow(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
         sql = "SELECT * FROM moneyflow_daily WHERE 1=1"
         p = []
         idx = 1
@@ -365,13 +402,18 @@ class QuoteDao(BaseDao):
         return await self._read_db(sql, p)
 
     # --- Northbound ---
-    async def save_northbound(self, df):
+    async def save_northbound(self, df: pd.DataFrame):
         cols = ["ts_code", "trade_date", "name", "vol", "ratio", "exchange"]
         return await self._save_upsert(
-            df, "northbound_holding", cols, pk_columns=["ts_code", "trade_date"],
+            df,
+            "northbound_holding",
+            cols,
+            pk_columns=["ts_code", "trade_date"],
         )
 
-    async def get_northbound(self, trade_date=None, ts_code=None):
+    async def get_northbound(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
         sql = "SELECT * FROM northbound_holding WHERE 1=1"
         p = []
         idx = 1

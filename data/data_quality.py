@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Dict, List, Tuple
+import typing
+from typing import Any
 
 import pandas as pd
 
@@ -18,8 +19,8 @@ class DataQualityService:
 
     @classmethod
     def check_continuity(
-        cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame,
-    ) -> Dict[str, Any]:
+        cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame
+    ) -> dict[str, Any]:
         """
         Tier 2: Check for missing trading days in a time-series.
 
@@ -44,13 +45,15 @@ class DataQualityService:
         start_date = date_series.min()
         end_date = date_series.max()
 
-        if pd.isna(start_date) or pd.isna(end_date):
+        if pd.isna(start_date) or pd.isna(end_date):  # type: ignore
             return {"missing_count": 0, "missing_dates": [], "coverage_ratio": 0.0}
 
         target_dates = set(date_series.dt.date)
 
-        start_date_obj = start_date.date() if hasattr(start_date, 'date') else start_date
-        end_date_obj = end_date.date() if hasattr(end_date, 'date') else end_date
+        start_date_obj = (
+            start_date.date() if hasattr(start_date, "date") else start_date
+        )
+        end_date_obj = end_date.date() if hasattr(end_date, "date") else end_date
 
         # Convert trade_cal cal_date to datetime for proper comparison
         if not pd.api.types.is_datetime64_any_dtype(trade_cal["cal_date"]):
@@ -68,7 +71,7 @@ class DataQualityService:
         if pd.api.types.is_datetime64_any_dtype(cal_dates):
             expected_dates = set(cal_dates.dt.date)
         else:
-            expected_dates = set(pd.to_datetime(cal_dates, errors='coerce').dt.date)
+            expected_dates = set(pd.to_datetime(cal_dates, errors="coerce").dt.date)
 
         missing = expected_dates - target_dates
         missing_list = sorted(list(missing))
@@ -87,8 +90,8 @@ class DataQualityService:
 
     @classmethod
     def check_recency(
-        cls, df: pd.DataFrame, date_col: str, ref_date,
-    ) -> Dict[str, Any]:
+        cls, df: pd.DataFrame, date_col: str, ref_date: typing.Any
+    ) -> dict[str, Any]:
         """
         Tier 2: Check data freshness against a reference date (usually latest trading day).
         ref_date can be a string (YYYYMMDD), datetime.date, or datetime.datetime.
@@ -98,7 +101,7 @@ class DataQualityService:
 
         # Get latest date in DF
         max_date = df[date_col].max()
-        if pd.isna(max_date):
+        if pd.isna(max_date):  # type: ignore
             return {"lag_days": cls.LAG_ERROR, "latest_data_date": None}
 
         # Handle string vs datetime
@@ -118,7 +121,7 @@ class DataQualityService:
         return {"lag_days": lag, "latest_data_date": latest}
 
     @staticmethod
-    def check_nulls(df: pd.DataFrame, columns: List[str] = None) -> Dict[str, float]:
+    def check_nulls(df: pd.DataFrame, columns: list[str] = None) -> dict[str, float]:  # type: ignore
         """
         Tier 2: Critical column null-rate analysis.
         If columns is None, checks all.
@@ -135,8 +138,8 @@ class DataQualityService:
 
     @staticmethod
     def check_cross_validation(
-        df: pd.DataFrame, rules: List[Tuple[str, str, float]],
-    ) -> List[str]:
+        df: pd.DataFrame, rules: list[tuple[str, str, float]]
+    ) -> list[str]:
         """
         Tier 3: Reliability Cross-Validation using simple expression evaluation.
 
@@ -179,8 +182,8 @@ class DataQualityService:
 
     @staticmethod
     def check_price_vs_factor(
-        df_price: pd.DataFrame, df_adj: pd.DataFrame,
-    ) -> Dict[str, Any]:
+        df_price: pd.DataFrame, df_adj: pd.DataFrame
+    ) -> dict[str, Any]:
         """
         Tier 3: Verify Price * AdjFactor consistency.
         Requires a joined view of raw and adjusted prices.

@@ -39,10 +39,11 @@ logger = logging.getLogger(__name__)
 class PreFetchedContext:
     """
     Container for pre-fetched data shared across all stock analyses in a batch.
-    
+
     This dataclass encapsulates all pre-fetched data to avoid parameter bloat
     in method signatures and enable clean extension for future enhancements.
     """
+
     capital: dict = field(default_factory=dict)
     history: dict = field(default_factory=dict)
     concepts_map: dict = field(default_factory=dict)
@@ -50,7 +51,7 @@ class PreFetchedContext:
     history_context: str = ""
     global_context: str = ""
     trade_date: Optional[object] = None
-    
+
     indicators: pd.DataFrame = field(default_factory=pd.DataFrame)
     sector_stats: dict = field(default_factory=dict)
     market_context: dict = field(default_factory=dict)
@@ -71,14 +72,14 @@ class AIStrategyMixin:
                 # Register custom context builders
                 self.register_context_builder("turnover", self._build_turnover_context)
                 self.register_context_builder("sector", self._build_sector_context)
-            
+
             async def filter(self, context):
                 candidates = ... # Math filtering
                 return await self.run_ai_analysis(candidates, context)
 
             def get_ai_context(self, row: dict) -> str:
                 return f"RSI({row.get('_rsi_period', 14)})={row.get('rsi_14', 'N/A')} — oversold candidate"
-    
+
     Attributes:
         _context_builders: Dict of registered context builder functions.
             Key: context block name (e.g., "turnover", "sector")
@@ -88,18 +89,18 @@ class AIStrategyMixin:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._context_builders: dict[str, ContextBuilder] = {}
-    
+
     def register_context_builder(self, name: str, builder: ContextBuilder) -> None:
         """
         Register a custom context builder for this strategy.
-        
+
         Args:
             name: Context block name (e.g., "turnover", "sector", "market")
             builder: Function(row: dict, prefetched: PreFetchedContext) -> str
         """
         self._context_builders[name] = builder
         logger.debug(f"[AIStrategyMixin] Registered context builder: {name}")
-    
+
     def get_context_blocks(self) -> list[str]:
         """Get list of context block names to build for this strategy."""
         return list(self._context_builders.keys())
@@ -109,12 +110,12 @@ class AIStrategyMixin:
     ) -> PreFetchedContext:
         """
         Hook for strategy-specific pre-fetching. Override in subclasses.
-        
+
         Args:
             candidates_df: DataFrame of candidate stocks.
             context: Full strategy context dict.
             prefetched: PreFetchedContext with base pre-fetched data.
-        
+
         Returns:
             Updated PreFetchedContext with strategy-specific data added.
         """
@@ -133,7 +134,10 @@ class AIStrategyMixin:
         return ""  # Default: no additional context
 
     async def run_ai_analysis(
-        self, candidates_df: pd.DataFrame, context: dict, max_stocks: int = None,
+        self,
+        candidates_df: pd.DataFrame,
+        context: dict,
+        max_stocks: int = None,  # type: ignore
     ) -> pd.DataFrame:
         """
         Run sequential AI analysis on pre-filtered candidates.
@@ -203,7 +207,7 @@ class AIStrategyMixin:
         concepts_map = {}
         all_ts_codes = candidates_df["ts_code"].tolist()
         try:
-            concepts_map = await dp.cache.get_concepts(all_ts_codes)
+            concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to pre-fetch concepts: {e}")
 
@@ -216,7 +220,7 @@ class AIStrategyMixin:
 
             years = ConfigHandler.get_init_history_years()
             start_date = (get_now() - timedelta(days=365 * years + 30)).date()
-            bulk_history_df = await dp.cache.get_daily_quotes(
+            bulk_history_df = await dp.cache.get_daily_quotes(  # type: ignore
                 ts_code_list=all_ts_codes,
                 start_date=start_date,
                 end_date=end_date,
@@ -245,7 +249,7 @@ class AIStrategyMixin:
         # Fetch once for the trade date, filter per-stock in the loop (0ms per stock)
         trade_date = None
         try:
-            trade_date = await dp.get_latest_trade_date()
+            trade_date = await dp.get_latest_trade_date()  # type: ignore
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to get latest trade date: {e}")
 
@@ -255,17 +259,17 @@ class AIStrategyMixin:
 
         if trade_date:
             try:
-                moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)
+                moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore
             except Exception as e:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch moneyflow: {e}")
 
             try:
-                top_list_df = await dp.cache.get_top_list(trade_date=trade_date)
+                top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore
             except Exception as e:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch top_list: {e}")
 
             try:
-                northbound_df = await dp.cache.get_northbound(trade_date=trade_date)
+                northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore
             except Exception as e:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch northbound: {e}")
 
@@ -300,7 +304,9 @@ class AIStrategyMixin:
 
         if on_progress:
             on_progress(
-                0, total_tasks, I18n.get("ai_progress_init", "初始化 AI 分析引擎..."),
+                0,
+                total_tasks,
+                I18n.get("ai_progress_init", "初始化 AI 分析引擎..."),
             )
 
         final_rows = []
@@ -313,7 +319,7 @@ class AIStrategyMixin:
                 )
                 break
 
-            row_data = row._asdict()
+            row_data = row._asdict()  # type: ignore
             stock_name = row_data.get("name", row_data.get("ts_code", "?"))
 
             # Setup streaming callback for this specific stock
@@ -330,7 +336,8 @@ class AIStrategyMixin:
                     )
 
                 hist_df = prefetched.history.get(
-                    row_data.get("ts_code"), pd.DataFrame(),
+                    row_data.get("ts_code"),
+                    pd.DataFrame(),
                 )
                 news_list = []
                 if row_data.get("ts_code") in prefetched.news_tasks:
@@ -345,7 +352,9 @@ class AIStrategyMixin:
                     history_df=hist_df,
                     news=news_list,
                     ui_prompt_override=ui_prompt_override,
-                    vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
+                    vol_ratio_threshold=context.get("params", {}).get(
+                        "vol_ratio_threshold", 1.5
+                    ),
                 )
 
                 completed_count += 1
@@ -365,13 +374,13 @@ class AIStrategyMixin:
 
                 # Valid result — enrich row
                 row_dict = dict(row_data)
-                
+
                 # 组装置信度与风险点到 summary 中，实现 UI 无感展示
                 summary_raw = res.get("summary", "")
                 summary = str(summary_raw) if summary_raw else ""
                 confidence = res.get("confidence")
                 uncertainty = res.get("uncertainty_factors")
-                
+
                 if confidence is not None:
                     summary = f"[置信度: {confidence}%] {summary}"
                 if uncertainty:
@@ -379,21 +388,27 @@ class AIStrategyMixin:
                         uncertainty_str = ", ".join(str(u) for u in uncertainty if u)
                     else:
                         uncertainty_str = str(uncertainty).strip()
-                    if uncertainty_str and uncertainty_str not in ["", "None", "无", "无。", "[]"]:
+                    if uncertainty_str and uncertainty_str not in [
+                        "",
+                        "None",
+                        "无",
+                        "无。",
+                        "[]",
+                    ]:
                         summary += f" (风险点: {uncertainty_str})"
-                
+
                 score_raw = res.get("score", 0)
                 row_dict["ai_score"] = (
-                    min(100, max(0, int(score_raw))) 
-                    if isinstance(score_raw, (int, float)) 
+                    min(100, max(0, int(score_raw)))
+                    if isinstance(score_raw, (int, float))
                     else 0
                 )
                 row_dict["ai_reason"] = summary
                 thinking_raw = res.get("thinking", "")
                 row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
                 row_dict["confidence"] = (
-                    min(100, max(1, int(confidence))) 
-                    if isinstance(confidence, (int, float)) 
+                    min(100, max(1, int(confidence)))
+                    if isinstance(confidence, (int, float))
                     else 50
                 )
                 final_rows.append(row_dict)
@@ -418,7 +433,8 @@ class AIStrategyMixin:
                 break
             except Exception as e:
                 logger.error(
-                    f"[AIStrategyMixin] Task error for {stock_name}: {e}", exc_info=True,
+                    f"[AIStrategyMixin] Task error for {stock_name}: {e}",
+                    exc_info=True,
                 )
                 completed_count += 1
             finally:
@@ -450,13 +466,13 @@ class AIStrategyMixin:
         on_chunk=None,
         history_df=None,
         news=None,
-        ui_prompt_override: str = None,
+        ui_prompt_override: str = None,  # type: ignore
         vol_ratio_threshold: float = 1.5,
     ):
         """
         Analyze a single stock. Fetches history, tech indicators, news,
         capital flow, financials, then calls AI with strategy-specific context injected.
-        
+
         Args:
             row: Dict of stock data for a single candidate.
             dp: DataProcessor instance.
@@ -487,18 +503,28 @@ class AIStrategyMixin:
             }
 
             # 2b. Technical Structure (MA alignment + volume trend from history_df)
-            tech_structure = self._compute_technical_structure(history_df, vol_ratio_threshold=vol_ratio_threshold)
+            tech_structure = self._compute_technical_structure(
+                history_df, vol_ratio_threshold=vol_ratio_threshold
+            )
             tech_context.update(tech_structure)
 
             # 2c. RSI Oversold Features (for oversold strategy enhancement)
-            if history_df is not None and not history_df.empty and len(history_df) >= 30:
+            if (
+                history_df is not None
+                and not history_df.empty
+                and len(history_df) >= 30
+            ):
                 df_sorted = history_df.sort_values("trade_date", ascending=True)
                 rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(
                     df_sorted["close"], period=14
                 )
                 row["_rsi_feature_text"] = rsi_features.get("feature_text", "")
-                row["_rsi_consecutive_days"] = rsi_features.get("consecutive_oversold_days", 0)
-                row["_rsi_days_since_healthy"] = rsi_features.get("days_since_healthy", 99)
+                row["_rsi_consecutive_days"] = rsi_features.get(
+                    "consecutive_oversold_days", 0
+                )
+                row["_rsi_days_since_healthy"] = rsi_features.get(
+                    "days_since_healthy", 99
+                )
                 row["_rsi_stagnation"] = rsi_features.get("stagnation_detected", False)
             else:
                 row["_rsi_feature_text"] = ""
@@ -517,7 +543,7 @@ class AIStrategyMixin:
 
             # 5. Strategy-specific context (The Hook!)
             strategy_ctx = self.get_ai_context(row)
-            
+
             # 5b. Registered context builders
             custom_context_blocks = []
             for name, builder in self._context_builders.items():
@@ -526,14 +552,19 @@ class AIStrategyMixin:
                     if block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
                 except Exception as e:
-                    logger.warning(f"[AIStrategyMixin] Context builder '{name}' failed: {e}")
-            
+                    logger.warning(
+                        f"[AIStrategyMixin] Context builder '{name}' failed: {e}"
+                    )
+
             if custom_context_blocks:
-                strategy_ctx = strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
+                strategy_ctx = (
+                    strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
+                )
 
             # 6. Capital Flow (filter pre-fetched batch data by ts_code)
             capital_flow_text = self._build_capital_flow_text(
-                ts_code, prefetched.capital or {},
+                ts_code,
+                prefetched.capital or {},
             )
 
             # 7. Financials (extract from stock_info which already has screening data)
@@ -541,7 +572,10 @@ class AIStrategyMixin:
 
             # 7b. History Feature Summary (Level-3: Factor Extraction + Summarization)
             history_text = self._build_history_text(
-                history_df, ts_code=ts_code, stock_name=row.get("name", ""), vol_ratio_threshold=vol_ratio_threshold
+                history_df,
+                ts_code=ts_code,
+                stock_name=row.get("name", ""),
+                vol_ratio_threshold=vol_ratio_threshold,
             )
 
             # 8. Build stock_info and call AI
@@ -575,7 +609,9 @@ class AIStrategyMixin:
     # ============================================================
 
     @staticmethod
-    def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.5) -> dict:
+    def _compute_technical_structure(
+        history_df, vol_ratio_threshold: float = 1.5
+    ) -> dict:
         """
         Compute MA alignment and volume trend from history DataFrame.
         Returns a dict of human-readable technical structure signals.
@@ -628,17 +664,11 @@ class AIStrategyMixin:
                 if vol_10d > 0:
                     vol_ratio = vol_5d / vol_10d
                     if vol_ratio < 0.7:
-                        result["volume_trend"] = (
-                            f"缩量 (5日/10日比值: {vol_ratio:.2f})"
-                        )
+                        result["volume_trend"] = f"缩量 (5日/10日比值: {vol_ratio:.2f})"
                     elif vol_ratio > vol_ratio_threshold:
-                        result["volume_trend"] = (
-                            f"放量 (5日/10日比值: {vol_ratio:.2f})"
-                        )
+                        result["volume_trend"] = f"放量 (5日/10日比值: {vol_ratio:.2f})"
                     else:
-                        result["volume_trend"] = (
-                            f"平稳 (5日/10日比值: {vol_ratio:.2f})"
-                        )
+                        result["volume_trend"] = f"平稳 (5日/10日比值: {vol_ratio:.2f})"
                 else:
                     result["volume_trend"] = "无成交量数据"
             else:
@@ -672,7 +702,7 @@ class AIStrategyMixin:
     def _get_limit_pct(ts_code: str, name: str = "") -> float:
         """
         根据股票代码和名称判断涨跌停幅度。
-        
+
         规则：
         - ST/*ST 股：±5%
         - 北交所 (8开头)：±30%
@@ -688,7 +718,12 @@ class AIStrategyMixin:
         return 10.0
 
     @staticmethod
-    def _build_history_text(history_df: pd.DataFrame, ts_code: str = "", stock_name: str = "", vol_ratio_threshold: float = 1.5) -> str:
+    def _build_history_text(
+        history_df: pd.DataFrame,
+        ts_code: str = "",
+        stock_name: str = "",
+        vol_ratio_threshold: float = 1.5,
+    ) -> str:
         """
         Build a semantic summary of recent price action using quantitative factor extraction.
         This provides the LLM with "vision" into the actual OHLCV structure.
@@ -818,6 +853,7 @@ class AIStrategyMixin:
             ]
 
             import datetime
+
             for _, r in df.tail(3).iterrows():
                 td = r.get("trade_date")
                 if isinstance(td, (datetime.date, datetime.datetime)):
@@ -829,14 +865,14 @@ class AIStrategyMixin:
                 p = f"{p_val:+.2f}%" if not pd.isna(p_val) else "N/A"
                 v_val = r.get("vol", 0)
                 v = f"{v_val:.0f}" if (has_vol and not pd.isna(v_val)) else "N/A"
-                
+
                 limit_tag = ""
                 if not pd.isna(p_val):
                     if p_val >= limit_pct - 0.5:
                         limit_tag = " 🔴涨停"
                     elif p_val <= -(limit_pct - 0.5):
                         limit_tag = " 🟢跌停"
-                
+
                 lines.append(f"{d} | {c} | {p}{limit_tag} | {v}")
 
             return "\n".join(lines)
@@ -930,7 +966,7 @@ class AIStrategyMixin:
 
         def fmt(val, suffix="", fmt_spec=".2f"):
             """Format a value using _safe_float for NaN safety, returning 'N/A' for missing."""
-            f = sf(val, default=None)
+            f = sf(val, default=None)  # type: ignore
             if f is None:
                 return "N/A"
             return f"{f:{fmt_spec}}{suffix}"
@@ -943,7 +979,7 @@ class AIStrategyMixin:
         parts.append(f"营收同比增长: {fmt(row.get('or_yoy'), '%')}")
         parts.append(f"净利润同比增长: {fmt(row.get('netprofit_yoy'), '%')}")
 
-        tmv = sf(row.get("total_mv"), default=None)
+        tmv = sf(row.get("total_mv"), default=None)  # type: ignore
         parts.append(
             f"总市值: {f'{tmv / 10000:.2f}亿元' if tmv is not None else 'N/A'}",
         )
@@ -951,8 +987,8 @@ class AIStrategyMixin:
         parts.append(f"股息率(TTM): {fmt(row.get('dv_ttm'), '%')}")
 
         # PEG calculation
-        pe_val = sf(row.get("pe_ttm"), default=None)
-        growth_val = sf(row.get("netprofit_yoy"), default=None)
+        pe_val = sf(row.get("pe_ttm"), default=None)  # type: ignore
+        growth_val = sf(row.get("netprofit_yoy"), default=None)  # type: ignore
         if pe_val is not None and growth_val is not None and growth_val > 0:
             peg = pe_val / growth_val
             parts.append(f"PEG: {peg:.2f} (PE/净利润增速)")

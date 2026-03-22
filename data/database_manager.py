@@ -1,4 +1,5 @@
 import logging
+import typing
 
 import pandas as pd
 import sqlalchemy as sa
@@ -58,7 +59,7 @@ class DatabaseManager:
             logger.error(f"Error fetching tables: {e}")
             return []
 
-    def get_table_schema(self, table_name):
+    def get_table_schema(self, table_name: str):
         """
         Get the schema (column names and types) for a specific table.
         Returns:
@@ -77,7 +78,7 @@ class DatabaseManager:
             logger.error(f"Error fetching schema for {table_name}: {e}")
             return []
 
-    def get_table_count(self, table_name, filters=None):
+    def get_table_count(self, table_name: str, filters: dict | None = None):
         """
         Get total row count for a table, optionally with filters.
 
@@ -102,14 +103,16 @@ class DatabaseManager:
             logger.error(f"Error counting rows for {table_name}: {e}")
             return 0
 
-    def _validate_table_name(self, table_name):
+    def _validate_table_name(self, table_name: str):
         """Ensure table name is valid and exists to prevent injection."""
         allowed_tables = self.get_all_tables()
         if table_name not in allowed_tables:
             raise ValueError(f"Invalid table name: {table_name}")
 
     @staticmethod
-    def _apply_filters(stmt, filters, schema_cols=None):
+    def _apply_filters(
+        stmt: typing.Any, filters: dict | None, schema_cols: typing.Any = None
+    ):
         """Apply WHERE filters using SQLAlchemy Core operators (zero f-string).
         schema_cols: optional set of valid column names for whitelist validation."""
         for col_name, op, val in filters:
@@ -131,12 +134,12 @@ class DatabaseManager:
 
     def query_table(
         self,
-        table_name,
-        page=1,
-        page_size=50,
-        filters=None,
-        sort_col=None,
-        sort_asc=True,
+        table_name: str,
+        page: typing.Any = 1,
+        page_size: typing.Any = 50,
+        filters: dict | None = None,
+        sort_col: typing.Any = None,
+        sort_asc: typing.Any = True,
     ):
         """
         Query data from a table with pagination and filtering.
@@ -169,7 +172,8 @@ class DatabaseManager:
             elif table_name == "daily_quotes":
                 # Default sort for common tables
                 stmt = stmt.order_by(
-                    sa.desc(sa.column("trade_date")), sa.asc(sa.column("ts_code")),
+                    sa.desc(sa.column("trade_date")),
+                    sa.asc(sa.column("ts_code")),
                 )
 
             # 3. Apply Pagination
@@ -187,7 +191,7 @@ class DatabaseManager:
             logger.error(f"Error querying table {table_name}: {e}")
             return pd.DataFrame()
 
-    def execute_sql(self, sql_query):
+    def execute_sql(self, sql_query: typing.Any):
         """
         Execute a raw SQL query from the SQL Console.
         Includes safety checks to prevent modification queries and memory exhaustion.

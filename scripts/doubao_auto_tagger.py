@@ -5,7 +5,6 @@ import random
 import re
 import sys
 from collections import defaultdict
-from typing import List, Tuple
 
 from playwright.async_api import Page, async_playwright
 
@@ -59,7 +58,7 @@ class DoubaoTagger:
             await self.cm.init_db()
             self.dao = self.cm.stock_dao
 
-    async def process_batch(self, page: Page, stocks: List[Tuple[str, str]]) -> bool:
+    async def process_batch(self, page: Page, stocks: list[tuple[str, str]]) -> bool:
         """核心交互逻辑：发送数据并等待大模型结果"""
         stock_text = "\n".join([f"{r[0]} ({r[1]})" for r in stocks])
         prompt = PROMPT_TEMPLATE.format(count=len(stocks), stock_list=stock_text)
@@ -108,7 +107,7 @@ class DoubaoTagger:
                 elif bubbles:
                     all_text = await bubbles[-1].text_content()
                     # 用增强正则硬抓数组 [...]，跳过前面可能的胡言乱语
-                    match = re.search(r"\[\s*\{.*?\}\s*\]", all_text, re.DOTALL)
+                    match = re.search(r"\[\s*\{.*?\}\s*\]", all_text, re.DOTALL)  # type: ignore
                     potential_json = match.group(0) if match else ""
 
                 # 清洗不可见字符
@@ -140,7 +139,8 @@ class DoubaoTagger:
             try:
                 data = json.loads(response_text)
                 print(
-                    f"✅ 成功解析 JSON，共提取了 {len(data)} 个股票对象。", flush=True,
+                    f"✅ 成功解析 JSON，共提取了 {len(data)} 个股票对象。",
+                    flush=True,
                 )
 
                 if self.dry_run:
@@ -150,7 +150,7 @@ class DoubaoTagger:
                     )
                     return True
 
-                count = await self.dao.upsert_ai_concepts(data)
+                count = await self.dao.upsert_ai_concepts(data)  # type: ignore
                 print(f"🎉 成果入库完成！写入 {count} 条专属概念。", flush=True)
                 return True
             except json.JSONDecodeError as e:
@@ -220,8 +220,9 @@ class DoubaoTagger:
                 else:
                     batch_limit = random.randint(30, 50)
 
-                stocks = await self.dao.get_stocks_without_ai_concepts(
-                    batch_limit, exclude_codes,
+                stocks = await self.dao.get_stocks_without_ai_concepts(  # type: ignore
+                    batch_limit,
+                    exclude_codes,
                 )
 
                 if not stocks and not exclude_codes:
@@ -241,8 +242,9 @@ class DoubaoTagger:
                     if not exclude_codes:
                         print("🚫 错题本重试全线溃败或已清空，彻底结束。", flush=True)
                         break
-                    stocks = await self.dao.get_stocks_without_ai_concepts(
-                        20, [],
+                    stocks = await self.dao.get_stocks_without_ai_concepts(  # type: ignore
+                        20,
+                        [],
                     )  # 降低批次大小攻坚
                     # 过滤只查错题本中的股票
                     stocks = [s for s in stocks if s[0] in exclude_codes]
@@ -292,7 +294,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0, help="Max stocks to process")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Do not save to databases",
+        "--dry-run",
+        action="store_true",
+        help="Do not save to databases",
     )
     args = parser.parse_args()
 

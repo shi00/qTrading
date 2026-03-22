@@ -6,7 +6,6 @@ Coverage Goal: >90%
 
 import os
 import sys
-from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -102,7 +101,10 @@ class TestAISelectionStrategy:
     @pytest.mark.asyncio
     @patch("strategies.ai_strategy.AIService")
     async def test_filter_returns_empty_when_no_api_key(
-        self, mock_ai_service_cls, sample_screening_df, mock_data_processor,
+        self,
+        mock_ai_service_cls,
+        sample_screening_df,
+        mock_data_processor,
     ):
         """Test: Strategy raises error when API key is missing"""
         mock_ai_service = MagicMock()
@@ -124,7 +126,9 @@ class TestAISelectionStrategy:
     @pytest.mark.asyncio
     @patch("strategies.ai_strategy.AIService")
     async def test_filter_returns_empty_when_no_data(
-        self, mock_ai_service_cls, mock_data_processor,
+        self,
+        mock_ai_service_cls,
+        mock_data_processor,
     ):
         """Test: Strategy returns empty DataFrame when input is empty"""
         mock_ai_service = MagicMock()
@@ -144,7 +148,9 @@ class TestAISelectionStrategy:
     @pytest.mark.asyncio
     @patch("strategies.ai_strategy.AIService")
     async def test_filter_returns_empty_when_no_dp(
-        self, mock_ai_service_cls, sample_screening_df,
+        self,
+        mock_ai_service_cls,
+        sample_screening_df,
     ):
         """Test: Strategy handles missing DataProcessor gracefully.
 
@@ -166,7 +172,10 @@ class TestAISelectionStrategy:
     @pytest.mark.asyncio
     @patch("strategies.ai_strategy.AIService")
     async def test_pre_filter_removes_negative_pe(
-        self, mock_ai_service_cls, sample_screening_df, mock_data_processor,
+        self,
+        mock_ai_service_cls,
+        sample_screening_df,
+        mock_data_processor,
     ):
         """Test: Pre-filter correctly removes stocks with negative PE"""
         mock_ai_service = MagicMock()

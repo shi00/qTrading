@@ -147,7 +147,10 @@ class StockDao(BaseDao):
         cols = ["ts_code", "concept_name", "concept_id"]
 
         return await self._save_upsert(
-            df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"],
+            df,
+            "stock_concepts",
+            cols,
+            pk_columns=["ts_code", "concept_id"],
         )
 
     async def overwrite_concepts(self, df):
@@ -180,7 +183,7 @@ class StockDao(BaseDao):
                 if params:
                     await conn.exec_driver_sql(sql_insert, params)
 
-            return len(params)
+            return len(params)  # type: ignore
         except Exception as e:
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
             raise e
@@ -191,7 +194,9 @@ class StockDao(BaseDao):
         )
 
     async def get_stocks_without_ai_concepts(
-        self, batch_size: int, exclude_codes: list = None,
+        self,
+        batch_size: int,
+        exclude_codes: list = None,  # type: ignore
     ) -> list:
         sql = """
             SELECT ts_code, name FROM stock_basic
@@ -206,11 +211,13 @@ class StockDao(BaseDao):
             return []
         if exclude_codes:
             df = df[~df["ts_code"].isin(exclude_codes)]
-        return list(df[["ts_code", "name"]].itertuples(index=False, name=None))[
+        return list(
+            df[["ts_code", "name"]].itertuples(index=False, name=None)
+        )[  # type: ignore
             :batch_size
         ]
 
-    async def get_concepts(self, ts_codes: list = None):
+    async def get_concepts(self, ts_codes: list = None):  # type: ignore
         """
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]
@@ -307,5 +314,8 @@ class StockDao(BaseDao):
         cols = ["ts_code", "concept_name", "concept_id"]
 
         return await self._save_upsert(
-            df, "stock_concepts", cols, pk_columns=["ts_code", "concept_id"],
+            df,
+            "stock_concepts",
+            cols,
+            pk_columns=["ts_code", "concept_id"],
         )

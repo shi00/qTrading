@@ -1,6 +1,6 @@
+import datetime
 import logging
 import time
-import datetime
 
 import flet as ft
 import pandas as pd
@@ -67,7 +67,10 @@ class ScreenerView(ft.Container):
         )
         self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)
         self.progress_ring = ft.ProgressRing(
-            visible=False, width=20, height=20, color=AppColors.ACCENT,
+            visible=False,
+            width=20,
+            height=20,
+            color=AppColors.ACCENT,
         )
 
         self.result_table = VirtualTable(on_sort=self._on_virtual_sort)
@@ -77,7 +80,10 @@ class ScreenerView(ft.Container):
 
         # 4. Logs (Virtualized via Column for auto-scrolling)
         self.log_view = ft.Column(
-            expand=True, spacing=4, scroll=ft.ScrollMode.ALWAYS, auto_scroll=True,
+            expand=True,
+            spacing=4,
+            scroll=ft.ScrollMode.ALWAYS,
+            auto_scroll=True,
         )
 
         # 5. Pagination
@@ -100,16 +106,20 @@ class ScreenerView(ft.Container):
         self.page_size_dropdown = ft.Dropdown(
             options=[
                 ft.dropdown.Option(
-                    "10", text=f"10 {I18n.get('screener_per_page', '条/页')}",
+                    "10",
+                    text=f"10 {I18n.get('screener_per_page', '条/页')}",
                 ),
                 ft.dropdown.Option(
-                    "20", text=f"20 {I18n.get('screener_per_page', '条/页')}",
+                    "20",
+                    text=f"20 {I18n.get('screener_per_page', '条/页')}",
                 ),
                 ft.dropdown.Option(
-                    "50", text=f"50 {I18n.get('screener_per_page', '条/页')}",
+                    "50",
+                    text=f"50 {I18n.get('screener_per_page', '条/页')}",
                 ),
                 ft.dropdown.Option(
-                    "100", text=f"100 {I18n.get('screener_per_page', '条/页')}",
+                    "100",
+                    text=f"100 {I18n.get('screener_per_page', '条/页')}",
                 ),
             ],
             value="50",
@@ -194,7 +204,7 @@ class ScreenerView(ft.Container):
         TaskManager().subscribe(self._on_tasks_updated)
 
         # Load Strategies Async
-        self.page.run_task(self._load_strategies)
+        self.page.run_task(self._load_strategies)  # type: ignore
 
     def will_unmount(self):
         TaskManager().unsubscribe(self._on_tasks_updated)
@@ -415,12 +425,16 @@ class ScreenerView(ft.Container):
 
         # AI Stream Container Styling
         self.log_view_container = ft.Container(
-            content=self.log_view, border_radius=8, padding=5, expand=True,
+            content=self.log_view,
+            border_radius=8,
+            padding=5,
+            expand=True,
         )
 
         self.log_card = ft.Container(
             content=ft.Column(
-                [self.log_title_text, self.log_view_container], spacing=5,
+                [self.log_title_text, self.log_view_container],
+                spacing=5,
             ),
             expand=True,
             padding=ft.padding.only(top=10),
@@ -475,9 +489,9 @@ class ScreenerView(ft.Container):
             return
         mode = list(selected)[0]
         if mode == "HISTORY":
-            self.page.run_task(self._switch_to_history_mode)
+            self.page.run_task(self._switch_to_history_mode)  # type: ignore
         else:
-            self.page.run_task(self._switch_to_realtime_mode)
+            self.page.run_task(self._switch_to_realtime_mode)  # type: ignore
 
     async def _switch_to_history_mode(self):
         """Activate history viewing mode."""
@@ -541,7 +555,9 @@ class ScreenerView(ft.Container):
                     # Format date for display
                     if isinstance(date_str, (datetime.date, datetime.datetime)):
                         display_date = date_str.strftime("%Y-%m-%d")
-                        d_key = date_str.strftime("%Y-%m-%d") # Use ISO format for internal key tracking
+                        d_key = date_str.strftime(
+                            "%Y-%m-%d"
+                        )  # Use ISO format for internal key tracking
                     else:
                         date_str_s = str(date_str)
                         display_date = (
@@ -557,14 +573,17 @@ class ScreenerView(ft.Container):
                     subtiles.append(
                         ft.ListTile(
                             leading=ft.Icon(
-                                ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT,
+                                ft.Icons.SELECT_ALL,
+                                size=18,
+                                color=AppColors.ACCENT,
                             ),
                             title=ft.Text(
                                 f"{I18n.get('screener_all_strategies', '全部策略')} ({total_cnt})",
                                 size=13,
                             ),
                             on_click=lambda e, d=d_key: self._on_tree_item_click(
-                                d, None,
+                                d,
+                                None,
                             ),
                             dense=True,
                         ),
@@ -578,7 +597,8 @@ class ScreenerView(ft.Container):
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
                                 title=ft.Text(
-                                    f"{s['strategy_name']} ({s['cnt']})", size=13,
+                                    f"{s['strategy_name']} ({s['cnt']})",
+                                    size=13,
                                 ),
                                 on_click=lambda e, d=d_key, sn=s["strategy_name"]: (
                                     self._on_tree_item_click(d, sn)
@@ -589,7 +609,9 @@ class ScreenerView(ft.Container):
 
                     tile = ft.ExpansionTile(
                         title=ft.Text(
-                            f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500,
+                            f"📅 {display_date}",
+                            size=14,
+                            weight=ft.FontWeight.W_500,
                         ),
                         subtitle=ft.Text(
                             I18n.get("history_total", "共 {count} 条").format(
@@ -637,9 +659,7 @@ class ScreenerView(ft.Container):
         else:
             ts = str(trade_date)
             display = (
-                f"{ts[:4]}-{ts[4:6]}-{ts[6:]}"
-                if len(ts) == 8 and ts.isdigit()
-                else ts
+                f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
             )
         label = strategy_name or I18n.get("screener_all_strategies", "全部策略")
         self._update_status(f"{display} / {label}", "blue")
@@ -655,7 +675,9 @@ class ScreenerView(ft.Container):
 
     def _on_strategy_change(self, e):
         UILogger.log_action(
-            "ScreenerView", "Select", f"strategy={self.strategy_dropdown.value}",
+            "ScreenerView",
+            "Select",
+            f"strategy={self.strategy_dropdown.value}",
         )
         self.selected_strategy = self.strategy_dropdown.value
         self.run_btn.disabled = not self.selected_strategy
@@ -683,7 +705,9 @@ class ScreenerView(ft.Container):
 
     async def _on_run_click(self, e):
         UILogger.log_action(
-            "ScreenerView", "Click", f"btn_run | strategy={self.selected_strategy}",
+            "ScreenerView",
+            "Click",
+            f"btn_run | strategy={self.selected_strategy}",
         )
         if not self.selected_strategy:
             return
@@ -693,11 +717,11 @@ class ScreenerView(ft.Container):
         self.log_view.update()  # Refresh immediately to clear stale cards
         # Collect dynamic params from UI controls
         params = self._collect_params()
-        self.page.run_task(self.vm.run_strategy, self.selected_strategy, params=params)
+        self.page.run_task(self.vm.run_strategy, self.selected_strategy, params=params)  # type: ignore
 
     def _render_strategy_params(self):
         """Dynamically render UI controls based on the selected strategy's parameter definitions."""
-        from ui.theme import PARAM_GROUP_ORDER, DEFAULT_GROUP_LABELS
+        from ui.theme import PARAM_GROUP_ORDER
 
         self.params_container.controls.clear()
 
@@ -731,20 +755,28 @@ class ScreenerView(ft.Container):
             if groups[group_name]:
                 group_controls = self._build_param_controls(groups[group_name])
                 if group_controls:
-                    title = self._resolve_group_title(group_name, group_labels.get(group_name))
+                    title = self._resolve_group_title(
+                        group_name,
+                        group_labels.get(group_name),  # type: ignore
+                    )
                     rendered_groups.append((group_name, title, group_controls))
 
         if groups["default"]:
             default_controls = self._build_param_controls(groups["default"])
             if default_controls:
-                title = self._resolve_group_title("default", group_labels.get("default"))
+                title = self._resolve_group_title(
+                    "default",
+                    group_labels.get("default"),  # type: ignore
+                )
                 rendered_groups.append(("default", title, default_controls))
 
         for group_name in custom_groups:
             if groups[group_name]:
                 group_controls = self._build_param_controls(groups[group_name])
                 if group_controls:
-                    title = self._resolve_group_title(group_name, custom_groups[group_name])
+                    title = self._resolve_group_title(
+                        group_name, custom_groups[group_name]
+                    )
                     rendered_groups.append((group_name, title, group_controls))
 
         for group_name, title, controls in rendered_groups:
@@ -753,7 +785,12 @@ class ScreenerView(ft.Container):
             group_card = ft.Container(
                 content=ft.Column(
                     [
-                        ft.Text(title, size=13, weight=ft.FontWeight.W_500, color=AppColors.TEXT_PRIMARY),
+                        ft.Text(
+                            title,
+                            size=13,
+                            weight=ft.FontWeight.W_500,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
                         ft.Divider(height=1, color=AppColors.DIVIDER),
                         ft.Column(controls, spacing=8),
                     ],
@@ -792,7 +829,7 @@ class ScreenerView(ft.Container):
 
         self.params_container.update()
 
-    def _resolve_group_title(self, group_name: str, label_key: str = None) -> str:
+    def _resolve_group_title(self, group_name: str, label_key: str = None) -> str:  # type: ignore
         """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
         from ui.theme import DEFAULT_GROUP_LABELS
 
@@ -821,7 +858,9 @@ class ScreenerView(ft.Container):
                     int(default) if default == int(default) else round(default, 1)
                 )
                 value_text = ft.Text(
-                    f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY,
+                    f"{label}: {init_display}",
+                    size=12,
+                    color=AppColors.TEXT_SECONDARY,
                 )
 
                 def make_on_change(vt, lbl):
@@ -836,7 +875,8 @@ class ScreenerView(ft.Container):
                                 self.selected_strategy,
                             )
                             if strategy_obj and hasattr(
-                                strategy_obj, "get_dynamic_description",
+                                strategy_obj,
+                                "get_dynamic_description",
                             ):
                                 params = self._collect_params()
                                 self.strategy_desc_text.value = (
@@ -893,7 +933,8 @@ class ScreenerView(ft.Container):
                     from strategies.strategy_prompts import get_base_prompt
 
                     current_val = get_base_prompt(self.selected_strategy) or p.get(
-                        "default", "",
+                        "default",
+                        "",
                     )
                 else:
                     current_val = p.get("default", "")
@@ -923,9 +964,10 @@ class ScreenerView(ft.Container):
                             ctrl.value = str(get_base_prompt(strat))
                             ctrl.update()
                             if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(
+                                self.page.show_toast(  # type: ignore
                                     I18n.get(
-                                        "ai_settings_restored", "系统提示词已恢复默认",
+                                        "ai_settings_restored",
+                                        "系统提示词已恢复默认",
                                     ),
                                     "info",
                                 )
@@ -938,10 +980,12 @@ class ScreenerView(ft.Container):
 
                             ConfigHandler.set_strategy_prompt(strat, ctrl.value)
                             UILogger.log_action(
-                                "ScreenerView", "SavePrompt", f"strategy={strat}",
+                                "ScreenerView",
+                                "SavePrompt",
+                                f"strategy={strat}",
                             )
                             if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(
+                                self.page.show_toast(  # type: ignore
                                     I18n.get("ai_settings_saved", "系统提示词已保存"),
                                     "success",
                                 )
@@ -990,7 +1034,8 @@ class ScreenerView(ft.Container):
                     controls.append(wrapper)
                 else:
                     wrapper = ft.Container(
-                        content=ctrl, margin=ft.margin.only(top=10, bottom=5),
+                        content=ctrl,
+                        margin=ft.margin.only(top=10, bottom=5),
                     )
                     controls.append(wrapper)
 
@@ -1027,7 +1072,7 @@ class ScreenerView(ft.Container):
                         params[name] = ctrl.value
                     else:
                         try:
-                            params[name] = float(ctrl.value)
+                            params[name] = float(ctrl.value)  # type: ignore
                         except (ValueError, TypeError):
                             params[name] = ctrl.value
                 elif isinstance(ctrl, ft.Dropdown):
@@ -1052,7 +1097,7 @@ class ScreenerView(ft.Container):
 
     def _on_virtual_sort(self, col_id, ascending):
         # Trigger sorting via ViewModel
-        self.page.run_task(self.vm.sort_data, col_id)
+        self.page.run_task(self.vm.sort_data, col_id)  # type: ignore
 
     async def _on_export_click(self, e):
         """Export current results"""
@@ -1065,12 +1110,14 @@ class ScreenerView(ft.Container):
             if path:
                 # Show toast info
                 if hasattr(self.page, "show_toast"):
-                    self.page.show_toast(
-                        I18n.get("data_export_success").format(file=path), "success",
+                    self.page.show_toast(  # type: ignore
+                        I18n.get("data_export_success").format(file=path),
+                        "success",
                     )
             elif hasattr(self.page, "show_toast"):
-                self.page.show_toast(
-                    I18n.get("data_export_fail").format(error=error), "error",
+                self.page.show_toast(  # type: ignore
+                    I18n.get("data_export_fail").format(error=error),
+                    "error",
                 )
         except Exception as ex:
             logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
@@ -1080,7 +1127,7 @@ class ScreenerView(ft.Container):
 
     def _on_page_size_change(self, e):
         try:
-            new_size = int(self.page_size_dropdown.value)
+            new_size = int(self.page_size_dropdown.value)  # type: ignore
             self.vm.change_page_size(new_size)
         except ValueError:
             pass
@@ -1099,7 +1146,8 @@ class ScreenerView(ft.Container):
         # Instantiate or update dialog
         if not self.detail_dialog:
             self.detail_dialog = StockDetailDialog(
-                stock_data=raw_data, data_processor=self.vm.data_processor,
+                stock_data=raw_data,
+                data_processor=self.vm.data_processor,
             )
             self.page.overlay.append(self.detail_dialog)
         else:
@@ -1124,17 +1172,20 @@ class ScreenerView(ft.Container):
 
             # 2. Update Pagination
             self.page_info_text.value = I18n.get("screener_page_info").format(
-                current=self.vm.page_no, total=getattr(self.vm, "total_pages", 0),
+                current=self.vm.page_no,
+                total=getattr(self.vm, "total_pages", 0),
             )
             self.prev_btn.disabled = self.vm.page_no <= 1
             self.next_btn.disabled = self.vm.page_no >= getattr(
-                self.vm, "total_pages", 0,
+                self.vm,
+                "total_pages",
+                0,
             )
 
             # 3. Enable Export if data exists
             self.export_btn.disabled = getattr(self.vm, "total_items", 0) == 0
 
-            self.page.update()
+            self.page.update()  # type: ignore
 
         self.page.run_task(_do_update)
 
@@ -1146,7 +1197,9 @@ class ScreenerView(ft.Container):
             # Clear table explicitly to remove old results
             self.result_table.set_columns([])
             self.result_table.set_rows(
-                [], sort_col=self.vm.sort_column, sort_asc=self.vm.sort_ascending,
+                [],
+                sort_col=self.vm.sort_column,
+                sort_asc=self.vm.sort_ascending,
             )
             self._raw_row_lookup = {}  # Clear lookup
             return
@@ -1222,7 +1275,7 @@ class ScreenerView(ft.Container):
 
             vt_columns.append({"id": col, "label": label, "width": width})
 
-        self.result_table.on_row_click = self._on_row_click
+        self.result_table.on_row_click = self._on_row_click  # type: ignore
         self.result_table.set_columns(vt_columns)
 
         def _format_cell_value(col, val):
@@ -1233,6 +1286,7 @@ class ScreenerView(ft.Container):
             # Format Dates safely
             if col in ["list_date", "trade_date"]:
                 import datetime
+
                 if isinstance(val, (datetime.date, datetime.datetime)):
                     return val.strftime("%Y-%m-%d")
                 val_str = str(val).split(".")[0]
@@ -1310,14 +1364,14 @@ class ScreenerView(ft.Container):
             "",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-            code_theme="atom-one-dark",
+            code_theme="atom-one-dark",  # type: ignore
         )
 
         content_md = ft.Markdown(
             "",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-            code_theme="atom-one-dark",
+            code_theme="atom-one-dark",  # type: ignore
         )
 
         reasoning_tile = ft.ExpansionTile(
@@ -1345,7 +1399,8 @@ class ScreenerView(ft.Container):
                 ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
                 reasoning_tile,
                 ft.Container(
-                    content=content_md, padding=ft.padding.only(left=5, right=5),
+                    content=content_md,
+                    padding=ft.padding.only(left=5, right=5),
                 ),
             ],
             spacing=10,
@@ -1466,7 +1521,8 @@ class ScreenerView(ft.Container):
                 self._render_table()
             except Exception as e:
                 logger.error(
-                    f"[ScreenerView] Theme | ❌ Re-render failed: {e}", exc_info=True,
+                    f"[ScreenerView] Theme | ❌ Re-render failed: {e}",
+                    exc_info=True,
                 )
 
             self.page.update()

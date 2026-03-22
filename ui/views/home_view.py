@@ -39,13 +39,17 @@ class HomeView(ft.Container):
 
         # --- Initialize Components ---
         self.header_title = ft.Text(
-            I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD,
+            I18n.get("home_title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
         )
         self.header = self._build_header()
         self.dashboard = MarketDashboard()
         self.news_feed = NewsFeed(on_load_more_click=self._on_load_more_click)
         self.news_header = ft.Text(
-            I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD,
+            I18n.get("home_live_news"),
+            size=20,
+            weight=ft.FontWeight.BOLD,
         )
 
         # Assemble Layout
@@ -109,7 +113,7 @@ class HomeView(ft.Container):
         # Fix P1-9: Unsubscribe PubSub to prevent ghost event handling
         if self.page and self._pubsub_subscribed:
             try:
-                self.page.pubsub.unsubscribe(self._on_broadcast_message)
+                self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore
             except Exception:
                 pass
             self._pubsub_subscribed = False
@@ -150,7 +154,7 @@ class HomeView(ft.Container):
             # Only update UI if mounted
             if self.page and self._is_mounted:
                 self.dashboard.update_data({})
-                self.news_feed.set_news(None, False)
+                self.news_feed.set_news(None, False)  # type: ignore
                 self.update()
 
     def _refresh_clicked(self, e):
@@ -258,6 +262,6 @@ class HomeView(ft.Container):
     async def _refresh_news_data(self, _data=None):
         try:
             news_data, has_more = await self.vm.refresh_news()
-            self.news_feed.set_news(news_data, has_more)
+            self.news_feed.set_news(news_data, has_more)  # type: ignore
         except Exception as e:
             logger.error(f"[HomeView] News | ❌ Load failed: {e}", exc_info=True)

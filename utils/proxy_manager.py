@@ -45,7 +45,9 @@ class ProxyManager:
 
         # Safety Filter: Ensure all items are strings
         target_domains = list(
-            set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]),
+            set(
+                [d.strip() for d in target_domains if isinstance(d, str) and d.strip()]
+            ),
         )
 
         if not target_domains:

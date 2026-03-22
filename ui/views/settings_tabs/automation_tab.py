@@ -37,7 +37,8 @@ class AutomationTab(ft.Container):
         auto_update_time = ConfigHandler.get_auto_update_time()
 
         self.schedule_enabled = ft.Switch(
-            value=auto_update_enabled, on_change=self.on_schedule_toggle,
+            value=auto_update_enabled,
+            on_change=self.on_schedule_toggle,
         )
         self.schedule_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
@@ -58,7 +59,8 @@ class AutomationTab(ft.Container):
         doubao_time = ConfigHandler.get_doubao_schedule_time()
 
         self.doubao_enabled = ft.Switch(
-            value=doubao_enabled, on_change=self.on_doubao_toggle,
+            value=doubao_enabled,
+            on_change=self.on_doubao_toggle,
         )
         self.doubao_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
@@ -253,7 +255,8 @@ class AutomationTab(ft.Container):
             )
 
             self.doubao_enabled.label = I18n.get(
-                "settings_doubao_update", "自动重建AI概念",
+                "settings_doubao_update",
+                "自动重建AI概念",
             )
             self.doubao_time.label = I18n.get("settings_update_time")
             self.doubao_time.options = self._build_time_options()
@@ -328,7 +331,7 @@ class AutomationTab(ft.Container):
 
     def on_doubao_time_change(self, e):
         selected_time = self.doubao_time.value
-        ConfigHandler.set_doubao_schedule_time(selected_time)
+        ConfigHandler.set_doubao_schedule_time(selected_time)  # type: ignore
         self.update()
         if self.show_snack:
             self.show_snack(
@@ -492,7 +495,7 @@ class NotificationsTab(ft.Container):
     def on_interval_change(self, e):
         """处理拉取间隔变更"""
         try:
-            val = int(self.news_interval.value)
+            val = int(self.news_interval.value)  # type: ignore
             ConfigHandler.save_config({"news_poll_interval": val})
             if self.show_snack:
                 self.show_snack(

@@ -77,7 +77,8 @@ class OnboardingWizard(ft.Container):
             options=[
                 ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
                 ft.dropdown.Option(
-                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)",
+                    "deepseek-reasoner",
+                    "DeepSeek-R1 (deepseek-reasoner)",
                 ),
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
@@ -109,7 +110,9 @@ class OnboardingWizard(ft.Container):
             bgcolor=AppColors.BORDER,
         )
         self.sync_status = ft.Text(
-            I18n.get("wizard_status_ready"), size=12, color=AppColors.TEXT_SECONDARY,
+            I18n.get("wizard_status_ready"),
+            size=12,
+            color=AppColors.TEXT_SECONDARY,
         )
 
         # Step 4: Schedule options
@@ -331,7 +334,9 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=10),
                 ft.ExpansionTile(
                     title=ft.Text(
-                        I18n.get("wizard_ai_advanced"), size=14, color=AppColors.PRIMARY,
+                        I18n.get("wizard_ai_advanced"),
+                        size=14,
+                        color=AppColors.PRIMARY,
                     ),
                     subtitle=ft.Text(
                         I18n.get("wizard_ai_advanced_subtitle"),
@@ -403,7 +408,8 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step3_desc").format(
-                        years=years, hours=int(years * 1.5),
+                        years=years,
+                        hours=int(years * 1.5),
                     ),
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
@@ -451,7 +457,9 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=30),
                 ft.Row([self.schedule_enabled], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Text(
-                    I18n.get("wizard_schedule_note"), size=12, color=AppColors.TEXT_HINT,
+                    I18n.get("wizard_schedule_note"),
+                    size=12,
+                    color=AppColors.TEXT_HINT,
                 ),
                 ft.Container(height=30),
                 ft.Row(
@@ -509,7 +517,7 @@ class OnboardingWizard(ft.Container):
         """Verify token and proceed to next step"""
         from ui.theme import AppColors
 
-        token = self.token_input.value.strip()
+        token = self.token_input.value.strip()  # type: ignore
         if not token:
             self.token_status.value = I18n.get("wizard_err_token_empty")
             self.token_status.color = AppColors.ERROR
@@ -590,7 +598,7 @@ class OnboardingWizard(ft.Container):
                         self.sync_progress.value = ratio
                         self.sync_status.value = f"{msg} ({ratio * 100:.1f}%)"
                         self._safe_update()
-                        _last_update_ts[0] = now
+                        _last_update_ts[0] = now  # type: ignore
 
                 # Ensure DB is initialized before sync
                 # initialize_system handles DB init internally
@@ -666,8 +674,8 @@ class OnboardingWizard(ft.Container):
     async def _verify_ai_config(self, e):
         from ui.theme import AppColors
 
-        api_key = self.ai_api_key_input.value.strip()
-        base_url = self.ai_base_url_input.value.strip()
+        api_key = self.ai_api_key_input.value.strip()  # type: ignore
+        base_url = self.ai_base_url_input.value.strip()  # type: ignore
         model = self.ai_model_dropdown.value
 
         if not api_key:
@@ -687,7 +695,7 @@ class OnboardingWizard(ft.Container):
         try:
             from services.ai_service import AIService
 
-            success = await AIService.test_connection(api_key, base_url, model)
+            success = await AIService.test_connection(api_key, base_url, model)  # type: ignore
 
             if success:
                 self.ai_status.value = I18n.get("wizard_ai_success")
@@ -721,7 +729,7 @@ class OnboardingWizard(ft.Container):
 
         try:
             processor = DataProcessor()
-            self.page.run_task(processor.request_cancel)
+            self.page.run_task(processor.request_cancel)  # type: ignore
             self.sync_status.value = I18n.get("common_cancelling")
             self.sync_status.color = AppColors.ERROR
             self.btn_cancel_sync.disabled = True

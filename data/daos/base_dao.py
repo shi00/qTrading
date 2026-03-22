@@ -1,13 +1,15 @@
 import asyncio
+import datetime
 import logging
 import time
+import typing
 
 import numpy as np
 import pandas as pd
+import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +32,16 @@ class BaseDao:
         if not hasattr(loop, "_basedao_maint_event"):
             evt = asyncio.Event()
             evt.set()
-            loop._basedao_maint_event = evt
-        return loop._basedao_maint_event
+            loop._basedao_maint_event = evt  # type: ignore
+        return loop._basedao_maint_event  # type: ignore
 
-    def __init__(self, engine):
+    def __init__(self, engine: typing.Any):
         self.engine = engine
 
     @staticmethod
-    def _prepare_data_params(df, cols, table_name=None):
+    def _prepare_data_params(
+        df: pd.DataFrame, cols: list, table_name: str | None = None
+    ):
         if df is None or df.empty:
             return None
 
@@ -57,20 +61,24 @@ class BaseDao:
                 if col in df.columns:
                     try:
                         # Attempt to parse strictly with coerce, avoiding setting slice on copy
-                        df[col] = pd.to_datetime(df[col], format='mixed', errors='coerce').dt.date
+                        df[col] = pd.to_datetime(
+                            df[col], format="mixed", errors="coerce"
+                        ).dt.date
                     except Exception:
                         pass
             for col in target_datetime_cols:
                 if col in df.columns:
                     try:
-                        df[col] = pd.to_datetime(df[col], format='mixed', errors='coerce')
+                        df[col] = pd.to_datetime(
+                            df[col], format="mixed", errors="coerce"
+                        )
                     except Exception:
                         pass
 
         df_clean = df[cols]
 
         # Helper to convert numpy types to native Python types for asyncpg
-        def _to_native(val):
+        def _to_native(val: typing.Any):
             if val is None:
                 return None
 
@@ -82,9 +90,9 @@ class BaseDao:
                 # multi-dimensional np arrays or un-hashable types that 'isna' dislikes
                 pass
 
-            if isinstance(val, (np.int64, np.int32, np.int16, np.int8)):
+            if isinstance(val, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore
                 return int(val)
-            if isinstance(val, (np.float64, np.float32)):
+            if isinstance(val, (np.float64, np.float32)):  # type: ignore
                 return float(val)
             if isinstance(val, (np.bool_)):
                 return bool(val)
@@ -97,11 +105,29 @@ class BaseDao:
             for row in df_clean.itertuples(index=False, name=None)
         ]
 
-    async def _write_db(self, sql, params=None, is_many=False, suppress_errors=True):
+    async def _write_db(
+        self,
+        sql: typing.Any,
+        params: typing.Any = None,
+        is_many: typing.Any = False,
+        suppress_errors: bool = True,
+    ):
         """Generic Write using Driver SQL for '?' support"""
-        # For executemany, empty params list means nothing to do
         if is_many and not params:
             return 0
+
+        if params:
+            if is_many:
+                params = [
+                    tuple(self._convert_param_for_asyncpg(p) for p in row)
+                    for row in params
+                ]
+            else:
+                params = (
+                    tuple(self._convert_param_for_asyncpg(p) for p in params)
+                    if not isinstance(params, tuple)
+                    else tuple(self._convert_param_for_asyncpg(p) for p in params)
+                )
 
         await self._get_maintenance_event().wait()
 
@@ -166,12 +192,17 @@ class BaseDao:
             return 0
 
     @staticmethod
-    def _quote_columns(columns):
+    def _quote_columns(columns: typing.Any):
         """Quote column names for safe use in SQL (handles reserved words like 'date', 'on')."""
         return ",".join(['"' + c + '"' for c in columns])
 
     async def _save_upsert(
-        self, df, table_name, columns, pk_columns, suppress_errors=True,
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        columns: typing.Any,
+        pk_columns: typing.Any,
+        suppress_errors: bool = True,
     ):
         """
         Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
@@ -193,46 +224,37 @@ class BaseDao:
             )
             return 0
 
-        # Auto-inject updated_at if the table supports it
-        # ⚠️ WARNING: Do NOT add similar auto-inject logic for `created_at`.
-        # `created_at` relies on DB-level `server_default` and must NEVER
-        # appear in the INSERT/UPDATE column list to preserve first-write semantics.
         has_updated_at = "updated_at" in table.columns.keys()
 
-        # We must avoid modifying the passed 'df' in-place.
-        # Ensure all required columns exist to prevent Pandas KeyError during slicing
         missing_cols = [col for col in columns if col not in df.columns]
         if missing_cols:
             logger.warning(
                 f"[{self.__class__.__name__}] Insert '{table_name}': Missing columns in dataframe, filling with None: {missing_cols}",
             )
-            # Use assign with dict comprehension to add missing columns safely as None
             df = df.assign(**{col: None for col in missing_cols})
 
-        if has_updated_at and "updated_at" not in columns:
-            columns = list(columns) + ["updated_at"]
-
-            now = get_now().replace(tzinfo=None)
-            df_slice = df.assign(updated_at=now)[columns]
-        else:
-            # If the dataframe already has updated_at or the table doesn't need it, just slice
-            df_slice = df[columns]
+        df_slice = df[columns]
 
         from data.models import DATE_COLUMNS, DATETIME_COLUMNS
+
         target_date_cols = DATE_COLUMNS.get(table_name, [])
         target_datetime_cols = DATETIME_COLUMNS.get(table_name, [])
 
         # Extracting out the CPU intensive conversion to allow async offloading
-        def _prepare_records(df_slice):
+        def _prepare_records(df_slice: typing.Any):
             df_clean = df_slice.copy()
-            
+
             # Vectorized conversion to native date/datetime objects before dict generation
             for col in df_clean.columns:
                 if col in target_date_cols:
-                    df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce').dt.date
+                    df_clean[col] = pd.to_datetime(
+                        df_clean[col], format="mixed", errors="coerce"
+                    ).dt.date
                 elif col in target_datetime_cols:
-                    df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce')
-                    
+                    df_clean[col] = pd.to_datetime(
+                        df_clean[col], format="mixed", errors="coerce"
+                    )
+
             records = df_clean.to_dict(orient="records")
 
             # Convert numpy types in dicts to python native types
@@ -247,9 +269,9 @@ class BaseDao:
                         pass
 
                     # 2. Safely cast numerics and booleans
-                    if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
+                    if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore
                         record[k] = int(v)
-                    elif isinstance(v, (np.float64, np.float32)):
+                    elif isinstance(v, (np.float64, np.float32)):  # type: ignore
                         record[k] = float(v)
                     elif isinstance(v, np.bool_):
                         record[k] = bool(v)
@@ -257,17 +279,22 @@ class BaseDao:
                         record[k] = v.to_pydatetime().replace(tzinfo=None)
             return records
 
-        records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
+        records = await ThreadPoolManager().run_async(
+            TaskType.CPU, _prepare_records, df_slice
+        )
 
         stmt = pg_insert(table)
-        update_cols = [c for c in columns if c not in pk_columns]
+        update_cols = [c for c in columns if c not in pk_columns and c != "created_at"]
 
         if not update_cols:
             stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
         else:
             update_dict = {c: getattr(stmt.excluded, c) for c in update_cols}
+            if has_updated_at:
+                update_dict["updated_at"] = sa.func.now()
             stmt = stmt.on_conflict_do_update(
-                index_elements=pk_columns, set_=update_dict,
+                index_elements=pk_columns,
+                set_=update_dict,
             )
 
         start_time = time.perf_counter()
@@ -316,11 +343,40 @@ class BaseDao:
                 raise e
             return 0
 
-    async def _read_db(self, sql, params=None):
+    @staticmethod
+    def _convert_param_for_asyncpg(val: typing.Any):
+        """
+        Convert Python values to types compatible with asyncpg.
+
+        asyncpg requires strict type matching for DATE columns:
+        - Expects datetime.date objects (with .toordinal() method)
+        - String dates like '20260320' will cause DataError
+
+        This method converts:
+        - str dates in 'YYYYMMDD' or 'YYYY-MM-DD' format -> datetime.date
+        - Other types passed through unchanged
+        """
+        if val is None:
+            return None
+
+        if isinstance(val, str):
+            try:
+                if len(val) == 8 and val.isdigit():
+                    return datetime.date(int(val[:4]), int(val[4:6]), int(val[6:8]))
+                elif len(val) == 10 and val[4] == "-" and val[7] == "-":
+                    return datetime.date(int(val[:4]), int(val[5:7]), int(val[8:10]))
+            except (ValueError, TypeError):
+                pass
+
+        return val
+
+    async def _read_db(self, sql: typing.Any, params: typing.Any = None):
         """Generic Read returning DataFrame (Offloaded CSV conversion)"""
-        # Ensure params is a tuple (not list) to avoid being interpreted as executemany
         if params is not None and isinstance(params, list):
             params = tuple(params)
+
+        if params:
+            params = tuple(self._convert_param_for_asyncpg(p) for p in params)
 
         await self._get_maintenance_event().wait()
 
@@ -335,7 +391,10 @@ class BaseDao:
 
                 # Offload DF creation
                 df = await ThreadPoolManager().run_async(
-                    TaskType.CPU, pd.DataFrame, rows, columns=cols,
+                    TaskType.CPU,
+                    pd.DataFrame,
+                    rows,
+                    columns=cols,
                 )
 
                 elapsed = (time.perf_counter() - start_time) * 1000

@@ -4,8 +4,9 @@ import concurrent.futures
 import functools
 import logging
 import threading
+from collections.abc import Callable
 from enum import Enum, auto
-from typing import Callable, Optional, TypeVar
+from typing import Optional, TypeVar
 
 from utils.config_handler import ConfigHandler
 
@@ -36,7 +37,7 @@ class ThreadPoolManager:
     def __new__(cls):
         with cls._lock:
             if cls._instance is None:
-                cls._instance = super(ThreadPoolManager, cls).__new__(cls)
+                cls._instance = super().__new__(cls)
                 cls._instance._initialized = False
             return cls._instance
 
@@ -47,8 +48,8 @@ class ThreadPoolManager:
         if self._initialized:
             return
 
-        self._io_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
-        self._cpu_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self._io_pool: concurrent.futures.ThreadPoolExecutor | None = None
+        self._cpu_pool: concurrent.futures.ThreadPoolExecutor | None = None
 
         self._init_pools()
         atexit.register(self.shutdown)
@@ -81,10 +82,12 @@ class ThreadPoolManager:
         cpu_workers = ConfigHandler.get_max_cpu_workers()
 
         new_io_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=io_workers, thread_name_prefix="IO_Worker",
+            max_workers=io_workers,
+            thread_name_prefix="IO_Worker",
         )
         new_cpu_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=cpu_workers, thread_name_prefix="CPU_Worker",
+            max_workers=cpu_workers,
+            thread_name_prefix="CPU_Worker",
         )
 
         # 2. Swap references (Atomic in Python GIL)
@@ -125,7 +128,8 @@ class ThreadPoolManager:
         return self._cpu_pool
 
     def get_executor(
-        self, task_type: TaskType,
+        self,
+        task_type: TaskType,
     ) -> concurrent.futures.ThreadPoolExecutor:
         if task_type == TaskType.IO:
             return self.io_pool
@@ -135,14 +139,22 @@ class ThreadPoolManager:
         return self.io_pool
 
     def submit(
-        self, task_type: TaskType, func: Callable[..., T], *args, **kwargs,
+        self,
+        task_type: TaskType,
+        func: Callable[..., T],
+        *args,
+        **kwargs,
     ) -> concurrent.futures.Future[T]:
         """Submit a sync task to the specific pool"""
         executor = self.get_executor(task_type)
         return executor.submit(func, *args, **kwargs)
 
     async def run_async(
-        self, task_type: TaskType, func: Callable[..., T], *args, **kwargs,
+        self,
+        task_type: TaskType,
+        func: Callable[..., T],
+        *args,
+        **kwargs,
     ) -> T:
         """
         Run a sync function in the executor and await it (asyncio bridge).
@@ -181,7 +193,7 @@ class ThreadPoolManager:
 
 
 # Global Accessor
-_manager: Optional[ThreadPoolManager] = None
+_manager: ThreadPoolManager | None = None
 _manager_lock = threading.Lock()
 
 

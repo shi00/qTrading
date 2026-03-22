@@ -85,7 +85,8 @@ class AIBrainTab(ft.Container):
             options=[
                 ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
                 ft.dropdown.Option(
-                    "deepseek-reasoner", "DeepSeek-R1 (deepseek-reasoner)",
+                    "deepseek-reasoner",
+                    "DeepSeek-R1 (deepseek-reasoner)",
                 ),
                 ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
                 ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
@@ -173,7 +174,8 @@ class AIBrainTab(ft.Container):
         # Status indicators - Global
         self.ai_status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT)
         self.ai_status_text = ft.Text(
-            I18n.get("ai_status_disconnected"), color=AppColors.TEXT_HINT,
+            I18n.get("ai_status_disconnected"),
+            color=AppColors.TEXT_HINT,
         )
 
         self.btn_test_connection = ft.OutlinedButton(
@@ -285,10 +287,12 @@ class AIBrainTab(ft.Container):
                     ft.ResponsiveRow(
                         [
                             ft.Column(
-                                [self.ai_base_url_input], col={"sm": 12, "md": 6},
+                                [self.ai_base_url_input],
+                                col={"sm": 12, "md": 6},
                             ),
                             ft.Column(
-                                [self.ai_model_dropdown], col={"sm": 12, "md": 6},
+                                [self.ai_model_dropdown],
+                                col={"sm": 12, "md": 6},
                             ),
                             ft.Column([self.ai_api_key_input], col={"sm": 12}),
                         ],
@@ -344,7 +348,8 @@ class AIBrainTab(ft.Container):
                             ),
                             ft.Column([], col={"sm": 0, "md": 1}),  # Spacer
                             ft.Column(
-                                [self.local_timeout_input], col={"sm": 12, "md": 4},
+                                [self.local_timeout_input],
+                                col={"sm": 12, "md": 4},
                             ),
                         ],
                         run_spacing=10,
@@ -388,10 +393,12 @@ class AIBrainTab(ft.Container):
                                         col={"sm": 12, "md": 6},
                                     ),
                                     ft.Column(
-                                        [self.local_batch_input], col={"sm": 6, "md": 3},
+                                        [self.local_batch_input],
+                                        col={"sm": 6, "md": 3},
                                     ),
                                     ft.Column(
-                                        [self.local_ctx_input], col={"sm": 6, "md": 3},
+                                        [self.local_ctx_input],
+                                        col={"sm": 6, "md": 3},
                                     ),
                                     ft.Column(
                                         [self.local_flash_attn_switch],
@@ -549,7 +556,8 @@ class AIBrainTab(ft.Container):
                 self.card_prompt,
                 ft.Container(
                     content=ft.Row(
-                        [self.btn_save_ai], alignment=ft.MainAxisAlignment.END,
+                        [self.btn_save_ai],
+                        alignment=ft.MainAxisAlignment.END,
                     ),
                     padding=ft.padding.only(top=10, bottom=30, right=20),
                 ),
@@ -625,10 +633,10 @@ class AIBrainTab(ft.Container):
         """更新 AI 连接状态指示器"""
         self.ai_status_text.value = I18n.get(status_key)
         self.ai_status_text.color = color
-        self.ai_status_icon.icon = icon
+        self.ai_status_icon.icon = icon  # type: ignore
         self.ai_status_icon.color = color
 
-    def _on_locale_change(self, new_locale: str = None):
+    def _on_locale_change(self, new_locale: str = None):  # type: ignore
         """语言变更回调 - 重建整个 UI"""
         try:
             # 保存当前输入值和连接状态
@@ -652,7 +660,7 @@ class AIBrainTab(ft.Container):
                 "news_prompt": self.ai_news_prompt_input.value,
                 "status_text": self.ai_status_text.value,
                 "status_color": self.ai_status_text.color,
-                "status_icon": self.ai_status_icon.icon,
+                "status_icon": self.ai_status_icon.icon,  # type: ignore
             }
 
             # 重建控件
@@ -698,14 +706,17 @@ class AIBrainTab(ft.Container):
 
             # 恢复连接状态
             self.ai_status_text.value = saved_values.get(
-                "status_text", I18n.get("ai_status_disconnected"),
+                "status_text",
+                I18n.get("ai_status_disconnected"),
             )
             self.ai_status_text.color = saved_values.get(
-                "status_color", AppColors.TEXT_HINT,
+                "status_color",
+                AppColors.TEXT_HINT,
             )
-            self.ai_status_icon.icon = saved_values.get("status_icon", ft.Icons.CIRCLE)
+            self.ai_status_icon.icon = saved_values.get("status_icon", ft.Icons.CIRCLE)  # type: ignore
             self.ai_status_icon.color = saved_values.get(
-                "status_color", AppColors.TEXT_HINT,
+                "status_color",
+                AppColors.TEXT_HINT,
             )
 
             # 重建布局
@@ -721,17 +732,19 @@ class AIBrainTab(ft.Container):
     async def _save_ai_settings(self, e):
         """保存 AI 配置"""
         UILogger.log_action(
-            "AIBrainTab", "Click", f"btn_save_ai | model={self.ai_model_dropdown.value}",
+            "AIBrainTab",
+            "Click",
+            f"btn_save_ai | model={self.ai_model_dropdown.value}",
         )
         try:
             # Cloud AI
-            ai_key = self.ai_api_key_input.value.strip()
-            ai_base = self.ai_base_url_input.value.strip()
+            ai_key = self.ai_api_key_input.value.strip()  # type: ignore
+            ai_base = self.ai_base_url_input.value.strip()  # type: ignore
             ai_model = self.ai_model_dropdown.value
 
             # Local AI
-            local_path = self.local_model_path_input.value.strip()
-            local_timeout_str = self.local_timeout_input.value.strip()
+            local_path = self.local_model_path_input.value.strip()  # type: ignore
+            local_timeout_str = self.local_timeout_input.value.strip()  # type: ignore
 
             try:
                 if not local_timeout_str:
@@ -745,7 +758,9 @@ class AIBrainTab(ft.Container):
             except ValueError:
                 self.show_snack(
                     I18n.get("ai_snack_invalid_range").format(
-                        field=I18n.get("settings_local_ai_timeout"), min=1, max=3600,
+                        field=I18n.get("settings_local_ai_timeout"),
+                        min=1,
+                        max=3600,
                     ),
                     color=AppColors.ERROR,
                 )
@@ -761,12 +776,13 @@ class AIBrainTab(ft.Container):
                 return
 
             # Validate and save numeric parameters
-            max_cand_str = self.ai_max_candidates_input.value.strip()
-            min_turn_str = self.strategy_min_turnover_input.value.strip()
+            max_cand_str = self.ai_max_candidates_input.value.strip()  # type: ignore
+            min_turn_str = self.strategy_min_turnover_input.value.strip()  # type: ignore
 
             if not max_cand_str or not min_turn_str:
                 self.show_snack(
-                    I18n.get("ai_snack_fields_empty"), color=AppColors.ERROR,
+                    I18n.get("ai_snack_fields_empty"),
+                    color=AppColors.ERROR,
                 )
                 return
 
@@ -804,7 +820,7 @@ class AIBrainTab(ft.Container):
                 return
 
             # Save concurrency (validated as integer)
-            concurrency_str = self.ai_concurrency_input.value.strip()
+            concurrency_str = self.ai_concurrency_input.value.strip()  # type: ignore
             try:
                 concurrency = int(concurrency_str)
                 if not (_CONCURRENCY_MIN <= concurrency <= _CONCURRENCY_MAX):
@@ -835,8 +851,8 @@ class AIBrainTab(ft.Container):
                 model_path=local_path,
                 timeout=local_timeout,
                 n_threads=int(self.local_threads_input.value),
-                n_batch=int(self.local_batch_input.value),
-                n_ctx=int(self.local_ctx_input.value),
+                n_batch=int(self.local_batch_input.value),  # type: ignore
+                n_ctx=int(self.local_ctx_input.value),  # type: ignore
                 flash_attn=self.local_flash_attn_switch.value,
                 n_gpu_layers=gpu_layers_to_save,
             )
@@ -846,7 +862,9 @@ class AIBrainTab(ft.Container):
 
             # Update status to verifying
             self._update_connection_status(
-                "settings_status_verifying", AppColors.WARNING, ft.Icons.HOURGLASS_EMPTY,
+                "settings_status_verifying",
+                AppColors.WARNING,
+                ft.Icons.HOURGLASS_EMPTY,
             )
             self._safe_update()
 
@@ -856,7 +874,9 @@ class AIBrainTab(ft.Container):
 
             if not ai_key:
                 self._update_connection_status(
-                    "settings_status_no_key", AppColors.TEXT_HINT, ft.Icons.CIRCLE,
+                    "settings_status_no_key",
+                    AppColors.TEXT_HINT,
+                    ft.Icons.CIRCLE,
                 )
                 self._safe_update()
                 return
@@ -871,7 +891,9 @@ class AIBrainTab(ft.Container):
                     )
                 else:
                     self._update_connection_status(
-                        "settings_status_verify_err", AppColors.ERROR, ft.Icons.ERROR,
+                        "settings_status_verify_err",
+                        AppColors.ERROR,
+                        ft.Icons.ERROR,
                     )
             except Exception as ex:
                 logger.error(
@@ -879,7 +901,9 @@ class AIBrainTab(ft.Container):
                     exc_info=True,
                 )
                 self._update_connection_status(
-                    "common_error", AppColors.ERROR, ft.Icons.ERROR,
+                    "common_error",
+                    AppColors.ERROR,
+                    ft.Icons.ERROR,
                 )
 
             self._safe_update()
@@ -889,7 +913,8 @@ class AIBrainTab(ft.Container):
                 # Check file exists first
                 if not os.path.exists(local_path):
                     self.show_snack(
-                        I18n.get("ai_model_file_not_found"), color=AppColors.ERROR,
+                        I18n.get("ai_model_file_not_found"),
+                        color=AppColors.ERROR,
                     )
                     return
 
@@ -902,12 +927,15 @@ class AIBrainTab(ft.Container):
 
                 # Calculate MD5 of configured file (in thread pool)
                 new_md5 = await ThreadPoolManager().run_async(
-                    TaskType.IO, LocalModelManager.calculate_file_md5, local_path,
+                    TaskType.IO,
+                    LocalModelManager.calculate_file_md5,
+                    local_path,
                 )
 
                 if loaded_md5 and new_md5 and loaded_md5 != new_md5:
                     self.show_snack(
-                        I18n.get("ai_local_model_changed"), color=AppColors.WARNING,
+                        I18n.get("ai_local_model_changed"),
+                        color=AppColors.WARNING,
                     )
                 else:
                     self.show_snack(I18n.get("settings_snack_ai_saved"))
@@ -930,8 +958,8 @@ class AIBrainTab(ft.Container):
             "Click",
             f"btn_test_connection | model={self.ai_model_dropdown.value}",
         )
-        api_key = self.ai_api_key_input.value.strip()
-        base_url = self.ai_base_url_input.value.strip()
+        api_key = self.ai_api_key_input.value.strip()  # type: ignore
+        base_url = self.ai_base_url_input.value.strip()  # type: ignore
         model = self.ai_model_dropdown.value
 
         if not api_key:
@@ -943,16 +971,20 @@ class AIBrainTab(ft.Container):
         self._safe_update()
 
         try:
-            success = await AIService.test_connection(api_key, base_url, model)
+            success = await AIService.test_connection(api_key, base_url, model)  # type: ignore
             if success:
                 self.show_snack(I18n.get("ai_snack_conn_ok"), color=AppColors.SUCCESS)
                 self._update_connection_status(
-                    "ai_status_connected", AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE,
+                    "ai_status_connected",
+                    AppColors.SUCCESS,
+                    ft.Icons.CHECK_CIRCLE,
                 )
             else:
                 self.show_snack(I18n.get("ai_snack_conn_fail"), color=AppColors.ERROR)
                 self._update_connection_status(
-                    "ai_status_disconnected", AppColors.ERROR, ft.Icons.ERROR,
+                    "ai_status_disconnected",
+                    AppColors.ERROR,
+                    ft.Icons.ERROR,
                 )
         except Exception as ex:
             logger.error(f"AI test connection error: {ex}", exc_info=True)

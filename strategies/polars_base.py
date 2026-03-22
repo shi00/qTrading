@@ -1,4 +1,5 @@
 import logging
+import typing
 from abc import abstractmethod
 
 import pandas as pd
@@ -21,7 +22,7 @@ class PolarsBaseStrategy(BaseStrategy):
     """
 
     @require_quality(QualityTier.BRONZE)
-    async def filter(self, context):
+    async def filter(self, context: typing.Any):
         """
         Template method that handles boilerplates.
         Subclasses should implement `_filter_logic(lazy_frame, context) -> LazyFrame`.

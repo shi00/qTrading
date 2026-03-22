@@ -1,9 +1,8 @@
 import asyncio
-import datetime
 import logging
-import os
 import re
 import threading
+import typing
 
 import pandas as pd
 import sqlalchemy as sa
@@ -26,7 +25,6 @@ from data.daos.stock_dao import StockDao
 from data.daos.sync_dao import SyncDao
 from data.data_dictionary import TABLE_DEFINITIONS
 from utils.config_handler import ConfigHandler
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -120,9 +118,9 @@ class CacheManager:
         if not hasattr(current_loop, "_cache_maint_event"):
             evt = asyncio.Event()
             evt.set()  # Default to Set (Not in maintenance)
-            current_loop._cache_maint_event = evt
+            current_loop._cache_maint_event = evt  # type: ignore
 
-        return current_loop._cache_maint_event
+        return current_loop._cache_maint_event  # type: ignore
 
     @property
     def _init_lock(self):
@@ -138,15 +136,15 @@ class CacheManager:
                 async def __aenter__(self):
                     return
 
-                async def __aexit__(self, *args):
+                async def __aexit__(self, *args: typing.Any):
                     return
 
             return DummyLock()
 
         if not hasattr(current_loop, "_cache_init_lock"):
-            current_loop._cache_init_lock = asyncio.Lock()
+            current_loop._cache_init_lock = asyncio.Lock()  # type: ignore
 
-        return current_loop._cache_init_lock
+        return current_loop._cache_init_lock  # type: ignore
 
     async def close(self):
         """Dispose the engine"""
@@ -178,12 +176,14 @@ class CacheManager:
             await self._maintenance_event.wait()
 
     @staticmethod
-    def _prepare_data_params(df, cols, table_name=None):
+    def _prepare_data_params(
+        df: pd.DataFrame, cols: list, table_name: str | None = None
+    ):
         # Facade: Delegate to BaseDao static method
         return BaseDao._prepare_data_params(df, cols, table_name)
 
     @staticmethod
-    def normalize_news_item(item, default_source="CLS"):
+    def normalize_news_item(item: dict, default_source: typing.Any = "CLS"):
         """Normalize news item dictionary for DB Insertion"""
         publish_time = item.get("time", item.get("publish_time"))
         if publish_time is None:
@@ -202,82 +202,38 @@ class CacheManager:
         }
 
     # Backward compatibility for direct SQL usage if any
-    async def _write_db(self, sql, params=None, is_many=False):
+    async def _write_db(
+        self, sql: typing.Any, params: typing.Any = None, is_many: typing.Any = False
+    ):
         # We can implement a temporary BaseDao to run this?
         # Or just instantiate a base dao for ad-hoc queries.
         # Ideally, usages should be migrated, but for now:
         dao = BaseDao(self.engine)
         return await dao._write_db(sql, params, is_many)
 
-    async def _read_db(self, sql, params=None):
+    async def _read_db(self, sql: typing.Any, params: typing.Any = None):
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params)
 
-
     # --- Init & Reset ---
-    async def init_db(self, force=False):
+    async def init_db(self, force: bool = False):
         """Initialize Tables"""
         async with self._init_lock:
             if self._schema_initialized and not force:
                 return
 
-            logger.debug("[CacheManager] Schema | Initializing via Alembic...")
+            logger.debug("[CacheManager] Schema | Delegating to DatabaseMigrator...")
 
-            # Check DB schema state to handle legacy users transitioning to Alembic
-            has_alembic, has_old_schema = False, False
-            try:
-                from sqlalchemy import inspect
-
-                async with self.engine.connect() as conn:
-
-                    def _sync_check(c):
-                        inspector = inspect(c)
-                        tables = inspector.get_table_names()
-                        return "alembic_version" in tables, "stock_basic" in tables
-
-                    has_alembic, has_old_schema = await conn.run_sync(_sync_check)
-            except Exception as e:
-                logger.error(
-                    f"[CacheManager] Schema | ❌ Table inspection failed: {e}",
-                    exc_info=True,
-                )
-
-            def run_alembic_upgrade():
-                from alembic.config import Config
-
-                from alembic import command
-
-                alembic_ini_path = os.path.join(
-                    os.path.dirname(__file__), "..", "alembic.ini",
-                )
-                alembic_cfg = Config(alembic_ini_path)
-                alembic_cfg.attributes["configure_logger"] = False
-                # Set the base directory so alembic can find its scripts
-                alembic_cfg.set_main_option(
-                    "script_location",
-                    os.path.join(os.path.dirname(__file__), "..", "alembic"),
-                )
-
-                # If the legacy database exists but Alembic doesn't, stamp it with the baseline
-                # (which exactly matches the old schema.sql) to prevent 'table already exists' errors.
-                if has_old_schema and not has_alembic:
-                    logger.debug(
-                        "[CacheManager] Schema | Legacy database detected. Stamped baseline.",
-                    )
-                    command.stamp(alembic_cfg, "367c382dbf28")
-
-                command.upgrade(alembic_cfg, "head")
+            from data.db_migrator import DatabaseMigrator
 
             try:
-                # Run alembic synchronously in thread pool
-                await ThreadPoolManager().run_async(TaskType.IO, run_alembic_upgrade)
+                await DatabaseMigrator.init_db(self.engine)
 
                 self._schema_initialized = True
                 logger.debug("[CacheManager] Schema | Init completed without errors.")
-
             except Exception as e:
                 logger.error(
-                    f"[CacheManager] Schema | ❌ Init failed critically: {e}",
+                    f"[CacheManager] Schema | Init failed critically: {e}",
                     exc_info=True,
                 )
 
@@ -288,7 +244,8 @@ class CacheManager:
             logger.info("[CacheManager] Wipe | Hard reset completed.")
         except Exception as e:
             logger.error(
-                f"[CacheManager] Wipe | ❌ Error during hard reset: {e}", exc_info=True,
+                f"[CacheManager] Wipe | ❌ Error during hard reset: {e}",
+                exc_info=True,
             )
             raise
 
@@ -330,30 +287,37 @@ class CacheManager:
 
     # --- Stock Basic ---
 
-    async def save_stock_basic(self, df, priority=None):
+    async def save_stock_basic(self, df: pd.DataFrame, priority: int | None = None):
         return await self.stock_dao.save_stock_basic(df, priority)
 
     async def get_stock_basic(self):
         return await self.stock_dao.get_stock_basic()
 
     # --- Concepts ---
-    async def save_concepts(self, df):
+    async def save_concepts(self, df: pd.DataFrame):
         return await self.stock_dao.save_concepts(df)
 
-    async def overwrite_concepts(self, df):
+    async def overwrite_concepts(self, df: pd.DataFrame):
         return await self.stock_dao.overwrite_concepts(df)
 
-    async def get_concepts(self, ts_codes=None):
+    async def get_concepts(self, ts_codes: list | None = None):
         """
         Get concepts for stock list.
         Returns: Dict[ts_code, List[concept_name]]
         """
-        return await self.stock_dao.get_concepts(ts_codes)
+        return await self.stock_dao.get_concepts(ts_codes)  # type: ignore
 
     # --- Daily Quotes ---
-    async def save_daily_quotes(self, df, priority=None, suppress_errors=True):
+    async def save_daily_quotes(
+        self,
+        df: pd.DataFrame,
+        priority: int | None = None,
+        suppress_errors: bool = True,
+    ):
         return await self.quote_dao.save_daily_quotes(
-            df, priority, suppress_errors=suppress_errors,
+            df,
+            priority,
+            suppress_errors=suppress_errors,
         )
 
     async def check_data_exists(self, trade_date: str) -> bool:
@@ -361,34 +325,56 @@ class CacheManager:
         return await self.quote_dao.check_data_exists(trade_date)
 
     async def get_daily_quotes(
-        self, ts_code=None, start_date=None, end_date=None, ts_code_list=None,
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        ts_code_list: list | None = None,
     ):
         return await self.quote_dao.get_daily_quotes(
-            ts_code, start_date, end_date, ts_code_list,
+            ts_code,
+            start_date,
+            end_date,
+            ts_code_list,
         )
 
     # --- Daily Indicators ---
-    async def save_daily_indicators(self, df, suppress_errors=True):
+    async def save_daily_indicators(
+        self, df: pd.DataFrame, suppress_errors: bool = True
+    ):
         return await self.market_dao.save_daily_indicators(
-            df, suppress_errors=suppress_errors,
+            df,
+            suppress_errors=suppress_errors,
         )
 
     async def get_daily_indicators(
-        self, ts_code=None, start_date=None, end_date=None, limit=None,
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int | None = None,
     ):
         return await self.market_dao.get_daily_indicators(
-            ts_code, start_date, end_date, limit,
+            ts_code,
+            start_date,
+            end_date,
+            limit,
         )
 
     async def get_daily_indicators_bulk(
-        self, ts_code_list: list, start_date=None, end_date=None,
+        self,
+        ts_code_list: list,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ):
         """
         批量获取多只股票的 daily_indicators 数据。
         解决 N+1 查询问题。
         """
         return await self.market_dao.get_daily_indicators_bulk(
-            ts_code_list, start_date, end_date,
+            ts_code_list,
+            start_date,
+            end_date,
         )
 
     async def get_latest_trade_date(self):
@@ -406,48 +392,58 @@ class CacheManager:
 
     # --- Indicators ---
 
-    async def get_latest_indicators(self, trade_date=None):
+    async def get_latest_indicators(self, trade_date: str | None = None):
         return await self.financial_dao.get_latest_indicators(trade_date)
 
     async def get_cached_indicator_dates(self):
         return await self.financial_dao.get_cached_indicator_dates()
 
     # --- Financial Reports ---
-    async def save_financial_reports(self, df):
+    async def save_financial_reports(self, df: pd.DataFrame):
         return await self.financial_dao.save_financial_reports(df)
 
-
-
-    async def get_cached_financial_records(self, period=None):
+    async def get_cached_financial_records(self, period: str | None = None):
         return await self.financial_dao.get_cached_financial_records(period)
 
     # --- Other Data Types ---
-    async def save_moneyflow(self, df):
+    async def save_moneyflow(self, df: pd.DataFrame):
         return await self.quote_dao.save_moneyflow(df)
 
-    async def save_northbound(self, df):
+    async def save_northbound(self, df: pd.DataFrame):
         return await self.quote_dao.save_northbound(df)
 
-    async def save_market_news(self, news_item, wait=False):
+    async def save_market_news(self, news_item: dict, wait: bool = False):
         return await self.market_dao.save_market_news(news_item, wait)
 
-    async def get_market_news(self, limit=50, offset=0, min_publish_time=None):
+    async def get_market_news(
+        self,
+        limit: int | None = 50,
+        offset: int = 0,
+        min_publish_time: typing.Any = None,
+    ):
         return await self.market_dao.get_market_news(limit, offset, min_publish_time)
 
     # --- Screening Data ---
-    async def get_screening_data(self, trade_date=None):
+    async def get_screening_data(self, trade_date: str | None = None):
         # P0-2: DAO now self-resolves latest_trade_date internally (Defense in Depth)
         return await self.screener_dao.get_screening_data(trade_date)
 
     # --- Sync Stats & Misc ---
     async def update_sync_status(
-        self, table_name, last_data_date, record_count, status="success",
+        self,
+        table_name: str,
+        last_data_date: str,
+        record_count: int,
+        status: str = "success",
     ):
         return await self.sync_dao.update_sync_status(
-            table_name, last_data_date, record_count, status,
+            table_name,
+            last_data_date,
+            record_count,
+            status,
         )
 
-    async def get_sync_status(self, table_name=None):
+    async def get_sync_status(self, table_name: str | None = None):
         return await self.sync_dao.get_sync_status(table_name)
 
     async def check_comprehensive_health(self):
@@ -472,7 +468,9 @@ class CacheManager:
             g_min, g_max = await self.quote_dao.get_date_range()
             if g_min and g_max:
                 global_trade_days = await self.stock_dao.count_trade_days(g_min, g_max)
-                global_expected_rows = await self.stock_dao.count_expected_rows(g_min, g_max)
+                global_expected_rows = await self.stock_dao.count_expected_rows(
+                    g_min, g_max
+                )
                 logger.debug(
                     f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
                 )
@@ -556,6 +554,7 @@ class CacheManager:
                                     continue  # Column doesn't exist in this table
                             if max_date:
                                 from utils.time_utils import parse_date
+
                                 max_dt = parse_date(max_date)
                                 age_days = (get_now() - max_dt).days
                                 # Fresh if within 7 days, decay linearly to 30 days
@@ -578,7 +577,8 @@ class CacheManager:
                     depth_ratio = None
                     if is_stock_table and global_trade_days > 0:
                         depth_ratio = min(
-                            1.0, global_trade_days / get_health_depth_full_trade_days(),
+                            1.0,
+                            global_trade_days / get_health_depth_full_trade_days(),
                         )
 
                     # --- Breadth (daily-frequency tables only) ---
@@ -666,94 +666,111 @@ class CacheManager:
         return await self.stock_dao.get_concept_count()
 
     # --- Extra Savers (Boilerplate) ---
-    async def save_fina_forecast(self, df):
+    async def save_fina_forecast(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_forecast(df)
 
-    async def save_fina_mainbz(self, df):
+    async def save_fina_mainbz(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_mainbz(df)
 
-    async def save_pledge_stat(self, df):
+    async def save_pledge_stat(self, df: pd.DataFrame):
         return await self.financial_dao.save_pledge_stat(df)
 
-    async def save_repurchase(self, df):
+    async def save_repurchase(self, df: pd.DataFrame):
         return await self.financial_dao.save_repurchase(df)
 
-    async def save_dividend(self, df):
+    async def save_dividend(self, df: pd.DataFrame):
         return await self.financial_dao.save_dividend(df)
 
-    async def save_index_daily(self, df):
+    async def save_index_daily(self, df: pd.DataFrame):
         return await self.quote_dao.save_index_daily(df)
 
-    async def save_index_dailybasic(self, df):
+    async def save_index_dailybasic(self, df: pd.DataFrame):
         return await self.quote_dao.save_index_dailybasic(df)
 
-    async def get_index_daily(self, ts_code=None, trade_date=None):
+    async def get_index_daily(
+        self, ts_code: str | None = None, trade_date: str | None = None
+    ):
         return await self.quote_dao.get_index_daily(ts_code, trade_date)
 
     async def get_index_daily_range(
-        self, ts_code_list: list, start_date=None, end_date=None,
+        self,
+        ts_code_list: list,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ):
         """
         批量获取多只指数的日线数据。
         """
         return await self.quote_dao.get_index_daily_range(
-            ts_code_list, start_date, end_date,
+            ts_code_list,
+            start_date,
+            end_date,
         )
 
-    async def save_limit_list(self, df):
+    async def save_limit_list(self, df: pd.DataFrame):
         return await self.quote_dao.save_limit_list(df)
 
-    async def save_margin_daily(self, df):
+    async def save_margin_daily(self, df: pd.DataFrame):
         return await self.quote_dao.save_margin_daily(df)
 
-    async def save_suspend_d(self, df):
+    async def save_suspend_d(self, df: pd.DataFrame):
         return await self.quote_dao.save_suspend_d(df)
 
-    async def save_fina_audit(self, df):
+    async def save_fina_audit(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_audit(df)
 
-    async def save_top_list(self, df):
+    async def save_top_list(self, df: pd.DataFrame):
         return await self.quote_dao.save_top_list(df)
 
-    async def get_top_list(self, trade_date=None):
+    async def get_top_list(self, trade_date: str | None = None):
         return await self.quote_dao.get_top_list(trade_date)
 
-    async def save_block_trade(self, df):
+    async def save_block_trade(self, df: pd.DataFrame):
         return await self.quote_dao.save_block_trade(df)
 
-    async def get_block_trade(self, trade_date=None):
+    async def get_block_trade(self, trade_date: str | None = None):
         return await self.quote_dao.get_block_trade(trade_date)
 
-    async def get_moneyflow(self, trade_date=None, ts_code=None):
+    async def get_moneyflow(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
         return await self.quote_dao.get_moneyflow(trade_date, ts_code)
 
-    async def get_northbound(self, trade_date=None, ts_code=None):
+    async def get_northbound(
+        self, trade_date: str | None = None, ts_code: str | None = None
+    ):
         return await self.quote_dao.get_northbound(trade_date, ts_code)
 
     # --- Screening History ---
-    async def get_screening_history(self, strategy_name=None, limit=100):
+    async def get_screening_history(
+        self, strategy_name: str | None = None, limit: int | None = 100
+    ):
         return await self.screener_dao.get_screening_history(strategy_name, limit)
 
-    async def get_history_tree(self, offset=0, limit=30):
+    async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
         return await self.screener_dao.get_history_tree(offset, limit)
 
-    async def get_history_records(self, trade_date, strategy_name=None):
+    async def get_history_records(
+        self, trade_date: str | None, strategy_name: str | None = None
+    ):
         return await self.screener_dao.get_history_records(trade_date, strategy_name)
 
     async def get_pending_reviews(self):
         return await self.screener_dao.get_pending_reviews()
 
-    async def update_screening_performance(self, updates):
+    async def update_screening_performance(self, updates: dict):
         return await self.screener_dao.update_screening_performance(updates)
 
-    async def get_learning_examples(self, limit=3):
+    async def get_learning_examples(self, limit: int | None = 3):
         return await self.screener_dao.get_learning_examples(limit)
 
     # --- Sync Status Step 4 ---
-    async def get_completed_step4_stocks(self, sync_version=1):
+    async def get_completed_step4_stocks(self, sync_version: int = 1):
         return await self.sync_dao.get_completed_step4_stocks(sync_version)
 
-    async def mark_stock_step4_completed(self, ts_code, sync_version=1):
+    async def mark_stock_step4_completed(
+        self, ts_code: str | None, sync_version: int = 1
+    ):
         return await self.sync_dao.mark_stock_step4_completed(ts_code, sync_version)
 
     async def clear_step4_sync_status(self):
@@ -764,13 +781,18 @@ class CacheManager:
         """Get the min and max calendar dates from DB"""
         return await self.stock_dao.get_trade_cal_range()
 
-    async def save_trade_cal(self, df):
+    async def save_trade_cal(self, df: pd.DataFrame):
         return await self.stock_dao.save_trade_cal(df)
 
-    async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
+    async def get_trade_cal(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        is_open: str | None = None,
+    ):
         return await self.stock_dao.get_trade_cal(start_date, end_date, is_open)
 
-    async def get_start_date_by_trade_days(self, end_date, trade_days: int):
+    async def get_start_date_by_trade_days(self, end_date: str | None, trade_days: int):
         return await self.stock_dao.get_start_date_by_trade_days(end_date, trade_days)
 
     async def get_latest_northbound(self):
@@ -779,30 +801,32 @@ class CacheManager:
     # --- Policy-Driven AI Extensions ---
 
     # Macro
-    async def save_macro_economy(self, df):
+    async def save_macro_economy(self, df: pd.DataFrame):
         return await self.macro_dao.save_macro_economy(df)
 
-    async def save_shibor_daily(self, df):
+    async def save_shibor_daily(self, df: pd.DataFrame):
         return await self.macro_dao.save_shibor_daily(df)
 
     # Holders
-    async def save_holder_number(self, df):
+    async def save_holder_number(self, df: pd.DataFrame):
         return await self.holder_dao.save_holder_number(df)
 
-    async def save_top10_holders(self, df):
+    async def save_top10_holders(self, df: pd.DataFrame):
         return await self.holder_dao.save_top10_holders(df)
 
-    async def save_index_weights(self, df):
+    async def save_index_weights(self, df: pd.DataFrame):
         return await self.market_dao.save_index_weights(df)
 
-    async def get_index_weights(self, index_code, trade_date):
+    async def get_index_weights(self, index_code: str | None, trade_date: str | None):
         return await self.market_dao.get_index_weights(index_code, trade_date)
 
     async def get_latest_index_weight_date(self):
         return await self.market_dao.get_latest_index_weight_date()
 
-    async def save_moneyflow_hsgt(self, df):
+    async def save_moneyflow_hsgt(self, df: pd.DataFrame):
         return await self.market_dao.save_moneyflow_hsgt(df)
 
-    async def get_moneyflow_hsgt(self, trade_date=None, limit=None):
+    async def get_moneyflow_hsgt(
+        self, trade_date: str | None = None, limit: int | None = None
+    ):
         return await self.market_dao.get_moneyflow_hsgt(trade_date, limit)

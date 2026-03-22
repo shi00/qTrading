@@ -163,56 +163,56 @@ class TechnicalAnalysis:
     def calculate_rsi_pandas(close: pd.Series, period: int = 14) -> pd.Series:
         """
         使用 Pandas 计算 RSI 序列（EMA 平滑方式，与 Polars 版本一致）。
-        
+
         与 get_rsi() 不同，此方法返回完整的 RSI 序列，用于后续分析：
         - 连续超卖天数
         - 恐慌速跌偏离度
         - 超卖钝化检测
-        
+
         Args:
             close: 收盘价序列
             period: RSI 周期（默认 14）
-        
+
         Returns:
             RSI 序列（0-100），数据不足时返回空 Series
         """
         if close is None or len(close) < period + 1:
             return pd.Series(dtype=float)
-        
+
         delta = close.diff()
         gain = delta.clip(lower=0)
         loss = (-delta).clip(upper=0)
-        
+
         avg_gain = gain.ewm(com=period - 1, min_periods=period, adjust=False).mean()
         avg_loss = loss.ewm(com=period - 1, min_periods=period, adjust=False).mean()
-        
+
         rs = avg_gain / avg_loss
         rs = rs.replace([np.inf, -np.inf], np.nan)
         rsi = 100 - (100 / (1 + rs))
         rsi = rsi.fillna(50)
         rsi = rsi.clip(lower=0, upper=100)
-        
+
         return rsi
 
     @staticmethod
     def analyze_rsi_oversold_features(close: pd.Series, period: int = 14) -> dict:
         """
         分析 RSI 超卖特征，用于判断"黄金坑" vs "价值陷阱"。
-        
+
         返回三个关键特征：
         1. consecutive_oversold_days: 连续超卖天数（衡量跌势持续性）
         2. days_since_healthy: 距上次多头状态的间隔天数（恐慌速跌 vs 阴跌耗损）
         3. stagnation_detected: 是否检测到超卖钝化（价格新低但 RSI 未新低）
-        
+
         Args:
             close: 收盘价序列（需按时间升序排列）
             period: RSI 周期
-        
+
         Returns:
             dict 包含特征值和描述文本
         """
         rsi = TechnicalAnalysis.calculate_rsi_pandas(close, period)
-        
+
         if rsi.empty or len(rsi) < 20:
             return {
                 "consecutive_oversold_days": 0,
@@ -220,9 +220,9 @@ class TechnicalAnalysis:
                 "stagnation_detected": False,
                 "feature_text": "RSI 状态: 缺乏足够历史数据",
             }
-        
+
         current_rsi = rsi.iloc[-1]
-        
+
         consecutive_days = 0
         oversold_mask = rsi < 30
         if oversold_mask.iloc[-1]:
@@ -231,33 +231,33 @@ class TechnicalAnalysis:
                     consecutive_days += 1
                 else:
                     break
-        
+
         healthy_mask = rsi > 50
         days_since_healthy = 99
         if healthy_mask.any():
             last_healthy_idx = healthy_mask[healthy_mask].index[-1]
-            days_since_healthy = len(rsi) - rsi.index.get_loc(last_healthy_idx) - 1
-        
+            days_since_healthy = len(rsi) - rsi.index.get_loc(last_healthy_idx) - 1  # type: ignore
+
         stagnation_detected = False
         if len(rsi) >= 20:
             recent_close = close.tail(20)
             recent_rsi = rsi.tail(20)
-            
+
             is_price_new_low = recent_close.iloc[-1] <= recent_close.iloc[:-1].min()
-            
+
             rsi_min = recent_rsi.min()
             if rsi_min > 0:
                 rsi_deviation_pct = (current_rsi - rsi_min) / rsi_min * 100
                 stagnation_detected = is_price_new_low and (rsi_deviation_pct > 5)
-        
+
         panic_str = "【恐慌急跌】" if days_since_healthy <= 8 else "【阴跌耗损】"
         stagnation_str = "【RSI 超卖钝化】" if stagnation_detected else ""
-        
+
         feature_text = (
             f"已连续 {consecutive_days} 天处于超卖(<30)；"
             f"距上次多头状态(>50)已历经 {days_since_healthy} 天 {panic_str} {stagnation_str}"
         )
-        
+
         return {
             "consecutive_oversold_days": consecutive_days,
             "days_since_healthy": days_since_healthy,
@@ -322,7 +322,8 @@ class TechnicalAnalysis:
 
         # RSV
         llv = pl.col(low).rolling_min(
-            window_size=n, min_samples=1,
+            window_size=n,
+            min_samples=1,
         )  # min_samples not fully supported in old polars?
         # rolling_min in Polars usually requires window_size.
         # Handle dynamic window? No, just standard rolling.

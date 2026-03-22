@@ -27,7 +27,9 @@ class ScreenerDao(BaseDao):
 
     # --- Screening History ---
 
-    async def get_screening_history(self, strategy_name=None, limit=100):
+    async def get_screening_history(
+        self, strategy_name: str | None = None, limit: int | None = 100
+    ):
         sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE 1=1"
         p = []
         idx = 1
@@ -39,7 +41,7 @@ class ScreenerDao(BaseDao):
         p.append(limit)
         return await self._read_db(sql, p)
 
-    async def get_history_tree(self, offset=0, limit=30):
+    async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
         """
         Get aggregated tree data for the history sidebar.
         Returns rows of (trade_date, strategy_name, cnt) grouped and ordered by date DESC.
@@ -53,10 +55,13 @@ class ScreenerDao(BaseDao):
             LIMIT $1 OFFSET $2
         """
         return await self._read_db(
-            sql, (limit * 5, offset),
+            sql,
+            (limit * 5, offset),
         )  # limit*5 to cover multiple strategies per date
 
-    async def get_history_records(self, trade_date, strategy_name=None):
+    async def get_history_records(
+        self, trade_date: str | None, strategy_name: str | None = None
+    ):
         """
         Get screening records for a specific date, optionally filtered by strategy.
         """
@@ -75,14 +80,14 @@ class ScreenerDao(BaseDao):
             return []
         return df.to_dict("records")
 
-    async def update_screening_performance(self, updates):
+    async def update_screening_performance(self, updates: dict):
         # updates = list of tuples (t1_price, t1_pct, t5_price, t5_pct, id)
         if not updates:
             return
         sql = "UPDATE screening_history SET t1_price = $1, t1_pct = $2, t5_price = $3, t5_pct = $4 WHERE id = $5"
         await self._write_db(sql, updates, is_many=True)
 
-    async def get_learning_examples(self, limit=3):
+    async def get_learning_examples(self, limit: int | None = 3):
 
         sql_win = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT $1"
         sql_loss = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT $1"
@@ -100,10 +105,10 @@ class ScreenerDao(BaseDao):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
             return df["max_td"].iloc[0]
-        return None
+        return None  # type: ignore
 
     # --- Screening Data Fetch for Logic ---
-    async def get_screening_data(self, trade_date=None):
+    async def get_screening_data(self, trade_date: str | None = None):
         if not trade_date:
             trade_date = await self._get_latest_closed_trade_date()
 

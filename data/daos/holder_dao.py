@@ -1,5 +1,7 @@
 import logging
 
+import pandas as pd
+
 from data.daos.base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -8,7 +10,7 @@ logger = logging.getLogger(__name__)
 class HolderDao(BaseDao):
     """DAO for Shareholder Data (Chip Concentration, Institutional Holdings)."""
 
-    async def save_holder_number(self, df):
+    async def save_holder_number(self, df: pd.DataFrame):
         """Save Stock Holder Number. Table: stk_holdernumber"""
         if df is None or df.empty:
             return 0
@@ -21,10 +23,13 @@ class HolderDao(BaseDao):
             "holder_num_ratio",
         ]
         return await self._save_upsert(
-            df, "stk_holdernumber", columns, pk_columns=["ts_code", "end_date"],
+            df,
+            "stk_holdernumber",
+            columns,
+            pk_columns=["ts_code", "end_date"],
         )
 
-    async def save_top10_holders(self, df):
+    async def save_top10_holders(self, df: pd.DataFrame):
         """Save Top 10 Holders. Table: top10_holders"""
         if df is None or df.empty:
             return 0
@@ -43,5 +48,3 @@ class HolderDao(BaseDao):
             columns,
             pk_columns=["ts_code", "end_date", "holder_name"],
         )
-
-

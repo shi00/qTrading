@@ -1,6 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any
 
 from ui.i18n import I18n
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # StrategyManager reads _STRATEGY_REGISTRY to auto-discover all strategies.
 # ============================================================================
 
-_STRATEGY_REGISTRY: Dict[str, type] = {}
+_STRATEGY_REGISTRY: dict[str, type] = {}
 
 
 def register_strategy(key: str):
@@ -63,7 +63,7 @@ class BaseStrategy(ABC):
         """
         return self.description
 
-    def get_parameters(self) -> List[Dict[str, Any]]:
+    def get_parameters(self) -> list[dict[str, Any]]:
         """
         Declare dynamic parameters for this strategy.
         Override in subclasses to expose tunable parameters to the UI.

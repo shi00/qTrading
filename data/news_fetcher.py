@@ -25,7 +25,7 @@ class NewsFetcher:
     """
 
     @staticmethod
-    async def get_stock_news(ts_code, limit=5):
+    async def get_stock_news(ts_code: str | None, limit: int | None = 5):
         """
         Fetch specific stock news using a dual-layer strategy:
         1. 巨潮公告 (stock_zh_a_disclosure_report_cninfo) - Official exchange filings (Highest quality)
@@ -48,7 +48,7 @@ class NewsFetcher:
         try:
             import akshare.stock_feature.stock_disclosure_cninfo as mod
 
-            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]
+            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore
         except Exception:
             market = "沪深京"  # Fallback to standard standard UTF-8 key
 
@@ -171,7 +171,7 @@ class NewsFetcher:
             return []
 
     @staticmethod
-    async def get_latest_global_news(limit=20):
+    async def get_latest_global_news(limit: int | None = 20):
         """
         Get major financial news (CCTV / Major Portals)
         """
@@ -228,7 +228,7 @@ class NewsFetcher:
                 # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
                 try:
                     # Try parsing with pandas for robustness (handles multiple formats)
-                    dt_obj = pd.to_datetime(final_time)
+                    dt_obj = pd.to_datetime(final_time)  # type: ignore
                     final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     # Fallback: if pandas fails, try to ensure at least string format
@@ -341,7 +341,7 @@ class NewsFetcher:
             return "Global data error."
 
     @staticmethod
-    async def get_hot_concepts(limit=8):
+    async def get_hot_concepts(limit: int | None = 8):
         """
         Get top performing concept boards.
         Uses Sina Finance (verified working, not blocked).
@@ -376,10 +376,10 @@ class NewsFetcher:
                 try:
                     raw_val = row.get("涨跌幅", 0)
                     # Handle NaN from pandas
-                    if pd.isna(raw_val):
+                    if pd.isna(raw_val):  # type: ignore
                         change_val = 0.0
                     else:
-                        change_val = float(raw_val)
+                        change_val = float(raw_val)  # type: ignore
                     change_str = f"{change_val:.2f}%"
                 except (ValueError, TypeError):
                     change_str = "0.00%"
