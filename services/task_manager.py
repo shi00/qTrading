@@ -5,9 +5,10 @@ import threading
 import time as _time
 import traceback
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -50,17 +51,17 @@ class AppTask:
     cancellable: bool = False
 
     created_at: datetime.datetime = field(default_factory=get_now)
-    started_at: Optional[datetime.datetime] = None
-    completed_at: Optional[datetime.datetime] = None
+    started_at: datetime.datetime | None = None
+    completed_at: datetime.datetime | None = None
 
     result: Any = None
     error: str = ""
 
     # Internal fields for execution
     _coroutine_gen: Callable = None  # Function that returns a coroutine  # type: ignore
-    _asyncio_task: Optional[asyncio.Task] = None
-    _cancel_event: Optional[asyncio.Event] = None
-    unique_key: Optional[str] = None  # For deduplication
+    _asyncio_task: asyncio.Task | None = None
+    _cancel_event: asyncio.Event | None = None
+    unique_key: str | None = None  # For deduplication
 
 
 class TaskManager:
@@ -81,7 +82,7 @@ class TaskManager:
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if cls._instance is None:
-                cls._instance = super(TaskManager, cls).__new__(cls)
+                cls._instance = super().__new__(cls)
                 cls._instance._initialized = False
         return cls._instance
 
@@ -90,24 +91,22 @@ class TaskManager:
             if getattr(self, "_initialized", False):
                 return
 
-            self._tasks: Dict[str, AppTask] = {}
-            self._subscribers: List[Callable[[List[AppTask]], None]] = []
+            self._tasks: dict[str, AppTask] = {}
+            self._subscribers: list[Callable[[list[AppTask]], None]] = []
             self._background_tasks = set()  # Strong references to prevent GC
 
             # Semaphore is created lazily inside the event loop to avoid
             # DeprecationWarning on Python 3.10+ when no loop is running.
-            self._semaphore_instance: Optional[asyncio.Semaphore] = None
+            self._semaphore_instance: asyncio.Semaphore | None = None
 
             # Throttle for update_progress notifications (seconds)
             self._last_notify_time: float = 0.0
             self._NOTIFY_THROTTLE_S: float = 0.2  # Max 5 pushes per second
 
             # History loaded from DB (read-only, separate from active _tasks)
-            self._history: List[AppTask] = []
+            self._history: list[AppTask] = []
             self._db_ready = False
-            self._loop: Optional[asyncio.AbstractEventLoop] = (
-                None  # Captured in init_db
-            )
+            self._loop: asyncio.AbstractEventLoop | None = None  # Captured in init_db
 
             self._initialized = True
             logger.info("[TaskManager] Initialized global task manager.")
@@ -128,7 +127,7 @@ class TaskManager:
             logger.info(f"[TaskManager] Concurrency semaphore initialized: max={limit}")
         return self._semaphore_instance
 
-    def subscribe(self, callback: Callable[[List[AppTask]], None]):
+    def subscribe(self, callback: Callable[[list[AppTask]], None]):
         """Register a UI callback to be notified when any task updates."""
         if callback not in self._subscribers:
             self._subscribers.append(callback)
@@ -138,7 +137,7 @@ class TaskManager:
             except Exception as e:
                 logger.error(f"[TaskManager] Error in subscriber initial push: {e}")
 
-    def unsubscribe(self, callback: Callable[[List[AppTask]], None]):
+    def unsubscribe(self, callback: Callable[[list[AppTask]], None]):
         if callback in self._subscribers:
             self._subscribers.remove(callback)
 
@@ -151,7 +150,7 @@ class TaskManager:
             except Exception as e:
                 logger.error(f"[TaskManager] Subscriber callback failed: {e}")
 
-    def get_all_tasks(self) -> List[AppTask]:
+    def get_all_tasks(self) -> list[AppTask]:
         """Return a snapshot of all tracked tasks + loaded history, ordered by creation."""
         active = list(self._tasks.values())
         active_ids = {t.id for t in active}
@@ -159,7 +158,7 @@ class TaskManager:
         combined = active + [h for h in self._history if h.id not in active_ids]
         return sorted(combined, key=lambda t: t.created_at, reverse=True)
 
-    def get_task(self, task_id: str) -> Optional[AppTask]:
+    def get_task(self, task_id: str) -> AppTask | None:
         return self._tasks.get(task_id)
 
     def submit_task(
@@ -170,7 +169,7 @@ class TaskManager:
         cancellable: bool = False,
         unique_key: str = None,  # type: ignore
         **kwargs,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Submit a new background task.  Thread-safe: may be called from either
         the event-loop thread or a worker thread (Flet dispatches sync on_click
@@ -400,7 +399,7 @@ class TaskManager:
     # --- Persistence ---
 
     @staticmethod
-    def _safe_dt(val) -> Optional[datetime.datetime]:
+    def _safe_dt(val) -> datetime.datetime | None:
         """
         Safely parse datetime from DB value, handling NaN/None/invalid.
 
@@ -421,7 +420,7 @@ class TaskManager:
 
     async def init_db(self):
         """Initialize persistence layer. Called once from main.py after CacheManager.init_db()."""
-        from data.cache_manager import CacheManager
+        from data.cache.cache_manager import CacheManager
 
         cache = CacheManager()
 
@@ -508,7 +507,7 @@ class TaskManager:
     async def _persist_snapshot(self, params: tuple):
         """Write a pre-captured snapshot tuple to DB."""
         try:
-            from data.cache_manager import CacheManager
+            from data.cache.cache_manager import CacheManager
 
             sql = (
                 "INSERT INTO task_history "
@@ -544,7 +543,7 @@ class TaskManager:
     async def _clear_finished_db(self, task_ids: list):
         """Delete specific tasks from DB using parameterized query."""
         try:
-            from data.cache_manager import CacheManager
+            from data.cache.cache_manager import CacheManager
 
             placeholders = ",".join([f"${i + 1}" for i in range(len(task_ids))])
             await CacheManager()._write_db(

@@ -6,6 +6,7 @@ Tests for Data Sync Strategies.
 """
 
 import datetime
+import inspect
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,11 +16,16 @@ import pytest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from data.sync_strategies.base import SyncContext, SyncResult
-from data.sync_strategies.financial import FinancialSyncStrategy
-from data.sync_strategies.historical import HistoricalSyncStrategy
-from data.sync_strategies.holder import HolderSyncStrategy
-from data.sync_strategies.macro import MacroSyncStrategy, _parse_period
+from data.external.tushare_client import TushareClient
+from data.mixins.health_mixin import HealthCheckMixin
+from data.persistence.daos.financial_dao import FinancialDao
+from data.persistence.daos.quote_dao import QuoteDao
+from data.sync import financial, historical, holder
+from data.sync.base import SyncContext, SyncResult
+from data.sync.financial import FinancialSyncStrategy
+from data.sync.historical import HistoricalSyncStrategy
+from data.sync.holder import HolderSyncStrategy
+from data.sync.macro import MacroSyncStrategy, _parse_period
 
 
 class TestSyncResult:
@@ -276,7 +282,7 @@ class TestMacroSyncStrategy:
         mock_dao.save_macro_economy = AsyncMock(return_value=0)
         mock_dao.save_shibor_daily = AsyncMock(return_value=0)
 
-        with patch("data.sync_strategies.macro.MacroDao", return_value=mock_dao):
+        with patch("data.sync.macro.MacroDao", return_value=mock_dao):
             mock_context.cache.market_dao = AsyncMock()
             mock_context.cache.market_dao.get_latest_index_weight_date = AsyncMock(
                 return_value=None
@@ -483,7 +489,11 @@ class TestHistoricalSyncStrategy:
             ]
         )
         mock_context.cache.get_cached_dates_for_table = AsyncMock(
-            return_value={"20240101", "20240102", "20240103"}
+            return_value={
+                datetime.date(2024, 1, 1),
+                datetime.date(2024, 1, 2),
+                datetime.date(2024, 1, 3),
+            }
         )
 
         result = await strategy.run(days=30)
@@ -501,7 +511,9 @@ class TestHistoricalSyncStrategy:
         mock_context.cache.check_data_exists = AsyncMock(return_value=False)
 
         with pytest.raises(Exception, match="Quotes API Error"):
-            await strategy.sync_daily_market_snapshot("20240101", force=True)
+            await strategy.sync_daily_market_snapshot(
+                datetime.date(2024, 1, 1), force=True
+            )
 
     @pytest.mark.asyncio
     async def test_sync_daily_market_snapshot_success(self, strategy, mock_context):
@@ -545,7 +557,7 @@ class TestHistoricalSyncStrategy:
         mock_context.cache.save_daily_indicators = AsyncMock(return_value=1)
         mock_context.cache.update_sync_status = AsyncMock()
 
-        await strategy.sync_daily_market_snapshot("20240101", force=True)
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 1, 1), force=True)
 
         mock_context.cache.save_daily_quotes.assert_called_once()
         mock_context.cache.save_daily_indicators.assert_called_once()
@@ -592,7 +604,7 @@ class TestHistoricalSyncStrategy:
         mock_context.cache.save_daily_indicators = AsyncMock(return_value=1)
         mock_context.cache.update_sync_status = AsyncMock()
 
-        await strategy.sync_daily_market_snapshot("20240101", force=True)
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 1, 1), force=True)
 
         mock_context.cache.save_daily_quotes.assert_called_once()
 
@@ -685,11 +697,14 @@ class TestFinancialSyncStrategy:
         mock_context.cache.save_fina_mainbz = AsyncMock(return_value=0)
         mock_context.cache.mark_stock_step4_completed = AsyncMock()
 
-        with patch(
-            "utils.config_handler.ConfigHandler.get_max_batch_rows", return_value=10
-        ), patch(
-            "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
-            return_value=1,
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_max_batch_rows", return_value=10
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
         ):
             result = await strategy.run(force=True)
 
@@ -769,3 +784,360 @@ class TestSyncContextDataCleaning:
         df_normal = df[(df["pct_chg"] >= -20) & (df["pct_chg"] <= 20)]
 
         assert len(df_normal) == 2
+
+
+class TestDateTypeConsistency:
+    """Test cases for date type consistency across the codebase."""
+
+    def test_dao_date_methods_return_datetime_date(self):
+        for dao_cls, method_name in [
+            (QuoteDao, "get_cached_trade_dates"),
+            (QuoteDao, "get_cached_dates_for_table"),
+            (QuoteDao, "get_date_range"),
+            (FinancialDao, "get_cached_indicator_dates"),
+        ]:
+            if hasattr(dao_cls, method_name):
+                method = getattr(dao_cls, method_name)
+                source = inspect.getsource(method)
+                assert 'strftime("%Y%m%d")' not in source, (
+                    f"{dao_cls.__name__}.{method_name} should return datetime.date objects, "
+                    f"not strings. API layer handles conversion."
+                )
+
+    def test_api_layer_converts_date_to_string(self):
+        source = inspect.getsource(TushareClient._handle_api_call)
+        assert "strftime" in source, (
+            "_handle_api_call should convert datetime.date to string for Tushare API"
+        )
+        assert "%Y%m%d" in source, (
+            "_handle_api_call should use YYYYMMDD format for Tushare API"
+        )
+
+    def test_health_mixin_date_comparison_type_safe(self):
+        source = inspect.getsource(HealthCheckMixin.check_data_health)
+        assert "official_dates" in source and "local_dates" in source, (
+            "check_data_health should compare official_dates and local_dates"
+        )
+        assert "get_cached_trade_dates" in source, (
+            "check_data_health should use get_cached_trade_dates which returns datetime.date"
+        )
+
+    def test_historical_sync_trade_dates_type(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy._run_historical_sync
+        )
+        assert "trade_date_objs" in source or "datetime.date" in source, (
+            "_run_historical_sync should work with datetime.date objects"
+        )
+        assert '[d.strftime("%Y%m%d") for d in' not in source, (
+            "_run_historical_sync should not convert dates to strings internally. "
+            "Let API layer handle conversion."
+        )
+
+    def test_breakpoint_resume_date_comparison_type_safe(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy._run_historical_sync
+        )
+        assert "existing" in source and "trade_dates" in source, (
+            "Breakpoint resume should compare existing dates with trade_dates"
+        )
+        assert "set.intersection" in source, (
+            "Breakpoint resume should use set.intersection for date comparison"
+        )
+
+    def test_sync_methods_accept_datetime_date(self):
+        for method_name in [
+            "sync_daily_market_snapshot",
+            "sync_moneyflow",
+            "sync_northbound",
+        ]:
+            if hasattr(historical.HistoricalSyncStrategy, method_name):
+                method = getattr(historical.HistoricalSyncStrategy, method_name)
+                source = inspect.getsource(method)
+                assert "datetime.date" in source or "date | None" in source, (
+                    f"{method_name} should accept datetime.date parameter"
+                )
+
+    def test_no_date_to_string_conversion_in_sync_layer(self):
+        for module in [historical, financial, holder]:
+            source = inspect.getsource(module)
+            problematic_patterns = [
+                'strftime("%Y%m%d") for d in',
+                'strftime("%Y-%m-%d") for d in',
+            ]
+            for pattern in problematic_patterns:
+                if pattern in source:
+                    if module.__name__ == "data.sync.historical":
+                        continue
+                    assert False, (
+                        f"{module.__name__} should not convert dates to strings. "
+                        f"API layer handles this conversion."
+                    )
+
+    def test_historical_sync_only_uses_strftime_for_display(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy._run_historical_sync
+        )
+        strftime_matches = [
+            line.strip() for line in source.split("\n") if 'strftime("%Y%m%d")' in line
+        ]
+        for match in strftime_matches:
+            assert "progress_callback" in match or "I18n.get" in match, (
+                f"strftime in historical should only be for display/progress, found: {match}"
+            )
+
+    def test_get_cached_indicator_dates_returns_datetime_date(self):
+        source = inspect.getsource(FinancialDao.get_cached_indicator_dates)
+        assert "strftime" not in source, (
+            "get_cached_indicator_dates should return datetime.date objects"
+        )
+
+    def test_get_date_range_returns_datetime_date(self):
+        source = inspect.getsource(QuoteDao.get_date_range)
+        assert "strftime" not in source, (
+            "get_date_range should return datetime.date objects"
+        )
+
+
+class TestHistoricalSyncCriticalTables:
+    """Test that all synced tables are tracked for breakpoint resume."""
+
+    def test_synced_tables_class_attribute(self):
+        assert hasattr(historical.HistoricalSyncStrategy, "SYNCED_TABLES"), (
+            "HistoricalSyncStrategy should have SYNCED_TABLES class attribute"
+        )
+
+        synced_tables = set(historical.HistoricalSyncStrategy.SYNCED_TABLES)
+
+        expected_tables = {
+            "daily_quotes",
+            "daily_indicators",
+            "moneyflow_daily",
+            "limit_list",
+            "suspend_d",
+            "margin_daily",
+            "northbound_holding",
+            "moneyflow_hsgt",
+            "top_list",
+            "block_trade",
+            "index_daily",
+            "index_dailybasic",
+        }
+
+        missing = expected_tables - synced_tables
+        assert not missing, f"SYNCED_TABLES missing tables: {missing}"
+
+    def test_run_uses_synced_tables(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy._run_historical_sync
+        )
+
+        assert "self.SYNCED_TABLES" in source, (
+            "_run_historical_sync should use self.SYNCED_TABLES for breakpoint resume"
+        )
+
+
+class TestFieldExistenceCheck:
+    """Test that field existence checks are in place for critical data."""
+
+    def test_quotes_field_check_in_historical_sync(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "adj_factor" in source, (
+            "sync_daily_market_snapshot should check for adj_factor column"
+        )
+        assert "required_quote_cols" in source or "missing_cols" in source, (
+            "sync_daily_market_snapshot should check for required quote columns"
+        )
+
+    def test_basic_field_check_in_historical_sync(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "required_basic_cols" in source or "df_basic" in source, (
+            "sync_daily_market_snapshot should check for required basic/indicator columns"
+        )
+
+
+class TestErrorHandlingConsistency:
+    """Test that error handling is consistent across sync methods."""
+
+    def test_critical_data_raises_on_failure(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "critical=True" in source, (
+            "sync_daily_market_snapshot should mark quotes and basic as critical"
+        )
+        assert "raise e" in source or "raise " in source, (
+            "sync_daily_market_snapshot should raise exception for critical data failures"
+        )
+
+    def test_non_critical_data_logs_warning(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "logger.warning" in source, (
+            "sync_daily_market_snapshot should log warnings for non-critical failures"
+        )
+
+
+class TestSyncStatusUpdate:
+    """Test that sync status is updated correctly."""
+
+    def test_sync_status_updated_on_success(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "update_sync_status" in source, (
+            "sync_daily_market_snapshot should call update_sync_status"
+        )
+        assert "safe_update_status" in source, (
+            "sync_daily_market_snapshot should have safe_update_status helper"
+        )
+
+    def test_sync_status_skipped_on_failure(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "Skipping sync_status" in source or "result is not None" in source, (
+            "sync_daily_market_snapshot should skip sync_status update on failure"
+        )
+
+
+class TestSyncReturnValueConsistency:
+    """Test that sync_daily_market_snapshot returns consistent values."""
+
+    def test_sync_returns_true_on_success(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "return True" in source, (
+            "sync_daily_market_snapshot should return True on successful sync"
+        )
+
+    def test_sync_returns_true_on_cache_hit(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        lines = source.split("\n")
+        cache_hit_return_true = False
+        for i, line in enumerate(lines):
+            if (
+                "Cache hit" in line
+                or "check_all_critical_tables_exist" in lines[max(0, i - 2)]
+            ):
+                for j in range(i, min(i + 5, len(lines))):
+                    if "return True" in lines[j]:
+                        cache_hit_return_true = True
+                        break
+        assert cache_hit_return_true, (
+            "sync_daily_market_snapshot should return True when cache hit (skipping sync)"
+        )
+
+
+class TestRetryLogging:
+    """Test that retry failures are properly logged."""
+
+    def test_retry_logs_exception_details(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy._run_historical_sync
+        )
+
+        retry_section = False
+        has_exception_logging = False
+        lines = source.split("\n")
+        for i, line in enumerate(lines):
+            if "retry_one" in line and "async def" in line:
+                retry_section = True
+            if retry_section and "except Exception" in line:
+                for j in range(i, min(i + 5, len(lines))):
+                    if "logger.warning" in lines[j] or "logger.error" in lines[j]:
+                        has_exception_logging = True
+                        break
+        assert has_exception_logging, (
+            "retry_one should log exception details when retry fails"
+        )
+
+
+class TestCheckDataExists:
+    """Test that check_data_exists uses HistoricalSyncStrategy.SYNCED_TABLES."""
+
+    def test_check_data_exists_uses_synced_tables(self):
+        source = inspect.getsource(QuoteDao.check_data_exists)
+
+        assert "_get_default_synced_tables" in source, (
+            "check_data_exists should use _get_default_synced_tables() to get default tables"
+        )
+
+    def test_check_data_exists_used_in_sync(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "check_data_exists" in source, (
+            "sync_daily_market_snapshot should use check_data_exists for cache checking"
+        )
+
+    def test_synced_tables_consistency(self):
+        """
+        Verify that QuoteDao.check_data_exists default tables match
+        HistoricalSyncStrategy.SYNCED_TABLES.
+        """
+        from data.persistence.daos.quote_dao import _get_default_synced_tables
+
+        dao_tables = set(_get_default_synced_tables())
+        strategy_tables = set(historical.HistoricalSyncStrategy.SYNCED_TABLES)
+
+        assert dao_tables == strategy_tables, (
+            f"Table mismatch: DAO={dao_tables}, Strategy={strategy_tables}"
+        )
+
+
+class TestDataIntegrityVerification:
+    """Test that data integrity is verified after save."""
+
+    def test_verify_data_integrity_function_exists(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "verify_data_integrity" in source, (
+            "sync_daily_market_snapshot should have verify_data_integrity function"
+        )
+
+    def test_verify_checks_fetched_vs_saved(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        assert "fetched" in source and "saved" in source, (
+            "verify_data_integrity should compare fetched vs saved row counts"
+        )
+
+    def test_save_if_ok_returns_dict(self):
+        source = inspect.getsource(
+            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
+        )
+
+        save_if_ok_section = False
+        has_dict_return = False
+        lines = source.split("\n")
+        for i, line in enumerate(lines):
+            if "async def save_if_ok" in line:
+                save_if_ok_section = True
+            if save_if_ok_section and ("saved" in line and "fetched" in line):
+                has_dict_return = True
+                break
+        assert has_dict_return, (
+            "save_if_ok should return a dict with 'saved' and 'fetched' keys"
+        )

@@ -16,11 +16,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from data.daos.holder_dao import HolderDao
-from data.daos.macro_dao import MacroDao
-from data.daos.market_dao import MarketDao
-from data.daos.screener_dao import ScreenerDao
-from data.daos.sync_dao import SyncDao
+from data.persistence.daos.holder_dao import HolderDao
+from data.persistence.daos.macro_dao import MacroDao
+from data.persistence.daos.market_dao import MarketDao
+from data.persistence.daos.screener_dao import ScreenerDao
+from data.persistence.daos.sync_dao import SyncDao
 
 TEST_DB_URL = "postgresql+asyncpg://postgres:123456@localhost:5432/test_astock"
 
@@ -693,3 +693,54 @@ class TestSyncDao:
         await sync_dao.clear_step4_sync_status()
         completed = await sync_dao.get_completed_step4_stocks(sync_version=1)
         assert len(completed) == 0
+
+
+class TestScreenerDaoDynamicCols:
+    """Tests for ScreenerDao dynamic column reflection"""
+
+    def test_sh_base_cols_excludes_thinking(self):
+        """Verify SH_BASE_COLS dynamically reflects columns and excludes 'thinking'"""
+        from data.persistence.daos.screener_dao import ScreenerDao
+
+        dao = ScreenerDao.__new__(ScreenerDao)
+        cols_str = dao.SH_BASE_COLS
+
+        col_list = [c.strip() for c in cols_str.split(",")]
+
+        assert "thinking" not in col_list
+        assert "id" in col_list
+        assert "trade_date" in col_list
+        assert "ts_code" in col_list
+        assert "ai_score" in col_list
+        assert "prediction_result" in col_list
+
+    def test_sh_full_cols_includes_thinking(self):
+        """Verify SH_FULL_COLS includes 'thinking'"""
+        from data.persistence.daos.screener_dao import ScreenerDao
+
+        dao = ScreenerDao.__new__(ScreenerDao)
+        full_cols = dao.SH_FULL_COLS
+
+        assert "thinking" in full_cols
+        assert full_cols.endswith(", thinking")
+
+    def test_sh_base_cols_matches_model(self):
+        """Verify SH_BASE_COLS count matches ScreeningHistory columns minus 'thinking'"""
+        from data.persistence.daos.screener_dao import ScreenerDao
+        from data.persistence.models import ScreeningHistory
+
+        dao = ScreenerDao.__new__(ScreenerDao)
+        col_list = [c.strip() for c in dao.SH_BASE_COLS.split(",")]
+
+        expected_count = len(ScreeningHistory.__table__.columns) - 1
+        assert len(col_list) == expected_count
+
+    def test_sh_base_cols_cached(self):
+        """Verify cached_property only computes once"""
+        from data.persistence.daos.screener_dao import ScreenerDao
+
+        dao = ScreenerDao.__new__(ScreenerDao)
+        result1 = dao.SH_BASE_COLS
+        result2 = dao.SH_BASE_COLS
+
+        assert result1 is result2

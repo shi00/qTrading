@@ -10,15 +10,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.review_manager import ReviewManager
+from data.persistence.review_manager import ReviewManager
 
 
 class TestReviewManagerInit(unittest.TestCase):
     """测试初始化"""
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_init(self, mock_config, mock_api, mock_cache):
         """正常初始化"""
         manager = ReviewManager()
@@ -31,9 +31,9 @@ class TestReviewManagerInit(unittest.TestCase):
 class TestGetPendingPredictions(unittest.TestCase):
     """测试获取待复盘预测"""
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_pending_success(self, mock_config, mock_api, mock_cache):
         """成功获取待复盘预测"""
         mock_df = pd.DataFrame(
@@ -59,9 +59,9 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_pending_empty(self, mock_config, mock_api, mock_cache):
         """空结果"""
         mock_screener_dao = MagicMock()
@@ -81,9 +81,9 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_pending_error(self, mock_config, mock_api, mock_cache):
         """错误返回空 DataFrame"""
         mock_screener_dao = MagicMock()
@@ -107,9 +107,9 @@ class TestGetPendingPredictions(unittest.TestCase):
 class TestGetLearningContext(unittest.TestCase):
     """测试获取学习上下文"""
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_learning_context_with_data(self, mock_config, mock_api, mock_cache):
         """有历史数据"""
         mock_wins = pd.DataFrame(
@@ -151,9 +151,9 @@ class TestGetLearningContext(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_learning_context_empty(self, mock_config, mock_api, mock_cache):
         """无历史数据"""
         mock_screener_dao = MagicMock()
@@ -171,9 +171,9 @@ class TestGetLearningContext(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_learning_context_error(self, mock_config, mock_api, mock_cache):
         """错误返回空上下文"""
         mock_screener_dao = MagicMock()
@@ -197,9 +197,9 @@ class TestGetLearningContext(unittest.TestCase):
 class TestUpdateResult(unittest.TestCase):
     """测试更新结果"""
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_update_result_success(self, mock_config, mock_api, mock_cache):
         """成功更新结果"""
         mock_screener_dao = MagicMock()
@@ -221,9 +221,9 @@ class TestUpdateResult(unittest.TestCase):
 class TestSaveResults(unittest.TestCase):
     """测试保存结果"""
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_save_results_success(self, mock_config, mock_api, mock_cache):
         """成功保存结果"""
         mock_df = pd.DataFrame(
@@ -268,9 +268,9 @@ class TestSaveResults(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_save_results_empty(self, mock_config, mock_api, mock_cache):
         """空 DataFrame 不保存"""
         mock_screener_dao = MagicMock()
@@ -288,9 +288,9 @@ class TestSaveResults(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_save_results_none(self, mock_config, mock_api, mock_cache):
         """None 不保存"""
         mock_screener_dao = MagicMock()
@@ -312,9 +312,9 @@ class TestSaveResults(unittest.TestCase):
 class TestSaveResultsEdgeCases(unittest.TestCase):
     """测试保存结果边界条件"""
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_save_results_missing_ts_code(self, mock_config, mock_api, mock_cache):
         """缺少 ts_code 的行被跳过"""
         mock_df = pd.DataFrame(
@@ -339,9 +339,9 @@ class TestSaveResultsEdgeCases(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.review_manager.CacheManager")
-    @patch("data.review_manager.TushareClient")
-    @patch("data.review_manager.ConfigHandler")
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
     def test_save_results_with_nan_values(self, mock_config, mock_api, mock_cache):
         """NaN 值被正确处理"""
         import numpy as np

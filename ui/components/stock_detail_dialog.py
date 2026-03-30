@@ -467,9 +467,12 @@ class StockDetailDialog(ft.AlertDialog):
         except Exception as e:
             import traceback
 
+            from ui.i18n import classify_error
+
             logger.error(f"Error loading chart: {e}\n{traceback.format_exc()}")
+            error_info = classify_error(e, context="chart")
             self.chart_container.content = ft.Text(
-                I18n.get("detail_err_load_chart").format(error=str(e)[:80]),
+                error_info["message"],
                 color=AppColors.ERROR,
             )
             self.chart_container.update()

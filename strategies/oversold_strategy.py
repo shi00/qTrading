@@ -5,7 +5,7 @@ import typing
 import pandas as pd
 import polars as pl
 
-from data.quality_gate import QualityGateError, QualityTier, require_quality
+from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from ui.i18n import I18n
@@ -259,7 +259,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 f"[OversoldStrategy] Error during execution: {e}",
                 exc_info=True,
             )
-            raise RuntimeError(f"Strategy internal error: {e}")
+            raise RuntimeError(f"Strategy internal error: {e}") from e
 
     # ============================================================
     # Context Builders — Strategy-specific enhancements

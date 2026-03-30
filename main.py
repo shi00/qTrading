@@ -3,9 +3,9 @@ import logging
 
 import flet as ft
 
-from data.cache_manager import CacheManager
-from data.market_data_service import MarketDataService
-from data.news_subscription import NewsSubscriptionService
+from data.cache.cache_manager import CacheManager
+from data.domain_services.market_data_service import MarketDataService
+from data.external.news_subscription import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
 from ui.i18n import I18n
 from ui.theme import apply_page_theme
@@ -21,38 +21,22 @@ logger = logging.getLogger(__name__)
 async def main(page: ft.Page):
     setup_logging()
 
-    # Ensure config file has all defaults populated
     ConfigHandler.ensure_defaults()
 
-    # --- Network Optimization    # [CRITICAL] Initialize Proxy Manager FIRST
-    # 必须在所有网络请求库（如 TushareClient, Requests）初始化之前设置好 Proxy
-    # 此方法是同步阻塞的，确保环境变量在后续组件加载前就绪
     ProxyManager.apply_smart_proxy_policy()
 
-    I18n.initialize()  # Initialize Locale
+    I18n.initialize()
 
-    # Start Cache Manager explicitly on Main Loop
-    await CacheManager().init_db()
-
-    # Initialize TaskManager persistence (load history, mark interrupted tasks)
-    from services.task_manager import TaskManager
-
-    await TaskManager().init_db()
-
-    # Start background scheduler
-    scheduler.start()
+    cache_manager = CacheManager()
 
     page.title = I18n.get("app_title")
     page.window_icon = "icon.png"  # type: ignore
-
-    # ... (Cleanup resources code) ...
 
     async def cleanup_resources(e):
         """
         Graceful shutdown handler.
         Orchestrate stopping all services and allow natural exit.
         """
-        # Silence low-level asyncio network warnings during shutdown
         logging.getLogger("asyncio").setLevel(logging.ERROR)
 
         logger.info("[Main] Cleanup initiated. Stopping services...")
@@ -74,7 +58,6 @@ async def main(page: ft.Page):
             logger.info("[Main] - Stopping Market Data Service...")
             MarketDataService().stop()
 
-            # Give services a moment to stop internal loops and let in-flight DB queries finish
             await asyncio.sleep(1.5)
 
             logger.info("[Main] Step 2: Signaling Global Cancellation...")
@@ -83,13 +66,11 @@ async def main(page: ft.Page):
             dp = DataProcessor()
             await dp.stop()
 
-            # Stop Toasts (Cancel pending timers)
             logger.info("[Main] Step 3: Stopping Toast Manager...")
             if hasattr(page, "toast") and page.toast:  # type: ignore
                 try:
                     import inspect
 
-                    # Robust shutdown: handle sync or async stop_all
                     if hasattr(page.toast, "stop_all"):  # type: ignore
                         res = page.toast.stop_all()  # type: ignore
                         if inspect.isawaitable(res):
@@ -99,13 +80,12 @@ async def main(page: ft.Page):
 
             logger.info("[Main] Step 4: Waiting for resources to release...")
 
-            # Flush and Close Database
             await dp.close()
             logger.info("[Main] DB Writer flushed and closed.")
 
             logger.info("[Main] Step 4.5: Closing async DB connection pool...")
             try:
-                from data.cache_manager import CacheManager
+                from data.cache.cache_manager import CacheManager
 
                 await CacheManager().close()
             except Exception:
@@ -122,7 +102,6 @@ async def main(page: ft.Page):
 
         logger.info("[Main] All resources released. Exiting process immediately.")
 
-        # Give logs a split second to flush
         import os
         import time
 
@@ -133,12 +112,9 @@ async def main(page: ft.Page):
 
     def on_error(e):
         logger.error(f"[App] Unhandled UI Exception: {e}", exc_info=True)
-        # Optional: Show toast to user if critical?
-        # if hasattr(page, "toast"): page.toast.show(f"Error: {e}", "error")
 
     page.on_error = on_error
 
-    # --- Window Initialization Strategy ---
     page.window.min_width = 960
     page.window.min_height = 640
     if not page.window.width or page.window.width < 1200:
@@ -149,49 +125,57 @@ async def main(page: ft.Page):
     page.padding = 0
     apply_page_theme(page)
 
-    # --- Toast Manager (Proposal A) ---
     page.toast = ToastManager(page)  # type: ignore
 
     def show_toast(message, type="info"):
         page.toast.show(message, type)  # type: ignore
 
-    page.show_toast = show_toast  # Helper for views  # type: ignore
+    page.show_toast = show_toast  # type: ignore
 
-    # --- Initialize App Layout ---
-    from ui.app_layout import AppLayout
+    async def _init_services_and_start_app():
+        """Initialize all services and start the app."""
+        await cache_manager.init_db()
 
-    app_layout = AppLayout(page)
+        from services.task_manager import TaskManager
 
-    async def start_app():
-        """Start the main app layout"""
+        await TaskManager().init_db()
 
-        # Register Global News Alert (Decoupled from AppLayout)
+        scheduler.start()
+
+        from ui.app_layout import AppLayout
+
+        app_layout = AppLayout(page)
+
         def on_news_alert(msg):
             if hasattr(page, "toast") and page.toast:  # type: ignore
                 page.toast.show(f"📰 {msg}", type="info")  # type: ignore
 
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
 
-        # Start Background Services (Moved from AppLayout)
         NewsSubscriptionService().start()
         MarketDataService().start()
 
-        # Show UI
         app_layout.show()
 
     async def on_onboarding_complete():
-        """Callback when onboarding wizard completes"""
+        """Callback when onboarding wizard completes."""
+        await _init_services_and_start_app()
         ConfigHandler.set_onboarding_complete(True)
-        await start_app()
 
-    # --- Check if onboarding is needed ---
+    db_url = ConfigHandler.get_db_url()
     token = ConfigHandler.get_token()
+    llm_api_key = ConfigHandler.get_llm_config().get("api_key")
     onboarding_complete = ConfigHandler.is_onboarding_complete()
-    masked_token = f"{token[:4]}****" if token and len(token) > 4 else "None"
-    logger.debug(f"Token='{masked_token}', Onboarding='{onboarding_complete}'")
 
-    if not token or not onboarding_complete:
-        # Show onboarding wizard
+    masked_token = f"{token[:4]}****" if token and len(token) > 4 else "None"
+    masked_llm_key = (
+        f"{llm_api_key[:4]}****" if llm_api_key and len(llm_api_key) > 4 else "None"
+    )
+    logger.debug(
+        f"DB_URL configured: {bool(db_url)}, Token='{masked_token}', API_Key='{masked_llm_key}', Onboarding='{onboarding_complete}'"
+    )
+
+    if not db_url or not token or not llm_api_key or not onboarding_complete:
         wizard = OnboardingWizard(page, on_complete=on_onboarding_complete)
         page.add(
             ft.Container(
@@ -201,8 +185,7 @@ async def main(page: ft.Page):
             ),
         )
     else:
-        # Show main app directly
-        await start_app()
+        await _init_services_and_start_app()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from ui.theme import AppColors
 from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
+from ui.views.settings_tabs.database_tab import DatabaseTab
 from ui.views.settings_tabs.system_tab import SystemTab
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ class SettingsView(ft.Container):
     # Tab configuration: (i18n_key, icon)
     TAB_CONFIG = [
         ("settings_tab_data", ft.Icons.STORAGE),
+        ("settings_tab_database", ft.Icons.DNS),
         ("settings_tab_ai", ft.Icons.SMART_TOY),
         ("settings_tab_tasks", ft.Icons.SCHEDULE),
         ("settings_tab_notify", ft.Icons.NOTIFICATIONS),
@@ -37,9 +39,10 @@ class SettingsView(ft.Container):
         # 2. Init Tabs (order must match TAB_CONFIG)
         self.tab_contents = [
             DataSourceTab(self.show_snack),
+            DatabaseTab(self.show_snack),
             AIBrainTab(self.show_snack),
             AutomationTab(self.show_snack),
-            NotificationsTab(self.show_snack, self),  # Pass self as page_ref holder
+            NotificationsTab(self.show_snack, self),
             SystemTab(self.show_snack),
         ]
         assert len(self.TAB_CONFIG) == len(self.tab_contents), (

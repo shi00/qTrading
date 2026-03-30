@@ -9,8 +9,8 @@ import unittest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from data.cache_manager import CacheManager
-from data.models import Base
+from data.cache.cache_manager import CacheManager
+from data.persistence.models import Base
 
 TEST_DB_URL = "postgresql+asyncpg://postgres:123456@localhost:5432/test_astock"
 

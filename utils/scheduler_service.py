@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from data.data_processor import DataProcessor
-from data.review_manager import ReviewManager
+from data.persistence.review_manager import ReviewManager
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager

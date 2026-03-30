@@ -1,0 +1,6 @@
+# === Testing & Automation Framework ===
+pytest>=8.0.0
+pytest-asyncio>=0.23.5
+
+# === Code Quality & Linting ===
+# 可以在此处补充 black, flake8, mypy 等工具

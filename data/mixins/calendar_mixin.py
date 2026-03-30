@@ -14,7 +14,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from data.services.trade_calendar_service import TradeCalendarService
+    from data.domain_services.trade_calendar_service import TradeCalendarService
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class CalendarMixin:
         self.trade_calendar: TradeCalendarService
     """
 
-    trade_calendar: "TradeCalendarService"
+    trade_calendar: TradeCalendarService
 
     async def get_latest_trade_date(self):
         """

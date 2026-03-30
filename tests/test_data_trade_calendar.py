@@ -22,7 +22,7 @@ import pandas as pd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from data.services.trade_calendar_service import TradeCalendarService
+from data.domain_services.trade_calendar_service import TradeCalendarService
 from tests.test_infra_base import TestDatabaseBase
 
 
@@ -223,7 +223,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         end = datetime.date(2024, 3, 31)
         await self._seed_trade_calendar(start, end)
 
-        with patch("data.services.trade_calendar_service.get_now") as mock_now:
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
             mock_now.return_value = mock_dt
 
@@ -237,7 +237,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         end = datetime.date(2024, 3, 31)
         await self._seed_trade_calendar(start, end)
 
-        with patch("data.services.trade_calendar_service.get_now") as mock_now:
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 10, 0, 0)
             mock_now.return_value = mock_dt
 
@@ -685,7 +685,7 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
             datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
         )
 
-        with patch("data.services.trade_calendar_service.get_now") as mock_now:
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
             mock_now.return_value = mock_dt
 
@@ -706,7 +706,7 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
             datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
         )
 
-        with patch("data.services.trade_calendar_service.get_now") as mock_now:
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
             mock_now.return_value = mock_dt
 
@@ -1126,7 +1126,7 @@ class TestTradeCalendarServiceCacheTTL(TestDatabaseBase):
             datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
         )
 
-        with patch("data.services.trade_calendar_service.get_now") as mock_now:
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
             mock_now.return_value = mock_dt
 
@@ -1143,7 +1143,7 @@ class TestTradeCalendarServiceCacheTTL(TestDatabaseBase):
             datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
         )
 
-        with patch("data.services.trade_calendar_service.get_now") as mock_now:
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
             mock_now.return_value = mock_dt
 

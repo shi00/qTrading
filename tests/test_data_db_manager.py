@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import config
-from data.database_manager import DatabaseManager
+from data.persistence.database_manager import DatabaseManager
 from tests.test_infra_base import TEST_DB_URL, TestDatabaseBase
 
 

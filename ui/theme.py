@@ -484,6 +484,17 @@ class AppStyles:
         )
 
     @staticmethod
+    def secondary_button() -> ft.ButtonStyle:
+        return ft.ButtonStyle(
+            color=ft.Colors.PRIMARY,
+            bgcolor=ft.Colors.TRANSPARENT,
+            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            shape=ft.RoundedRectangleBorder(radius=2),
+            side=ft.BorderSide(1, ft.Colors.PRIMARY),
+            elevation=0,
+        )
+
+    @staticmethod
     def accent_button() -> ft.ButtonStyle:
         return ft.ButtonStyle(
             color=ft.Colors.ON_SECONDARY,

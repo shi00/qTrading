@@ -19,13 +19,13 @@ The Mixin handles:
 import asyncio
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Callable, Optional
 
 import pandas as pd
 
-from data.news_fetcher import NewsFetcher
+from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
@@ -50,7 +50,7 @@ class PreFetchedContext:
     news_tasks: dict = field(default_factory=dict)
     history_context: str = ""
     global_context: str = ""
-    trade_date: Optional[object] = None
+    trade_date: object | None = None
 
     indicators: pd.DataFrame = field(default_factory=pd.DataFrame)
     sector_stats: dict = field(default_factory=dict)
@@ -160,7 +160,7 @@ class AIStrategyMixin:
         ui_prompt_override = context.get("params", {}).get("ai_system_prompt", None)
 
         # --- Guard: AI Available? ---
-        if ai_client.client is None:
+        if not ai_client.is_cloud_available():
             logger.info(
                 "[AIStrategyMixin] AI service not configured — returning math-only results",
             )
@@ -188,7 +188,7 @@ class AIStrategyMixin:
         # --- Pre-fetch Learning Context ONCE for the entire batch ---
         history_context = ""
         try:
-            from data.review_manager import ReviewManager
+            from data.persistence.review_manager import ReviewManager
 
             rm = ReviewManager()
             history_context = await rm.get_learning_context()
@@ -447,7 +447,7 @@ class AIStrategyMixin:
         )
 
         # Cleanup: Cancel any orphan news tasks that were never awaited (e.g. user cancelled early)
-        for code, task in prefetched.news_tasks.items():
+        for _code, task in prefetched.news_tasks.items():
             if not task.done():
                 task.cancel()
 

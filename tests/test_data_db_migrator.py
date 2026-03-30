@@ -26,7 +26,7 @@ def mock_engine():
 @pytest.fixture
 def mock_thread_pool():
     """创建模拟的线程池管理器"""
-    with patch("data.db_migrator.ThreadPoolManager") as mock_tp:
+    with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
         tp_instance = MagicMock()
         tp_instance.run_async = AsyncMock()
         mock_tp.return_value = tp_instance
@@ -37,9 +37,9 @@ class TestDatabaseMigrator:
     """测试 DatabaseMigrator 类"""
 
     @pytest.mark.asyncio
-    @patch("data.db_migrator.command")
-    @patch("data.db_migrator.ScriptDirectory")
-    @patch("data.db_migrator.Config")
+    @patch("data.persistence.db_migrator.command")
+    @patch("data.persistence.db_migrator.ScriptDirectory")
+    @patch("data.persistence.db_migrator.Config")
     async def test_fresh_install(
         self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
     ):
@@ -47,7 +47,7 @@ class TestDatabaseMigrator:
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(return_value=(False, False))
 
-        from data.db_migrator import DatabaseMigrator
+        from data.persistence.db_migrator import DatabaseMigrator
 
         await DatabaseMigrator.init_db(engine)
 
@@ -59,9 +59,9 @@ class TestDatabaseMigrator:
         mock_command.upgrade.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.db_migrator.command")
-    @patch("data.db_migrator.ScriptDirectory")
-    @patch("data.db_migrator.Config")
+    @patch("data.persistence.db_migrator.command")
+    @patch("data.persistence.db_migrator.ScriptDirectory")
+    @patch("data.persistence.db_migrator.Config")
     async def test_legacy_schema_backward_compatibility(
         self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
     ):
@@ -76,7 +76,7 @@ class TestDatabaseMigrator:
             mock_rev1,
         ]
 
-        from data.db_migrator import DatabaseMigrator
+        from data.persistence.db_migrator import DatabaseMigrator
 
         await DatabaseMigrator.init_db(engine)
 
@@ -89,9 +89,9 @@ class TestDatabaseMigrator:
         mock_command.upgrade.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.db_migrator.command")
-    @patch("data.db_migrator.ScriptDirectory")
-    @patch("data.db_migrator.Config")
+    @patch("data.persistence.db_migrator.command")
+    @patch("data.persistence.db_migrator.ScriptDirectory")
+    @patch("data.persistence.db_migrator.Config")
     async def test_up_to_date_schema(
         self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
     ):
@@ -99,7 +99,7 @@ class TestDatabaseMigrator:
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(return_value=(True, True))
 
-        from data.db_migrator import DatabaseMigrator
+        from data.persistence.db_migrator import DatabaseMigrator
 
         await DatabaseMigrator.init_db(engine)
 
@@ -110,9 +110,9 @@ class TestDatabaseMigrator:
         mock_command.upgrade.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.db_migrator.command")
-    @patch("data.db_migrator.ScriptDirectory")
-    @patch("data.db_migrator.Config")
+    @patch("data.persistence.db_migrator.command")
+    @patch("data.persistence.db_migrator.ScriptDirectory")
+    @patch("data.persistence.db_migrator.Config")
     async def test_legacy_schema_no_baseline_found(
         self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
     ):
@@ -122,7 +122,7 @@ class TestDatabaseMigrator:
 
         mock_script.from_config.return_value.walk_revisions.return_value = []
 
-        from data.db_migrator import DatabaseMigrator
+        from data.persistence.db_migrator import DatabaseMigrator
 
         await DatabaseMigrator.init_db(engine)
 
@@ -133,9 +133,9 @@ class TestDatabaseMigrator:
         mock_command.upgrade.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.db_migrator.command")
-    @patch("data.db_migrator.ScriptDirectory")
-    @patch("data.db_migrator.Config")
+    @patch("data.persistence.db_migrator.command")
+    @patch("data.persistence.db_migrator.ScriptDirectory")
+    @patch("data.persistence.db_migrator.Config")
     async def test_inspection_error_continues(
         self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
     ):
@@ -143,7 +143,7 @@ class TestDatabaseMigrator:
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(side_effect=Exception("Connection error"))
 
-        from data.db_migrator import DatabaseMigrator
+        from data.persistence.db_migrator import DatabaseMigrator
 
         await DatabaseMigrator.init_db(engine)
 
@@ -153,9 +153,9 @@ class TestDatabaseMigrator:
         mock_command.upgrade.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.db_migrator.command")
-    @patch("data.db_migrator.ScriptDirectory")
-    @patch("data.db_migrator.Config")
+    @patch("data.persistence.db_migrator.command")
+    @patch("data.persistence.db_migrator.ScriptDirectory")
+    @patch("data.persistence.db_migrator.Config")
     async def test_upgrade_error_propagates(
         self, mock_config, mock_script, mock_command, mock_engine
     ):
@@ -163,12 +163,12 @@ class TestDatabaseMigrator:
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(return_value=(False, False))
 
-        with patch("data.db_migrator.ThreadPoolManager") as mock_tp:
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(side_effect=Exception("Upgrade failed"))
             mock_tp.return_value = tp_instance
 
-            from data.db_migrator import DatabaseMigrator
+            from data.persistence.db_migrator import DatabaseMigrator
 
             with pytest.raises(Exception, match="Upgrade failed"):
                 await DatabaseMigrator.init_db(engine)

@@ -3,7 +3,7 @@ import typing
 
 import pandas as pd
 
-from data.quality_gate import QualityTier, require_quality
+from data.persistence.quality_gate import QualityTier, require_quality
 from services.ai_service import AIService
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy, register_strategy
@@ -36,7 +36,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
 
         # Fail fast if API not configured (test_ai_core compliance)
         ai_client = AIService()
-        if hasattr(ai_client, "client") and ai_client.client is None:
+        if not ai_client.is_cloud_available():
             raise ValueError("API Key missing or client not initialized")
 
         if df is None or df.empty:

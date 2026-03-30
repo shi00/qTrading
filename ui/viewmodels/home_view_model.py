@@ -4,8 +4,8 @@ import logging
 import pandas as pd
 
 from data.data_processor import DataProcessor
-from data.market_data_service import MarketDataService
-from data.news_subscription import NewsSubscriptionService
+from data.domain_services.market_data_service import MarketDataService
+from data.external.news_subscription import NewsSubscriptionService
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)

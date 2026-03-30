@@ -8,7 +8,7 @@ import asyncio
 import unittest
 from unittest.mock import MagicMock
 
-from data.quality_gate import (
+from data.persistence.quality_gate import (
     QualityGate,
     QualityGateError,
     QualityTier,

@@ -187,16 +187,14 @@ class TestTokenBucketAsync(unittest.TestCase):
 class TestTokenBucketEdgeCases(unittest.TestCase):
     """测试边界条件"""
 
-    def test_consume_more_than_capacity(self):
-        """消费超过容量的令牌"""
+    def test_consume_more_than_capacity_raises_error(self):
+        """消费超过容量的令牌应该抛出异常"""
         bucket = TokenBucket(start_tokens=5, capacity=10, rate=10.0)
 
-        start_time = time.monotonic()
-        bucket.consume(15)
-        elapsed = time.monotonic() - start_time
+        with self.assertRaises(ValueError) as context:
+            bucket.consume(15)
 
-        self.assertGreater(elapsed, 0.5)
-        self.assertLess(bucket.tokens, 0)
+        self.assertIn("exceed bucket capacity", str(context.exception))
 
     def test_consume_zero_tokens(self):
         """消费零令牌"""

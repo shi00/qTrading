@@ -17,10 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from data.daos.base_dao import BaseDao
-from data.daos.financial_dao import FinancialDao
-from data.daos.quote_dao import QuoteDao
-from data.daos.stock_dao import StockDao
+from data.persistence.daos.base_dao import BaseDao
+from data.persistence.daos.financial_dao import FinancialDao
+from data.persistence.daos.quote_dao import QuoteDao
+from data.persistence.daos.stock_dao import StockDao
 
 
 class TestBaseDaoConvertParam:
@@ -243,8 +243,10 @@ class TestQuoteDao:
         assert len(result) == 2
 
     async def test_check_data_exists(self, quote_dao, clean_db):
-        """检查数据是否存在"""
-        assert not await quote_dao.check_data_exists("20240321")
+        """检查数据是否存在 - 使用 tables 参数只检查 quotes 表"""
+        assert not await quote_dao.check_data_exists(
+            "20240321", tables=["daily_quotes"]
+        )
 
         df = pd.DataFrame(
             [
@@ -266,7 +268,7 @@ class TestQuoteDao:
         )
         await quote_dao.save_daily_quotes(df)
 
-        assert await quote_dao.check_data_exists("20240321")
+        assert await quote_dao.check_data_exists("20240321", tables=["daily_quotes"])
 
     async def test_get_latest_trade_date(self, quote_dao, clean_db):
         """获取最新交易日期"""

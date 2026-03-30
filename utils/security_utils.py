@@ -67,7 +67,7 @@ class SecurityManager:
                 logger.critical(f"Failed to load backup key file: {e}")
                 raise RuntimeError(
                     "CRITICAL: Both primary and backup key files are corrupt. Cannot proceed.",
-                )
+                ) from e
 
         # 3. If neither exists, and we are sure main file doesn't exist (not just failed to load), generate new.
         # Note: The first check 'os.path.exists(cls.KEY_FILE)' handles the "file exists" case.
@@ -181,8 +181,8 @@ class SecurityManager:
             # Basic validation
             try:
                 decoded = base64.b64decode(encrypted_text.encode("utf-8"))
-            except Exception:
-                raise DecryptionError("Invalid Base64 encoding")
+            except Exception as e:
+                raise DecryptionError("Invalid Base64 encoding") from e
 
             if len(decoded) < 28:  # 12 nonce + 16 tag
                 raise DecryptionError("Data too short")
@@ -197,7 +197,7 @@ class SecurityManager:
             return plaintext.decode("utf-8")
 
         except (ValueError, TypeError) as e:
-            raise DecryptionError(f"Data corruption: {e}")
+            raise DecryptionError(f"Data corruption: {e}") from e
         except Exception as e:
             # cryptography library raises built-in exceptions like InvalidTag
-            raise DecryptionError(f"Decryption failed (Wrong Key?): {e}")
+            raise DecryptionError(f"Decryption failed (Wrong Key?): {e}") from e

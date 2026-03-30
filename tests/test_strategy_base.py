@@ -144,7 +144,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         c_prices = list(range(35, 5, -1))
 
         history_data = []
-        for d, p in zip(dates, c_prices):
+        for d, p in zip(dates, c_prices, strict=True):
             history_data.append(
                 {
                     "ts_code": "000003.SZ",

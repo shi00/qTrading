@@ -23,14 +23,14 @@ from data.constants import (
     get_health_depth_full_trade_days,
 )
 from data.data_dictionary import TABLE_DEFINITIONS
-from data.data_quality import DataQualityService
+from data.persistence.data_quality import DataQualityService
 from strategies.base_strategy import _STRATEGY_REGISTRY
 from ui.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
 if TYPE_CHECKING:
-    from data.cache_manager import CacheManager
+    from data.cache.cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class HealthCheckMixin:
     """
 
     # Type hints for IDE support (resolved at runtime via DataProcessor)
-    cache: "CacheManager"
+    cache: CacheManager
     _quality_tier: int | None
     _health_cache: dict
 

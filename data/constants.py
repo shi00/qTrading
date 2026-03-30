@@ -54,6 +54,8 @@ FINANCIAL_REPORT_SCHEMA_COLS = [
     "debt_to_assets",
     "or_yoy",
     "netprofit_yoy",
+    "goodwill",
+    "audit_result",
 ]
 
 # Major Market Indices to Track

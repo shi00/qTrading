@@ -33,6 +33,7 @@ COMMON_COLUMNS = {
     "close": "col_close",
     "pre_close": "col_pre_close",
     "change": "col_change",
+    "pct_change": "col_pct_chg",
     "pct_chg": "col_pct_chg",
     "vol": "col_vol",
     "volume": "col_volume",
@@ -191,6 +192,7 @@ TABLE_DEFINITIONS = {
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "audit_result": "col_audit_result",
+            "audit_sign": "col_audit_sign",
             "audit_fees": "col_audit_fees",
             "audit_agency": "col_audit_agency",
         },
@@ -228,6 +230,7 @@ TABLE_DEFINITIONS = {
             "stk_div": "col_stk_div",
             "stk_bo_rate": "col_stk_bo_rate",
             "stk_co_rate": "col_stk_co_rate",
+            "cash_div": "col_cash_div",
             "cash_div_tax": "col_cash_div_tax",
         },
     },
@@ -329,7 +332,7 @@ TABLE_DEFINITIONS = {
             "last_time": "col_last_time",
             "open_times": "col_open_times",
             "strth": "col_strth",
-            "limit_type": "col_limit_type",
+            "limit": "col_limit_type",
         },
     },
     "suspend_d": {
@@ -339,10 +342,15 @@ TABLE_DEFINITIONS = {
         "type": "global",
         "columns": {
             "suspend_timing": "col_suspend_timing",
-            "suspend_type_name": "col_suspend_type_name",
+            "suspend_type": "col_suspend_type_name",
         },
     },
-    "market_news": {"alias": "tab_market_news", "columns": {}},
+    "market_news": {
+        "alias": "tab_market_news",
+        "columns": {
+            "content_hash": "col_content_hash",
+        },
+    },
     "trade_cal": {"alias": "tab_trade_cal", "columns": {}},
     "screening_history": {
         "alias": "tab_screening_history",
@@ -429,6 +437,7 @@ TABLE_DEFINITIONS = {
             "holder_name": "col_holder_name",
             "hold_amount": "col_hold_amount",
             "hold_ratio": "col_hold_ratio",
+            "hold_float_ratio": "col_hold_float_ratio",
             "hold_change": "col_hold_change",
             "holder_type": "col_holder_type",
         },
@@ -485,31 +494,24 @@ def validate_schema_definitions():
     """
     Validates that all SQLAlchemy ORM models have a corresponding entry in TABLE_DEFINITIONS.
     Logs warnings for any missing definitions to help maintain data dictionary consistency.
+    Also validates column-level consistency between ORM and data dictionary.
     """
     import logging
 
     logger = logging.getLogger(__name__)
 
     try:
-        from data.models import Base
+        from data.persistence.models import Base
 
-        # 1. Extract database tables defined dynamically via SQLAlchemy ORM
-        # This replaces the obsolete schema.sql physical file parsing.
         db_tables = set(Base.metadata.tables.keys())
         defined_tables = set(TABLE_DEFINITIONS.keys())
 
-        # 2. Find tables in ORM models missing from our localized dictionary
-        missing_defs = db_tables - defined_tables
-
-        # 3. Filter out known internal/system tables
         IGNORED_TABLES = {
             "stock_sync_status",
-            "screening_history",
-            "task_history",
             "alembic_version",
         }
 
-        missing_defs = missing_defs - IGNORED_TABLES
+        missing_defs = db_tables - defined_tables - IGNORED_TABLES
 
         if missing_defs:
             logger.warning(
@@ -518,10 +520,39 @@ def validate_schema_definitions():
             logger.warning(
                 "[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.",
             )
-        else:
-            logger.info(
-                f"[DataDict] Schema validation passed. {len(db_tables)} tables verified via SQLAlchemy Metadata.",
+
+        extra_defs = defined_tables - db_tables - IGNORED_TABLES
+        if extra_defs:
+            logger.warning(
+                f"[DataDict] The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}",
             )
+
+        for table_name in defined_tables - IGNORED_TABLES:
+            if table_name not in db_tables:
+                continue
+
+            orm_table = Base.metadata.tables[table_name]
+            orm_cols = set(c.name for c in orm_table.columns)
+
+            dd_def = TABLE_DEFINITIONS.get(table_name, {})
+            dd_table_cols = set(dd_def.get("columns", {}).keys())
+            dd_cols_with_common = dd_table_cols | set(COMMON_COLUMNS.keys())
+
+            missing_cols = orm_cols - dd_cols_with_common - {"updated_at", "created_at"}
+            if missing_cols:
+                logger.warning(
+                    f"[DataDict] Table '{table_name}': ORM columns missing from data dictionary: {missing_cols}",
+                )
+
+            phantom_cols = dd_table_cols - orm_cols
+            if phantom_cols:
+                logger.warning(
+                    f"[DataDict] Table '{table_name}': Data dictionary has phantom columns not in ORM: {phantom_cols}",
+                )
+
+        logger.info(
+            f"[DataDict] Schema validation completed. {len(db_tables)} tables verified.",
+        )
 
     except Exception as e:
         logger.error(f"[DataDict] ORM validation failed: {e}")

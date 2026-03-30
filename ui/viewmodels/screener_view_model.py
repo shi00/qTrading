@@ -6,10 +6,10 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from data.cache_manager import CacheManager
+from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from data.quality_gate import QualityGateError
-from data.review_manager import ReviewManager
+from data.persistence.quality_gate import QualityGateError
+from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
 from ui.i18n import I18n
@@ -265,7 +265,7 @@ class ScreenerViewModel:
                     )
                 if self.on_progress:
                     self.on_progress(False)
-                raise RuntimeError(f"Strategy execution crashed: {e}")
+                raise RuntimeError(f"Strategy execution crashed: {e}") from e
 
         # Reset Local UI State
         self._full_results = None

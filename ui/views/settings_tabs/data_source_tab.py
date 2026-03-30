@@ -3,9 +3,9 @@ import logging
 
 import flet as ft
 
-from data.cache_manager import CacheManager
+from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from data.tushare_client import TushareClient
+from data.external.tushare_client import TushareClient
 from services.task_manager import TaskManager
 from ui.components.settings_widgets import (
     ActionChip,
@@ -181,7 +181,7 @@ class DataSourceTab(ft.Container):
             label=I18n.get("settings_token"),
             password=True,
             can_reveal_password=True,
-            value=current_token,
+            value="",
             expand=True,
             height=40,
             content_padding=10,
@@ -630,8 +630,11 @@ class DataSourceTab(ft.Container):
                 )
                 return "日更完成"
             except Exception as ex:
+                from ui.i18n import classify_error
+
+                error_info = classify_error(ex, context="general")
                 self.show_snack(
-                    f"{I18n.get('common_error')}: {str(ex)[:30]}",
+                    f"{I18n.get('common_op_fail').format(error=error_info['message'])}",
                     color=AppColors.ERROR,
                 )
                 raise
@@ -744,8 +747,11 @@ class DataSourceTab(ft.Container):
                 )
                 return "重建完成"
             except Exception as ex:
+                from ui.i18n import classify_error
+
+                error_info = classify_error(ex, context="general")
                 self.show_snack(
-                    f"{I18n.get('common_error')}: {str(ex)[:30]}",
+                    f"{I18n.get('common_op_fail').format(error=error_info['message'])}",
                     color=AppColors.ERROR,
                 )
                 raise
@@ -806,7 +812,12 @@ class DataSourceTab(ft.Container):
                 self.page.pubsub.send_all("cache_cleared")  # type: ignore
                 return "缓存已清空"
             except Exception as ex:
-                self.show_snack(I18n.get("ds_clean_fail").format(error=str(ex)[:100]))
+                from ui.i18n import classify_error
+
+                error_info = classify_error(ex, context="general")
+                self.show_snack(
+                    I18n.get("ds_clean_fail").format(error=error_info["message"])
+                )
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -882,11 +893,11 @@ class DataSourceTab(ft.Container):
                 color=AppColors.SUCCESS,
             )
         except Exception as ex:
-            # Verification failed - Don't save token, don't update singleton
+            from ui.i18n import classify_error
+
+            error_info = classify_error(ex, context="token")
             logger.warning(f"Token verification failed: {ex}")
-            self.status_text.value = I18n.get("ds_verify_fail_fmt").format(
-                error=str(ex)[:20],
-            )
+            self.status_text.value = error_info["message"]
             self.status_text.color = AppColors.ERROR
             self.status_icon.color = AppColors.ERROR
             self.status_icon.icon = ft.Icons.ERROR  # type: ignore
@@ -1014,7 +1025,7 @@ class DataSourceTab(ft.Container):
                 self.sync_button.disabled = False
                 self._set_sync_busy(False)
 
-                raise RuntimeError(msg)
+                raise RuntimeError(msg) from e
 
         TaskManager().submit_task(
             name=I18n.get("task_name_init_sync"),
@@ -1128,7 +1139,10 @@ class DataSourceTab(ft.Container):
             self.page.open(dlg)  # type: ignore
 
         except Exception as ex:
+            from ui.i18n import classify_error
+
+            error_info = classify_error(ex, context="general")
             self.show_snack(
-                I18n.get("common_op_fail").format(error=ex),
+                error_info["message"],
                 color=AppColors.ERROR,
             )

@@ -5,7 +5,7 @@ from abc import abstractmethod
 import pandas as pd
 import polars as pl
 
-from data.quality_gate import QualityGateError, QualityTier, require_quality
+from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class PolarsBaseStrategy(BaseStrategy):
             raise e
         except Exception as e:
             logger.error(f"[Strategy] {self.name} failed: {e}", exc_info=True)
-            return pd.DataFrame()
+            raise RuntimeError(f"Strategy {self.name} execution failed: {e}") from e
 
     @abstractmethod
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:

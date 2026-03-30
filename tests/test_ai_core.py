@@ -14,8 +14,8 @@ import pytest
 # Add project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.news_fetcher import NewsFetcher
-from data.review_manager import ReviewManager
+from data.external.news_fetcher import NewsFetcher
+from data.persistence.review_manager import ReviewManager
 from strategies.ai_strategy import AISelectionStrategy
 from utils.time_utils import get_now
 
@@ -83,7 +83,7 @@ def mock_data_processor():
     mock_dp.get_stock_history = mock_get_history
     mock_dp.is_cancelled.return_value = False
 
-    from data.quality_gate import QualityTier
+    from data.persistence.quality_gate import QualityTier
 
     mock_dp._quality_tier = QualityTier.SILVER
 
@@ -108,7 +108,7 @@ class TestAISelectionStrategy:
     ):
         """Test: Strategy raises error when API key is missing"""
         mock_ai_service = MagicMock()
-        mock_ai_service.client = None
+        mock_ai_service.is_cloud_available.return_value = False
         mock_ai_service_cls.return_value = mock_ai_service
 
         strategy = AISelectionStrategy()
@@ -132,7 +132,7 @@ class TestAISelectionStrategy:
     ):
         """Test: Strategy returns empty DataFrame when input is empty"""
         mock_ai_service = MagicMock()
-        mock_ai_service.client = MagicMock()
+        mock_ai_service.is_cloud_available.return_value = True
         mock_ai_service_cls.return_value = mock_ai_service
 
         strategy = AISelectionStrategy()
@@ -158,7 +158,7 @@ class TestAISelectionStrategy:
         and the strategy proceeds. It should not crash.
         """
         mock_ai_service = MagicMock()
-        mock_ai_service.client = MagicMock()
+        mock_ai_service.is_cloud_available.return_value = True
         mock_ai_service_cls.return_value = mock_ai_service
 
         strategy = AISelectionStrategy()
@@ -179,9 +179,8 @@ class TestAISelectionStrategy:
     ):
         """Test: Pre-filter correctly removes stocks with negative PE"""
         mock_ai_service = MagicMock()
-        mock_ai_service.client = MagicMock()
+        mock_ai_service.is_cloud_available.return_value = True
 
-        # Mock analyze_stock to return valid result
         async def mock_analyze(*args, **kwargs):
             return {"score": 80, "summary": "Test", "decision": "Buy"}
 

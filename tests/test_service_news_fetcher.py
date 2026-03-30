@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.news_fetcher import NewsFetcher
+from data.external.news_fetcher import NewsFetcher
 
 
 class TestGetStockNews(unittest.TestCase):
@@ -34,7 +34,7 @@ class TestGetStockNews(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_stock_news_cninfo_success(self, mock_pool):
         """巨潮公告成功"""
         mock_future = MagicMock()
@@ -75,7 +75,7 @@ class TestGetStockNews(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_stock_news_timeout(self, mock_pool):
         """超时返回空列表"""
         mock_manager = MagicMock()
@@ -92,7 +92,7 @@ class TestGetStockNews(unittest.TestCase):
 class TestGetLatestGlobalNews(unittest.TestCase):
     """测试全球新闻获取"""
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_global_news_success(self, mock_pool):
         """成功获取全球新闻"""
         mock_df = pd.DataFrame(
@@ -113,7 +113,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_global_news_empty(self, mock_pool):
         """空数据返回空列表"""
         mock_manager = MagicMock()
@@ -126,7 +126,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_global_news_none(self, mock_pool):
         """None 数据返回空列表"""
         mock_manager = MagicMock()
@@ -139,7 +139,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_global_news_runtime_error(self, mock_pool):
         """RuntimeError 返回空列表"""
         mock_manager = MagicMock()
@@ -156,7 +156,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 class TestGetUSMajorMoves(unittest.TestCase):
     """测试美股动态获取"""
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_success(self, mock_pool):
         """成功获取美股动态"""
         mock_data = [
@@ -175,7 +175,7 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_empty(self, mock_pool):
         """空数据返回默认消息"""
         mock_manager = MagicMock()
@@ -188,7 +188,7 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_none(self, mock_pool):
         """None 数据返回默认消息"""
         mock_manager = MagicMock()
@@ -201,7 +201,7 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_error(self, mock_pool):
         """错误返回错误消息"""
         mock_manager = MagicMock()
@@ -218,7 +218,7 @@ class TestGetUSMajorMoves(unittest.TestCase):
 class TestGetHotConcepts(unittest.TestCase):
     """测试热门概念获取"""
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_hot_concepts_success(self, mock_pool):
         """成功获取热门概念"""
         mock_df = pd.DataFrame(
@@ -240,7 +240,7 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_hot_concepts_with_green(self, mock_pool):
         """下跌概念显示绿色"""
         mock_df = pd.DataFrame(
@@ -260,7 +260,7 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_hot_concepts_empty(self, mock_pool):
         """空数据返回空列表"""
         mock_manager = MagicMock()
@@ -273,7 +273,7 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_hot_concepts_none(self, mock_pool):
         """None 数据返回空列表"""
         mock_manager = MagicMock()
@@ -286,7 +286,7 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_hot_concepts_error(self, mock_pool):
         """错误返回空列表"""
         mock_manager = MagicMock()
@@ -303,7 +303,7 @@ class TestGetHotConcepts(unittest.TestCase):
 class TestNewsFetcherEdgeCases(unittest.TestCase):
     """测试边界条件"""
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_concepts_with_nan_values(self, mock_pool):
         """NaN 涨跌幅处理"""
         import numpy as np
@@ -326,7 +326,7 @@ class TestNewsFetcherEdgeCases(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_concepts_missing_column(self, mock_pool):
         """缺少涨跌幅列"""
         mock_df = pd.DataFrame(

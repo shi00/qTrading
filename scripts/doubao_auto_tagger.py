@@ -13,7 +13,7 @@ APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if APP_ROOT not in sys.path:
     sys.path.append(APP_ROOT)
 
-from data.cache_manager import CacheManager  # noqa: E402
+from data.cache.cache_manager import CacheManager  # noqa: E402
 
 AUTH_FILE = os.path.join(APP_ROOT, ".doubao_auth_state.json")
 MAX_EXCLUDE_RETRIES = 2  # 对于有毒批次的最高容忍次数

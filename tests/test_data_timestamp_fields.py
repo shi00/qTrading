@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from data.daos.macro_dao import MacroDao
-from data.models import Base
+from data.persistence.daos.macro_dao import MacroDao
+from data.persistence.models import Base
 
 
 class TestCreatedAtSchema:
@@ -84,7 +84,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
         )
         self.engine = create_async_engine(self.test_db_url, echo=False)
 
-        from data.models import Base
+        from data.persistence.models import Base
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
@@ -110,7 +110,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
         """首次插入时，created_at 和 updated_at 由数据库设置，应该相等"""
         import pandas as pd
 
-        from data.daos.market_dao import MarketDao
+        from data.persistence.daos.market_dao import MarketDao
 
         dao = MarketDao(self.engine)
         ts_code = "test_created_at_equal"

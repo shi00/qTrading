@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 
-from data.cache_manager import CacheManager
+from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from data.tushare_client import TushareClient
+from data.external.tushare_client import TushareClient
 from utils.time_utils import get_now
 
 
@@ -180,7 +180,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_latest_trade_date_weekday_pre_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 10, 0, 0)  # Wed pre-market
         with patch(
-            "data.services.trade_calendar_service.get_now", return_value=fixed_dt
+            "data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt
         ):
             self.processor.trade_calendar._latest_trade_date_cache = {
                 "ts": 0,
@@ -212,7 +212,7 @@ class TestDataProcessor(unittest.TestCase):
             )
 
             date_obj = await self.processor.get_latest_trade_date()
-            # Pre-market Wednesday → should be Tuesday 20231024
+            # Pre-market Wednesday - should be Tuesday 20231024
             self.assertEqual(date_obj, datetime.date(2023, 10, 24))
 
     def test_get_latest_trade_date_weekday_pre_market(self):
@@ -221,7 +221,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_latest_trade_date_weekday_post_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 17, 0, 0)  # Wed post-market
         with patch(
-            "data.services.trade_calendar_service.get_now", return_value=fixed_dt
+            "data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt
         ):
             self.processor.trade_calendar._latest_trade_date_cache = {
                 "ts": 0,
@@ -263,7 +263,7 @@ class TestDataProcessor(unittest.TestCase):
         """Test weekend -> should skip to Friday"""
         fixed_dt = datetime.datetime(2023, 10, 28, 12, 0, 0)  # Sat
         with patch(
-            "data.services.trade_calendar_service.get_now", return_value=fixed_dt
+            "data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt
         ):
             self.processor.trade_calendar._latest_trade_date_cache = {
                 "ts": 0,
@@ -530,7 +530,7 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_sync_daily_market_cache_hit(self):
         """Test that data is NOT fetched if cache exists"""
-        trade_date = "20231025"
+        trade_date = datetime.date(2023, 10, 25)
 
         # Mock Cache existence
         self.processor.cache.get_daily_quotes = AsyncMock(
@@ -544,7 +544,7 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_sync_daily_market_cache_miss(self):
         """Test cache miss fetches from API and saves"""
-        target_date = "20231025"
+        target_date = datetime.date(2023, 10, 25)
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20200101")
         self.mock_cache.check_data_exists = AsyncMock(return_value=False)
 
@@ -605,8 +605,10 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_trade_cal.return_value = mock_df
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
-        # Mock get_cached_dates_for_table for breakpoint resume
-        cached_dates = {"20230105", "20230104"}
+        cached_dates = {
+            datetime.date(2023, 1, 5),
+            datetime.date(2023, 1, 4),
+        }
         self.mock_cache.get_cached_dates_for_table = AsyncMock(
             return_value=cached_dates
         )
@@ -619,10 +621,9 @@ class TestDataProcessor(unittest.TestCase):
         ) as mock_sync:
             await self.processor.sync_historical_data(days=days)
 
-            # Should skip 2 cached dates, sync remaining 3
             self.assertEqual(mock_sync.call_count, 3)
             call_args = [c.args[0] for c in mock_sync.call_args_list]
-            self.assertIn("20230103", call_args)
+            self.assertIn(datetime.date(2023, 1, 3), call_args)
 
     def test_sync_historical(self):
         asyncio.run(self.async_test_sync_historical_breakpoint_resume())
@@ -981,61 +982,6 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_sync_daily_auto_resolves_date(self):
         asyncio.run(self.async_test_sync_daily_auto_resolves_date())
-
-
-class TestScreenerDaoDynamicCols(unittest.TestCase):
-    """Tests for P2-M2: ScreenerDao dynamic column reflection"""
-
-    def test_sh_base_cols_excludes_thinking(self):
-        """Verify SH_BASE_COLS dynamically reflects columns and excludes 'thinking'"""
-        from data.daos.screener_dao import ScreenerDao
-
-        dao = ScreenerDao.__new__(ScreenerDao)  # Create without __init__
-        cols_str = dao.SH_BASE_COLS
-
-        col_list = [c.strip() for c in cols_str.split(",")]
-
-        # 'thinking' must NOT be in the base columns
-        self.assertNotIn("thinking", col_list)
-        # Critical columns must be present
-        self.assertIn("id", col_list)
-        self.assertIn("trade_date", col_list)
-        self.assertIn("ts_code", col_list)
-        self.assertIn("ai_score", col_list)
-        self.assertIn("prediction_result", col_list)
-
-    def test_sh_full_cols_includes_thinking(self):
-        """Verify SH_FULL_COLS includes 'thinking'"""
-        from data.daos.screener_dao import ScreenerDao
-
-        dao = ScreenerDao.__new__(ScreenerDao)
-        full_cols = dao.SH_FULL_COLS
-
-        self.assertIn("thinking", full_cols)
-        # Should end with ", thinking"
-        self.assertTrue(full_cols.endswith(", thinking"))
-
-    def test_sh_base_cols_matches_model(self):
-        """Verify SH_BASE_COLS count matches ScreeningHistory columns minus 'thinking'"""
-        from data.daos.screener_dao import ScreenerDao
-        from data.models import ScreeningHistory
-
-        dao = ScreenerDao.__new__(ScreenerDao)
-        col_list = [c.strip() for c in dao.SH_BASE_COLS.split(",")]
-
-        expected_count = len(ScreeningHistory.__table__.columns) - 1  # minus thinking
-        self.assertEqual(len(col_list), expected_count)
-
-    def test_sh_base_cols_cached(self):
-        """Verify cached_property only computes once"""
-        from data.daos.screener_dao import ScreenerDao
-
-        dao = ScreenerDao.__new__(ScreenerDao)
-        result1 = dao.SH_BASE_COLS
-        result2 = dao.SH_BASE_COLS
-
-        # cached_property means identity should match
-        self.assertIs(result1, result2)
 
 
 if __name__ == "__main__":

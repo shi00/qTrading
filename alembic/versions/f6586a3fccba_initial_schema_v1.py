@@ -27,7 +27,7 @@ def upgrade() -> None:
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("price", sa.Float(), nullable=True),
-        sa.Column("volume", sa.Float(), nullable=True),
+        sa.Column("vol", sa.Float(), nullable=True),
         sa.Column("amount", sa.Float(), nullable=True),
         sa.Column("buyer", sa.String(), nullable=False),
         sa.Column("seller", sa.String(), nullable=False),
@@ -174,6 +174,7 @@ def upgrade() -> None:
         sa.Column("end_date", sa.Date(), nullable=False),
         sa.Column("ann_date", sa.Date(), nullable=True),
         sa.Column("audit_result", sa.String(), nullable=True),
+        sa.Column("audit_sign", sa.String(), nullable=True),
         sa.Column("audit_fees", sa.Float(), nullable=True),
         sa.Column("audit_agency", sa.String(), nullable=True),
         sa.Column(
@@ -398,7 +399,7 @@ def upgrade() -> None:
         sa.Column("last_time", sa.String(), nullable=True),
         sa.Column("open_times", sa.Integer(), nullable=True),
         sa.Column("strth", sa.Float(), nullable=True),
-        sa.Column("limit_type", sa.String(), nullable=True),
+        sa.Column("limit", sa.String(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -816,7 +817,7 @@ def upgrade() -> None:
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("suspend_timing", sa.String(), nullable=True),
-        sa.Column("suspend_type_name", sa.String(), nullable=True),
+        sa.Column("suspend_type", sa.String(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -886,6 +887,8 @@ def upgrade() -> None:
         sa.Column("holder_name", sa.String(), nullable=False),
         sa.Column("hold_amount", sa.Float(), nullable=True),
         sa.Column("hold_ratio", sa.Float(), nullable=True),
+        sa.Column("hold_float_ratio", sa.Float(), nullable=True),
+        sa.Column("hold_change", sa.Float(), nullable=True),
         sa.Column("holder_type", sa.String(), nullable=True),
         sa.Column(
             "updated_at",
@@ -915,7 +918,7 @@ def upgrade() -> None:
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=True),
         sa.Column("close", sa.Float(), nullable=True),
-        sa.Column("pct_chg", sa.Float(), nullable=True),
+        sa.Column("pct_change", sa.Float(), nullable=True),
         sa.Column("turnover_rate", sa.Float(), nullable=True),
         sa.Column("amount", sa.Float(), nullable=True),
         sa.Column("l_sell", sa.Float(), nullable=True),

@@ -154,6 +154,7 @@ def setup_logging(name="astock_screener"):
         "matplotlib",
         "PIL",
         "websockets",
+        "litellm",
     ]
     for lib in noisy_libs:
         logging.getLogger(lib).setLevel(logging.WARNING)

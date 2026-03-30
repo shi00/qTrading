@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Make sure to import the class to be tested
 # Assuming path is setup or we run as module
-from data.tushare_client import TushareClient
+from data.external.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 
 
@@ -136,8 +136,9 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
         client = TushareClient(token="dummy")
         client._rate_limiter = None
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception) as context:
             await client.get_daily_quotes(ts_code="000001.SZ")
+        self.assertEqual(str(context.exception), "General Error")
 
         self.assertEqual(
             mock_api_instance.daily.call_count,

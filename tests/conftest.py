@@ -7,9 +7,9 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from data.models import Base
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
@@ -27,8 +27,14 @@ _temp_config_file = os.path.join(_temp_config_dir, "test_user_settings.json")
 def pytest_configure(config):
     """
     Hook that runs before any test collection or import.
-    Patch CONFIG_FILE before utils.config_handler is imported.
+    Patch CONFIG_FILE and DATABASE_URL before any modules are imported.
     """
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    os.environ["DATABASE_URL"] = TEST_DB_URL
+
     import utils.config_handler
 
     utils.config_handler.CONFIG_FILE = _temp_config_file
@@ -75,7 +81,12 @@ async def _ensure_test_db():
     try:
         # 强制断开其他连接，防止 ObjectInUseError
         await conn.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'test_astock' AND pid <> pg_backend_pid();"
+            """
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = 'test_astock'
+              AND pid <> pg_backend_pid();
+            """
         )
         await conn.execute("DROP DATABASE IF EXISTS test_astock")
         await conn.execute("CREATE DATABASE test_astock")
@@ -93,6 +104,8 @@ async def test_engine():
         await _ensure_test_db()
 
         _test_engine = create_async_engine(TEST_DB_URL, echo=False)
+
+        from data.persistence.models import Base
 
         async with _test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)

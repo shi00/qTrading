@@ -6,8 +6,8 @@ import time
 
 import flet as ft
 
-from data.database_manager import DatabaseManager
-from data.metadata_manager import MetaDataManager
+from data.persistence.database_manager import DatabaseManager
+from data.persistence.metadata_manager import MetaDataManager
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -236,15 +236,17 @@ class TableViewerTab(ft.Container):
                         ft.PopupMenuItem(
                             text=I18n.get("data_export_current"),
                             icon=ft.Icons.DOWNLOAD,
-                            on_click=lambda e: asyncio.create_task(
-                                self._export_csv(current_page=True),
+                            on_click=lambda e: self.page.run_task(
+                                self._export_csv,
+                                current_page=True,
                             ),
                         ),
                         ft.PopupMenuItem(
                             text=I18n.get("data_export_all"),
                             icon=ft.Icons.DRIVE_FILE_MOVE,
-                            on_click=lambda e: asyncio.create_task(
-                                self._export_csv(current_page=False),
+                            on_click=lambda e: self.page.run_task(
+                                self._export_csv,
+                                current_page=False,
                             ),
                         ),
                     ],

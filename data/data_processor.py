@@ -5,17 +5,17 @@ import threading
 
 import pandas as pd
 
-from data.cache_manager import CacheManager
+from data.cache.cache_manager import CacheManager
+from data.domain_services.trade_calendar_service import TradeCalendarService
+from data.external.news_fetcher import NewsFetcher
+from data.external.tushare_client import TushareClient
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
-from data.news_fetcher import NewsFetcher
-from data.services.trade_calendar_service import TradeCalendarService
-from data.sync_strategies.base import SyncContext
-from data.sync_strategies.financial import FinancialSyncStrategy
-from data.sync_strategies.historical import HistoricalSyncStrategy
-from data.sync_strategies.holder import HolderSyncStrategy
-from data.sync_strategies.macro import MacroSyncStrategy
-from data.tushare_client import TushareClient
+from data.sync.base import SyncContext
+from data.sync.financial import FinancialSyncStrategy
+from data.sync.historical import HistoricalSyncStrategy
+from data.sync.holder import HolderSyncStrategy
+from data.sync.macro import MacroSyncStrategy
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -149,7 +149,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Delegate cancellation to strategies
         try:
             tasks = []
-            for name, strategy in self.strategies.items():
+            for _name, strategy in self.strategies.items():
                 tasks.append(strategy.cancel())
 
             if tasks:
@@ -261,7 +261,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         return await self.get_screening_data(trade_date)
 
     async def run_daily_update(self, progress_callback=None):
-        from data.review_manager import ReviewManager
+        from data.persistence.review_manager import ReviewManager
 
         await self.init_data()
 
@@ -290,11 +290,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     ):
         try:
             from scripts.doubao_auto_tagger import DoubaoTagger
-        except ImportError:
+        except ImportError as e:
             logger.error(
                 "Playwright 依赖缺失，请运行 `pip install playwright && playwright install`",
             )
-            raise RuntimeError("系统缺少自动化打标底层依赖组件。")
+            raise RuntimeError("系统缺少自动化打标底层依赖组件。") from e
 
         await self.cache.stock_dao.clear_all_doubao_concepts()
         tagger = DoubaoTagger()
@@ -590,15 +590,19 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def get_screening_data(self, trade_date=None):
         return await self.cache.get_screening_data(trade_date)
 
-    async def initialize_system(self, progress_callback=None):
+    async def initialize_system(self, progress_callback=None, quick=False):
         """
         Orchestrate system initialization with 6 distinct steps.
+
+        Args:
+            progress_callback: Optional callback for progress updates
+            quick: If True, perform quick sync (skip historical data, only sync essential data)
 
         Steps and weights:
         - Step 1 (1%):  Sync stock list
         - Step 2 (1%):  Sync trade calendar
-        - Step 3 (45%): Sync historical data
-        - Step 4 (38%): Sync financial data
+        - Step 3 (45%): Sync historical data (skipped if quick=True)
+        - Step 4 (38%): Sync financial data (skipped if quick=True)
         - Step 5 (10%): Sync AI core data (macro/holders)
         - Step 6 (5%):  Health check
 
@@ -620,7 +624,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Step weights (must sum to 100)
         # Optimized based on user feedback (Steps 1 & 2 represent 2% total)
         # Added Step 5 (AI Data) -> 10%
-        STEP_WEIGHTS = [1, 1, 45, 38, 10, 5]
+        # For quick mode, redistribute weights (skip steps 3 & 4)
+        if quick:
+            STEP_WEIGHTS = [10, 10, 0, 0, 50, 30]
+        else:
+            STEP_WEIGHTS = [1, 1, 45, 38, 10, 5]
         current_step = 0
 
         def report_step(step_num, sub_progress=0, sub_total=1, sub_msg=""):
@@ -678,36 +686,40 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return None
 
             # ===== Step 3: Historical Data (50%) =====
-            def step3_callback(current, total, msg):
-                report_step(3, current, total, msg)
+            if not quick:
 
-            trade_days = 250 * years
-            history_result = await self.sync_historical_data(
-                days=trade_days,
-                progress_callback=step3_callback,
-            )
-            if history_result and history_result.status == "failed":
-                logger.error(
-                    f"[DataProcessor] Init | ❌ Historical daily sync encountered errors: {history_result.errors}",
+                def step3_callback(current, total, msg):
+                    report_step(3, current, total, msg)
+
+                trade_days = 250 * years
+                history_result = await self.sync_historical_data(
+                    days=trade_days,
+                    progress_callback=step3_callback,
                 )
-                return None
-            if self.is_cancelled():
-                return None
+                if history_result and history_result.status == "failed":
+                    logger.error(
+                        f"[DataProcessor] Init | ❌ Historical daily sync encountered errors: {history_result.errors}",
+                    )
+                    return None
+                if self.is_cancelled():
+                    return None
 
             # ===== Step 4: Financial Data (35%) =====
-            def step4_callback(current, total, msg):
-                report_step(4, current, total, msg)
+            if not quick:
 
-            financial_result = await self.sync_comprehensive_fundamentals(
-                progress_callback=step4_callback,
-            )
-            if financial_result and financial_result.status == "failed":
-                logger.error(
-                    f"[DataProcessor] Init | ❌ Financial sync encountered errors: {financial_result.errors}",
+                def step4_callback(current, total, msg):
+                    report_step(4, current, total, msg)
+
+                financial_result = await self.sync_comprehensive_fundamentals(
+                    progress_callback=step4_callback,
                 )
-                return None
-            if self.is_cancelled():
-                return None
+                if financial_result and financial_result.status == "failed":
+                    logger.error(
+                        f"[DataProcessor] Init | ❌ Financial sync encountered errors: {financial_result.errors}",
+                    )
+                    return None
+                if self.is_cancelled():
+                    return None
 
             # ===== Step 5: AI Alpha Data (10%) =====
             report_step(5, 0, 3, I18n.get("init_sync_macro"))

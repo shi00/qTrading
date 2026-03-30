@@ -6,6 +6,7 @@ import keyring
 from readerwriterlock import rwlock
 
 import config
+from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 from utils.security_utils import DecryptionError, SecurityManager
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,13 @@ class ConfigHandler:
         "auto_update_time": "16:30",
         "log_max_mb": 5,
         "log_backup_count": 5,
+        # Database Configuration
+        "db_host": "127.0.0.1",
+        "db_port": 5432,
+        "db_user": "postgres",
+        "db_name": "astock",
+        "db_url": "",
+        "db_password_encrypted": "",
         "db_connection_pool_size": 10,
         "db_pool_pre_ping": True,
         "db_pool_recycle": 1800,
@@ -71,9 +79,16 @@ class ConfigHandler:
         "sync_max_concurrent_heavy": 3,
         "max_batch_rows": 20000,
         "no_proxy_domains": [],
-        "ai_api_key": "",
-        "ai_base_url": "https://api.deepseek.com",
-        "ai_model_name": "deepseek-chat",
+        # LLM Provider Configuration
+        "llm_provider": "deepseek",
+        "llm_model": "deepseek-chat",
+        "llm_base_url": "",
+        "llm_api_version": AZURE_DEFAULT_API_VERSION,  # Azure specific
+        "llm_azure_resource_name": "",  # Azure specific
+        "llm_azure_deployment_name": "",  # Azure specific
+        "llm_custom_models": {},  # User-defined model pool
+        "llm_provider_extras": {},  # Provider-specific extras (nested structure)
+        # Local AI Configuration
         "local_model_path": "",
         "local_model_timeout": 90,
         "ai_system_prompt": DEFAULT_AI_PROMPT,
@@ -368,6 +383,90 @@ class ConfigHandler:
         return user_config.get("db_url", sys_config.DB_URL)
 
     @staticmethod
+    def get_db_password():
+        """Get database password from keyring."""
+        try:
+            password = keyring.get_password(KEYRING_SERVICE_NAME, "db_password")
+            if password:
+                return password
+        except Exception as e:
+            logger.warning(f"Failed to get db_password from keyring: {e}")
+
+        user_config = ConfigHandler.load_config()
+        encrypted = user_config.get("db_password_encrypted", "")
+        if encrypted:
+            return ConfigHandler._try_decrypt(encrypted)
+        return ""
+
+    @staticmethod
+    def save_db_password(password: str) -> bool:
+        """Save database password to keyring."""
+        if not password:
+            return False
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, "db_password", password)
+            ConfigHandler.save_config({"db_password_encrypted": ""})
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to save db_password to keyring: {e}")
+            try:
+                encrypted = SecurityManager.encrypt(password)
+                ConfigHandler.save_config({"db_password_encrypted": encrypted})
+                return True
+            except Exception as e2:
+                logger.error(f"Failed to encrypt db_password: {e2}")
+                return False
+
+    @staticmethod
+    def save_db_config(
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+    ) -> bool:
+        """Save database configuration."""
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        db_url = DatabaseConfigService.build_url(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=database,
+            async_driver=True,
+        )
+
+        ConfigHandler.save_config(
+            {
+                "db_host": host,
+                "db_port": port,
+                "db_user": user,
+                "db_name": database,
+                "db_url": db_url,
+            }
+        )
+
+        if password:
+            ConfigHandler.save_db_password(password)
+
+        return True
+
+    @staticmethod
+    def get_db_config() -> dict:
+        """Get database configuration components."""
+        config = ConfigHandler.load_config()
+        password = ConfigHandler.get_db_password()
+
+        return {
+            "host": config.get("db_host", "localhost"),
+            "port": config.get("db_port", 5432),
+            "user": config.get("db_user", "postgres"),
+            "password": password,
+            "database": config.get("db_name", "astock"),
+        }
+
+    @staticmethod
     def set_db_connection_pool_size(size):
         return ConfigHandler.save_config({"db_connection_pool_size": int(size)})
 
@@ -432,50 +531,155 @@ class ConfigHandler:
         return config.get(key, default)
 
     @staticmethod
-    def get_ai_config():
-        """Get all AI related clean config"""
+    def get_llm_provider() -> str:
+        """获取当前 LLM 供应商 ID"""
         config = ConfigHandler.load_config()
-
-        # Try keyring first
-        api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
-
-        # Legacy fallback
-        if not api_key:
-            encrypted_key = config.get("ai_api_key", "")
-            api_key = ConfigHandler._try_decrypt(encrypted_key)
-
-        return {
-            "ai_api_key": api_key,
-            "ai_base_url": config.get("ai_base_url", ""),
-            "ai_model_name": config.get("ai_model_name", ""),
-        }
+        return config.get("llm_provider", "deepseek")
 
     @staticmethod
-    def save_ai_config(api_key, base_url, model_name):
-        """Save AI settings (API Key Encrypted via Keyring)"""
-        if api_key:
-            try:
-                keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
-                encrypted_key = ""  # Clear from plain json
-            except Exception as e:
-                logger.warning(
-                    f"Keyring save failed: {e}. Falling back to SecurityManager.",
-                )
-                encrypted_key = SecurityManager.encrypt_data(api_key)
-        else:
-            try:
-                keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
-            except Exception:
-                pass
-            encrypted_key = ""
+    def save_llm_config(
+        provider: str,
+        model: str,
+        base_url: str,
+        api_key: str = None,
+        **kwargs,
+    ) -> bool:
+        """
+        保存 LLM 完整配置
 
-        return ConfigHandler.save_config(
+        Args:
+            provider: 供应商 ID
+            model: 模型 ID
+            base_url: API 基础 URL
+            api_key: API Key (将加密存储)，为 None 时保持现有密钥不变，为空字符串时清除密钥
+            **kwargs: 扩展字段 (如 Azure 的 api_version, azure_resource_name, azure_deployment_name)
+        """
+        from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+
+        config_update = {
+            "llm_provider": provider,
+            "llm_model": model,
+        }
+
+        provider_extras = {}
+
+        if provider == "azure":
+            azure_extras = {}
+            api_version = kwargs.get("api_version", AZURE_DEFAULT_API_VERSION)
+            azure_extras["api_version"] = api_version
+
+            resource_name = kwargs.get("azure_resource_name", "")
+            deployment_name = kwargs.get("azure_deployment_name", "")
+
+            if resource_name:
+                azure_extras["resource_name"] = resource_name
+                base_url = f"https://{resource_name}.openai.azure.com"
+
+            if deployment_name:
+                azure_extras["deployment_name"] = deployment_name
+
+            if azure_extras:
+                provider_extras["azure"] = azure_extras
+
+        config_update["llm_base_url"] = base_url
+
+        if "custom_models" in kwargs:
+            provider_extras["custom_models"] = kwargs["custom_models"]
+
+        if provider_extras:
+            config_update["llm_provider_extras"] = provider_extras
+        else:
+            config_update["llm_provider_extras"] = {}
+
+        ConfigHandler.save_config(config_update)
+
+        if api_key is not None:
+            if api_key:
+                try:
+                    keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
+                except Exception as e:
+                    logger.warning(
+                        f"Keyring save failed: {e}. Falling back to SecurityManager."
+                    )
+                    encrypted_key = SecurityManager.encrypt_data(api_key)
+                    ConfigHandler.save_config({"ai_api_key": encrypted_key})
+            else:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
+                except Exception:
+                    pass
+                ConfigHandler.save_config({"ai_api_key": ""})
+
+        return True
+
+    @staticmethod
+    def get_llm_config() -> dict:
+        """
+        获取 LLM 完整配置
+
+        Returns:
             {
-                "ai_api_key": encrypted_key,
-                "ai_base_url": base_url,
-                "ai_model_name": model_name,
-            },
-        )
+                "provider": str,
+                "model": str,
+                "base_url": str,
+                "api_key": str,
+                "api_version": str,  # Azure 专用
+                "azure_resource_name": str,  # Azure 专用
+                "azure_deployment_name": str,  # Azure 专用
+                "custom_models": dict,
+            }
+        """
+        config = ConfigHandler.load_config()
+
+        api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+        if not api_key:
+            encrypted = config.get("ai_api_key", "")
+            api_key = ConfigHandler._try_decrypt(encrypted)
+
+        provider = config.get("llm_provider", "deepseek")
+        model = config.get("llm_model", "deepseek-chat")
+        base_url = config.get("llm_base_url", "")
+
+        if not base_url:
+            default_urls = {
+                "deepseek": "https://api.deepseek.com",
+                "openai": "https://api.openai.com",
+                "anthropic": "https://api.anthropic.com",
+            }
+            base_url = default_urls.get(provider, "")
+
+        provider_extras = config.get("llm_provider_extras", {})
+
+        api_version = AZURE_DEFAULT_API_VERSION
+        azure_resource_name = ""
+        azure_deployment_name = ""
+        custom_models = {}
+
+        if "azure" in provider_extras:
+            azure_config = provider_extras["azure"]
+            api_version = azure_config.get("api_version", AZURE_DEFAULT_API_VERSION)
+            azure_resource_name = azure_config.get("resource_name", "")
+            azure_deployment_name = azure_config.get("deployment_name", "")
+        else:
+            api_version = config.get("llm_api_version", AZURE_DEFAULT_API_VERSION)
+            azure_resource_name = config.get("llm_azure_resource_name", "")
+            azure_deployment_name = config.get("llm_azure_deployment_name", "")
+
+        if "custom_models" in provider_extras:
+            custom_models = provider_extras["custom_models"]
+        else:
+            custom_models = config.get("llm_custom_models", {})
+
+        return {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_version": api_version,
+            "azure_resource_name": azure_resource_name,
+            "azure_deployment_name": azure_deployment_name,
+            "custom_models": custom_models,
+        }
 
     @staticmethod
     def get_local_ai_timeout() -> int:

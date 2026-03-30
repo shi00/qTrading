@@ -1,108 +1,325 @@
+"""
+Onboarding Wizard with Enhanced Navigation
+
+Steps (8 total):
+0. Welcome - Configuration overview
+1. Database Configuration (Required)
+2. Token Configuration (Required)
+3. Cloud AI Configuration (Required)
+4. Local Model Configuration (Optional)
+5. Data Sync (Optional)
+6. Schedule Setup (Optional)
+7. Complete
+
+Features:
+- Fixed navigation bar at bottom
+- Step-by-step validation with gradual persistence
+- Back navigation with re-validation
+- Component reuse (LLMConfigPanel, LocalModelConfigPanel)
+"""
+
 import asyncio
 import logging
+import os
+from dataclasses import dataclass
 
 import flet as ft
 
 from data.data_processor import DataProcessor
 from ui.i18n import I18n
-from ui.theme import AppStyles
+from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
 
-# Constants
 DEFAULT_SYNC_YEARS = 3
-DEFAULT_SYNC_DAYS = DEFAULT_SYNC_YEARS * 365  # Natural days (yields ~750 trading days)
+DEFAULT_SYNC_DAYS = DEFAULT_SYNC_YEARS * 365
+
+
+@dataclass
+class StepConfig:
+    id: str
+    name: str
+    show_prev: bool
+    show_next: bool
+    next_text_key: str
+    next_icon: str
+    show_skip: bool = False
+    skip_text_key: str = ""
+    required: bool = False
+    validate_before_next: bool = False
+
+
+STEP_CONFIGS = [
+    StepConfig(
+        id="welcome",
+        name="wizard_step_welcome",
+        show_prev=False,
+        show_next=True,
+        next_text_key="wizard_btn_start",
+        next_icon=ft.Icons.ARROW_FORWARD,
+        required=False,
+        validate_before_next=False,
+    ),
+    StepConfig(
+        id="database",
+        name="wizard_step_database",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_verify_next",
+        next_icon=ft.Icons.ARROW_FORWARD,
+        required=True,
+        validate_before_next=True,
+    ),
+    StepConfig(
+        id="token",
+        name="wizard_step_token",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_verify_next",
+        next_icon=ft.Icons.ARROW_FORWARD,
+        required=True,
+        validate_before_next=True,
+    ),
+    StepConfig(
+        id="cloud_ai",
+        name="wizard_step_cloud_ai",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_verify_next",
+        next_icon=ft.Icons.ARROW_FORWARD,
+        required=True,
+        validate_before_next=True,
+    ),
+    StepConfig(
+        id="local_model",
+        name="wizard_step_local_model",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_verify_next",
+        next_icon=ft.Icons.ARROW_FORWARD,
+        show_skip=True,
+        skip_text_key="wizard_btn_skip",
+        required=False,
+        validate_before_next=True,
+    ),
+    StepConfig(
+        id="data_sync",
+        name="wizard_step_data_sync",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_next",
+        next_icon=ft.Icons.ARROW_FORWARD,
+        required=False,
+        validate_before_next=False,
+    ),
+    StepConfig(
+        id="schedule",
+        name="wizard_step_schedule",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_finish",
+        next_icon=ft.Icons.CHECK_CIRCLE,
+        required=False,
+        validate_before_next=True,
+    ),
+    StepConfig(
+        id="complete",
+        name="wizard_step_complete",
+        show_prev=True,
+        show_next=True,
+        next_text_key="wizard_btn_start",
+        next_icon=ft.Icons.ROCKET_LAUNCH,
+        required=False,
+        validate_before_next=False,
+    ),
+]
 
 
 class OnboardingWizard(ft.Container):
-    """
-    Step-by-step onboarding wizard for first-time users.
-    Steps:
-    1. Welcome & Token Configuration
-    2. AI Configuration
-    3. Initial Data Sync
-    4. Set up Daily Scheduled Task (optional)
-    5. Complete
-    """
+    """Step-by-step onboarding wizard with enhanced navigation."""
 
     def __init__(self, page, on_complete=None):
         super().__init__()
         self.app_page = page
-        self.on_complete = on_complete  # Callback when wizard completes
+        self.on_complete = on_complete
         self.current_step = 0
         self.expand = True
-
-        # Add background color to match theme
-        from ui.theme import AppColors
-
         self.bgcolor = AppColors.BACKGROUND
 
-        # Step 1: Token input
+        self.step_validated: dict[str, bool] = {}
+        self._locale_subscription_id = None
+        self.sync_in_progress = False
+        self._data_processor = None
+        self._validation_in_progress = False
+
+        self._init_database_controls()
+        self._init_token_controls()
+        self._init_cloud_ai_controls()
+        self._init_local_model_controls()
+        self._init_sync_controls()
+        self._init_schedule_controls()
+
+        self.steps_content = [
+            self._build_welcome_step(),
+            self._build_database_step(),
+            self._build_token_step(),
+            self._build_cloud_ai_step(),
+            self._build_local_model_step(),
+            self._build_sync_step(),
+            self._build_schedule_step(),
+            self._build_complete_step(),
+        ]
+
+        self.step_container = ft.Container(
+            content=self.steps_content[0],
+        )
+
+        self.step_indicators = ft.Row(
+            self._build_step_indicators(),
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+            visible=1 <= self.current_step <= 6,
+        )
+
+        self.navigation_bar = ft.Container(
+            content=self._build_navigation_buttons(),
+            padding=ft.padding.symmetric(horizontal=20, vertical=10),
+            bgcolor=AppColors.SURFACE,
+            border=ft.border.only(top=ft.BorderSide(1, AppColors.BORDER)),
+        )
+
+        self.step_content_container = ft.Container(
+            content=ft.Column(
+                [self.step_container],
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+            ),
+            expand=True,
+        )
+
+        self.header_container = self._build_header()
+        self.header_container.visible = self.current_step in (0, 7)
+
+        self.loading_overlay_text = ft.Text(
+            I18n.get("wizard_validating"),
+            size=14,
+            color=AppColors.TEXT_PRIMARY,
+        )
+
+        self.loading_overlay = ft.Container(
+            content=ft.Column(
+                [
+                    ft.ProgressRing(width=40, height=40, stroke_width=3),
+                    self.loading_overlay_text,
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.7, AppColors.BACKGROUND),
+            visible=False,
+            expand=True,
+            alignment=ft.alignment.center,
+            on_click=lambda e: None,
+        )
+
+        self.content = ft.Stack(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Container(height=5),
+                        self.header_container,
+                        self.step_indicators,
+                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                        self.step_content_container,
+                        self.navigation_bar,
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    expand=True,
+                ),
+                self.loading_overlay,
+            ],
+            expand=True,
+        )
+
+        self.did_mount = self._on_mount
+        self.will_unmount = self._on_unmount
+
+    def _init_database_controls(self):
+        from ui.components.config_panels.database_config_panel import (
+            DatabaseConfigPanel,
+        )
+
+        self.database_panel = DatabaseConfigPanel(
+            compact=True,
+            show_save_button=False,
+            show_header=False,
+            load_password=True,
+            on_change=lambda: self._on_input_change("database"),
+            on_loading_change=self._on_panel_loading_change,
+        )
+
+    def _init_token_controls(self):
+        saved_token = ConfigHandler.get_token()
         self.token_input = ft.TextField(
             label=I18n.get("wizard_token_label"),
             password=True,
             can_reveal_password=True,
             width=AppStyles.CONTROL_WIDTH_LG,
             hint_text=I18n.get("wizard_token_hint"),
-            on_submit=self._verify_token,
+            value=saved_token or "",
+            on_change=lambda e: self._on_input_change("token"),
             border_color=AppColors.PRIMARY,
             label_style=ft.TextStyle(color=AppColors.PRIMARY),
         )
-        self.token_status = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
-
-        # Step 2: AI Config
-        self.ai_api_key_input = ft.TextField(
-            label=I18n.get("wizard_ai_key_label"),
-            password=True,
-            can_reveal_password=True,
-            width=AppStyles.CONTROL_WIDTH_LG,
-            hint_text="sk-...",
-            border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-        )
-        self.ai_base_url_input = ft.TextField(
-            label=I18n.get("settings_ai_base_url_label"),
-            value="https://api.deepseek.com",
-            width=AppStyles.CONTROL_WIDTH_LG,
-            border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-        )
-        self.ai_model_dropdown = ft.Dropdown(
-            label=I18n.get("wizard_ai_model_label"),
-            value="deepseek-chat",
-            width=AppStyles.CONTROL_WIDTH_MD,
-            border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-            options=[
-                ft.dropdown.Option("deepseek-chat", "DeepSeek-V3 (deepseek-chat)"),
-                ft.dropdown.Option(
-                    "deepseek-reasoner",
-                    "DeepSeek-R1 (deepseek-reasoner)",
-                ),
-                ft.dropdown.Option("moonshot-v1-8k", "Moonshot Kimi"),
-                ft.dropdown.Option("qwen2.5-max", "Alibaba Qwen"),
-                ft.dropdown.Option("gpt-4o", "OpenAI GPT-4o"),
-            ],
+        self.token_status = ft.Text(
+            "", size=12, color=AppColors.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER
         )
 
-        from utils.config_handler import DEFAULT_AI_PROMPT
+    def _init_cloud_ai_controls(self):
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        self.ai_prompt_input = ft.TextField(
-            label=I18n.get("wizard_ai_prompt_label"),
-            value=DEFAULT_AI_PROMPT,
-            multiline=True,
-            min_lines=3,
-            max_lines=8,
-            text_size=12,
-            border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-            hint_text=I18n.get("wizard_ai_prompt_hint"),
+        self.llm_config_panel = LLMConfigPanel(
+            show_save_button=False,
+            compact=True,
+            on_loading_change=self._on_panel_loading_change,
+        )
+        self.ai_status = ft.Text(
+            "", size=12, color=AppColors.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER
         )
 
-        self.ai_status = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
+    def _init_local_model_controls(self):
+        from ui.components.config_panels.local_model_config_panel import (
+            LocalModelConfigPanel,
+        )
 
-        # Step 3: Sync progress
+        self.local_model_panel = LocalModelConfigPanel(
+            show_save_button=False,
+            compact=True,
+            show_internal_loading=False,
+            on_change=lambda: self._on_input_change("local_model"),
+            on_loading_change=self._on_local_model_loading_change,
+        )
+        self.local_model_status = ft.Text(
+            "", size=12, color=AppColors.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER
+        )
+
+    def _on_panel_loading_change(self, loading: bool):
+        """通用面板加载状态回调 - 仅控制遮罩显隐"""
+        self._show_loading_overlay(loading)
+        self._safe_update()
+
+    def _on_local_model_loading_change(self, loading: bool):
+        self._show_loading_overlay(loading)
+        if loading:
+            self.local_model_status.value = I18n.get("wizard_model_loading")
+            self.local_model_status.color = AppColors.WARNING
+        else:
+            self.local_model_status.value = self.local_model_panel.status_text.value
+            self.local_model_status.color = self.local_model_panel.status_text.color
+        self._safe_update()
+
+    def _init_sync_controls(self):
         self.sync_progress = ft.ProgressBar(
             width=AppStyles.CONTROL_WIDTH_LG,
             value=0,
@@ -113,40 +330,66 @@ class OnboardingWizard(ft.Container):
             I18n.get("wizard_status_ready"),
             size=12,
             color=AppColors.TEXT_SECONDARY,
+            text_align=ft.TextAlign.CENTER,
+        )
+        self.btn_quick_sync = ft.ElevatedButton(
+            I18n.get("wizard_sync_quick"),
+            icon=ft.Icons.FLASH_ON,
+            style=AppStyles.accent_button(),
+        )
+        self.btn_full_sync = ft.ElevatedButton(
+            I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),
+            icon=ft.Icons.CLOUD_SYNC,
+            style=AppStyles.primary_button(),
+        )
+        self.btn_sync_later = ft.TextButton(
+            I18n.get("wizard_btn_sync_later"),
+            icon=ft.Icons.SCHEDULE,
+            on_click=lambda e: self._skip_sync(),
+        )
+        self.btn_cancel_sync = ft.ElevatedButton(
+            I18n.get("wizard_btn_cancel"),
+            icon=ft.Icons.CANCEL,
+            color=AppColors.ERROR,
+            visible=False,
+        )
+        self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(
+            self._start_sync, quick=True
+        )
+        self.btn_full_sync.on_click = lambda e: self.app_page.run_task(
+            self._start_sync, quick=False
+        )
+        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(
+            self._cancel_sync
         )
 
-        # Step 4: Schedule options
+    def _init_schedule_controls(self):
         self.schedule_enabled = ft.Checkbox(
             label=I18n.get("wizard_schedule_label"),
             value=True,
             active_color=AppColors.PRIMARY,
         )
 
-        # Build wizard UI
-        self.steps_content = [
-            self._build_step1(),
-            self._build_step_ai(),
-            self._build_step2(),
-            self._build_step3(),
-            self._build_step4(),
-        ]
+        from utils.config_handler import ConfigHandler
 
-        self.step_container = ft.Container(
-            content=self.steps_content[0],
-            expand=True,
+        default_time = ConfigHandler.get_auto_update_time()
+
+        self.schedule_time = ft.TextField(
+            label=I18n.get("wizard_schedule_time_label"),
+            value=default_time,
+            hint_text="HH:MM",
+            width=150,
+            text_align=ft.TextAlign.CENTER,
+            border_color=AppColors.PRIMARY,
+            label_style=ft.TextStyle(color=AppColors.PRIMARY),
         )
 
-        # Progress indicator
-        self.step_indicators = ft.Row(
-            self._build_step_indicators(),
-            alignment=ft.MainAxisAlignment.CENTER,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+    def _on_input_change(self, step_id: str):
+        self.step_validated[step_id] = False
 
-        self.content = ft.Column(
-            scroll=ft.ScrollMode.AUTO,
-            controls=[
-                ft.Container(height=40),  # More top spacing
+    def _build_header(self):
+        return ft.Column(
+            [
                 ft.Text(
                     I18n.get("wizard_welcome_title"),
                     size=32,
@@ -155,119 +398,408 @@ class OnboardingWizard(ft.Container):
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Text(
-                    I18n.get("wizard_welcome_desc"),
+                    I18n.get("wizard_welcome_desc_with_time"),
                     size=16,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=30),
-                self.step_indicators,
-                ft.Divider(height=40, color=ft.Colors.TRANSPARENT),
-                self.step_container,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            expand=True,
         )
 
-        # Lifecycle hooks
-        self.did_mount = self._on_mount
-        self.will_unmount = self._on_unmount
-
     def _build_step_indicators(self):
-        """Build the list of controls for step indicators including arrows"""
-        from ui.theme import AppColors
+        # 仅在配置步骤 1~6 显示，欢迎页和完成页不显示
+        if not (1 <= self.current_step <= 6):
+            return []
 
-        labels = [
+        total_config_steps = 6
+        config_step = self.current_step  # 1~6
+        progress_percent = config_step / total_config_steps
+
+        step_names = [
+            None,  # 0: 欢迎(不显示)
+            I18n.get("wizard_step_database"),
             I18n.get("wizard_step_label_token"),
             I18n.get("wizard_step_label_ai"),
+            I18n.get("wizard_step_local_model"),
             I18n.get("wizard_step_label_sync"),
             I18n.get("wizard_step_label_schedule"),
-            I18n.get("wizard_step_label_done"),
+            None,  # 7: 完成(不显示)
         ]
-        controls = []
-        for i in range(5):
-            # Add step indicator
-            controls.append(self._create_step_indicator(i, labels))
+        current_step_name = step_names[self.current_step] or ""
 
-            # Add arrow connector if not the last step
-            if i < 4:
-                is_completed = i < self.current_step
-                color = AppColors.SUCCESS if is_completed else AppColors.BORDER
-                controls.append(
+        step_text = ft.Text(
+            f"{current_step_name}  ({config_step}/{total_config_steps})",
+            size=14,
+            weight=ft.FontWeight.W_600,
+            color=AppColors.TEXT_PRIMARY,
+        )
+
+        progress_bar = ft.Container(
+            content=ft.Stack(
+                [
                     ft.Container(
-                        content=ft.Icon(ft.Icons.ARROW_RIGHT_ALT, color=color, size=24),
-                        padding=ft.padding.symmetric(horizontal=10),
-                        offset=ft.Offset(0, -0.2),
+                        width=200,
+                        height=4,
+                        bgcolor=AppColors.BORDER,
+                        border_radius=2,
                     ),
+                    ft.Container(
+                        width=200 * progress_percent,
+                        height=4,
+                        bgcolor=AppColors.PRIMARY,
+                        border_radius=2,
+                    ),
+                ],
+            ),
+            padding=ft.padding.only(top=8),
+        )
+
+        return [
+            ft.Column(
+                [step_text, progress_bar],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=0,
+            )
+        ]
+
+    def _build_navigation_buttons(self):
+        config = STEP_CONFIGS[self.current_step]
+
+        buttons = []
+
+        if config.show_prev:
+            is_sync_step = config.id == "data_sync"
+            buttons.append(
+                ft.ElevatedButton(
+                    I18n.get("wizard_btn_prev"),
+                    icon=ft.Icons.ARROW_BACK,
+                    on_click=lambda e: self.app_page.run_task(self._prev_step),
+                    style=AppStyles.secondary_button(),
+                    disabled=(self.sync_in_progress and is_sync_step)
+                    or self._validation_in_progress,
                 )
-        return controls
-
-    def _create_step_indicator(self, index, labels):
-        """Create step indicator dot with step number"""
-        from ui.theme import AppColors
-
-        is_active = index == self.current_step
-        is_completed = index < self.current_step
-
-        if is_completed:
-            color = AppColors.SUCCESS
-            icon = ft.Icons.CHECK_CIRCLE
-        elif is_active:
-            color = AppColors.PRIMARY
-            icon = ft.Icons.RADIO_BUTTON_CHECKED
+            )
         else:
-            color = AppColors.BORDER
-            icon = ft.Icons.RADIO_BUTTON_UNCHECKED
+            buttons.append(ft.Container())
 
-        # Text color logic
-        text_color = color if (is_active or is_completed) else AppColors.TEXT_HINT
+        if config.show_skip:
+            buttons.append(
+                ft.TextButton(
+                    I18n.get(config.skip_text_key),
+                    on_click=lambda e: self.app_page.run_task(self._skip_step),
+                    disabled=self._validation_in_progress,
+                )
+            )
 
-        font_weight = ft.FontWeight.BOLD if is_active else ft.FontWeight.NORMAL
+        if config.show_next:
+            buttons.append(
+                ft.ElevatedButton(
+                    I18n.get(config.next_text_key),
+                    icon=config.next_icon,
+                    on_click=lambda e: self.app_page.run_task(self._next_step),
+                    style=AppStyles.primary_button(),
+                    disabled=self._validation_in_progress,
+                )
+            )
+
+        return ft.Row(
+            buttons,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _update_navigation_buttons(self):
+        nav_row = self.navigation_bar.content
+        new_buttons = self._build_navigation_buttons()
+        nav_row.controls = new_buttons.controls
+        self._safe_update()
+
+    def _build_welcome_step(self):
+        rocket_container = ft.Container(
+            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=72, color=AppColors.PRIMARY),
+            width=120,
+            height=120,
+            border_radius=60,
+            bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),
+            alignment=ft.alignment.center,
+            shadow=ft.BoxShadow(
+                spread_radius=2,
+                blur_radius=24,
+                color=ft.Colors.with_opacity(0.35, AppColors.PRIMARY),
+                offset=ft.Offset(0, 4),
+            ),
+        )
+
+        gradient_title = ft.ShaderMask(
+            content=ft.Text(
+                I18n.get("wizard_welcome_guide"),
+                size=20,
+                weight=ft.FontWeight.W_600,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            shader=ft.LinearGradient(
+                begin=ft.alignment.center_left,
+                end=ft.alignment.center_right,
+                colors=[AppColors.PRIMARY, AppColors.ACCENT],
+            ),
+            blend_mode=ft.BlendMode.SRC_IN,
+        )
 
         return ft.Column(
             [
-                ft.Text(
-                    I18n.get("wizard_step_prefix").format(index=index + 1),
-                    size=12,
-                    color=text_color,
-                    weight=font_weight,
-                ),
-                ft.Icon(icon, color=color, size=32),
-                ft.Text(labels[index], size=13, color=text_color, weight=font_weight),
+                ft.Container(height=20),
+                rocket_container,
+                ft.Container(height=16),
+                gradient_title,
+                ft.Container(height=20),
+                self._build_overview_cards(),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=4,
-            width=90,
         )
 
-    def _update_indicators(self):
-        """Update step indicators"""
-        self.step_indicators.controls = self._build_step_indicators()
-        self.step_container.content = self.steps_content[self.current_step]
-        self.update()
+    def _build_overview_cards(self):
+        return ft.ResponsiveRow(
+            [
+                self._create_overview_card(
+                    icon=ft.Icons.STORAGE,
+                    color=AppColors.PRIMARY,
+                    title_key="wizard_overview_db_title",
+                    desc_key="wizard_overview_db_desc",
+                    default_title="数据库配置",
+                    default_desc="配置 PostgreSQL 连接",
+                    required=True,
+                    gradient_index=0,
+                ),
+                self._create_overview_card(
+                    icon=ft.Icons.KEY,
+                    color=AppColors.PRIMARY,
+                    title_key="wizard_overview_token_title",
+                    desc_key="wizard_overview_token_desc",
+                    default_title="Token 配置",
+                    default_desc="设置 Tushare API 密钥",
+                    required=True,
+                    gradient_index=1,
+                ),
+                self._create_overview_card(
+                    icon=ft.Icons.CLOUD,
+                    color=AppColors.ACCENT,
+                    title_key="wizard_overview_cloud_ai_title",
+                    desc_key="wizard_overview_cloud_ai_desc",
+                    default_title="云端 AI",
+                    default_desc="配置 LLM API",
+                    required=True,
+                    gradient_index=2,
+                ),
+                self._create_overview_card(
+                    icon=ft.Icons.PSYCHOLOGY,
+                    color=AppColors.ACCENT,
+                    title_key="wizard_overview_local_model_title",
+                    desc_key="wizard_overview_local_model_desc",
+                    default_title="本地模型",
+                    default_desc="GGUF 模型配置",
+                    required=False,
+                    gradient_index=3,
+                ),
+                self._create_overview_card(
+                    icon=ft.Icons.CLOUD_SYNC,
+                    color=AppColors.PRIMARY,
+                    title_key="wizard_overview_sync_title",
+                    desc_key="wizard_overview_sync_desc",
+                    default_title="数据同步",
+                    default_desc="同步历史行情数据",
+                    required=False,
+                    gradient_index=4,
+                ),
+                self._create_overview_card(
+                    icon=ft.Icons.SCHEDULE,
+                    color=AppColors.ACCENT,
+                    title_key="wizard_overview_schedule_title",
+                    desc_key="wizard_overview_schedule_desc",
+                    default_title="定时任务",
+                    default_desc="自动更新计划",
+                    required=False,
+                    gradient_index=5,
+                ),
+            ],
+            spacing=20,
+            run_spacing=20,
+        )
 
-    def _on_mount(self):
-        """Subscribe to locale changes"""
-        I18n.subscribe(self._on_locale_change)
+    def _create_overview_card(
+        self,
+        icon,
+        color,
+        title_key,
+        desc_key,
+        default_title,
+        default_desc,
+        required=False,
+        gradient_index=0,
+    ):
+        required_text = I18n.get("wizard_required")
+        optional_text = I18n.get("wizard_optional")
 
-    def _on_unmount(self):
-        """Unsubscribe from locale changes to prevent memory leaks"""
-        I18n.unsubscribe(self._on_locale_change)
+        if required:
+            badge_bgcolor = ft.Colors.with_opacity(0.9, color)
+            badge_text_color = AppColors.TEXT_ON_PRIMARY
+            dot_color = AppColors.TEXT_ON_PRIMARY
+        else:
+            badge_bgcolor = ft.Colors.with_opacity(0.6, AppColors.TEXT_SECONDARY)
+            badge_text_color = AppColors.TEXT_ON_PRIMARY
+            dot_color = AppColors.TEXT_ON_PRIMARY
 
-    def _on_locale_change(self):
-        self._safe_update()
+        badge = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        width=5,
+                        height=5,
+                        border_radius=3,
+                        bgcolor=dot_color,
+                    ),
+                    ft.Text(
+                        required_text if required else optional_text,
+                        size=9,
+                        weight=ft.FontWeight.W_600,
+                        color=badge_text_color,
+                    ),
+                ],
+                spacing=4,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            bgcolor=badge_bgcolor,
+            border_radius=6,
+            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+        )
 
-    def _safe_update(self):
-        """Safely update UI, handling cases where page is not attached"""
-        try:
-            if self.page:
-                self.update()
-        except Exception:
-            pass
+        icon_with_badge = ft.Stack(
+            [
+                ft.Container(
+                    content=ft.Icon(icon, size=32, color=color),
+                    width=52,
+                    height=52,
+                    border_radius=14,
+                    bgcolor=ft.Colors.with_opacity(0.12, color),
+                    alignment=ft.alignment.center,
+                ),
+                ft.Container(
+                    content=badge,
+                    top=-4,
+                    right=-4,
+                ),
+            ],
+            width=64,
+            height=60,
+            clip_behavior=ft.ClipBehavior.NONE,
+        )
 
-    def _build_step1(self):
-        """Step 1: Token Configuration"""
-        from ui.theme import AppColors, AppStyles
+        card_content = ft.Container(
+            padding=20,
+            border_radius=16,
+            bgcolor=ft.Colors.with_opacity(0.7, AppColors.SURFACE),
+            border=ft.border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY)),
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=8,
+                color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
+                offset=ft.Offset(0, 2),
+            ),
+            content=ft.Column(
+                [
+                    icon_with_badge,
+                    ft.Container(height=16),
+                    ft.Text(
+                        I18n.get(title_key),
+                        size=16,
+                        weight=ft.FontWeight.W_700,
+                        color=AppColors.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Container(height=6),
+                    ft.Text(
+                        I18n.get(desc_key),
+                        size=13,
+                        color=ft.Colors.with_opacity(0.85, AppColors.TEXT_SECONDARY),
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=0,
+            ),
+            on_hover=lambda e: self._on_card_hover(e, color),
+            animate=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
+        )
+
+        return ft.Container(
+            col={"sm": 6, "md": 4, "lg": 4},
+            content=card_content,
+        )
+
+    def _on_card_hover(self, e, color):
+        if e.data == "true":
+            e.control.border = ft.border.all(1.5, ft.Colors.with_opacity(0.5, color))
+            e.control.shadow = ft.BoxShadow(
+                spread_radius=1,
+                blur_radius=12,
+                color=ft.Colors.with_opacity(0.2, color),
+                offset=ft.Offset(0, 3),
+            )
+        else:
+            e.control.border = ft.border.all(
+                1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY)
+            )
+            e.control.shadow = ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=8,
+                color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
+                offset=ft.Offset(0, 2),
+            )
+        e.control.update()
+
+    def _build_database_step(self):
+        return ft.Column(
+            [
+                ft.Icon(ft.Icons.STORAGE, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_db_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_db_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                self.database_panel,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _build_token_step(self):
+        desc = I18n.get("wizard_step1_desc")
+        url = "https://tushare.pro/register"
+
+        # 清洗文本，移除包含链接的行，避免重复
+        lines = desc.split("\n")
+        cleaned_lines = [line for line in lines if url not in line]
+        cleaned_desc = "\n".join(cleaned_lines)
+
+        link_button = ft.Container(
+            content=ft.TextButton(
+                text=I18n.get("wizard_token_register"),
+                icon=ft.Icons.OPEN_IN_NEW,
+                icon_color=AppColors.ACCENT,
+                tooltip=url,
+                on_click=lambda e: e.page.launch_url(url) if e.page else None,
+                style=ft.ButtonStyle(color=AppColors.ACCENT),
+            ),
+            margin=ft.margin.only(top=5, bottom=15),
+        )
 
         return ft.Column(
             [
@@ -280,122 +812,82 @@ class OnboardingWizard(ft.Container):
                 ),
                 ft.Container(height=10),
                 ft.Text(
-                    I18n.get("wizard_step1_desc"),
+                    cleaned_desc,
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=30),
+                link_button,
                 self.token_input,
                 self.token_status,
-                ft.Container(height=30),
-                ft.Row(
-                    [
-                        ft.ElevatedButton(
-                            I18n.get("wizard_btn_verify_next"),
-                            icon=ft.Icons.ARROW_FORWARD,
-                            on_click=self._verify_token,
-                            style=AppStyles.primary_button(),
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    async def _handle_quick_sync(self, e):
-        await self._start_sync(quick=True)
-
-    def _build_step_ai(self):
-        """Step 2: AI Configuration"""
-        from ui.theme import AppColors, AppStyles
-
+    def _build_cloud_ai_step(self):
         return ft.Column(
             [
-                ft.Icon(ft.Icons.SMART_TOY, size=64, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.CLOUD, size=64, color=AppColors.PRIMARY),
                 ft.Text(
-                    I18n.get("wizard_step2_title"),
+                    I18n.get("wizard_step_cloud_ai_title"),
                     size=24,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Container(height=10),
                 ft.Text(
-                    I18n.get("wizard_step2_desc"),
+                    I18n.get("wizard_step_cloud_ai_desc"),
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=30),
-                self.ai_base_url_input,
-                self.ai_api_key_input,
-                self.ai_model_dropdown,
-                ft.Container(height=10),
-                ft.ExpansionTile(
-                    title=ft.Text(
-                        I18n.get("wizard_ai_advanced"),
-                        size=14,
-                        color=AppColors.PRIMARY,
-                    ),
-                    subtitle=ft.Text(
-                        I18n.get("wizard_ai_advanced_subtitle"),
-                        size=12,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    controls=[self.ai_prompt_input],
-                    collapsed_text_color=AppColors.TEXT_SECONDARY,
-                    text_color=AppColors.PRIMARY,
+                ft.Container(height=20),
+                ft.Container(
+                    content=self.llm_config_panel,
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=AppColors.SURFACE,
                 ),
                 self.ai_status,
-                ft.Container(height=30),
-                ft.Row(
-                    [
-                        ft.ElevatedButton(
-                            I18n.get("wizard_btn_verify_next"),
-                            icon=ft.Icons.ARROW_FORWARD,
-                            on_click=self._verify_ai_config,
-                            style=AppStyles.primary_button(),
-                        ),
-                        ft.TextButton(
-                            I18n.get("wizard_btn_skip"),
-                            on_click=self._skip_ai_config,
-                            style=ft.ButtonStyle(color=AppColors.TEXT_HINT),
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def _build_step2(self):
-        """Step 3: Data Sync"""
-        from ui.theme import AppColors, AppStyles
-
-        self.btn_quick_sync = ft.ElevatedButton(
-            I18n.get("wizard_sync_quick"),
-            icon=ft.Icons.FLASH_ON,
-            on_click=self._handle_quick_sync,
-            style=AppStyles.accent_button(),  # Use accent color for quick action
+    def _build_local_model_step(self):
+        return ft.Column(
+            [
+                ft.Icon(ft.Icons.PSYCHOLOGY, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step_local_model_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step_local_model_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                ft.Container(
+                    content=self.local_model_panel,
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=AppColors.SURFACE,
+                ),
+                self.local_model_status,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        from utils.config_handler import ConfigHandler
 
-        years = ConfigHandler.get_init_history_years()
-        self.btn_full_sync = ft.ElevatedButton(
-            I18n.get("wizard_sync_full").format(years=years),
-            icon=ft.Icons.CLOUD_SYNC,
-            on_click=self._handle_full_sync,
-            style=AppStyles.primary_button(),
+    def _build_sync_step(self):
+        years = (
+            ConfigHandler.get_init_history_years()
+            if hasattr(ConfigHandler, "get_init_history_years")
+            else DEFAULT_SYNC_YEARS
         )
-        self.btn_cancel_sync = ft.ElevatedButton(
-            I18n.get("wizard_btn_cancel"),
-            icon=ft.Icons.CANCEL,
-            color=AppColors.ERROR,
-            visible=False,
-            on_click=self._handle_cancel_sync,
-        )
-
         return ft.Column(
             [
                 ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
@@ -408,36 +900,49 @@ class OnboardingWizard(ft.Container):
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step3_desc").format(
-                        years=years,
-                        hours=int(years * 1.5),
+                        years=years, hours=int(years * 1.5)
                     ),
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=30),
-                ft.Row(
-                    [self.btn_quick_sync, self.btn_full_sync, self.btn_cancel_sync],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ft.Container(height=10),
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=20),
+                            ft.Text(
+                                I18n.get("wizard_sync_warning"),
+                                size=12,
+                                color=AppColors.WARNING,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
                 ),
-                ft.Container(height=30),
+                ft.Container(height=20),
+                ft.Row(
+                    [
+                        self.btn_quick_sync,
+                        self.btn_full_sync,
+                        self.btn_sync_later,
+                        self.btn_cancel_sync,
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True,
+                ),
+                ft.Container(height=20),
                 self.sync_progress,
                 self.sync_status,
-                ft.Container(height=10),
-                ft.TextButton(
-                    I18n.get("wizard_btn_skip_step"),
-                    on_click=self._skip_sync,
-                    style=ft.ButtonStyle(color=AppColors.TEXT_HINT),
-                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def _build_step3(self):
-        """Step 4: Scheduled Task"""
-        from ui.theme import AppColors, AppStyles
-
+    def _build_schedule_step(self):
         return ft.Column(
             [
                 ft.Icon(ft.Icons.SCHEDULE, size=64, color=AppColors.PRIMARY),
@@ -454,33 +959,21 @@ class OnboardingWizard(ft.Container):
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=30),
+                ft.Container(height=20),
                 ft.Row([self.schedule_enabled], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Container(height=15),
+                ft.Row([self.schedule_time], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Text(
                     I18n.get("wizard_schedule_note"),
                     size=12,
                     color=AppColors.TEXT_HINT,
-                ),
-                ft.Container(height=30),
-                ft.Row(
-                    [
-                        ft.ElevatedButton(
-                            I18n.get("wizard_btn_finish"),
-                            icon=ft.Icons.CHECK,
-                            on_click=self._finish_setup,
-                            style=AppStyles.primary_button(),
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
+                    text_align=ft.TextAlign.CENTER,
                 ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def _build_step4(self):
-        """Step 5: Complete"""
-        from ui.theme import AppColors
-
+    def _build_complete_step(self):
         return ft.Column(
             [
                 ft.Icon(ft.Icons.CELEBRATION, size=80, color=AppColors.SUCCESS),
@@ -497,242 +990,381 @@ class OnboardingWizard(ft.Container):
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=40),
-                ft.ElevatedButton(
-                    I18n.get("wizard_btn_start"),
-                    icon=ft.Icons.ROCKET_LAUNCH,
-                    style=ft.ButtonStyle(
-                        bgcolor=AppColors.SUCCESS,
-                        color=AppColors.TEXT_ON_PRIMARY,
-                        icon_color=AppColors.TEXT_ON_PRIMARY,
-                        padding=20,
-                    ),
-                    on_click=self._complete_wizard,
-                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    async def _verify_token(self, e):
-        """Verify token and proceed to next step"""
-        from ui.theme import AppColors
-
-        token = self.token_input.value.strip()  # type: ignore
-        if not token:
-            self.token_status.value = I18n.get("wizard_err_token_empty")
-            self.token_status.color = AppColors.ERROR
-            self.update()
-            return
-
-        self.token_status.value = I18n.get("wizard_verifying")
-        self.token_status.color = AppColors.WARNING
-        self.update()
+    async def _validate_and_save_database(self) -> bool:
+        self._show_loading_overlay(True)
+        self._safe_update()
 
         try:
-            # Use TushareClient for verification (ensures proxy/config compatibility)
-            from data.tushare_client import TushareClient
+            result = await self.database_panel.test_connection()
+            if result:
+                config = self.database_panel.get_config()
+                ConfigHandler.save_db_config(
+                    host=config["host"],
+                    port=config["port"],
+                    user=config["user"],
+                    password=config["password"],
+                    database=config["database"],
+                )
+            return result
+        finally:
+            self._show_loading_overlay(False)
+            self._safe_update()
 
-            # Temporary client for this token
+    async def _validate_and_save_token(self) -> bool:
+        token = self.token_input.value.strip()
+
+        if not token:
+            err_msg = I18n.get("wizard_err_token_required")
+            self.token_status.value = err_msg
+            self.token_status.color = AppColors.ERROR
+            self._safe_update()
+            return False
+
+        self._show_loading_overlay(True)
+        self.token_status.value = I18n.get("wizard_verifying")
+        self.token_status.color = AppColors.WARNING
+        self._safe_update()
+
+        try:
+            import asyncio
+
+            from data.external.tushare_client import TushareClient
+
             client = TushareClient(token=token)
+            await asyncio.to_thread(
+                client.get_trade_dates, start_date="20250101", end_date="20250101"
+            )
 
-            # Verify by fetching calendar (lightweight)
-            # TushareClient expects YYYYMMDD string dates
-            client.get_trade_dates(start_date="20250101", end_date="20250101")
-
-            # Save token if successful
-            ConfigHandler.save_config({"ts_token": token, "onboarding_complete": False})
+            ConfigHandler.save_token(token)
 
             self.token_status.value = I18n.get("wizard_msg_token_success")
             self.token_status.color = AppColors.SUCCESS
-            self.update()
-
-            # Move to next step
-            await self._next_step()
+            self._safe_update()
+            return True
 
         except Exception as ex:
-            self.token_status.value = I18n.get("wizard_err_verify_failed").format(
-                error=str(ex)[:40],
-            )
+            from ui.i18n import classify_error
+
+            error_info = classify_error(ex, context="token")
+            self.token_status.value = error_info["message"]
             self.token_status.color = AppColors.ERROR
-            self.update()
+            logger.error(f"[OnboardingWizard] Token verification failed: {ex}")
+            self._safe_update()
+            return False
+        finally:
+            self._show_loading_overlay(False)
+            self._safe_update()
+
+    async def _validate_and_save_cloud_ai(self) -> bool:
+        from services.ai_service import AIService
+
+        config = self.llm_config_panel.get_current_config()
+        provider = config.get("provider", "").strip()
+        model = config.get("model", "").strip()
+
+        if not provider or not model:
+            err_msg = I18n.get("wizard_err_provider_model_required")
+            self.ai_status.value = err_msg
+            self.ai_status.color = AppColors.ERROR
+            self._safe_update()
+            return False
+
+        api_key = config.get("api_key", "").strip()
+        base_url = config.get("base_url", "").strip()
+
+        if not api_key:
+            existing_config = ConfigHandler.get_llm_config()
+            existing_key = existing_config.get("api_key", "")
+            if not existing_key:
+                err_msg = I18n.get("wizard_err_api_key_required")
+                self.ai_status.value = err_msg
+                self.ai_status.color = AppColors.ERROR
+                self._safe_update()
+                return False
+            api_key = existing_key
+            base_url = existing_config.get("base_url", "")
+
+        self._show_loading_overlay(True)
+        self.ai_status.value = I18n.get("wizard_status_verifying")
+        self.ai_status.color = AppColors.TEXT_SECONDARY
+        self._safe_update()
+
+        try:
+            result = await AIService.test_connection(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+            )
+
+            if not result.get("success"):
+                err_msg = result.get("message", "Connection failed")
+                self.ai_status.value = err_msg
+                self.ai_status.color = AppColors.ERROR
+                self._safe_update()
+                return False
+
+            self.llm_config_panel.save_current_config()
+
+            self.ai_status.value = I18n.get("wizard_ai_configured")
+            self.ai_status.color = AppColors.SUCCESS
+            self._safe_update()
+            return True
+
+        except Exception as e:
+            logger.error(f"[OnboardingWizard] AI connection test failed: {e}")
+            self.ai_status.value = str(e)
+            self.ai_status.color = AppColors.ERROR
+            self._safe_update()
+            return False
+        finally:
+            self._show_loading_overlay(False)
+            self._safe_update()
+
+    async def _validate_and_save_local_model(self) -> bool:
+        model_path = self.local_model_panel.model_path_input.value.strip()
+
+        if not model_path:
+            return True
+
+        if not os.path.exists(model_path):
+            self.local_model_status.value = I18n.get("wizard_err_model_not_found")
+            self.local_model_status.color = AppColors.ERROR
+            self._safe_update()
+            return False
+
+        if not model_path.lower().endswith(".gguf"):
+            self.local_model_status.value = I18n.get("wizard_err_model_format")
+            self.local_model_status.color = AppColors.ERROR
+            self._safe_update()
+            return False
+
+        try:
+            if await self.local_model_panel.async_verify_model():
+                self.local_model_panel.save_config()
+                self.local_model_status.value = I18n.get("wizard_model_configured")
+                self.local_model_status.color = AppColors.SUCCESS
+                self._safe_update()
+                return True
+
+            self.local_model_status.value = self.local_model_panel.status_text.value
+            self.local_model_status.color = self.local_model_panel.status_text.color
+            self._safe_update()
+            return False
+        except Exception as e:
+            logger.error(f"[OnboardingWizard] Local model validation failed: {e}")
+            self.local_model_status.value = I18n.get("wizard_err_model_load_failed")
+            self.local_model_status.color = AppColors.ERROR
+            self._safe_update()
+            return False
+        finally:
+            self._show_loading_overlay(False)
+            self._safe_update()
+
+    async def _validate_and_save_schedule(self) -> bool:
+        enabled = self.schedule_enabled.value
+        time_str = self.schedule_time.value.strip()
+
+        import re
+
+        if not re.match(r"^\d{1,2}:\d{2}$", time_str):
+            time_str = "16:30"
+        else:
+            try:
+                hours, minutes = map(int, time_str.split(":"))
+                if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+                    time_str = "16:30"
+            except ValueError:
+                time_str = "16:30"
+
+        self.schedule_time.value = time_str
+        ConfigHandler.save_config(
+            {
+                "auto_update_enabled": enabled,
+                "auto_update_time": time_str,
+            }
+        )
+        return True
+
+    async def _validate_and_persist_current_step(self) -> bool:
+        config = STEP_CONFIGS[self.current_step]
+
+        if self.step_validated.get(config.id, False):
+            return True
+
+        validators = {
+            "database": self._validate_and_save_database,
+            "token": self._validate_and_save_token,
+            "cloud_ai": self._validate_and_save_cloud_ai,
+            "local_model": self._validate_and_save_local_model,
+            "schedule": self._validate_and_save_schedule,
+        }
+
+        validator = validators.get(config.id)
+        if validator:
+            result = await validator()
+            if result:
+                self.step_validated[config.id] = True
+            return result
+
+        return True
 
     async def _next_step(self):
-        """Move to next step"""
-        self.current_step += 1
-        self._update_indicators()
+        config = STEP_CONFIGS[self.current_step]
+
+        if config.validate_before_next:  # noqa: SIM102
+            if not await self._validate_and_persist_current_step():
+                return
+
+        if config.id == "complete":
+            if self.on_complete:
+                await self.on_complete()
+            return
+
+        if self.current_step < len(STEP_CONFIGS) - 1:
+            self.current_step += 1
+            self._update_wizard()
+
+    async def _prev_step(self):
+        config = STEP_CONFIGS[self.current_step]
+        if config.validate_before_next:
+            self.step_validated[config.id] = False
+
+        if self.current_step > 0:
+            self.current_step -= 1
+            self._update_wizard()
+
+    async def _skip_step(self):
+        if self.current_step < len(STEP_CONFIGS) - 1:
+            self.current_step += 1
+            self._update_wizard()
+
+    def _update_wizard(self):
+        self.step_indicators.controls = self._build_step_indicators()
+        self.step_indicators.visible = 1 <= self.current_step <= 6
+        self.header_container.visible = self.current_step in (0, 7)
+        self.step_container.content = self.steps_content[self.current_step]
+        self.navigation_bar.content = self._build_navigation_buttons()
+        self._safe_update()
+
+    @property
+    def data_processor(self):
+        if self._data_processor is None:
+            self._data_processor = DataProcessor()
+        return self._data_processor
 
     async def _start_sync(self, quick=False):
-        """Start data sync"""
-        # Disable sync buttons, show cancel button
+        self.sync_in_progress = True
         self.btn_quick_sync.disabled = True
         self.btn_full_sync.disabled = True
         self.btn_cancel_sync.visible = True
         self.btn_cancel_sync.disabled = False
+        self.btn_sync_later.disabled = True
+        self._update_navigation_buttons()
 
         self.sync_status.value = I18n.get("wizard_status_init")
-        self.sync_status.color = ft.Colors.BLUE
-        self.sync_progress.value = None  # Indeterminate
-        self.update()
+        self.sync_progress.value = 0
+        self._safe_update()
 
         try:
-            processor = DataProcessor()
-            await processor.init_data()
 
-            if quick:
-                # Quick sync
-                self.sync_status.value = I18n.get("wizard_status_today")
-                self.update()
-                await processor.sync_daily_market_snapshot()
-                self.sync_status.value = I18n.get("wizard_msg_today_done")
-                self.sync_status.color = ft.Colors.GREEN
-            else:
-                _last_update_ts = [0]
+            def progress_callback(current, total, message):
+                self.sync_progress.value = current / 100
+                self.sync_status.value = message
+                self._safe_update()
 
-                def update_progress(current, total, msg):
-                    import time
+            result = await self.data_processor.initialize_system(
+                progress_callback=progress_callback,
+                quick=quick,
+            )
 
-                    now = time.time()
-                    if current == total or (now - _last_update_ts[0] > 0.1):
-                        # Clamp ratio to 1.0
-                        ratio = min(current / max(total, 0.001), 1.0)
-                        self.sync_progress.value = ratio
-                        self.sync_status.value = f"{msg} ({ratio * 100:.1f}%)"
-                        self._safe_update()
-                        _last_update_ts[0] = now  # type: ignore
+            if result:
+                self.sync_status.value = I18n.get("wizard_status_done")
+                self.sync_progress.value = 1
+                self.btn_cancel_sync.visible = False
+                self.btn_sync_later.disabled = False
 
-                # Ensure DB is initialized before sync
-                # initialize_system handles DB init internally
-
-                # Use unified initialization workflow
-                # This ensures Stock List -> Calendar -> History -> Financials -> Health Check
-                result = await processor.initialize_system(
-                    progress_callback=update_progress,
-                )
-
-                if processor.is_cancelled():
-                    self.sync_status.value = I18n.get("wizard_msg_sync_cancelled")
-                    self.sync_status.color = ft.Colors.RED
-                    self.sync_progress.value = 0
-                elif result is None:
-                    # Critical failure without explicit cancellation
-                    raise Exception(
-                        "Initialization task failed unexpectedly. Check logs.",
-                    )
-                else:
-                    self.sync_status.value = I18n.get("wizard_msg_history_done")
-                    self.sync_status.color = ft.Colors.GREEN
-                    self.sync_progress.value = 1
-
-            self.update()
-
-            if not processor.is_cancelled():
                 await asyncio.sleep(1)
                 await self._next_step()
+            else:
+                self.sync_status.value = I18n.get("wizard_status_cancelled")
+                self.btn_quick_sync.disabled = False
+                self.btn_full_sync.disabled = False
+                self.btn_sync_later.disabled = False
 
-        except asyncio.CancelledError:
-            logger.info("Sync task was cancelled by user")
-            self.sync_status.value = I18n.get("wizard_msg_sync_cancelled")
-            self.sync_status.color = ft.Colors.ORANGE
-        except Exception as ex:
-            logger.error(f"Sync error: {ex}", exc_info=True)
-            self.sync_status.value = I18n.get("wizard_msg_sync_failed").format(
-                error=str(ex)[:40],
-            )
-            self.sync_status.color = ft.Colors.RED
+        except Exception as e:
+            from ui.i18n import classify_error
+
+            error_info = classify_error(e, context="general")
+            self.sync_status.value = error_info["message"]
             self.sync_progress.value = 0
-            self.update()
-
-        finally:
-            # Always re-enable buttons and hide cancel
             self.btn_quick_sync.disabled = False
             self.btn_full_sync.disabled = False
+            self.btn_sync_later.disabled = False
             self.btn_cancel_sync.visible = False
-            self.update()
+        finally:
+            self.sync_in_progress = False
+            self._update_navigation_buttons()
+            self._safe_update()
 
-    async def _skip_sync(self, e):
-        """Skip sync step"""
+    async def _skip_sync(self):
+        self.sync_status.value = I18n.get("wizard_status_skip")
+        self._safe_update()
         await self._next_step()
 
-    async def _finish_setup(self, e):
-        """Finish setup and save preferences"""
-        # Save schedule preference
-        config = {
-            "onboarding_complete": True,
-            "auto_update_enabled": self.schedule_enabled.value,
-            "auto_update_time": "16:30",
-        }
-        ConfigHandler.save_config(config)
-
-        # Move to completion step
-        await self._next_step()
-
-    async def _complete_wizard(self, e):
-        """Complete wizard and call callback"""
-        if self.on_complete:
-            self.on_complete()
-
-    async def _verify_ai_config(self, e):
-        from ui.theme import AppColors
-
-        api_key = self.ai_api_key_input.value.strip()  # type: ignore
-        base_url = self.ai_base_url_input.value.strip()  # type: ignore
-        model = self.ai_model_dropdown.value
-
-        if not api_key:
-            self.ai_status.value = I18n.get("wizard_err_ai_key")
-            self.ai_status.color = AppColors.ERROR
-            self.update()
-            return
-
-        # Save temporarily
-        ConfigHandler.save_ai_config(api_key, base_url, model)
-        ConfigHandler.save_ai_system_prompt(self.ai_prompt_input.value)
-
-        self.ai_status.value = I18n.get("wizard_ai_connecting")
-        self.ai_status.color = AppColors.WARNING
-        self.update()
-
+    async def _cancel_sync(self):
         try:
-            from services.ai_service import AIService
-
-            success = await AIService.test_connection(api_key, base_url, model)  # type: ignore
-
-            if success:
-                self.ai_status.value = I18n.get("wizard_ai_success")
-                self.ai_status.color = AppColors.SUCCESS
-                self.update()
-                await asyncio.sleep(0.5)
-                await self._next_step()
-            else:
-                self.ai_status.value = I18n.get("wizard_ai_failed")
-                self.ai_status.color = AppColors.ERROR
-                self.update()
-
-        except Exception as ex:
-            self.ai_status.value = I18n.get("wizard_ai_error").format(
-                error=str(ex)[:30],
-            )
-            self.ai_status.color = AppColors.ERROR
-            self.update()
-
-    async def _skip_ai_config(self, e):
-        """Skip AI config"""
-        await self._next_step()
-
-    async def _handle_full_sync(self, e):
-        await self._start_sync(quick=False)
-
-    async def _handle_cancel_sync(self, e):
-        """Cancel the running sync task"""
-        from data.data_processor import DataProcessor
-        from ui.theme import AppColors
-
-        try:
-            processor = DataProcessor()
-            self.page.run_task(processor.request_cancel)  # type: ignore
-            self.sync_status.value = I18n.get("common_cancelling")
-            self.sync_status.color = AppColors.ERROR
-            self.btn_cancel_sync.disabled = True
-            self.update()
+            if self._data_processor:
+                await self._data_processor.stop()
+            self.sync_status.value = I18n.get("wizard_status_cancelled")
+            self.btn_quick_sync.disabled = False
+            self.btn_full_sync.disabled = False
+            self.btn_sync_later.disabled = False
+            self.btn_cancel_sync.visible = False
         except Exception as e:
             logger.warning(f"Failed to cancel sync: {e}")
+        finally:
+            self.sync_in_progress = False
+            self._update_navigation_buttons()
+            self._safe_update()
+
+    def _on_mount(self):
+        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
+
+    def _on_unmount(self):
+        if self._locale_subscription_id:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def _on_locale_change(self, new_locale: str = None):
+        self.token_input.label = I18n.get("wizard_token_label")
+        self.token_input.hint_text = I18n.get("wizard_token_hint")
+        self.sync_status.value = I18n.get("wizard_status_ready")
+        self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
+        self.btn_full_sync.text = I18n.get("wizard_sync_full").format(
+            years=DEFAULT_SYNC_YEARS
+        )
+        self.btn_cancel_sync.text = I18n.get("wizard_btn_cancel")
+        self.schedule_enabled.label = I18n.get("wizard_schedule_label")
+        self.schedule_time.label = I18n.get("wizard_schedule_time_label")
+        self.loading_overlay_text.value = I18n.get("wizard_validating")
+
+        self.step_indicators.controls = self._build_step_indicators()
+        self._update_navigation_buttons()
+        self._safe_update()
+
+    def _safe_update(self):
+        try:
+            if self.page:
+                self.update()
+        except Exception:
+            pass
+
+    def _show_loading_overlay(self, show: bool):
+        self._validation_in_progress = show
+        self.loading_overlay.visible = show
+        self._update_navigation_buttons()

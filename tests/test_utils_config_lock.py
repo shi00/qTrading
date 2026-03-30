@@ -44,7 +44,7 @@ class TestConfigThreadSafety:
             t = threading.Thread(target=writer_task, args=(i,))
             threads.append(t)
 
-        for i in range(NUM_READERS):
+        for _i in range(NUM_READERS):
             t = threading.Thread(target=reader_task)
             threads.append(t)
 

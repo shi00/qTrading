@@ -5,7 +5,7 @@ import time
 import flet as ft
 import pandas as pd
 
-from data.metadata_manager import MetaDataManager
+from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import VirtualTable
@@ -868,7 +868,9 @@ class ScreenerView(ft.Container):
                         val = e.control.value
                         display = int(val) if val == int(val) else round(val, 1)
                         vt.value = f"{lbl}: {display}"
+                        e.control.tooltip = str(display)
                         vt.update()
+                        e.control.update()
 
                         if self.selected_strategy:
                             strategy_obj = self.vm.strategy_mgr.get_strategy(
@@ -891,7 +893,9 @@ class ScreenerView(ft.Container):
                     max=max_val,
                     value=default,
                     divisions=divisions,
+                    label="{value}",
                     active_color=AppColors.PRIMARY,
+                    tooltip=str(init_display),
                     on_change=make_on_change(value_text, label),
                 )
                 slider.data = p["name"]
@@ -955,14 +959,14 @@ class ScreenerView(ft.Container):
                 if p["name"] == "ai_system_prompt":
                     ctrl.label = None
 
-                    def make_restore_default(strat):
+                    def make_restore_default(strat, ctrl_field):
                         def restore_default(e):
                             from strategies.strategy_prompts import get_base_prompt
                             from utils.config_handler import ConfigHandler
 
                             ConfigHandler.set_strategy_prompt(strat, None)
-                            ctrl.value = str(get_base_prompt(strat))
-                            ctrl.update()
+                            ctrl_field.value = str(get_base_prompt(strat))
+                            ctrl_field.update()
                             if self.page and hasattr(self.page, "show_toast"):
                                 self.page.show_toast(  # type: ignore
                                     I18n.get(
@@ -974,11 +978,11 @@ class ScreenerView(ft.Container):
 
                         return restore_default
 
-                    def make_save_prompt(strat):
+                    def make_save_prompt(strat, ctrl_field):
                         def save_prompt(e):
                             from utils.config_handler import ConfigHandler
 
-                            ConfigHandler.set_strategy_prompt(strat, ctrl.value)
+                            ConfigHandler.set_strategy_prompt(strat, ctrl_field.value)
                             UILogger.log_action(
                                 "ScreenerView",
                                 "SavePrompt",
@@ -997,7 +1001,7 @@ class ScreenerView(ft.Container):
                         icon=ft.Icons.RESTORE,
                         style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
                         height=30,
-                        on_click=make_restore_default(self.selected_strategy),
+                        on_click=make_restore_default(self.selected_strategy, ctrl),
                     )
 
                     save_btn = ft.TextButton(
@@ -1005,7 +1009,7 @@ class ScreenerView(ft.Container):
                         icon=ft.Icons.SAVE,
                         style=ft.ButtonStyle(color=AppColors.PRIMARY),
                         height=30,
-                        on_click=make_save_prompt(self.selected_strategy),
+                        on_click=make_save_prompt(self.selected_strategy, ctrl),
                     )
 
                 ctrl.data = p["name"]

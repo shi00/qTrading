@@ -251,7 +251,7 @@ class AppLayout(ft.Container):
         # 1. Apply new theme to page (sets page.theme, page.dark_theme, page.theme_mode)
         # 2. Propagate custom color updates to ALL views that have update_theme
         #    (Tables, charts, settings inputs — anything with Layer 2 colors)
-        for tab_index, view in self._view_cache.items():
+        for _tab_index, view in self._view_cache.items():
             if hasattr(view, "update_theme"):
                 try:
                     view.update_theme()  # type: ignore

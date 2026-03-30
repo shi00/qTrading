@@ -272,7 +272,7 @@ class TestCacheManager(TestDatabaseBase):
         """Test screening history saving and updating"""
         from sqlalchemy import text
 
-        sql = text("""INSERT INTO screening_history 
+        sql = text("""INSERT INTO screening_history
                  (trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
                  VALUES (:trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
 

@@ -390,7 +390,7 @@ class TestAIStrategyMixinRunAnalysis:
         """AI 服务未配置"""
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai_instance = MagicMock()
-            mock_ai_instance.client = None
+            mock_ai_instance.is_cloud_available.return_value = False
             mock_ai.return_value = mock_ai_instance
 
             candidates = pd.DataFrame(
@@ -411,7 +411,7 @@ class TestAIStrategyMixinRunAnalysis:
         """取消操作"""
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai_instance = MagicMock()
-            mock_ai_instance.client = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
             mock_ai.return_value = mock_ai_instance
 
             mock_context["data_processor"].is_cancelled = MagicMock(return_value=True)
@@ -433,7 +433,7 @@ class TestAIStrategyMixinRunAnalysis:
         """候选数量上限"""
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai_instance = MagicMock()
-            mock_ai_instance.client = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
             mock_ai.return_value = mock_ai_instance
 
             with patch(

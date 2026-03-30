@@ -63,13 +63,13 @@ class ToastManager:
 
         task.add_done_callback(on_done)
 
-    def show(self, message: str, type: str = "info", duration: int = 10) -> None:
+    def show(self, message: str, toast_type: str = "info", duration: int = 10) -> None:
         """
         Show a toast notification.
 
         Args:
             message: Text to display
-            type: 'info', 'success', 'error', 'warning'
+            toast_type: 'info', 'success', 'error', 'warning'
             duration: Seconds before auto-dismiss
         """
         if not self.page or self._is_stopping:
@@ -82,7 +82,7 @@ class ToastManager:
             "warning": (AppColors.WARNING, ft.Icons.WARNING),
             "info": (AppColors.INFO, ft.Icons.INFO),
         }
-        color, icon = color_map.get(type, color_map["info"])
+        color, icon = color_map.get(toast_type, color_map["info"])
 
         toast_card = ToastCard(
             message=message,
@@ -184,6 +184,7 @@ class ToastCard(ft.Container):
         self.is_expanded = False  # State for expansion
         self.remaining = duration
         self._is_cancelled = False
+        self._is_dismissing = False
 
         # Threshold for "Long Text"
         self.is_long_text = len(message) > self.LONG_TEXT_THRESHOLD
@@ -311,6 +312,9 @@ class ToastCard(ft.Container):
         self.is_hovered = e.data == "true"
 
     async def _handle_dismiss_click(self, e):
+        if self._is_dismissing:
+            return
+        self._is_dismissing = True
         await self.dismiss()
 
     async def dismiss(self):

@@ -4,20 +4,79 @@ import logging
 import threading
 
 import httpx
-from openai import AsyncOpenAI
 
-from data.review_manager import ReviewManager
 from services.local_model_manager import LocalModelManager
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
 
+LITELLM_AVAILABLE = True
+try:
+    import litellm
+    from litellm import acompletion
+
+    litellm.suppress_debug_info = True
+    litellm.set_verbose = False
+
+    LITELLM_AVAILABLE = True
+except ImportError:
+    LITELLM_AVAILABLE = False
+    logger.warning("[AIService] LiteLLM not installed, cloud LLM features disabled")
+
+
+def _check_reasoning_support(model: str) -> bool:
+    """检查模型是否支持推理增强 (reasoning_content)"""
+    if not LITELLM_AVAILABLE:
+        return False
+    try:
+        return litellm.utils.supports_reasoning(model=model)
+    except Exception:
+        reasoning_models = {
+            "deepseek-reasoner",
+            "deepseek-r1",
+            "o1",
+            "o1-mini",
+            "o1-preview",
+            "o3-mini",
+            "claude-3.7-sonnet",
+            "claude-4-opus",
+            "claude-4-sonnet",
+        }
+        model_lower = model.lower()
+        return any(rm in model_lower for rm in reasoning_models)
+
+
+def _classify_api_error(e: Exception) -> dict:
+    """
+    Classify API errors into user-friendly i18n messages.
+
+    Returns:
+        {"code": str, "message": str} where message is translated i18n text
+    """
+    from ui.i18n import classify_error
+
+    return classify_error(e, context="llm")
+
 
 class AIService:
     """
-    AI Service for OpenAI-compatible APIs (DeepSeek, Moonshot, etc.)
-    Handles prompt engineering, dialogue management, and API interaction.
+    AI Service - 基于 LiteLLM 1.82+ 的统一 LLM 网关
+
+    设计原则:
+    1. Cloud Provider: 使用 LiteLLM 统一调用各厂商 API
+    2. Local Provider: 绝对隔离，不经过 LiteLLM，直接调用 LocalModelManager
+    3. 状态机管理: 使用 _is_cloud_configured 替代 self.client
+    4. 异步安全: 使用懒加载动态锁，避免跨事件循环崩溃
+
+    LiteLLM 1.82+ 特性利用:
+    - reasoning_content 标准化提取
+    - stream_options 获取 usage 统计
+    - supports_reasoning 模型能力检测
+    - drop_params 自动丢弃不支持的参数
+
+    重要: 异步锁必须在运行时动态创建，绑定到当前事件循环
+    禁止在类级别或 __init__ 中直接创建 asyncio.Lock/Semaphore
     """
 
     _instance = None
@@ -35,16 +94,159 @@ class AIService:
         if self._initialized:
             return
 
-        self.config = ConfigHandler()
-        self.client = None
-        self._setup_client()
-        self._semaphore = None  # Lazy creation to avoid cross-event-loop issues
-        self._semaphore_loop = None  # Track which loop the semaphore belongs to
+        self._is_cloud_configured = False
+        self._litellm_config = {}
+        self._local_model_loaded = False
+        self._supports_reasoning = False
 
-        # _setup_lock: lazy-initialized in property to avoid binding to wrong event loop
-        self._setup_lock = None
+        self._configure_litellm()
+        self._setup_client()
 
         self._initialized = True
+
+    def _configure_litellm(self):
+        """配置 LiteLLM 全局参数 (1.82+ 优化)"""
+        if not LITELLM_AVAILABLE:
+            return
+
+        litellm.set_verbose = False
+        litellm.drop_params = True
+        litellm.set_timeout = 30.0
+        litellm.max_retries = 2
+        litellm.success_callback = []
+        litellm.failure_callback = []
+        litellm.modify_params = True
+
+        logger.debug("[AIService] LiteLLM 1.82+ configured")
+
+    def _setup_client(self):
+        """
+        配置云端 LLM (LiteLLM 版本)
+
+        重要: LiteLLM 是函数式调用，没有持久化的 Client 实例
+        这里缓存配置供后续调用使用
+        """
+        if not LITELLM_AVAILABLE:
+            logger.warning(
+                "[AIService] Config | ⚠️ LiteLLM not available. Cloud features disabled."
+            )
+            self._is_cloud_configured = False
+            return
+
+        llm_config = ConfigHandler.get_llm_config()
+
+        api_key = llm_config.get("api_key")
+        if not api_key:
+            logger.warning(
+                "[AIService] Config | ⚠️ API Key not found. Cloud features disabled."
+            )
+            self._is_cloud_configured = False
+            return
+
+        provider = llm_config.get("provider", "")
+        base_url = llm_config.get("base_url", "")
+
+        if provider == "azure":
+            resource_name = llm_config.get("azure_resource_name", "")
+            deployment_name = llm_config.get("azure_deployment_name", "")
+            if not resource_name:
+                logger.warning(
+                    "[AIService] Config | ⚠️ Azure resource name not found. Cloud features disabled."
+                )
+                self._is_cloud_configured = False
+                return
+            if not deployment_name:
+                logger.warning(
+                    "[AIService] Config | ⚠️ Azure deployment name not found. Cloud features disabled."
+                )
+                self._is_cloud_configured = False
+                return
+            base_url = f"https://{resource_name}.openai.azure.com"
+            llm_config["base_url"] = base_url
+            llm_config["model"] = deployment_name
+        elif not base_url:
+            logger.error(
+                "[AIService] Config | ❌ 'base_url' is mandatory for cloud LLM."
+            )
+            self._is_cloud_configured = False
+            return
+
+        self._litellm_config = llm_config
+        self._is_cloud_configured = True
+
+        model_id = llm_config.get("model", "")
+        provider = llm_config.get("provider", "")
+        litellm_model = f"{provider}/{model_id}" if provider else model_id
+        self._supports_reasoning = _check_reasoning_support(litellm_model)
+
+        logger.info(
+            f"[AIService] Init | ✅ Cloud client ready. provider={provider}, reasoning={self._supports_reasoning}"
+        )
+
+    def is_cloud_available(self) -> bool:
+        """检查云端 LLM 是否可用 (替代 if not self.client)"""
+        return self._is_cloud_configured and bool(self._litellm_config.get("api_key"))
+
+    @staticmethod
+    def _build_litellm_params(llm_config: dict, messages: list, **kwargs) -> dict:
+        """
+        构建 LiteLLM 请求参数 (静态方法，供 test_connection 复用)
+
+        Azure 特殊处理:
+        - base_url: https://{resource_name}.openai.azure.com (不含 deployments 路径)
+        - model: azure/{deployment_name}
+        - api_version: 作为独立参数传递
+        """
+        provider = llm_config.get("provider", "custom")
+        model = llm_config.get("model", "")
+
+        request_params = {
+            "messages": messages,
+            "api_key": llm_config.get("api_key"),
+        }
+
+        if provider == "azure":
+            request_params["model"] = f"azure/{model}"
+            azure_resource_name = llm_config.get("azure_resource_name", "")
+            if azure_resource_name:
+                request_params["api_base"] = (
+                    f"https://{azure_resource_name}.openai.azure.com"
+                )
+            else:
+                request_params["api_base"] = llm_config.get("base_url", "")
+            from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+
+            request_params["api_version"] = llm_config.get(
+                "api_version", AZURE_DEFAULT_API_VERSION
+            )
+        else:
+            prefix_map = {
+                "openai": "openai",
+                "anthropic": "anthropic",
+                "google": "gemini",
+                "deepseek": "deepseek",
+                "mistral": "mistral",
+                "qwen": "openai",
+                "zhipu": "openai",
+                "moonshot": "openai",
+                "minimax": "openai",
+                "custom": "openai",
+            }
+            prefix = prefix_map.get(provider, "openai")
+            request_params["model"] = f"{prefix}/{model}"
+            request_params["api_base"] = llm_config.get("base_url", "")
+
+        if "temperature" in kwargs:
+            request_params["temperature"] = kwargs["temperature"]
+        if "max_tokens" in kwargs:
+            request_params["max_tokens"] = kwargs["max_tokens"]
+        if "response_format" in kwargs:
+            request_params["response_format"] = kwargs["response_format"]
+
+        timeout_val = kwargs.get("timeout", 30.0)
+        request_params["timeout"] = httpx.Timeout(timeout_val, connect=5.0)
+
+        return request_params
 
     async def _get_semaphore(self):
         """Get or create semaphore for current event loop"""
@@ -73,39 +275,6 @@ class AIService:
 
         return current_loop._ai_semaphore  # type: ignore
 
-    def _setup_client(self):
-        """
-        Initialize OpenAI client from settings.
-        STRICT MODE: Requires explicit 'ai_api_key' and 'ai_base_url' in config.
-        """
-        ai_cfg = ConfigHandler.get_ai_config()
-        api_key = ai_cfg.get("ai_api_key")
-        base_url = ai_cfg.get("ai_base_url")
-
-        if not api_key:
-            logger.warning(
-                "[AIService] Config | ⚠️ API Key not found. AI features disabled.",
-            )
-            self.client = None
-            return
-
-        if not base_url:
-            logger.error(
-                "[AIService] Config | ❌ 'ai_base_url' is mandatory. No default fallback.",
-            )
-            self.client = None
-            return
-
-        # Configure timeout and retry at SDK level
-        # Total 30s timeout (matching analyze_stock), 5s connect timeout, max 2 retries
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=httpx.Timeout(30.0, connect=5.0),
-            max_retries=2,
-        )
-        logger.info(f"[AIService] Init | ✅ Cloud client ready. base_url={base_url}")
-
     def _safe_truncate(self, text: str, max_len: int) -> str:
         """Safely truncate text to avoid token overflow"""
         if not text:
@@ -117,17 +286,90 @@ class AIService:
     async def reload_config(self):
         """Reload config when settings change"""
         self._setup_client()
-        # Force semaphore rebuild with new concurrency
-        self._semaphore = None
-        self._semaphore_loop = None
+        self._local_model_loaded = False
 
-        # Reset Local Model state to allow hot-swapping model path
-        # Use simple assignment as we are in main loop single thread (mostly)
-        # But to be safe with async, we just flag it.
-        # Ideally we should stop current inferences? Too complex.
-        # Just reset flags so next call re-loads.
-        # We don't unset _local_llama immediately to avoid crashing running threads
-        # It will be overwritten on next _setup_local_model success.
+    async def _chat_completion_litellm(
+        self,
+        messages: list,
+        on_chunk=None,
+        **kwargs,
+    ) -> dict:
+        """
+        LiteLLM 1.82+ 版本的云端调用
+
+        Args:
+            messages: 消息列表
+            on_chunk: 流式回调函数 (content, is_reasoning)
+            **kwargs: 其他参数
+
+        Returns:
+            {"content": str, "usage": dict, "reasoning_content": str}
+        """
+        llm_config = self._litellm_config
+        request_params = self._build_litellm_params(llm_config, messages, **kwargs)
+
+        stream = kwargs.get("stream", False) or on_chunk is not None
+
+        if stream:
+            if self._supports_reasoning:
+                request_params["stream_options"] = {"include_usage": True}
+
+            response = await acompletion(stream=True, **request_params)
+            response_content = ""
+            reasoning_content = ""
+            usage = None
+
+            async for chunk in response:
+                if not chunk.choices:
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage = {
+                            "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
+                            "completion_tokens": getattr(
+                                chunk.usage, "completion_tokens", 0
+                            ),
+                            "total_tokens": getattr(chunk.usage, "total_tokens", 0),
+                        }
+                    continue
+
+                delta = chunk.choices[0].delta
+
+                if self._supports_reasoning:
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        reasoning_content += reasoning
+                        if on_chunk:
+                            on_chunk(reasoning, True)
+
+                if delta.content:
+                    response_content += delta.content
+                    if on_chunk:
+                        on_chunk(delta.content, False)
+
+            if not response_content and reasoning_content:
+                response_content = reasoning_content
+
+            result = {"content": response_content}
+            if reasoning_content:
+                result["reasoning_content"] = reasoning_content
+            if usage:
+                result["usage"] = usage
+
+            return result
+        else:
+            response = await acompletion(**request_params)
+            content = response.choices[0].message.content
+            result = {"content": content}
+
+            if hasattr(response, "usage") and response.usage:
+                result["usage"] = {
+                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(
+                        response.usage, "completion_tokens", 0
+                    ),
+                    "total_tokens": getattr(response.usage, "total_tokens", 0),
+                }
+
+            return result
 
     async def _chat_completion(
         self,
@@ -181,54 +423,24 @@ class AIService:
 
         # --- Cloud Provider ---
         else:
-            if not self.client:
-                raise ValueError("Cloud Client not initialized")
-
-            model = model or ConfigHandler.get_setting("ai_model_name")  # type: ignore
-            if not model:
-                raise ValueError("Model not configured")
+            if not self.is_cloud_available():
+                raise ValueError("Cloud LLM not configured. Please set up API Key.")
 
             async with await self._get_semaphore():
                 logger.debug(
-                    f"[AIService] Cloud | Invoking {model} ({len(messages)} messages)",
+                    f"[AIService] Cloud | Invoking LiteLLM ({len(messages)} messages)",
                 )
 
-                response = await self.client.chat.completions.create(  # type: ignore
-                    model=model,
-                    messages=messages,
-                    # When streaming, response_format json_object is often unsupported by providers, so we disable it
-                    response_format={"type": "json_object"}  # type: ignore
+                result = await self._chat_completion_litellm(
+                    messages,
+                    on_chunk=on_chunk,
+                    temperature=temperature,
+                    timeout=timeout,
+                    response_format={"type": "json_object"}
                     if json_mode and not on_chunk
                     else None,
-                    temperature=temperature,
-                    timeout=timeout,  # Let the SDK handle timeout natively so retries work
-                    stream=bool(on_chunk),
                 )
-
-                if on_chunk:
-                    response_content = ""
-                    reasoning_content = ""
-                    async for chunk in response:
-                        if not chunk.choices:
-                            continue
-                        delta = chunk.choices[0].delta
-                        if (
-                            hasattr(delta, "reasoning_content")
-                            and delta.reasoning_content
-                        ):
-                            reasoning_content += delta.reasoning_content
-                            on_chunk(
-                                delta.reasoning_content,
-                                True,
-                            )  # True for is_reasoning
-                        if delta.content:
-                            response_content += delta.content
-                            on_chunk(delta.content, False)
-                    # Guard: some models put everything in reasoning_content
-                    if not response_content and reasoning_content:
-                        response_content = reasoning_content
-                else:
-                    response_content = response.choices[0].message.content
+                response_content = result["content"]
 
         # --- Post-Processing (JSON Parsing) ---
         if json_mode:
@@ -289,11 +501,9 @@ class AIService:
     ) -> dict:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
-        Requires 'ai_model_name' to be configured.
+        Requires 'llm_model' to be configured.
         """
-        if not self.client:
-            # Minimal check, though _chat_completion checks it too.
-            # But analyze_stock might return specific error dicts expected by Strategy.
+        if not self.is_cloud_available():
             return None  # type: ignore
 
         # Build Prompt
@@ -356,6 +566,8 @@ class AIService:
         # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
         if history_context is None:
             try:
+                from data.persistence.review_manager import ReviewManager
+
                 rm = ReviewManager()
                 history_context = await rm.get_learning_context()
             except Exception as e:
@@ -570,7 +782,7 @@ class AIService:
         """
         Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).
         """
-        system_instruction = self.config.get_ai_news_prompt()
+        system_instruction = ConfigHandler.get_ai_news_prompt()
         messages = [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": text[:500]},
@@ -629,19 +841,14 @@ class AIService:
         """
         Verify API connection by sending a minimal request.
         """
-        if not self.client:
+        if not self.is_cloud_available():
             return False
 
         try:
-            model = self.config.get_setting("ai_model_name")
-            if not model:
-                raise ValueError("AI Model not configured")
-
-            # Minimal request to test auth
-            await self.client.chat.completions.create(
-                model=model,
+            result = await self._chat_completion_litellm(
                 messages=[{"role": "user", "content": "Hi"}],
                 max_tokens=1,
+                timeout=10.0,
             )
             return True
         except Exception as e:
@@ -652,32 +859,74 @@ class AIService:
             raise e
 
     @staticmethod
-    async def test_connection(api_key: str, base_url: str, model: str) -> bool:
+    async def test_connection(
+        provider: str = "deepseek",
+        model: str = "",
+        base_url: str = "",
+        api_key: str = "",
+        **kwargs,
+    ) -> dict:
         """
         Static method to test connection with provided credentials (without saving).
+
+        Args:
+            provider: 供应商 ID
+            model: 模型 ID
+            base_url: API 基础 URL
+            api_key: API Key
+            **kwargs: 扩展字段 (如 Azure 的 azure_resource_name, api_version)
+
+        Returns:
+            {"success": bool, "message": str, "usage": dict}
         """
         if not api_key:
-            raise ValueError("API Key is empty")
+            return {"success": False, "message": "API Key is empty"}
+
+        if not LITELLM_AVAILABLE:
+            return {"success": False, "message": "LiteLLM not installed"}
 
         try:
-            # Create a temporary client with same timeout config
-            client = AsyncOpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=httpx.Timeout(10.0, connect=5.0),  # Shorter for testing
-                max_retries=1,  # Less retries for testing
+            test_config = {
+                "provider": provider,
+                "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
+                **kwargs,
+            }
+
+            litellm_model = f"{provider}/{model}" if provider else model
+            supports_reasoning = _check_reasoning_support(litellm_model)
+
+            request_params = AIService._build_litellm_params(
+                test_config,
+                [{"role": "user", "content": "Hi"}],
+                max_tokens=1,
+                timeout=10.0,
             )
 
-            # Simple test request
-            await client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "Hi"}],
-                max_tokens=1,
-            )
-            return True
+            response = await acompletion(**request_params)
+
+            result = {"success": True, "message": "Connection successful"}
+
+            if hasattr(response, "usage") and response.usage:
+                result["usage"] = {
+                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(
+                        response.usage, "completion_tokens", 0
+                    ),
+                    "total_tokens": getattr(response.usage, "total_tokens", 0),
+                }
+
+            if supports_reasoning:
+                result["reasoning_supported"] = True
+
+            return result
+
         except Exception as e:
-            logger.error(
-                f"[AIService] TestConn | ❌ Test connection failed: {e}",
-                exc_info=True,
-            )
-            raise e
+            logger.error(f"[AIService] TestConn | ❌ Test connection failed: {e}")
+            error_info = _classify_api_error(e)
+            return {
+                "success": False,
+                "message": error_info["message"],
+                "error_code": error_info["code"],
+            }

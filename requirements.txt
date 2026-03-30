@@ -15,6 +15,7 @@ brotlicffi>=1.1.0.0 # Fast Brotli compression support for urllib3 (optional dep,
 
 # === Data Processing & Analysis ===
 # Core dataframe libraries
+numpy>=1.26.0
 pandas>=3.0.0
 polars>=1.38.1
 pyarrow>=14.0.0 # Required by Polars for converting Pandas nullable Int64/Float64 types
@@ -31,13 +32,12 @@ alembic>=1.14.0 # Database Migration Tool
 sqlparse>=0.4.4 # SQL Query parser and formatter
 
 # === AI & LLM Integration ===
-# Cloud LLM APIs (DeepSeek / OpenAI compatible)
-openai>=2.17.0
-# Local LLM Inference
-llama-cpp-python>=0.3.16 # Requires Visual Studio Build Tools to compile. Install manually if needed.
+# Multi-LLM Gateway (openai 作为子依赖自动安装)
+litellm>=1.50.0
+# Local LLM Inference (Optional / Heavy, Requires C++ Build Tools)
+llama-cpp-python>=0.3.16 # Install manually if needed, avoiding breaks in pure python environments
 
 # === Charting & Visualization ===
-plotly>=6.5.2 # Interactive UI Charts
 mplfinance>=0.12.10b0 # Candlestick Charts
 matplotlib>=3.10.0 # Base plotting library
 
@@ -53,9 +53,6 @@ cryptography>=46.0.4 # File-based encryption fallback for token storage
 
 # === Advanced Utilities ===
 readerwriterlock>=1.0.9 # Advanced Thread-safe read/write locks for CacheManager
-async-lru>=2.1.0 # Async LRU caching for high-frequency queries
 
-# === Testing & Automation ===
-pytest>=8.0.0
-pytest-asyncio>=0.23.5
+# === Scrapers & Automations (Optional / Heavy) ===
 playwright>=1.58.0 # Browser automation (For News/Information web scraping and UI tests)
