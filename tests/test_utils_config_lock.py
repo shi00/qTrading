@@ -65,8 +65,7 @@ class TestConfigThreadSafety:
                 success_count += 1
 
         assert success_count == NUM_WRITERS, (
-            f"Writer success rate: {success_count}/{NUM_WRITERS}. "
-            f"Some writes were lost or corrupted."
+            f"Writer success rate: {success_count}/{NUM_WRITERS}. Some writes were lost or corrupted."
         )
 
     def test_config_concurrent_read(self):

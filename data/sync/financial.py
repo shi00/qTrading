@@ -168,12 +168,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # === [断点续传逻辑增强验证] ===
         # 找出虽然标记为完成，但实际期数不够的残缺股票
-        MIN_PERIODS = ConfigHandler.get_sync_integrity_config().get(
-            "financial_min_periods", 4
-        )
-        incomplete_stocks = await self.context.cache.get_incomplete_financial_stocks(
-            MIN_PERIODS
-        )
+        MIN_PERIODS = ConfigHandler.get_sync_integrity_config().get("financial_min_periods", 4)
+        incomplete_stocks = await self.context.cache.get_incomplete_financial_stocks(MIN_PERIODS)
 
         if incomplete_stocks:
             logger.info(
@@ -212,9 +208,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         end_date = get_now().date()
         years = ConfigHandler.get_init_history_years()
-        rough_start_date = get_now().date() - datetime.timedelta(
-            days=int(250 * years * 2.0)
-        )
+        rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
         all_dates = await self.context.processor.get_trade_dates(  # type: ignore
             start_date=rough_start_date,
             end_date=end_date,
@@ -222,11 +216,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         start_date = (
             all_dates[-(250 * years)]
             if len(all_dates) >= (250 * years)
-            else (
-                all_dates[0]
-                if all_dates
-                else (get_now().date() - datetime.timedelta(days=365 * years))
-            )
+            else (all_dates[0] if all_dates else (get_now().date() - datetime.timedelta(days=365 * years)))
         )
 
         all_dates = []
@@ -332,17 +322,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                             # Accumulate for aux tables
                             api_func = task_specs[i][0]
                             if api_func == self.context.api.get_fina_mainbz:
-                                total_mainbz_rows += (
-                                    row_count
-                                    if row_count is not None
-                                    else len(result_data)
-                                )
+                                total_mainbz_rows += row_count if row_count is not None else len(result_data)
                             elif api_func == self.context.api.get_fina_audit:
-                                total_audit_rows += (
-                                    row_count
-                                    if row_count is not None
-                                    else len(result_data)
-                                )
+                                total_audit_rows += row_count if row_count is not None else len(result_data)
 
                     if not has_error:
                         await self.context.cache.mark_stock_step4_completed(
@@ -480,11 +462,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             if df_disclosure is None or df_disclosure.empty:
                 continue
 
-            target_list = (
-                df_disclosure[["ts_code", "end_date"]]
-                .drop_duplicates()
-                .to_dict("records")
-            )
+            target_list = df_disclosure[["ts_code", "end_date"]].drop_duplicates().to_dict("records")
             if not target_list:
                 continue
 
@@ -617,11 +595,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                 except Exception as e:
                     err_str = str(e).lower()
-                    if (
-                        "permission" in err_str
-                        or "积分" in err_str
-                        or "no access" in err_str
-                    ):
+                    if "permission" in err_str or "积分" in err_str or "no access" in err_str:
                         logger.warning(
                             f"[FinancialSync] BatchSync | ⛔ Permission Denied for {table_name}: {e}",
                         )
@@ -645,10 +619,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 break
 
             # Each date: 3 tables in parallel
-            coros = [
-                sync_one_date_table(d, tbl, cfg)
-                for tbl, cfg in FINANCIAL_BATCH_TABLES.items()
-            ]
+            coros = [sync_one_date_table(d, tbl, cfg) for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
             await asyncio.gather(*coros)
 
             # Report progress every 10 days

@@ -168,9 +168,7 @@ async def main(page: ft.Page):
     onboarding_complete = ConfigHandler.is_onboarding_complete()
 
     masked_token = f"{token[:4]}****" if token and len(token) > 4 else "None"
-    masked_llm_key = (
-        f"{llm_api_key[:4]}****" if llm_api_key and len(llm_api_key) > 4 else "None"
-    )
+    masked_llm_key = f"{llm_api_key[:4]}****" if llm_api_key and len(llm_api_key) > 4 else "None"
     logger.debug(
         f"DB_URL configured: {bool(db_url)}, Token='{masked_token}', API_Key='{masked_llm_key}', Onboarding='{onboarding_complete}'"
     )

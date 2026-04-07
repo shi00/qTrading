@@ -25,31 +25,19 @@ class TestDatabaseManager(TestDatabaseBase):
 
         async with self._ddl_engine.begin() as conn:
             await conn.execute(
-                text(
-                    "CREATE TABLE IF NOT EXISTS test_stock_basic (ts_code TEXT PRIMARY KEY, name TEXT)"
-                )
+                text("CREATE TABLE IF NOT EXISTS test_stock_basic (ts_code TEXT PRIMARY KEY, name TEXT)")
             )
             await conn.execute(text("DELETE FROM test_stock_basic"))
-            await conn.execute(
-                text("INSERT INTO test_stock_basic VALUES ('000001.SZ', 'PingAn')")
-            )
-            await conn.execute(
-                text("INSERT INTO test_stock_basic VALUES ('600519.SH', 'Moutai')")
-            )
+            await conn.execute(text("INSERT INTO test_stock_basic VALUES ('000001.SZ', 'PingAn')"))
+            await conn.execute(text("INSERT INTO test_stock_basic VALUES ('600519.SH', 'Moutai')"))
 
             await conn.execute(
-                text(
-                    "CREATE TABLE IF NOT EXISTS test_daily_quotes (ts_code TEXT, trade_date TEXT, close REAL)"
-                )
+                text("CREATE TABLE IF NOT EXISTS test_daily_quotes (ts_code TEXT, trade_date TEXT, close REAL)")
             )
             await conn.execute(text("DELETE FROM test_daily_quotes"))
             for i in range(100):
                 date = f"202301{i:02d}" if i < 31 else "20230201"
-                await conn.execute(
-                    text(
-                        f"INSERT INTO test_daily_quotes VALUES ('000001.SZ', '{date}', {10.0 + i})"
-                    )
-                )
+                await conn.execute(text(f"INSERT INTO test_daily_quotes VALUES ('000001.SZ', '{date}', {10.0 + i})"))
 
     async def asyncTearDown(self):
         if hasattr(self, "db_manager"):
@@ -95,11 +83,7 @@ class TestDatabaseManager(TestDatabaseBase):
     async def test_execute_sql_memory_limit(self):
         async with self._ddl_engine.begin() as conn:
             for i in range(2500):
-                await conn.execute(
-                    text(
-                        f"INSERT INTO test_daily_quotes VALUES ('TMP', '2023{i}', {float(i)})"
-                    )
-                )
+                await conn.execute(text(f"INSERT INTO test_daily_quotes VALUES ('TMP', '2023{i}', {float(i)})"))
 
         result = self.db_manager.execute_sql("SELECT * FROM test_daily_quotes")
         self.assertTrue(result["success"])

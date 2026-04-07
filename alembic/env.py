@@ -44,11 +44,7 @@ def get_database_url() -> str:
 
 db_url = get_database_url()
 sync_db_url = db_url.replace("+asyncpg", "") if db_url else ""
-async_db_url = (
-    db_url
-    if "+asyncpg" in db_url
-    else db_url.replace("postgresql://", "postgresql+asyncpg://")
-)
+async_db_url = db_url if "+asyncpg" in db_url else db_url.replace("postgresql://", "postgresql+asyncpg://")
 alembic_config.set_main_option("sqlalchemy.url", sync_db_url)
 
 if alembic_config.config_file_name is not None:

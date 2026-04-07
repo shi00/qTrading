@@ -30,9 +30,7 @@ HEALTH_DEPTH_WARNING_RATIO = 0.30
 
 # Quality Tier Assignment Thresholds (used by _assign_basic_tier fast-path)
 TIER_QUOTE_FRESHNESS_DAYS = 5  # Max lag days for daily_quotes to qualify as SILVER
-TIER_FINANCIAL_FRESHNESS_DAYS = (
-    100  # Max lag days for financial_reports to qualify as GOLD
-)
+TIER_FINANCIAL_FRESHNESS_DAYS = 100  # Max lag days for financial_reports to qualify as GOLD
 
 # Financial Report Schema Columns (Unified for Income, Balance, Cashflow, Indicator)
 FINANCIAL_REPORT_SCHEMA_COLS = [

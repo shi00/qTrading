@@ -97,9 +97,7 @@ class TestHolderDaoBatchPerformance:
                 }
             )
 
-        with patch.object(
-            holder_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls
-        ):
+        with patch.object(holder_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls):
             ts_codes = ["000001.SZ", "000002.SZ", "600000.SH"]
             await holder_dao.get_top10_holders_batch(ts_codes)
 

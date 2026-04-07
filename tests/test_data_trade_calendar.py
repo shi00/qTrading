@@ -92,9 +92,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         """Test is_trading_day falls back to API when DB has no data."""
         test_date = datetime.date(2024, 3, 21)
 
-        await self.cache.stock_dao._write_db(
-            "DELETE FROM trade_cal WHERE cal_date = $1", (test_date,)
-        )
+        await self.cache.stock_dao._write_db("DELETE FROM trade_cal WHERE cal_date = $1", (test_date,))
 
         api_df = pd.DataFrame(
             {
@@ -170,9 +168,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         end = datetime.date(2024, 3, 31)
         await self._seed_trade_calendar(start, end)
 
-        result = await self.service.get_start_date_by_trade_days(
-            datetime.date(2024, 3, 21), 10
-        )
+        result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 21), 10)
 
         self.assertIsNotNone(result)
         self.assertLess(result, datetime.date(2024, 3, 21))  # type: ignore
@@ -247,9 +243,7 @@ class TestTradeCalendarService(TestDatabaseBase):
 
     async def test_to_date_conversion(self):
         """Test _to_date handles various input types."""
-        self.assertEqual(
-            self.service._to_date("2024-03-21"), datetime.date(2024, 3, 21)
-        )
+        self.assertEqual(self.service._to_date("2024-03-21"), datetime.date(2024, 3, 21))
         self.assertEqual(self.service._to_date("20240321"), datetime.date(2024, 3, 21))
         self.assertEqual(
             self.service._to_date(datetime.datetime(2024, 3, 21, 10, 0)),
@@ -321,33 +315,23 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 
     async def test_get_trade_dates_reverse_range(self):
         """Test get_trade_dates with start > end returns empty list."""
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 22), datetime.date(2024, 3, 18)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 22), datetime.date(2024, 3, 18))
         self.assertEqual(result, [])
 
     async def test_get_trade_dates_same_date_trading(self):
         """Test get_trade_dates with same start and end date (trading day)."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 21), datetime.date(2024, 3, 21)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 21), datetime.date(2024, 3, 21))
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 21), datetime.date(2024, 3, 21)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 21), datetime.date(2024, 3, 21))
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0], datetime.date(2024, 3, 21))
 
     async def test_get_trade_dates_same_date_weekend(self):
         """Test get_trade_dates with same start and end date (weekend)."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 23), datetime.date(2024, 3, 23)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 23), datetime.date(2024, 3, 23))
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 23), datetime.date(2024, 3, 23)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 23), datetime.date(2024, 3, 23))
 
         self.assertEqual(result, [])
 
@@ -382,16 +366,12 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 
     async def test_get_start_date_by_trade_days_zero_days(self):
         """Test get_start_date_by_trade_days with 0 days returns None."""
-        result = await self.service.get_start_date_by_trade_days(
-            datetime.date(2024, 3, 21), 0
-        )
+        result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 21), 0)
         self.assertIsNone(result)
 
     async def test_get_start_date_by_trade_days_negative_days(self):
         """Test get_start_date_by_trade_days with negative days returns None."""
-        result = await self.service.get_start_date_by_trade_days(
-            datetime.date(2024, 3, 21), -5
-        )
+        result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 21), -5)
         self.assertIsNone(result)
 
     async def test_get_prev_trade_date_null_date(self):
@@ -410,22 +390,16 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 
     async def test_get_start_date_by_trade_days_exceeds_available(self):
         """Test get_start_date_by_trade_days when requesting more days than available."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
-        result = await self.service.get_start_date_by_trade_days(
-            datetime.date(2024, 3, 22), 100
-        )
+        result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 22), 100)
 
         self.assertIsNotNone(result)
         self.assertLess(result, datetime.date(2024, 3, 22))  # type: ignore
 
     async def test_get_prev_trade_date_first_available(self):
         """Test get_prev_trade_date when at first available trading day."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         result = await self.service.get_prev_trade_date(datetime.date(2024, 3, 18))
 
@@ -434,9 +408,7 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 
     async def test_get_next_trade_date_last_available(self):
         """Test get_next_trade_date when at last available trading day."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         result = await self.service.get_next_trade_date(datetime.date(2024, 3, 22))
 
@@ -445,13 +417,9 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 
     async def test_count_trade_days_empty_range(self):
         """Test count_trade_days with no trading days in range."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
-        result = await self.service.count_trade_days(
-            datetime.date(2024, 1, 1), datetime.date(2024, 1, 5)
-        )
+        result = await self.service.count_trade_days(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
 
         self.assertGreaterEqual(result, 0)
 
@@ -461,27 +429,21 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 
     async def test_is_trading_day_string_with_hyphen(self):
         """Test is_trading_day accepts YYYY-MM-DD string format."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 21), datetime.date(2024, 3, 21)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 21), datetime.date(2024, 3, 21))
 
         result = await self.service.is_trading_day("2024-03-21")
         self.assertTrue(result)
 
     async def test_is_trading_day_string_without_hyphen(self):
         """Test is_trading_day accepts YYYYMMDD string format."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 21), datetime.date(2024, 3, 21)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 21), datetime.date(2024, 3, 21))
 
         result = await self.service.is_trading_day("20240321")
         self.assertTrue(result)
 
     async def test_get_trade_dates_string_inputs(self):
         """Test get_trade_dates accepts string date inputs."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         result = await self.service.get_trade_dates("2024-03-18", "20240322")
 
@@ -517,17 +479,13 @@ class TestTradeCalendarServiceOffline(TestDatabaseBase):
 
     async def test_get_trade_dates_offline_fallback(self):
         """Test get_trade_dates falls back to offline calendar."""
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         self.assertEqual(len(result), 5)
 
     async def test_count_trade_days_offline_fallback(self):
         """Test count_trade_days falls back to list counting."""
-        result = await self.service.count_trade_days(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        result = await self.service.count_trade_days(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         self.assertEqual(result, 5)
 
@@ -552,9 +510,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_is_trading_day_db_exception_fallback(self):
         """Test is_trading_day handles DB exceptions gracefully."""
-        self.service._cache.get_trade_cal = AsyncMock(
-            side_effect=Exception("DB connection failed")
-        )
+        self.service._cache.get_trade_cal = AsyncMock(side_effect=Exception("DB connection failed"))
 
         result = await self.service.is_trading_day(datetime.date(2024, 3, 21))
 
@@ -562,13 +518,9 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_get_trade_dates_db_exception_fallback(self):
         """Test get_trade_dates handles DB exceptions with offline fallback."""
-        self.service._cache.get_trade_cal = AsyncMock(
-            side_effect=Exception("DB connection failed")
-        )
+        self.service._cache.get_trade_cal = AsyncMock(side_effect=Exception("DB connection failed"))
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         self.assertEqual(len(result), 5)
 
@@ -579,9 +531,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
     async def test_is_trading_day_api_exception_fallback(self):
         """Test is_trading_day handles API exceptions with offline fallback."""
         self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
-        self.service._api.get_trade_cal = AsyncMock(
-            side_effect=Exception("API timeout")
-        )
+        self.service._api.get_trade_cal = AsyncMock(side_effect=Exception("API timeout"))
 
         result = await self.service.is_trading_day(datetime.date(2024, 3, 21))
 
@@ -590,13 +540,9 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
     async def test_get_trade_dates_api_exception_fallback(self):
         """Test get_trade_dates handles API exceptions with offline fallback."""
         self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
-        self.service._api.get_trade_cal = AsyncMock(
-            side_effect=Exception("API timeout")
-        )
+        self.service._api.get_trade_cal = AsyncMock(side_effect=Exception("API timeout"))
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         self.assertEqual(len(result), 5)
 
@@ -607,9 +553,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
     async def test_api_data_persistence_failure_does_not_affect_result(self):
         """Test that persistence failure doesn't affect the returned result."""
         self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
-        self.service._cache.save_trade_cal = AsyncMock(
-            side_effect=Exception("Write failed")
-        )
+        self.service._cache.save_trade_cal = AsyncMock(side_effect=Exception("Write failed"))
 
         api_df = pd.DataFrame(
             {
@@ -640,9 +584,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
         )
         self.service._api.get_trade_cal = AsyncMock(return_value=malformed_df)
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 3, 21), datetime.date(2024, 3, 21)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 3, 21), datetime.date(2024, 3, 21))
 
         self.assertIsNotNone(result)
 
@@ -681,9 +623,7 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
 
     async def test_concurrent_get_latest_trade_date_no_race(self):
         """Test concurrent calls to get_latest_trade_date don't cause race conditions."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
 
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
@@ -702,9 +642,7 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
 
     async def test_cache_ttl_prevents_excessive_queries(self):
         """Test that cache TTL prevents excessive database queries."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
 
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
@@ -714,9 +652,7 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
             await self.service.get_latest_trade_date()
             await self.service.get_latest_trade_date()
 
-            self.assertEqual(
-                self.service._latest_trade_date_cache["val"], datetime.date(2024, 3, 21)
-            )
+            self.assertEqual(self.service._latest_trade_date_cache["val"], datetime.date(2024, 3, 21))
 
 
 class TestTradeCalendarServiceBatch(TestDatabaseBase):
@@ -753,9 +689,7 @@ class TestTradeCalendarServiceBatch(TestDatabaseBase):
 
     async def test_get_trade_dates_batch(self):
         """Test get_trade_dates_batch returns correct results for multiple ranges."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
 
         ranges = [
             (datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)),
@@ -765,12 +699,8 @@ class TestTradeCalendarServiceBatch(TestDatabaseBase):
         result = await self.service.get_trade_dates_batch(ranges)
 
         self.assertEqual(len(result), 2)
-        self.assertEqual(
-            len(result[(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))]), 5
-        )
-        self.assertEqual(
-            len(result[(datetime.date(2024, 3, 25), datetime.date(2024, 3, 29))]), 5
-        )
+        self.assertEqual(len(result[(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))]), 5)
+        self.assertEqual(len(result[(datetime.date(2024, 3, 25), datetime.date(2024, 3, 29))]), 5)
 
     async def test_get_trade_dates_batch_empty_input(self):
         """Test get_trade_dates_batch with empty input returns empty dict."""
@@ -869,18 +799,14 @@ class TestTradeCalendarServiceHolidays(TestDatabaseBase):
 
         for d in spring_festival_dates:
             result = await self.service.is_trading_day(d)
-            self.assertFalse(
-                result, f"{d} should not be a trading day (Spring Festival)"
-            )
+            self.assertFalse(result, f"{d} should not be a trading day (Spring Festival)")
 
     async def test_after_spring_festival_is_trading(self):
         """Test first trading day after Spring Festival."""
         await self._seed_holiday_calendar()
 
         result = await self.service.is_trading_day(datetime.date(2024, 2, 19))
-        self.assertTrue(
-            result, "Feb 19, 2024 should be a trading day (after Spring Festival)"
-        )
+        self.assertTrue(result, "Feb 19, 2024 should be a trading day (after Spring Festival)")
 
     async def test_national_day_not_trading(self):
         """Test National Day dates are not trading days."""
@@ -901,17 +827,13 @@ class TestTradeCalendarServiceHolidays(TestDatabaseBase):
         await self._seed_holiday_calendar()
 
         result = await self.service.is_trading_day(datetime.date(2024, 10, 8))
-        self.assertTrue(
-            result, "Oct 8, 2024 should be a trading day (after National Day)"
-        )
+        self.assertTrue(result, "Oct 8, 2024 should be a trading day (after National Day)")
 
     async def test_get_trade_dates_across_holiday(self):
         """Test get_trade_dates correctly skips holidays."""
         await self._seed_holiday_calendar()
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2024, 2, 8), datetime.date(2024, 2, 20)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2024, 2, 8), datetime.date(2024, 2, 20))
 
         expected_trading_days = [
             datetime.date(2024, 2, 8),
@@ -925,9 +847,7 @@ class TestTradeCalendarServiceHolidays(TestDatabaseBase):
         """Test count_trade_days correctly counts across holidays."""
         await self._seed_holiday_calendar()
 
-        result = await self.service.count_trade_days(
-            datetime.date(2024, 2, 8), datetime.date(2024, 2, 20)
-        )
+        result = await self.service.count_trade_days(datetime.date(2024, 2, 8), datetime.date(2024, 2, 20))
 
         self.assertEqual(result, 3)
 
@@ -971,9 +891,7 @@ class TestTradeCalendarServiceYearBoundary(TestDatabaseBase):
         """Test get_trade_dates across year boundary."""
         await self._seed_year_boundary_calendar()
 
-        result = await self.service.get_trade_dates(
-            datetime.date(2023, 12, 28), datetime.date(2024, 1, 5)
-        )
+        result = await self.service.get_trade_dates(datetime.date(2023, 12, 28), datetime.date(2024, 1, 5))
 
         self.assertTrue(len(result) > 0)
         for d in result:
@@ -983,9 +901,7 @@ class TestTradeCalendarServiceYearBoundary(TestDatabaseBase):
         """Test count_trade_days across year boundary."""
         await self._seed_year_boundary_calendar()
 
-        result = await self.service.count_trade_days(
-            datetime.date(2023, 12, 28), datetime.date(2024, 1, 5)
-        )
+        result = await self.service.count_trade_days(datetime.date(2023, 12, 28), datetime.date(2024, 1, 5))
 
         self.assertGreater(result, 0)
 
@@ -1064,9 +980,7 @@ class TestTradeCalendarServicePersistence(TestDatabaseBase):
         start = datetime.date(2024, 3, 18)
         end = datetime.date(2024, 3, 22)
 
-        self.service._cache.save_trade_cal = AsyncMock(
-            side_effect=Exception("DB write failed")
-        )
+        self.service._cache.save_trade_cal = AsyncMock(side_effect=Exception("DB write failed"))
 
         api_df = pd.DataFrame(
             {
@@ -1122,9 +1036,7 @@ class TestTradeCalendarServiceCacheTTL(TestDatabaseBase):
 
     async def test_cache_ttl_prevents_repeated_queries(self):
         """Test that cache TTL prevents repeated database queries."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
 
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
@@ -1139,9 +1051,7 @@ class TestTradeCalendarServiceCacheTTL(TestDatabaseBase):
 
     async def test_clear_cache_resets_ttl(self):
         """Test that clear_cache resets the TTL cache."""
-        await self._seed_trade_calendar(
-            datetime.date(2024, 3, 1), datetime.date(2024, 3, 31)
-        )
+        await self._seed_trade_calendar(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
 
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_dt = datetime.datetime(2024, 3, 21, 17, 0, 0)
@@ -1289,9 +1199,7 @@ class TestTradeCalendarServiceIntegration(TestDatabaseBase):
 
     async def test_get_trade_cal_df_empty_range(self):
         """Test get_trade_cal_df with empty date range returns DataFrame."""
-        result = await self.service.get_trade_cal_df(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 22)
-        )
+        result = await self.service.get_trade_cal_df(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         self.assertIsInstance(result, pd.DataFrame)
 

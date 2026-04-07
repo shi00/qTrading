@@ -47,9 +47,7 @@ class TestDataProcessor(unittest.TestCase):
         # Patch ConfigHandler
         self.patcher_config = patch("data.data_processor.ConfigHandler")
         self.mock_config = self.patcher_config.start()
-        self.mock_config.get_sync_max_concurrent_heavy.return_value = (
-            5  # Configure ConfigHandler return value
-        )
+        self.mock_config.get_sync_max_concurrent_heavy.return_value = 5  # Configure ConfigHandler return value
 
         # Reset Singleton State
         DataProcessor._instance = None
@@ -62,9 +60,7 @@ class TestDataProcessor(unittest.TestCase):
         # Inject mocks
         self.processor.api = self.mock_api
         self.processor.cache = self.mock_cache
-        self.processor._cancel_event = (
-            asyncio.Event()
-        )  # Updated from _shutdown_event  # type: ignore
+        self.processor._cancel_event = asyncio.Event()  # Updated from _shutdown_event  # type: ignore
 
         # CRITICAL: Inject mocks into TradeCalendarService
         if hasattr(self.processor, "trade_calendar"):
@@ -179,9 +175,7 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_get_latest_trade_date_weekday_pre_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 10, 0, 0)  # Wed pre-market
-        with patch(
-            "data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt
-        ):
+        with patch("data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt):
             self.processor.trade_calendar._latest_trade_date_cache = {
                 "ts": 0,
                 "val": None,
@@ -220,9 +214,7 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_get_latest_trade_date_weekday_post_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 17, 0, 0)  # Wed post-market
-        with patch(
-            "data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt
-        ):
+        with patch("data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt):
             self.processor.trade_calendar._latest_trade_date_cache = {
                 "ts": 0,
                 "val": None,
@@ -262,9 +254,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_latest_trade_date_weekend(self):
         """Test weekend -> should skip to Friday"""
         fixed_dt = datetime.datetime(2023, 10, 28, 12, 0, 0)  # Sat
-        with patch(
-            "data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt
-        ):
+        with patch("data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt):
             self.processor.trade_calendar._latest_trade_date_cache = {
                 "ts": 0,
                 "val": None,
@@ -609,9 +599,7 @@ class TestDataProcessor(unittest.TestCase):
             datetime.date(2023, 1, 5),
             datetime.date(2023, 1, 4),
         }
-        self.mock_cache.get_cached_dates_for_table = AsyncMock(
-            return_value=cached_dates
-        )
+        self.mock_cache.get_cached_dates_for_table = AsyncMock(return_value=cached_dates)
 
         historical_strategy = self.processor.strategies["historical"]
         with patch.object(
@@ -673,17 +661,10 @@ class TestDataProcessor(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertTrue(self.mock_cache.save_financial_reports.call_count >= 3)
 
-        saved_dfs = [
-            c[0][0] for c in self.mock_cache.save_financial_reports.call_args_list
-        ]
+        saved_dfs = [c[0][0] for c in self.mock_cache.save_financial_reports.call_args_list]
 
-        has_assets = any(
-            "total_assets" in df.columns and df.iloc[0]["total_assets"] == 10000
-            for df in saved_dfs
-        )
-        has_roe = any(
-            "roe" in df.columns and df.iloc[0]["roe"] == 10.5 for df in saved_dfs
-        )
+        has_assets = any("total_assets" in df.columns and df.iloc[0]["total_assets"] == 10000 for df in saved_dfs)
+        has_roe = any("roe" in df.columns and df.iloc[0]["roe"] == 10.5 for df in saved_dfs)
 
         self.assertTrue(has_assets, "total_assets not saved")
         self.assertTrue(has_roe, "roe not saved")

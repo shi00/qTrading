@@ -15,9 +15,7 @@ class ScreenerDao(BaseDao):
     def SH_BASE_COLS(self):
         """Dynamically generate base columns excluding heavy fields like 'thinking'."""
         # Reflection using SQLAlchemy Core Table columns (runs once, cached per instance)
-        cols = [
-            c.name for c in ScreeningHistory.__table__.columns if c.name != "thinking"
-        ]
+        cols = [c.name for c in ScreeningHistory.__table__.columns if c.name != "thinking"]
         return ", ".join(cols)
 
     @functools.cached_property
@@ -27,9 +25,7 @@ class ScreenerDao(BaseDao):
 
     # --- Screening History ---
 
-    async def get_screening_history(
-        self, strategy_name: str | None = None, limit: int | None = 100
-    ):
+    async def get_screening_history(self, strategy_name: str | None = None, limit: int | None = 100):
         sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE 1=1"
         p = []
         idx = 1
@@ -59,9 +55,7 @@ class ScreenerDao(BaseDao):
             (limit * 5, offset),
         )  # limit*5 to cover multiple strategies per date
 
-    async def get_history_records(
-        self, trade_date: str | None, strategy_name: str | None = None
-    ):
+    async def get_history_records(self, trade_date: str | None, strategy_name: str | None = None):
         """
         Get screening records for a specific date, optionally filtered by strategy.
         """

@@ -125,9 +125,7 @@ class AIBrainTab(ft.Container):
         self.btn_save_ai = ft.ElevatedButton(
             text=I18n.get("settings_save_ai"),
             icon=ft.Icons.SAVE,
-            on_click=lambda e: (
-                self.page.run_task(self._save_ai_settings, e) if self.page else None
-            ),
+            on_click=lambda e: self.page.run_task(self._save_ai_settings, e) if self.page else None,
             style=AppStyles.primary_button(),
             height=40,
         )
@@ -487,9 +485,7 @@ class AIBrainTab(ft.Container):
             self.ai_client = AIService()
             await self.ai_client.reload_config()
 
-            self.show_snack(
-                I18n.get("settings_verify_success"), color=AppColors.SUCCESS
-            )
+            self.show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
 
             local_config = self.local_model_panel.get_current_config()
             local_path = local_config.get("model_path", "")

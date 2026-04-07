@@ -108,9 +108,7 @@ class LocalModelManager:
             logger.error(f"[LocalModel] Failed to calculate MD5: {e}")
             return ""
 
-    async def load_model(
-        self, model_path: str, config: dict[str, Any] | None = None
-    ) -> bool:
+    async def load_model(self, model_path: str, config: dict[str, Any] | None = None) -> bool:
         """
         Load the model from GGUF file.
         Run in CPU thread pool to avoid blocking main loop.
@@ -306,9 +304,7 @@ class LocalModelManager:
                 self._model_stat = (0, 0)
                 raise RuntimeError(f"Inference execution failed: {e}") from e
 
-    def _generate_sync(
-        self, prompt: str, max_tokens: int, temperature: float, system_prompt: str
-    ) -> str:
+    def _generate_sync(self, prompt: str, max_tokens: int, temperature: float, system_prompt: str) -> str:
         """
         Sync generation logic.
         """

@@ -229,9 +229,7 @@ class TaskManager:
 
             # Throttle: only broadcast to subscribers at most every _NOTIFY_THROTTLE_S seconds
             now = _time.monotonic()
-            if (
-                now - self._last_notify_time
-            ) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
+            if (now - self._last_notify_time) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
                 self._last_notify_time = now
                 self._notify_subscribers()
 
@@ -276,16 +274,12 @@ class TaskManager:
 
     def _clear_finished_impl(self):
         """Actual clearing logic. Runs on event loop thread."""
-        to_delete = [
-            tid for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES
-        ]
+        to_delete = [tid for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
         for tid in to_delete:
             del self._tasks[tid]
         # Also clear matching items from history
         delete_set = set(to_delete)
-        history_to_clear = [
-            h.id for h in self._history if h.status in TERMINAL_STATUSES
-        ]
+        history_to_clear = [h.id for h in self._history if h.status in TERMINAL_STATUSES]
         self._history = [h for h in self._history if h.status not in TERMINAL_STATUSES]
         all_clear_ids = list(delete_set | set(history_to_clear))
         # DB cleanup
@@ -296,11 +290,7 @@ class TaskManager:
     async def cancel_all_running_async(self):
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes."""
-        active_ids = [
-            tid
-            for tid, t in self._tasks.items()
-            if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)
-        ]
+        active_ids = [tid for tid, t in self._tasks.items() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)]
         for tid in active_ids:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
@@ -321,9 +311,7 @@ class TaskManager:
 
     def _auto_evict_old(self):
         """Prevent unbounded memory growth by evicting oldest finished tasks when history exceeds limit."""
-        finished = [
-            (tid, t) for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES
-        ]
+        finished = [(tid, t) for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
         if len(finished) > self._MAX_FINISHED_HISTORY:
             finished.sort(key=lambda x: x[1].completed_at or datetime.datetime.min)
             to_evict = finished[: len(finished) - self._MAX_FINISHED_HISTORY]
@@ -368,11 +356,7 @@ class TaskManager:
                 # If we made it here without CancelledError, it's a success
                 task.status = TaskStatus.COMPLETED
                 task.progress = 1.0
-                task.description = (
-                    str(task.result)
-                    if task.result
-                    else I18n.get("task_status_completed", "已完成")
-                )
+                task.description = str(task.result) if task.result else I18n.get("task_status_completed", "已完成")
                 logger.info(f"[TaskManager] Completed: [{task.id}]")
 
         except asyncio.CancelledError:
@@ -431,8 +415,7 @@ class TaskManager:
 
         # 2. Mark stale RUNNING/QUEUED from last session as INTERRUPTED
         await cache._write_db(
-            "UPDATE task_history SET status = $1, description = $2 "
-            "WHERE status IN ('RUNNING', 'QUEUED')",
+            "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
             (
                 TaskStatus.INTERRUPTED.value,
                 I18n.get("task_interrupted_desc", "应用上次异常退出，任务被中断"),

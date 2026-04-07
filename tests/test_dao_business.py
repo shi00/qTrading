@@ -217,9 +217,7 @@ class TestMarketDao:
         )
         await market_dao.save_daily_indicators(df)
 
-        result = await market_dao.get_daily_indicators_bulk(
-            ts_code_list=["000001.SZ", "000002.SZ", "000003.SZ"]
-        )
+        result = await market_dao.get_daily_indicators_bulk(ts_code_list=["000001.SZ", "000002.SZ", "000003.SZ"])
         assert len(result) == 3
 
     async def test_get_daily_indicators_bulk_empty_list(self, market_dao, clean_db):
@@ -272,9 +270,7 @@ class TestMarketDao:
         saved = await market_dao.save_index_weights(df)
         assert saved == 2
 
-        result = await market_dao.get_index_weights(
-            index_code="000300.SH", trade_date="20240321"
-        )
+        result = await market_dao.get_index_weights(index_code="000300.SH", trade_date="20240321")
         assert len(result) == 2
 
     async def test_get_latest_index_weight_date(self, market_dao, clean_db):
@@ -523,9 +519,7 @@ class TestScreenerDao:
         assert len(wins) == 1
         assert wins["prediction_result"].iloc[0] == "WIN"
 
-    async def test_get_screening_data_complex_join(
-        self, screener_dao, clean_db, setup_stock_data
-    ):
+    async def test_get_screening_data_complex_join(self, screener_dao, clean_db, setup_stock_data):
         """测试复杂 JOIN 查询获取筛选数据"""
         result = await screener_dao.get_screening_data(trade_date="2024-03-21")
 
@@ -670,12 +664,8 @@ class TestSyncDao:
 
     async def test_get_all_sync_status(self, sync_dao, clean_db):
         """获取所有同步状态"""
-        await sync_dao.update_sync_status(
-            "daily_quotes", datetime.date(2024, 3, 21), 5000
-        )
-        await sync_dao.update_sync_status(
-            "stock_basic", datetime.date(2024, 3, 21), 5000
-        )
+        await sync_dao.update_sync_status("daily_quotes", datetime.date(2024, 3, 21), 5000)
+        await sync_dao.update_sync_status("stock_basic", datetime.date(2024, 3, 21), 5000)
 
         result = await sync_dao.get_sync_status()
         assert not result.empty

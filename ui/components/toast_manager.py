@@ -147,9 +147,7 @@ class ToastManager:
             tasks_snapshot = list(self._active_tasks)
 
         # Cancel all active tasks
-        valid_tasks = [
-            t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future))
-        ]
+        valid_tasks = [t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future))]
         for task in valid_tasks:
             if not task.done():
                 task.cancel()

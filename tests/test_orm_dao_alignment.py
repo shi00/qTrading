@@ -312,18 +312,12 @@ class TestDaoSaveMethodCompleteness:
 
     def test_save_daily_quotes_uses_save_upsert(self):
         source = inspect.getsource(QuoteDao.save_daily_quotes)
-        assert "_save_upsert" in source, (
-            "save_daily_quotes should delegate to _save_upsert for consistent handling"
-        )
+        assert "_save_upsert" in source, "save_daily_quotes should delegate to _save_upsert for consistent handling"
 
     def test_save_moneyflow_uses_save_upsert(self):
         source = inspect.getsource(QuoteDao.save_moneyflow)
-        assert "_save_upsert" in source, (
-            "save_moneyflow should delegate to _save_upsert for consistent handling"
-        )
+        assert "_save_upsert" in source, "save_moneyflow should delegate to _save_upsert for consistent handling"
 
     def test_save_top_list_uses_save_upsert(self):
         source = inspect.getsource(QuoteDao.save_top_list)
-        assert "_save_upsert" in source, (
-            "save_top_list should delegate to _save_upsert for consistent handling"
-        )
+        assert "_save_upsert" in source, "save_top_list should delegate to _save_upsert for consistent handling"

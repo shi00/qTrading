@@ -128,12 +128,8 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         dp_mock._quality_tier = 2
 
         trade_calendar_mock = MagicMock()
-        trade_calendar_mock.get_latest_trade_date = AsyncMock(
-            return_value=datetime.date(2023, 1, 1)
-        )
-        trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(
-            return_value=datetime.date(2022, 8, 1)
-        )
+        trade_calendar_mock.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
+        trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
         dp_mock.trade_calendar = trade_calendar_mock
 
         cache_mock = MagicMock()

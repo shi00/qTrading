@@ -110,9 +110,7 @@ class DataSanitizer:
                 exception.__traceback__,
             )
             # 过滤敏感路径
-            tb_clean = [
-                DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line) for line in tb_lines
-            ]
+            tb_clean = [DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line) for line in tb_lines]
             return "\n".join(tb_clean)
 
         return msg

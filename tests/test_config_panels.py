@@ -693,9 +693,7 @@ class TestDatabaseConfigPanelSaveConfig:
     """Tests for DatabaseConfigPanel.save_config with table creation"""
 
     @pytest.mark.asyncio
-    async def test_save_config_calls_ensure_tables_exist(
-        self, mock_page, isolated_config, test_engine
-    ):
+    async def test_save_config_calls_ensure_tables_exist(self, mock_page, isolated_config, test_engine):
         """Test save_config calls ensure_tables_exist"""
         from data.persistence.db_config_service import DatabaseConfigService
         from data.persistence.models import Base
@@ -752,9 +750,7 @@ class TestDatabaseConfigPanelSaveConfig:
             await conn.run_sync(Base.metadata.drop_all)
 
     @pytest.mark.asyncio
-    async def test_save_config_handles_table_creation_failure(
-        self, mock_page, isolated_config
-    ):
+    async def test_save_config_handles_table_creation_failure(self, mock_page, isolated_config):
         """Test save_config returns False when table creation fails"""
         from data.persistence.db_config_service import DatabaseConfigService
         from ui.components.config_panels.database_config_panel import (
@@ -808,9 +804,7 @@ class TestOnboardingWizardDatabaseValidation:
     """Tests for OnboardingWizard._validate_and_save_database"""
 
     @pytest.mark.asyncio
-    async def test_validate_and_save_database_calls_ensure_tables(
-        self, mock_page, isolated_config, test_engine
-    ):
+    async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, test_engine):
         """Test _validate_and_save_database calls ensure_tables_exist"""
         from data.persistence.db_config_service import DatabaseConfigService
         from data.persistence.models import Base
@@ -854,9 +848,7 @@ class TestOnboardingWizardDatabaseValidation:
             await conn.run_sync(Base.metadata.drop_all)
 
     @pytest.mark.asyncio
-    async def test_validate_and_save_database_handles_failure(
-        self, mock_page, isolated_config
-    ):
+    async def test_validate_and_save_database_handles_failure(self, mock_page, isolated_config):
         """Test _validate_and_save_database returns False on table creation failure"""
         from data.persistence.db_config_service import DatabaseConfigService
         from ui.views.onboarding_wizard import OnboardingWizard
@@ -947,9 +939,7 @@ class TestLocalModelConfigPanelVerificationState:
 
         with (
             patch("os.path.exists", return_value=True),
-            patch(
-                "services.local_model_manager.LocalModelManager.get_instance"
-            ) as mock_get_instance,
+            patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance,
         ):
             mock_manager = MagicMock()
             mock_manager.load_model = AsyncMock(return_value=True)
@@ -980,9 +970,7 @@ class TestLocalModelConfigPanelVerificationState:
 
         with (
             patch("os.path.exists", return_value=True),
-            patch(
-                "services.local_model_manager.LocalModelManager.get_instance"
-            ) as mock_get_instance,
+            patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance,
         ):
             mock_manager = MagicMock()
             mock_manager.load_model = AsyncMock(return_value=False)
@@ -1013,9 +1001,7 @@ class TestLocalModelConfigPanelVerificationState:
 
         with (
             patch("os.path.exists", return_value=True),
-            patch(
-                "services.local_model_manager.LocalModelManager.get_instance"
-            ) as mock_get_instance,
+            patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance,
         ):
             mock_get_instance.side_effect = Exception("Test error")
 
@@ -1111,9 +1097,7 @@ class TestLLMConfigPanelVerificationState:
         panel._set_loading_state = MagicMock()
 
         with patch("services.ai_service.AIService.test_connection") as mock_test:
-            mock_test.return_value = AsyncMock(
-                return_value={"success": False, "message": "Test error"}
-            )()
+            mock_test.return_value = AsyncMock(return_value={"success": False, "message": "Test error"})()
 
             result = await panel.async_verify_connection()
 

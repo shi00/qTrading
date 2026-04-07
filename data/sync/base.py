@@ -65,12 +65,8 @@ class SyncResult:
                     return key
             return key
 
-        self.quality_scores = {
-            normalize_date_key(k): v for k, v in self.quality_scores.items()
-        }
-        self.expected_bases = {
-            normalize_date_key(k): v for k, v in self.expected_bases.items()
-        }
+        self.quality_scores = {normalize_date_key(k): v for k, v in self.quality_scores.items()}
+        self.expected_bases = {normalize_date_key(k): v for k, v in self.expected_bases.items()}
 
         for key, value in other.quality_scores.items():
             normalized_key = normalize_date_key(key)
@@ -92,10 +88,7 @@ class SyncResult:
         elif other.status == "failed" and self.status == "failed":
             self.status = "failed"
         elif (
-            other.status == "failed"
-            or self.status == "failed"
-            or other.status == "partial"
-            or self.status == "partial"
+            other.status == "failed" or self.status == "failed" or other.status == "partial" or self.status == "partial"
         ):
             self.status = "partial"
 

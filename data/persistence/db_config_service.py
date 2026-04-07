@@ -137,11 +137,7 @@ class DatabaseConfigService:
             error_type_name = type(e).__name__
 
             if error_type_name == "ConnectionDoesNotExistError":
-                if (
-                    "password" in error_str
-                    or "authentication" in error_str
-                    or "was closed" in error_str
-                ):
+                if "password" in error_str or "authentication" in error_str or "was closed" in error_str:
                     return ConnectionResult(
                         status=ConnectionStatus.AUTHENTICATION_ERROR,
                         message=I18n.get("db_err_auth"),
@@ -207,9 +203,7 @@ class DatabaseConfigService:
                 timeout=cls.CONNECTION_TIMEOUT,
             )
 
-            exists = await conn.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", database
-            )
+            exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database)
             await conn.close()
 
             return exists is not None
@@ -308,12 +302,8 @@ class DatabaseConfigService:
                 return {
                     "host": parsed.hostname or cls.DEFAULT_HOST,
                     "port": parsed.port or cls.DEFAULT_PORT,
-                    "user": unquote_plus(parsed.username)
-                    if parsed.username
-                    else cls.DEFAULT_USER,
-                    "password": unquote_plus(parsed.password)
-                    if parsed.password
-                    else "",
+                    "user": unquote_plus(parsed.username) if parsed.username else cls.DEFAULT_USER,
+                    "password": unquote_plus(parsed.password) if parsed.password else "",
                     "database": parsed.path.lstrip("/") or cls.DEFAULT_DATABASE,
                 }
 
@@ -431,13 +421,10 @@ class DatabaseConfigService:
             version = await conn.fetchval("SELECT version()")
             version_short = version.split(",")[0] if version else "Unknown"
 
-            size = await conn.fetchval(
-                "SELECT pg_size_pretty(pg_database_size($1))", database
-            )
+            size = await conn.fetchval("SELECT pg_size_pretty(pg_database_size($1))", database)
 
             table_count = await conn.fetchval(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_schema = 'public'"
+                "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
             )
 
             await conn.close()

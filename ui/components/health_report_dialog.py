@@ -279,9 +279,7 @@ class CoverageDetailTable(ft.Column):
             # Global: Show presence status badge instead of coverage bar
             cnt = stats.get("covered", 0)
             value_text = (
-                I18n.get("health_global_count", count=f"{cnt:,}")
-                if ratio > 0
-                else I18n.get("health_global_no_data")
+                I18n.get("health_global_count", count=f"{cnt:,}") if ratio > 0 else I18n.get("health_global_no_data")
             )
             return ft.Container(
                 padding=ft.padding.symmetric(vertical=5),
@@ -397,9 +395,7 @@ class CoverageDetailTable(ft.Column):
                 ft.Text(
                     I18n.get("health_depth", ratio=f"{depth_ratio * 100:.0f}%"),
                     size=10,
-                    color=AppColors.WARNING
-                    if depth_ratio < HEALTH_DEPTH_WARNING_RATIO
-                    else AppColors.TEXT_HINT,
+                    color=AppColors.WARNING if depth_ratio < HEALTH_DEPTH_WARNING_RATIO else AppColors.TEXT_HINT,
                 ),
             )
         if breadth_ratio is not None:
@@ -407,9 +403,7 @@ class CoverageDetailTable(ft.Column):
                 ft.Text(
                     I18n.get("health_breadth", ratio=f"{breadth_ratio * 100:.0f}%"),
                     size=10,
-                    color=AppColors.WARNING
-                    if breadth_ratio < HEALTH_THRESHOLD_BREADTH
-                    else AppColors.TEXT_HINT,
+                    color=AppColors.WARNING if breadth_ratio < HEALTH_THRESHOLD_BREADTH else AppColors.TEXT_HINT,
                 ),
             )
         return items
@@ -638,11 +632,7 @@ class HealthScanDialog(ft.AlertDialog):
         avg_lag = result.get("avg_lag", 99)
         avg_cont = result.get("avg_continuity", 0)
 
-        color = (
-            AppColors.SUCCESS
-            if score > 80
-            else (AppColors.WARNING if score > 50 else AppColors.ERROR)
-        )
+        color = AppColors.SUCCESS if score > 80 else (AppColors.WARNING if score > 50 else AppColors.ERROR)
 
         self.progress_bar.visible = False
         self.status_text.visible = False

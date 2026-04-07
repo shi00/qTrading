@@ -65,9 +65,7 @@ class TestGetPendingPredictions(unittest.TestCase):
     def test_get_pending_empty(self, mock_config, mock_api, mock_cache):
         """空结果"""
         mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame()
-        )
+        mock_screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
@@ -87,9 +85,7 @@ class TestGetPendingPredictions(unittest.TestCase):
     def test_get_pending_error(self, mock_config, mock_api, mock_cache):
         """错误返回空 DataFrame"""
         mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            side_effect=Exception("DB error")
-        )
+        mock_screener_dao.get_pending_predictions = AsyncMock(side_effect=Exception("DB error"))
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
@@ -133,9 +129,7 @@ class TestGetLearningContext(unittest.TestCase):
         )
 
         mock_screener_dao = MagicMock()
-        mock_screener_dao.get_learning_context = AsyncMock(
-            side_effect=[mock_wins, mock_losses]
-        )
+        mock_screener_dao.get_learning_context = AsyncMock(side_effect=[mock_wins, mock_losses])
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
@@ -177,9 +171,7 @@ class TestGetLearningContext(unittest.TestCase):
     def test_get_learning_context_error(self, mock_config, mock_api, mock_cache):
         """错误返回空上下文"""
         mock_screener_dao = MagicMock()
-        mock_screener_dao.get_learning_context = AsyncMock(
-            side_effect=Exception("DB error")
-        )
+        mock_screener_dao.get_learning_context = AsyncMock(side_effect=Exception("DB error"))
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao

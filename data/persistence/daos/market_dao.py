@@ -51,9 +51,7 @@ class MarketDao(BaseDao):
         return await self._read_db(sql, params)
 
     # --- Daily Indicators ---
-    async def save_daily_indicators(
-        self, df: pd.DataFrame, suppress_errors: bool = True
-    ):
+    async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = True):
         """
         Save Daily Indicators (PE, PB, etc.). Table: daily_indicators
         :param suppress_errors: If True (default), log errors but returns 0. If False, raises Exception.
@@ -232,9 +230,7 @@ class MarketDao(BaseDao):
             pk_columns=["trade_date"],
         )
 
-    async def get_moneyflow_hsgt(
-        self, trade_date: str | None = None, limit: int | None = None
-    ):
+    async def get_moneyflow_hsgt(self, trade_date: str | None = None, limit: int | None = None):
         """Get Northbound Money Flow."""
         sql = "SELECT * FROM moneyflow_hsgt WHERE 1=1"
         params = []

@@ -319,9 +319,7 @@ class AppColors:
     # ====================================================================
     BACKGROUND = "background"  # Use string token to access scheme background
     SURFACE = ft.Colors.SURFACE
-    SURFACE_VARIANT = (
-        ft.Colors.SURFACE_CONTAINER_HIGHEST
-    )  # ft.Colors.SURFACE_VARIANT doesn't exist
+    SURFACE_VARIANT = ft.Colors.SURFACE_CONTAINER_HIGHEST  # ft.Colors.SURFACE_VARIANT doesn't exist
     PRIMARY = ft.Colors.PRIMARY
     PRIMARY_DARK = ft.Colors.PRIMARY_CONTAINER
     PRIMARY_LIGHT = ft.Colors.INVERSE_PRIMARY

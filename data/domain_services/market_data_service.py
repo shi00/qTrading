@@ -183,9 +183,7 @@ class MarketDataService:
                     logger.error(f"[MarketDataService] Listener error: {e}")
 
     @staticmethod
-    def _process_fetch_results(
-        results: typing.Any, date: str, indices_config: typing.Any
-    ):
+    def _process_fetch_results(results: typing.Any, date: str, indices_config: typing.Any):
         """
         静态处理方法，可在线程中运行。
         解析 asyncio.gather 的结果并构建最终数据字典。
@@ -202,11 +200,7 @@ class MarketDataService:
 
         # 处理北向资金 (倒数第2个)
         hsgt_res = results[-2]
-        hsgt = (
-            hsgt_res
-            if not isinstance(hsgt_res, Exception)
-            else MarketDataService._get_empty_hsgt_data_static()
-        )
+        hsgt = hsgt_res if not isinstance(hsgt_res, Exception) else MarketDataService._get_empty_hsgt_data_static()
 
         # 处理热门概念 (最后1个)
         hot_res = results[-1]

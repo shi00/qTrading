@@ -58,9 +58,7 @@ class TestDataSanitizer:
         assert "col1" in result
         assert "col2" in result
         # 验证不泄露实际数据
-        assert (
-            "1" not in result or "shape" in result
-        )  # 数字1如果存在应该是shape的一部分
+        assert "1" not in result or "shape" in result  # 数字1如果存在应该是shape的一部分
 
     def test_sanitize_dataframe_empty(self):
         """测试空DataFrame"""

@@ -35,9 +35,7 @@ class ProxyManager:
             current_no_proxy = os.environ.get("no_proxy", "")
 
         final_domains = (
-            set([d.strip() for d in current_no_proxy.split(",") if d.strip()])
-            if current_no_proxy
-            else set()
+            set([d.strip() for d in current_no_proxy.split(",") if d.strip()]) if current_no_proxy else set()
         )
 
         # Load User Configured Domains ONLY
@@ -45,9 +43,7 @@ class ProxyManager:
 
         # Safety Filter: Ensure all items are strings
         target_domains = list(
-            set(
-                [d.strip() for d in target_domains if isinstance(d, str) and d.strip()]
-            ),
+            set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]),
         )
 
         if not target_domains:

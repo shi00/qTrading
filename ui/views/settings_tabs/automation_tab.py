@@ -213,17 +213,13 @@ class AutomationTab(ft.Container):
 
         # Status color (custom)
         enabled = self.schedule_enabled.value
-        self.schedule_status.color = (
-            AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-        )
+        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
 
         self.doubao_time.bgcolor = AppColors.INPUT_BG
         self.doubao_time.color = AppColors.INPUT_TEXT
         self.doubao_time.border_color = AppColors.INPUT_BORDER
         doubao_enabled = self.doubao_enabled.value
-        self.doubao_status.color = (
-            AppColors.SUCCESS if doubao_enabled else ft.Colors.ON_SURFACE_VARIANT
-        )
+        self.doubao_status.color = AppColors.SUCCESS if doubao_enabled else ft.Colors.ON_SURFACE_VARIANT
 
         if self.page:
             self.update()
@@ -280,27 +276,19 @@ class AutomationTab(ft.Container):
 
     def _get_schedule_status_text(self, enabled):
         """获取调度状态文本"""
-        return (
-            I18n.get("settings_status_auto_on")
-            if enabled
-            else I18n.get("settings_status_auto_off")
-        )
+        return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
 
     def on_schedule_toggle(self, e):
         """处理自动更新开关切换"""
         enabled = self.schedule_enabled.value
         ConfigHandler.save_config({"auto_update_enabled": enabled})
         self.schedule_status.value = self._get_schedule_status_text(enabled)
-        self.schedule_status.color = (
-            AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-        )
+        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
         self.schedule_time.disabled = not enabled
         self.update()
         if self.show_snack:
             self.show_snack(
-                I18n.get("settings_snack_auto_on")
-                if enabled
-                else I18n.get("settings_snack_auto_off"),
+                I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
             )
 
     def on_schedule_time_change(self, e):
@@ -317,16 +305,12 @@ class AutomationTab(ft.Container):
         enabled = self.doubao_enabled.value
         ConfigHandler.set_doubao_schedule_enabled(enabled)
         self.doubao_status.value = self._get_schedule_status_text(enabled)
-        self.doubao_status.color = (
-            AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-        )
+        self.doubao_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
         self.doubao_time.disabled = not enabled
         self.update()
         if self.show_snack:
             self.show_snack(
-                I18n.get("settings_snack_auto_on")
-                if enabled
-                else I18n.get("settings_snack_auto_off"),
+                I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
             )
 
     def on_doubao_time_change(self, e):

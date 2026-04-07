@@ -179,9 +179,9 @@ def update_log_level(level_str):
 
     for h in logger.handlers:
         # Update file handler (excluding error.log which is always ERROR)
-        if (
-            isinstance(h, RotatingFileHandler) and "error.log" not in h.baseFilename
-        ) or isinstance(h, logging.StreamHandler):
+        if (isinstance(h, RotatingFileHandler) and "error.log" not in h.baseFilename) or isinstance(
+            h, logging.StreamHandler
+        ):
             h.setLevel(new_level)
 
     logger.info(f"Log level updated to {level_str}")

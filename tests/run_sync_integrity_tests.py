@@ -60,15 +60,9 @@ def test_core_resume_tables():
     strategy = HistoricalSyncStrategy(mock_context)
 
     assert hasattr(strategy, "CORE_RESUME_TABLES"), "CORE_RESUME_TABLES not defined"
-    assert "daily_quotes" in strategy.CORE_RESUME_TABLES, (
-        "daily_quotes not in CORE_RESUME_TABLES"
-    )
-    assert "daily_indicators" in strategy.CORE_RESUME_TABLES, (
-        "daily_indicators not in CORE_RESUME_TABLES"
-    )
-    assert "block_trade" not in strategy.CORE_RESUME_TABLES, (
-        "block_trade should not be in CORE_RESUME_TABLES"
-    )
+    assert "daily_quotes" in strategy.CORE_RESUME_TABLES, "daily_quotes not in CORE_RESUME_TABLES"
+    assert "daily_indicators" in strategy.CORE_RESUME_TABLES, "daily_indicators not in CORE_RESUME_TABLES"
+    assert "block_trade" not in strategy.CORE_RESUME_TABLES, "block_trade should not be in CORE_RESUME_TABLES"
     print("test_core_resume_tables: PASSED")
 
 
@@ -78,9 +72,7 @@ def test_no_direct_dao_access():
     from data.sync.historical import HistoricalSyncStrategy
 
     source = inspect.getsource(HistoricalSyncStrategy)
-    assert "quote_dao._read_db" not in source, (
-        "Direct DAO access found in HistoricalSyncStrategy"
-    )
+    assert "quote_dao._read_db" not in source, "Direct DAO access found in HistoricalSyncStrategy"
     print("test_no_direct_dao_access: PASSED")
 
 
@@ -90,12 +82,8 @@ def test_fina_audit_table():
     from data.persistence.daos.financial_dao import FinancialDao
 
     source = inspect.getsource(FinancialDao.verify_stock_financial_integrity)
-    assert "fina_audit" in source, (
-        "fina_audit not found in verify_stock_financial_integrity"
-    )
-    assert "fina_indicator" not in source, (
-        "fina_indicator should not be in verify_stock_financial_integrity"
-    )
+    assert "fina_audit" in source, "fina_audit not found in verify_stock_financial_integrity"
+    assert "fina_indicator" not in source, "fina_indicator should not be in verify_stock_financial_integrity"
     print("test_fina_audit_table: PASSED")
 
 
@@ -105,13 +93,10 @@ def test_delisted_stock_sql():
     from data.persistence.daos.quote_dao import QuoteDao
 
     source = inspect.getsource(QuoteDao.get_expected_stock_count)
-    assert "list_status = 'L'" in source or "list_status='L'" in source, (
-        "L status check not found"
+    assert "list_status = 'L'" in source or "list_status='L'" in source, "L status check not found"
+    assert "delist_date IS NOT NULL" in source or "delist_date is not null" in source.lower(), (
+        "delist_date IS NOT NULL check not found"
     )
-    assert (
-        "delist_date IS NOT NULL" in source
-        or "delist_date is not null" in source.lower()
-    ), "delist_date IS NOT NULL check not found"
     print("test_delisted_stock_sql: PASSED")
 
 
@@ -128,12 +113,10 @@ def test_quality_weights_usage():
 def test_low_frequency_tables():
     from data.persistence.daos.quote_dao import LOW_FREQUENCY_TABLES
 
-    assert isinstance(LOW_FREQUENCY_TABLES, (list, set, tuple)), (
-        "LOW_FREQUENCY_TABLES should be a collection"
+    assert isinstance(LOW_FREQUENCY_TABLES, (list, set, tuple)), "LOW_FREQUENCY_TABLES should be a collection"
+    assert "block_trade" in LOW_FREQUENCY_TABLES or "limit_list_d" in LOW_FREQUENCY_TABLES, (
+        "Expected low frequency tables not found"
     )
-    assert (
-        "block_trade" in LOW_FREQUENCY_TABLES or "limit_list_d" in LOW_FREQUENCY_TABLES
-    ), "Expected low frequency tables not found"
     print("test_low_frequency_tables: PASSED")
 
 

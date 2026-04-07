@@ -100,20 +100,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 end_date = get_now().date()
                 start_date = (get_now() - datetime.timedelta(days=days)).date()
                 try:
-                    quality_results = (
-                        await self.context.cache.get_bulk_sync_quality_scores(
-                            start_date=start_date,
-                            end_date=end_date,
-                            tables=list(self.SYNCED_TABLES),
-                        )
+                    quality_results = await self.context.cache.get_bulk_sync_quality_scores(
+                        start_date=start_date,
+                        end_date=end_date,
+                        tables=list(self.SYNCED_TABLES),
                     )
                     for date, quality in quality_results.items():
                         result.quality_scores[date] = quality.get("score", 0)
                         result.expected_bases[date] = quality.get("expected_base", 0)
                         if quality.get("issues"):
-                            result.warnings.extend(
-                                [f"{date}: {issue}" for issue in quality["issues"][:2]]
-                            )
+                            result.warnings.extend([f"{date}: {issue}" for issue in quality["issues"][:2]])
 
                         tables_info = quality.get("tables", {})
                         for table, info in tables_info.items():
@@ -122,9 +118,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             result.table_stats[table]["count"] += info.get("count", 0)
 
                 except Exception as qe:
-                    logger.warning(
-                        f"[HistoricalSync] Report | Failed to collect quality scores: {qe}"
-                    )
+                    logger.warning(f"[HistoricalSync] Report | Failed to collect quality scores: {qe}")
 
         except asyncio.CancelledError:
             result.status = "cancelled"
@@ -151,10 +145,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         start_date = (get_now() - datetime.timedelta(days=days)).date()
 
         try:
-            trade_date_objs = (
-                await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore
-                    start_date, end_date
-                )
+            trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore
+                start_date, end_date
             )
             trade_dates = list(reversed(trade_date_objs))
         except Exception as e:
@@ -180,14 +172,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         try:
             cached_dates_per_table = {}
             for table in self.SYNCED_TABLES:
-                cached_dates_per_table[
-                    table
-                ] = await self.context.cache.get_cached_dates_for_table(table)
+                cached_dates_per_table[table] = await self.context.cache.get_cached_dates_for_table(table)
 
             existing = set()
-            core_dates = [
-                cached_dates_per_table.get(t, set()) for t in self.CORE_RESUME_TABLES
-            ]
+            core_dates = [cached_dates_per_table.get(t, set()) for t in self.CORE_RESUME_TABLES]
             if core_dates and all(core_dates):
                 existing = set.intersection(*core_dates)
 
@@ -210,28 +198,21 @@ class HistoricalSyncStrategy(ISyncStrategy):
             trade_dates_str = {normalize_date(d) for d in trade_dates}
             existing_in_range = existing_str & trade_dates_str
 
-            dates_to_verify = sorted(
-                [d for d in trade_dates if normalize_date(d) in existing_in_range]
-            )
+            dates_to_verify = sorted([d for d in trade_dates if normalize_date(d) in existing_in_range])
             low_quality_dates = []
 
             if dates_to_verify:
                 try:
-                    quality_results = (
-                        await self.context.cache.get_bulk_sync_quality_scores(
-                            start_date=dates_to_verify[0],
-                            end_date=dates_to_verify[-1],
-                            tables=list(self.SYNCED_TABLES),
-                        )
+                    quality_results = await self.context.cache.get_bulk_sync_quality_scores(
+                        start_date=dates_to_verify[0],
+                        end_date=dates_to_verify[-1],
+                        tables=list(self.SYNCED_TABLES),
                     )
 
                     for date in dates_to_verify:
                         date_key = to_date_key(date)
                         quality = quality_results.get(date_key)
-                        if (
-                            quality is not None
-                            and quality.get("score", 0) < QUALITY_THRESHOLD
-                        ):
+                        if quality is not None and quality.get("score", 0) < QUALITY_THRESHOLD:
                             low_quality_dates.append(date)
                             issues_str = ", ".join(quality.get("issues", [])[:3])
                             logger.debug(
@@ -250,9 +231,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     logger.warning(f"[HistoricalSync] QualityCheck | Failed: {qe}")
 
             original_count = len(trade_dates)
-            trade_dates = [
-                d for d in trade_dates if normalize_date(d) not in existing_str
-            ]
+            trade_dates = [d for d in trade_dates if normalize_date(d) not in existing_str]
             skipped = original_count - len(trade_dates)
             result.updated += skipped
 
@@ -302,9 +281,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         progress_callback(
                             processed_count,
                             total_days,
-                            I18n.get("progress_sync_market").format(
-                                date=date.strftime("%Y%m%d")
-                            ),
+                            I18n.get("progress_sync_market").format(date=date.strftime("%Y%m%d")),
                         )
                 except Exception as e:
                     # Specific error handling
@@ -350,9 +327,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 failed_dates = []
                 retry_sem = asyncio.Semaphore(2)
 
-                async def retry_one(
-                    date: str, sem: asyncio.Semaphore, failed_list: list
-                ):
+                async def retry_one(date: str, sem: asyncio.Semaphore, failed_list: list):
                     if self._shutdown_event.is_set():
                         return
                     async with sem:
@@ -373,10 +348,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if self._shutdown_event.is_set():
                         break
                     r_batch = current_batch[r_start : r_start + BATCH_SIZE]
-                    r_tasks = [
-                        asyncio.create_task(retry_one(d, retry_sem, failed_dates))
-                        for d in r_batch
-                    ]
+                    r_tasks = [asyncio.create_task(retry_one(d, retry_sem, failed_dates)) for d in r_batch]
 
                     with self._tasks_lock:
                         self._active_tasks.update(r_tasks)
@@ -439,9 +411,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             ("index_basic", self.context.api.get_index_dailybasic, "Index Indicators"),
         ]
 
-        async def fetch_wrapper(
-            key: typing.Any, func: typing.Callable, name: typing.Any
-        ):
+        async def fetch_wrapper(key: typing.Any, func: typing.Callable, name: typing.Any):
             try:
                 # Return (key, data, error)
                 return (key, await func(trade_date=trade_date), None)
@@ -453,14 +423,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def fetch_indices():
             try:
-                tasks = [
-                    self.context.api.get_index_daily(ts_code=c, trade_date=trade_date)
-                    for c in MAJOR_INDICES
-                ]
+                tasks = [self.context.api.get_index_daily(ts_code=c, trade_date=trade_date) for c in MAJOR_INDICES]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-                valid = [
-                    r for r in results if isinstance(r, pd.DataFrame) and not r.empty
-                ]
+                valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if valid:
                     return ("index", pd.concat(valid, ignore_index=True), None)
                 return ("index", None, None)
@@ -485,9 +450,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # Save Logic
         cache = self.context.cache
 
-        async def save_if_ok(
-            key: typing.Any, method: typing.Any, critical: typing.Any = False
-        ):
+        async def save_if_ok(key: typing.Any, method: typing.Any, critical: typing.Any = False):
             """
             Save data for a given key if available.
             Returns a dict with:
@@ -499,9 +462,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if df is None:
                 if key in error_map:
-                    logger.warning(
-                        f"[HistoricalSync] DaySync | ⚠️ Fetch failed for {key}, skipping sync_status update"
-                    )
+                    logger.warning(f"[HistoricalSync] DaySync | ⚠️ Fetch failed for {key}, skipping sync_status update")
                 return {"saved": None, "fetched": 0, "success": False}
 
             fetched_count = len(df)
@@ -533,9 +494,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     return {"saved": None, "fetched": fetched_count, "success": False}
 
             if df is not None and df.empty:
-                logger.debug(
-                    f"[HistoricalSync] DaySync | {key} returned empty data, will update sync_status with 0"
-                )
+                logger.debug(f"[HistoricalSync] DaySync | {key} returned empty data, will update sync_status with 0")
             return {"saved": 0, "fetched": fetched_count, "success": True}
 
         # 1. Quotes (Critical)
@@ -548,9 +507,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         df_quotes = data_map.get("quotes")
         if df_quotes is not None and not df_quotes.empty:
             required_quote_cols = ["ts_code", "trade_date", "close", "pct_chg", "vol"]
-            missing_cols = [
-                c for c in required_quote_cols if c not in df_quotes.columns
-            ]
+            missing_cols = [c for c in required_quote_cols if c not in df_quotes.columns]
             if missing_cols:
                 logger.warning(
                     f"[HistoricalSync] DaySync | ⚠️ Critical columns missing in quotes for {trade_date}: {missing_cols}"
@@ -564,9 +521,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         df_basic = data_map.get("basic")
         if df_basic is not None and not df_basic.empty:
             required_basic_cols = ["ts_code", "trade_date", "pe", "pb"]
-            missing_basic_cols = [
-                c for c in required_basic_cols if c not in df_basic.columns
-            ]
+            missing_basic_cols = [c for c in required_basic_cols if c not in df_basic.columns]
             if missing_basic_cols:
                 logger.warning(
                     f"[HistoricalSync] DaySync | ⚠️ Critical columns missing in basic for {trade_date}: {missing_basic_cols}"
@@ -597,9 +552,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
         hsgt_result = await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
         index_result = await save_if_ok("index", cache.save_index_daily)
-        index_basic_result = await save_if_ok(
-            "index_basic", cache.save_index_dailybasic
-        )
+        index_basic_result = await save_if_ok("index_basic", cache.save_index_dailybasic)
 
         # Yield before northbound special processing
         await asyncio.sleep(0)
@@ -609,9 +562,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             df_north = data_map.get("north")
             if df_north is not None and not df_north.empty:
                 original_count = len(df_north)
-                df_north = df_north[
-                    df_north["ts_code"].astype(str).str.endswith((".SH", ".SZ"))
-                ]
+                df_north = df_north[df_north["ts_code"].astype(str).str.endswith((".SH", ".SZ"))]
                 filtered_count = original_count - len(df_north)
                 if filtered_count > 0:
                     logger.debug(
@@ -620,9 +571,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if not df_north.empty:
                     north_rows = await cache.save_northbound(df_north)
                     north_result = {
-                        "saved": north_rows
-                        if north_rows is not None
-                        else len(df_north),
+                        "saved": north_rows if north_rows is not None else len(df_north),
                         "fetched": original_count,
                         "success": True,
                     }
@@ -642,16 +591,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
             north_result = {"saved": None, "fetched": 0, "success": False}
 
-        async def safe_update_status(
-            table_name: str, result: typing.Any, trade_date: str | None
-        ):
+        async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | None):
             saved = result.get("saved") if isinstance(result, dict) else result
             if saved is not None:
                 await cache.update_sync_status(table_name, trade_date, saved or 0)
             else:
-                logger.debug(
-                    f"[HistoricalSync] Skipping sync_status for {table_name} due to fetch/save failure"
-                )
+                logger.debug(f"[HistoricalSync] Skipping sync_status for {table_name} due to fetch/save failure")
 
         def verify_data_integrity(key: str, result_data: typing.Any):
             if not isinstance(result_data, dict):

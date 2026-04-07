@@ -169,9 +169,7 @@ class TestCacheManager(TestDatabaseBase):
 
     async def test_sync_status(self):
         """Test sync status operations"""
-        await self.cache.update_sync_status(
-            "test_table", datetime.date(2023, 1, 1), 100
-        )
+        await self.cache.update_sync_status("test_table", datetime.date(2023, 1, 1), 100)
 
         status = await self.cache.get_sync_status("test_table")
         self.assertEqual(status["record_count"], 100)  # type: ignore

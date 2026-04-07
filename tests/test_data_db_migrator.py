@@ -40,9 +40,7 @@ class TestDatabaseMigrator:
     @patch("data.persistence.db_migrator.command")
     @patch("data.persistence.db_migrator.ScriptDirectory")
     @patch("data.persistence.db_migrator.Config")
-    async def test_fresh_install(
-        self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
-    ):
+    async def test_fresh_install(self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine):
         """测试场景一：全新安装环境（空库）"""
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(return_value=(False, False))
@@ -92,9 +90,7 @@ class TestDatabaseMigrator:
     @patch("data.persistence.db_migrator.command")
     @patch("data.persistence.db_migrator.ScriptDirectory")
     @patch("data.persistence.db_migrator.Config")
-    async def test_up_to_date_schema(
-        self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine
-    ):
+    async def test_up_to_date_schema(self, mock_config, mock_script, mock_command, mock_thread_pool, mock_engine):
         """测试场景三：正常更新迭代（已有 alembic_version）"""
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(return_value=(True, True))
@@ -156,9 +152,7 @@ class TestDatabaseMigrator:
     @patch("data.persistence.db_migrator.command")
     @patch("data.persistence.db_migrator.ScriptDirectory")
     @patch("data.persistence.db_migrator.Config")
-    async def test_upgrade_error_propagates(
-        self, mock_config, mock_script, mock_command, mock_engine
-    ):
+    async def test_upgrade_error_propagates(self, mock_config, mock_script, mock_command, mock_engine):
         """测试场景六：升级失败时抛出异常"""
         engine, conn = mock_engine
         conn.run_sync = AsyncMock(return_value=(False, False))

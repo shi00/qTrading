@@ -229,9 +229,7 @@ class ScreenerView(ft.Container):
 
         # Determine if we have any running strategy task
         running_strategy_tasks = [
-            t
-            for t in tasks
-            if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")
+            t for t in tasks if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")
         ]
 
         # If there are no active strategy tasks, unlock the UI
@@ -257,9 +255,7 @@ class ScreenerView(ft.Container):
 
             # Use Name (value) for display, Key for ID
             # strategies is Dict[key, name]
-            self.strategy_dropdown.options = [
-                ft.dropdown.Option(k, v) for k, v in strategies.items()
-            ]
+            self.strategy_dropdown.options = [ft.dropdown.Option(k, v) for k, v in strategies.items()]
             self.strategy_dropdown.update()
         except Exception as e:
             logger.error(
@@ -555,9 +551,7 @@ class ScreenerView(ft.Container):
                     # Format date for display
                     if isinstance(date_str, (datetime.date, datetime.datetime)):
                         display_date = date_str.strftime("%Y-%m-%d")
-                        d_key = date_str.strftime(
-                            "%Y-%m-%d"
-                        )  # Use ISO format for internal key tracking
+                        d_key = date_str.strftime("%Y-%m-%d")  # Use ISO format for internal key tracking
                     else:
                         date_str_s = str(date_str)
                         display_date = (
@@ -600,9 +594,7 @@ class ScreenerView(ft.Container):
                                     f"{s['strategy_name']} ({s['cnt']})",
                                     size=13,
                                 ),
-                                on_click=lambda e, d=d_key, sn=s["strategy_name"]: (
-                                    self._on_tree_item_click(d, sn)
-                                ),
+                                on_click=lambda e, d=d_key, sn=s["strategy_name"]: self._on_tree_item_click(d, sn),
                                 dense=True,
                             ),
                         )
@@ -622,16 +614,13 @@ class ScreenerView(ft.Container):
                         ),
                         controls=subtiles,
                         initially_expanded=(
-                            self._history_tree_offset == 0
-                            and self.history_tree_list.controls.__len__() == 0
+                            self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0
                         ),
                         collapsed_icon_color=AppColors.TEXT_SECONDARY,
                     )
                     self.history_tree_list.controls.append(tile)
 
-                self.history_load_more_btn.visible = (
-                    len(tree_data) >= 5
-                )  # Show if likely more data
+                self.history_load_more_btn.visible = len(tree_data) >= 5  # Show if likely more data
                 self._history_tree_offset += len(tree_data) * 5  # Advance offset
 
             self.history_tree_list.update()
@@ -658,9 +647,7 @@ class ScreenerView(ft.Container):
             trade_date = display
         else:
             ts = str(trade_date)
-            display = (
-                f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-            )
+            display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
         label = strategy_name or I18n.get("screener_all_strategies", "全部策略")
         self._update_status(f"{display} / {label}", "blue")
         await self.vm.load_history_data(trade_date, strategy_name)
@@ -687,9 +674,7 @@ class ScreenerView(ft.Container):
             # Gather default params before rendering to push initial dynamic desc
             strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
             if strategy_obj:
-                defaults = {
-                    p["name"]: p.get("default") for p in strategy_obj.get_parameters()
-                }
+                defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
                 desc = strategy_obj.get_dynamic_description(defaults)
             else:
                 desc = self.vm.get_strategy_desc(self.selected_strategy)
@@ -774,9 +759,7 @@ class ScreenerView(ft.Container):
             if groups[group_name]:
                 group_controls = self._build_param_controls(groups[group_name])
                 if group_controls:
-                    title = self._resolve_group_title(
-                        group_name, custom_groups[group_name]
-                    )
+                    title = self._resolve_group_title(group_name, custom_groups[group_name])
                     rendered_groups.append((group_name, title, group_controls))
 
         for group_name, title, controls in rendered_groups:
@@ -854,9 +837,7 @@ class ScreenerView(ft.Container):
                 step = p.get("step", 1)
                 divisions = int((max_val - min_val) / step) if step > 0 else 10
 
-                init_display = (
-                    int(default) if default == int(default) else round(default, 1)
-                )
+                init_display = int(default) if default == int(default) else round(default, 1)
                 value_text = ft.Text(
                     f"{label}: {init_display}",
                     size=12,
@@ -881,9 +862,7 @@ class ScreenerView(ft.Container):
                                 "get_dynamic_description",
                             ):
                                 params = self._collect_params()
-                                self.strategy_desc_text.value = (
-                                    strategy_obj.get_dynamic_description(params)
-                                )
+                                self.strategy_desc_text.value = strategy_obj.get_dynamic_description(params)
                                 self.strategy_desc_text.update()
 
                     return handler
@@ -1328,18 +1307,10 @@ class ScreenerView(ft.Container):
             return
 
         async def _do_log():
-            line = (
-                f"[{name}] {I18n.get('screener_score')}: {score} | {thinking[:80]}..."
-            )
+            line = f"[{name}] {I18n.get('screener_score')}: {score} | {thinking[:80]}..."
 
             # Colors based on score
-            color = (
-                AppColors.ACCENT
-                if score > 80
-                else "#FFB86C"
-                if score > 50
-                else "#FF5555"
-            )
+            color = AppColors.ACCENT if score > 80 else "#FFB86C" if score > 50 else "#FF5555"
 
             # Limit total logs to avoid memory leak (aligned with stream card cap)
             if len(self.log_view.controls) > 10:

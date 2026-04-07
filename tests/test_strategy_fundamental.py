@@ -174,9 +174,7 @@ class TestGrowthStrategy(unittest.TestCase):
     def test_growth_strategy_normal(self):
         """正常成长筛选"""
         lf = pl.from_pandas(self.sample_df).lazy()
-        context = {
-            "params": {"revenue_growth_min": 20, "profit_growth_min": 25, "roe_min": 15}
-        }
+        context = {"params": {"revenue_growth_min": 20, "profit_growth_min": 25, "roe_min": 15}}
         result = self.strategy._filter_logic(lf, context).collect()
 
         self.assertTrue(result.height > 0)
@@ -189,9 +187,7 @@ class TestGrowthStrategy(unittest.TestCase):
     def test_growth_strategy_revenue_growth(self):
         """营收增长过滤"""
         lf = pl.from_pandas(self.sample_df).lazy()
-        context = {
-            "params": {"revenue_growth_min": 28, "profit_growth_min": 0, "roe_min": 0}
-        }
+        context = {"params": {"revenue_growth_min": 28, "profit_growth_min": 0, "roe_min": 0}}
         result = self.strategy._filter_logic(lf, context).collect()
 
         ts_codes = result["ts_code"].to_list()
@@ -201,9 +197,7 @@ class TestGrowthStrategy(unittest.TestCase):
     def test_growth_strategy_profit_growth(self):
         """利润增长过滤"""
         lf = pl.from_pandas(self.sample_df).lazy()
-        context = {
-            "params": {"revenue_growth_min": 0, "profit_growth_min": 35, "roe_min": 0}
-        }
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 35, "roe_min": 0}}
         result = self.strategy._filter_logic(lf, context).collect()
 
         ts_codes = result["ts_code"].to_list()
@@ -212,9 +206,7 @@ class TestGrowthStrategy(unittest.TestCase):
     def test_growth_strategy_roe_filter(self):
         """ROE 过滤"""
         lf = pl.from_pandas(self.sample_df).lazy()
-        context = {
-            "params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 19}
-        }
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 19}}
         result = self.strategy._filter_logic(lf, context).collect()
 
         for row in result.iter_rows(named=True):
@@ -223,9 +215,7 @@ class TestGrowthStrategy(unittest.TestCase):
     def test_growth_strategy_empty_result(self):
         """无匹配结果"""
         lf = pl.from_pandas(self.sample_df).lazy()
-        context = {
-            "params": {"revenue_growth_min": 50, "profit_growth_min": 50, "roe_min": 30}
-        }
+        context = {"params": {"revenue_growth_min": 50, "profit_growth_min": 50, "roe_min": 30}}
         result = self.strategy._filter_logic(lf, context).collect()
 
         self.assertEqual(result.height, 0)
@@ -233,9 +223,7 @@ class TestGrowthStrategy(unittest.TestCase):
     def test_growth_strategy_sort_by_roe(self):
         """按 ROE 降序排列"""
         lf = pl.from_pandas(self.sample_df).lazy()
-        context = {
-            "params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 0}
-        }
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 0}}
         result = self.strategy._filter_logic(lf, context).collect()
 
         roe_values = result["roe"].to_list()

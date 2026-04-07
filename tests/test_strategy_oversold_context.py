@@ -174,9 +174,7 @@ class TestBuildHistoryTextLimitTag(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(
-            history_df, ts_code="000001.SZ", stock_name="测试股票"
-        )
+        result = AIStrategyMixin._build_history_text(history_df, ts_code="000001.SZ", stock_name="测试股票")
 
         self.assertIn("🟢跌停", result)
 
@@ -232,9 +230,7 @@ class TestBuildHistoryTextLimitTag(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(
-            history_df, ts_code="300001.SZ", stock_name="创业板股票"
-        )
+        result = AIStrategyMixin._build_history_text(history_df, ts_code="300001.SZ", stock_name="创业板股票")
 
         self.assertIn("🟢跌停", result)
 
@@ -290,9 +286,7 @@ class TestBuildHistoryTextLimitTag(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(
-            history_df, ts_code="000001.SZ", stock_name="ST某某"
-        )
+        result = AIStrategyMixin._build_history_text(history_df, ts_code="000001.SZ", stock_name="ST某某")
 
         self.assertIn("🟢跌停", result)
 
@@ -450,9 +444,7 @@ class TestPromptFormatting(unittest.TestCase):
 
         for line in lines:
             if line.strip():
-                self.assertFalse(
-                    line.startswith("    "), f"Line has leading whitespace: {line}"
-                )
+                self.assertFalse(line.startswith("    "), f"Line has leading whitespace: {line}")
 
     def test_get_ai_context_chinese(self):
         """`get_ai_context()` 输出全中文"""

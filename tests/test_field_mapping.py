@@ -31,8 +31,7 @@ class TestNoUnnecessaryFieldMappings:
         actual_mappings = set(TushareClient._COLUMN_RENAMES.keys())
         unwanted = actual_mappings & unnecessary_mappings
         assert not unwanted, (
-            f"Unnecessary field mappings found: {unwanted}. "
-            f"Database columns should match Tushare API fields directly."
+            f"Unnecessary field mappings found: {unwanted}. Database columns should match Tushare API fields directly."
         )
 
     def test_macro_mappings_are_intentional(self):
@@ -53,36 +52,26 @@ class TestOrmFieldNamesMatchTushare:
     """Test that ORM field names match Tushare API response field names."""
 
     def test_top_list_pct_change(self):
-        assert hasattr(TopList, "pct_change"), (
-            "TopList should have 'pct_change' (Tushare API field)"
-        )
+        assert hasattr(TopList, "pct_change"), "TopList should have 'pct_change' (Tushare API field)"
         assert not hasattr(TopList, "pct_chg") or hasattr(TopList, "pct_change"), (
             "TopList.pct_chg should be renamed to pct_change to match Tushare API"
         )
 
     def test_block_trade_vol(self):
-        assert hasattr(BlockTrade, "vol"), (
-            "BlockTrade should have 'vol' (Tushare API field)"
-        )
+        assert hasattr(BlockTrade, "vol"), "BlockTrade should have 'vol' (Tushare API field)"
         assert not hasattr(BlockTrade, "volume") or hasattr(BlockTrade, "vol"), (
             "BlockTrade.volume should be renamed to vol to match Tushare API"
         )
 
     def test_limit_list_limit(self):
-        assert hasattr(LimitList, "limit"), (
-            "LimitList should have 'limit' (Tushare API field)"
-        )
+        assert hasattr(LimitList, "limit"), "LimitList should have 'limit' (Tushare API field)"
         assert not hasattr(LimitList, "limit_type") or hasattr(LimitList, "limit"), (
             "LimitList.limit_type should be renamed to limit to match Tushare API"
         )
 
     def test_suspend_d_suspend_type(self):
-        assert hasattr(SuspendD, "suspend_type"), (
-            "SuspendD should have 'suspend_type' (Tushare API field)"
-        )
-        assert not hasattr(SuspendD, "suspend_type_name") or hasattr(
-            SuspendD, "suspend_type"
-        ), (
+        assert hasattr(SuspendD, "suspend_type"), "SuspendD should have 'suspend_type' (Tushare API field)"
+        assert not hasattr(SuspendD, "suspend_type_name") or hasattr(SuspendD, "suspend_type"), (
             "SuspendD.suspend_type_name should be renamed to suspend_type to match Tushare API"
         )
 
@@ -142,6 +131,4 @@ class TestShiborDailyColumnNames:
         python_attrs = {"w1", "w2", "m1", "m3", "m6", "m9", "y1"}
 
         for attr in python_attrs:
-            assert attr in columns, (
-                f"ShiborDaily ORM should have Python attribute '{attr}'"
-            )
+            assert attr in columns, f"ShiborDaily ORM should have Python attribute '{attr}'"

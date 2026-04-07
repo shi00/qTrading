@@ -316,11 +316,7 @@ class LLMConfigPanel(ft.Container):
         links = []
 
         # 仅在向导特供的 compact 模式下采用紧凑内边距，释放高达 70px+ 的占用
-        compact_btn_style = (
-            ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=4))
-            if self._compact
-            else None
-        )
+        compact_btn_style = ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=4)) if self._compact else None
 
         console_url = provider.get("console_url")
         if console_url:
@@ -357,9 +353,7 @@ class LLMConfigPanel(ft.Container):
 
         return ft.Row(
             controls=links,
-            alignment=ft.MainAxisAlignment.CENTER
-            if self._compact
-            else ft.MainAxisAlignment.START,
+            alignment=ft.MainAxisAlignment.CENTER if self._compact else ft.MainAxisAlignment.START,
             wrap=not self._compact,
             spacing=8 if self._compact else 10,
         )
@@ -380,12 +374,8 @@ class LLMConfigPanel(ft.Container):
         if provider == "azure":
             self._is_azure = True
             self.azure_resource_input.value = llm_config.get("azure_resource_name", "")
-            self.azure_deployment_input.value = (
-                llm_config.get("azure_deployment_name", "") or model
-            )
-            self.azure_version_input.value = llm_config.get(
-                "api_version", AZURE_DEFAULT_API_VERSION
-            )
+            self.azure_deployment_input.value = llm_config.get("azure_deployment_name", "") or model
+            self.azure_version_input.value = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
             self._show_azure_fields(True)
             self.base_url_input.value = ""
             self.refresh_models_button.visible = False
@@ -409,9 +399,7 @@ class LLMConfigPanel(ft.Container):
                     self.custom_model_input.visible = True
                     self.custom_model_input.value = model
                 elif models:
-                    recommended = next(
-                        (m.get("id") for m in models if m.get("tag") == "推荐"), None
-                    )
+                    recommended = next((m.get("id") for m in models if m.get("tag") == "推荐"), None)
                     self.model_dropdown.value = recommended or models[0].get("id")
 
             provider_config = LLM_PROVIDERS.get(provider, {})
@@ -459,9 +447,7 @@ class LLMConfigPanel(ft.Container):
             self.base_url_input.value = ""
             self.custom_model_input.visible = False
             self.refresh_models_button.visible = False
-            self._show_info(
-                I18n.get("llm_switch_provider_hint").format(provider=provider_name)
-            )
+            self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
         elif provider_id == "custom":
             self._is_azure = False
             self._show_azure_fields(False)
@@ -470,9 +456,7 @@ class LLMConfigPanel(ft.Container):
             self.refresh_models_button.visible = True
             self.base_url_input.value = ""
             self.base_url_input.read_only = False
-            self._show_info(
-                I18n.get("llm_switch_provider_hint").format(provider=provider_name)
-            )
+            self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
             self._load_custom_model_history(provider_id)
         else:
             self._is_azure = False
@@ -482,15 +466,11 @@ class LLMConfigPanel(ft.Container):
             self.refresh_models_button.visible = provider_id in MODELS_API_COMPATIBLE
             self.base_url_input.value = provider.get("base_url", "")
             self.base_url_input.read_only = True
-            self._show_info(
-                I18n.get("llm_switch_provider_hint").format(provider=provider_name)
-            )
+            self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
 
             models = provider.get("models", [])
             if models:
-                recommended = next(
-                    (m.get("id") for m in models if m.get("tag") == "推荐"), None
-                )
+                recommended = next((m.get("id") for m in models if m.get("tag") == "推荐"), None)
                 self.model_dropdown.value = recommended or models[0].get("id")
 
         self._update_links_row()
@@ -501,11 +481,7 @@ class LLMConfigPanel(ft.Container):
 
         links = []
 
-        compact_btn_style = (
-            ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=4))
-            if self._compact
-            else None
-        )
+        compact_btn_style = ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=4)) if self._compact else None
 
         console_url = provider.get("console_url")
         if console_url:
@@ -540,11 +516,7 @@ class LLMConfigPanel(ft.Container):
                 )
             )
 
-        content_col = (
-            self.content.content
-            if isinstance(self.content, ft.Container)
-            else self.content
-        )
+        content_col = self.content.content if isinstance(self.content, ft.Container) else self.content
         links_row = content_col.controls[-1]
         links_row.controls = links
 
@@ -555,9 +527,7 @@ class LLMConfigPanel(ft.Container):
 
         provider_models = custom_models.get(provider_id, [])
 
-        self.custom_model_input.options = [
-            ft.dropdown.Option(model_id) for model_id in provider_models
-        ]
+        self.custom_model_input.options = [ft.dropdown.Option(model_id) for model_id in provider_models]
 
     def _on_test_click(self, e):
         if not self.page:
@@ -629,9 +599,7 @@ class LLMConfigPanel(ft.Container):
             if result.get("success"):
                 self._show_success(I18n.get("llm_test_success"))
             else:
-                self._show_error(
-                    f"{I18n.get('llm_test_failed')}: {result.get('message', '')}"
-                )
+                self._show_error(f"{I18n.get('llm_test_failed')}: {result.get('message', '')}")
 
         except Exception as ex:
             from services.ai_service import _classify_api_error
@@ -709,9 +677,7 @@ class LLMConfigPanel(ft.Container):
                 self._show_success(I18n.get("llm_test_success"))
                 return True
 
-            self._show_error(
-                f"{I18n.get('llm_test_failed')}: {result.get('message', '')}"
-            )
+            self._show_error(f"{I18n.get('llm_test_failed')}: {result.get('message', '')}")
             return False
 
         except Exception as ex:
@@ -793,9 +759,7 @@ class LLMConfigPanel(ft.Container):
             from ui.i18n import classify_error
 
             error_info = classify_error(ex, context="llm")
-            self._show_error(
-                f"{I18n.get('llm_refresh_failed')}: {error_info['message']}"
-            )
+            self._show_error(f"{I18n.get('llm_refresh_failed')}: {error_info['message']}")
             logger.error(f"[LLMConfigPanel] Refresh models error: {ex}")
 
         finally:
@@ -870,11 +834,7 @@ class LLMConfigPanel(ft.Container):
 
             if model and (
                 provider == "custom"
-                or model
-                not in [
-                    m.get("id")
-                    for m in LLM_PROVIDERS.get(provider, {}).get("models", [])
-                ]
+                or model not in [m.get("id") for m in LLM_PROVIDERS.get(provider, {}).get("models", [])]
             ):
                 llm_config = ConfigHandler.get_llm_config()
                 custom_models = llm_config.get("custom_models", {})
@@ -912,9 +872,7 @@ class LLMConfigPanel(ft.Container):
             from ui.i18n import classify_error
 
             error_info = classify_error(ex, context="llm")
-            self._show_error(
-                f"{I18n.get('settings_save_failed')}: {error_info['message']}"
-            )
+            self._show_error(f"{I18n.get('settings_save_failed')}: {error_info['message']}")
             logger.error(f"[LLMConfigPanel] Save config error: {ex}")
 
         self.update()

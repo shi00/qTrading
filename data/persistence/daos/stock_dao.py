@@ -171,7 +171,9 @@ class StockDao(BaseDao):
         )
 
         col_str = self._quote_columns(cols)
-        sql_insert = f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join([f'${i + 1}' for i in range(len(cols))])})"
+        sql_insert = (
+            f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join([f'${i + 1}' for i in range(len(cols))])})"
+        )
 
         try:
             # Gate: wait for maintenance before direct engine access
@@ -246,9 +248,7 @@ class StockDao(BaseDao):
         # P3-2: Use groupby instead of iterrows for better performance
         for code, group in rows.groupby("ts_code"):
             # 过滤掉防无限循环的占位符概念名
-            concepts = [
-                c for c in group["concept_name"].tolist() if c != "已扫描无强概念"
-            ]
+            concepts = [c for c in group["concept_name"].tolist() if c != "已扫描无强概念"]
             if concepts:
                 result[code] = concepts
 
@@ -297,9 +297,7 @@ class StockDao(BaseDao):
                 continue
 
             for concept in concepts:
-                concept_id = (
-                    f"AI_DOUBAO_{hashlib.md5(concept.encode('utf-8')).hexdigest()}"
-                )
+                concept_id = f"AI_DOUBAO_{hashlib.md5(concept.encode('utf-8')).hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,

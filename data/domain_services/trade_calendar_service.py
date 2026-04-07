@@ -121,19 +121,13 @@ class TradeCalendarService:
 
         try:
             await self._cache.save_trade_cal(df)
-            logger.debug(
-                f"[TradeCalendarService] Persisted {len(df)} calendar records to DB"
-            )
+            logger.debug(f"[TradeCalendarService] Persisted {len(df)} calendar records to DB")
             return True
         except Exception as e:
-            logger.warning(
-                f"[TradeCalendarService] Failed to persist calendar data: {e}"
-            )
+            logger.warning(f"[TradeCalendarService] Failed to persist calendar data: {e}")
             return False
 
-    async def _fetch_from_api_and_persist(
-        self, start_date, end_date
-    ) -> pd.DataFrame | None:
+    async def _fetch_from_api_and_persist(self, start_date, end_date) -> pd.DataFrame | None:
         """
         从 Tushare API 获取数据并持久化。
 
@@ -150,9 +144,7 @@ class TradeCalendarService:
                 await self._ensure_data_persisted(df)
             return df
         except Exception as e:
-            logger.warning(
-                f"[TradeCalendarService] API fetch failed for {start_date} - {end_date}: {e}"
-            )
+            logger.warning(f"[TradeCalendarService] API fetch failed for {start_date} - {end_date}: {e}")
             return None
 
     async def is_trading_day(self, date) -> bool:
@@ -176,16 +168,12 @@ class TradeCalendarService:
             return False
 
         try:
-            df = await self._cache.get_trade_cal(
-                start_date=date_obj, end_date=date_obj, is_open=1
-            )
+            df = await self._cache.get_trade_cal(start_date=date_obj, end_date=date_obj, is_open=1)
             if df is not None and not df.empty:
                 return True
 
             if df is not None and len(df) == 0:
-                df = await self._cache.get_trade_cal(
-                    start_date=date_obj, end_date=date_obj
-                )
+                df = await self._cache.get_trade_cal(start_date=date_obj, end_date=date_obj)
                 if df is not None and not df.empty:
                     return df["is_open"].iloc[0] == 1
 
@@ -198,9 +186,7 @@ class TradeCalendarService:
             return self._offline.is_trading_day(date_obj)
 
         except Exception as e:
-            logger.warning(
-                f"[TradeCalendarService] is_trading_day check failed, using offline: {e}"
-            )
+            logger.warning(f"[TradeCalendarService] is_trading_day check failed, using offline: {e}")
             return self._offline.is_trading_day(date_obj)
 
     @log_async_operation(
@@ -236,9 +222,7 @@ class TradeCalendarService:
             return []
 
         try:
-            df = await self._cache.get_trade_cal(
-                start_date=start_obj, end_date=end_obj, is_open=1
-            )
+            df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open=1)
             if df is not None and not df.empty:
                 dates = pd.to_datetime(df["cal_date"]).dt.date.tolist()
                 return sorted(dates)
@@ -290,15 +274,11 @@ class TradeCalendarService:
         try:
             return await self._cache.stock_dao.count_trade_days(start_obj, end_obj)
         except Exception as e:
-            logger.warning(
-                f"[TradeCalendarService] count_trade_days failed, using list: {e}"
-            )
+            logger.warning(f"[TradeCalendarService] count_trade_days failed, using list: {e}")
             dates = await self.get_trade_dates(start_obj, end_obj)
             return len(dates)
 
-    async def get_start_date_by_trade_days(
-        self, end_date, trade_days: int
-    ) -> datetime.date | None:
+    async def get_start_date_by_trade_days(self, end_date, trade_days: int) -> datetime.date | None:
         """
         根据交易日数量计算起始日期。
 
@@ -331,9 +311,7 @@ class TradeCalendarService:
             return rough_start
 
         except Exception as e:
-            logger.warning(
-                f"[TradeCalendarService] get_start_date_by_trade_days failed: {e}"
-            )
+            logger.warning(f"[TradeCalendarService] get_start_date_by_trade_days failed: {e}")
             rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
             return rough_start
 
@@ -369,11 +347,7 @@ class TradeCalendarService:
 
         offline_dates = self._offline.get_trade_dates(lookback_start, date_obj)
         if offline_dates:
-            offline_before = [
-                parse_date(d).date()
-                for d in offline_dates
-                if parse_date(d).date() < date_obj
-            ]
+            offline_before = [parse_date(d).date() for d in offline_dates if parse_date(d).date() < date_obj]
             if offline_before:
                 return offline_before[-1]
 
@@ -411,11 +385,7 @@ class TradeCalendarService:
 
         offline_dates = self._offline.get_trade_dates(date_obj, lookforward_end)
         if offline_dates:
-            offline_after = [
-                parse_date(d).date()
-                for d in offline_dates
-                if parse_date(d).date() > date_obj
-            ]
+            offline_after = [parse_date(d).date() for d in offline_dates if parse_date(d).date() > date_obj]
             if offline_after:
                 return offline_after[0]
 
@@ -476,18 +446,14 @@ class TradeCalendarService:
                     self._latest_trade_date_cache = {"ts": now_ts, "val": result}
                     return result
             except Exception as e:
-                logger.warning(
-                    f"[TradeCalendarService] get_latest_trade_date failed: {e}"
-                )
+                logger.warning(f"[TradeCalendarService] get_latest_trade_date failed: {e}")
 
             dt = end_dt
             while dt.weekday() >= 5:
                 dt -= datetime.timedelta(days=1)
             return dt
 
-    async def get_trade_dates_batch(
-        self, ranges: list[tuple[datetime.date, datetime.date]]
-    ) -> dict:
+    async def get_trade_dates_batch(self, ranges: list[tuple[datetime.date, datetime.date]]) -> dict:
         """
         批量获取多个日期范围的交易日。
 
@@ -533,9 +499,7 @@ class TradeCalendarService:
         self._latest_trade_date_cache = {"ts": 0, "val": None}
         logger.debug("[TradeCalendarService] Memory cache cleared")
 
-    async def get_trade_cal_df(
-        self, start_date=None, end_date=None, is_open=None
-    ) -> pd.DataFrame:
+    async def get_trade_cal_df(self, start_date=None, end_date=None, is_open=None) -> pd.DataFrame:
         """
         获取原始交易日历 DataFrame。
 
@@ -558,9 +522,7 @@ class TradeCalendarService:
         end_obj = self._to_date(end_date)
 
         try:
-            df = await self._cache.get_trade_cal(
-                start_date=start_obj, end_date=end_obj, is_open=is_open
-            )
+            df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open=is_open)
             if df is not None and not df.empty:
                 return df
 

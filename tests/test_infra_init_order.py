@@ -41,9 +41,7 @@ def test_initialization_order():
         def on_apply_policy():
             call_order.append("ProxyManager.apply_smart_proxy_policy")
 
-        proxy_manager_module_mock.ProxyManager.apply_smart_proxy_policy.side_effect = (
-            on_apply_policy
-        )
+        proxy_manager_module_mock.ProxyManager.apply_smart_proxy_policy.side_effect = on_apply_policy
 
         # Configure TushareClient.__init__
         # TushareClient is a class in the module

@@ -47,11 +47,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         # Rule: Listed, Profitable (PE>0), Active (Turnover > min)
         min_turnover = ConfigHandler.get_strategy_min_turnover()
 
-        mask = (
-            (df["pe_ttm"] > 0)
-            & (df["turnover_rate"] > min_turnover)
-            & (df["list_status"] == "L")
-        )
+        mask = (df["pe_ttm"] > 0) & (df["turnover_rate"] > min_turnover) & (df["list_status"] == "L")
         candidates = df[mask].copy()
 
         # Sort by turnover_rate desc (Most active), cap at limit
@@ -70,9 +66,4 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         turnover = row.get("turnover_rate", "N/A")
         pe = row.get("pe_ttm", "N/A")
         pct_chg = row.get("pct_chg", "N/A")
-        return (
-            f"该股票由 AI 主动策略筛选："
-            f"换手率={turnover}%（高活跃度），"
-            f"PE(TTM)={pe}（盈利），"
-            f"日涨跌幅={pct_chg}%"
-        )
+        return f"该股票由 AI 主动策略筛选：换手率={turnover}%（高活跃度），PE(TTM)={pe}（盈利），日涨跌幅={pct_chg}%"

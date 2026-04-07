@@ -194,9 +194,7 @@ class TestQuoteDao:
 
         await quote_dao.save_daily_quotes(df)
 
-        result = await quote_dao.get_daily_quotes(
-            ts_code="000001.SZ", start_date="20240321", end_date="20240321"
-        )
+        result = await quote_dao.get_daily_quotes(ts_code="000001.SZ", start_date="20240321", end_date="20240321")
         assert len(result) == 1
         assert result["trade_date"].iloc[0] == datetime.date(2024, 3, 21)
 
@@ -237,16 +235,12 @@ class TestQuoteDao:
 
         await quote_dao.save_daily_quotes(df)
 
-        result = await quote_dao.get_daily_quotes(
-            ts_code_list=["000001.SZ", "000002.SZ"]
-        )
+        result = await quote_dao.get_daily_quotes(ts_code_list=["000001.SZ", "000002.SZ"])
         assert len(result) == 2
 
     async def test_check_data_exists(self, quote_dao, clean_db):
         """检查数据是否存在 - 使用 tables 参数只检查 quotes 表"""
-        assert not await quote_dao.check_data_exists(
-            "20240321", tables=["daily_quotes"]
-        )
+        assert not await quote_dao.check_data_exists("20240321", tables=["daily_quotes"])
 
         df = pd.DataFrame(
             [
@@ -430,9 +424,7 @@ class TestStockDao:
         saved = await stock_dao.save_trade_cal(df)
         assert saved == 3
 
-        result = await stock_dao.get_trade_cal(
-            start_date="20240321", end_date="20240322", is_open=1
-        )
+        result = await stock_dao.get_trade_cal(start_date="20240321", end_date="20240322", is_open=1)
         assert len(result) == 2
 
     async def test_count_trade_days(self, stock_dao, clean_db):
@@ -473,9 +465,7 @@ class TestStockDao:
         )
         await stock_dao.save_trade_cal(df)
 
-        count = await stock_dao.count_trade_days(
-            datetime.date(2024, 3, 18), datetime.date(2024, 3, 21)
-        )
+        count = await stock_dao.count_trade_days(datetime.date(2024, 3, 18), datetime.date(2024, 3, 21))
         assert count == 4
 
     async def test_get_start_date_by_trade_days(self, stock_dao, clean_db):
@@ -510,9 +500,7 @@ class TestStockDao:
         )
         await stock_dao.save_trade_cal(df)
 
-        result = await stock_dao.get_start_date_by_trade_days(
-            datetime.date(2024, 3, 21), 3
-        )
+        result = await stock_dao.get_start_date_by_trade_days(datetime.date(2024, 3, 21), 3)
         assert result == datetime.date(2024, 3, 19)
 
     async def test_save_and_get_concepts(self, stock_dao, clean_db):

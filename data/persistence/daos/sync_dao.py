@@ -22,9 +22,7 @@ class SyncDao(BaseDao):
         elif isinstance(last_data_date, datetime):
             last_data_date = last_data_date.date()
         elif not isinstance(last_data_date, date):
-            raise TypeError(
-                f"last_data_date must be str, datetime, or date, got {type(last_data_date)}"
-            )
+            raise TypeError(f"last_data_date must be str, datetime, or date, got {type(last_data_date)}")
 
         now = get_now().replace(tzinfo=None)
         sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at")
@@ -61,9 +59,7 @@ class SyncDao(BaseDao):
         except Exception:
             return set()
 
-    async def mark_stock_step4_completed(
-        self, ts_code: str | None, sync_version: int = 1
-    ):
+    async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1):
         now = get_now().replace(tzinfo=None)
         sql = '''INSERT INTO stock_sync_status ("ts_code","step4_completed_at","sync_version")
                VALUES ($1, $2, $3)

@@ -250,11 +250,7 @@ class MarketNews(Base):
     source = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
-    __table_args__ = (
-        UniqueConstraint(
-            "content_hash", "publish_time", name="uq_market_news_hash_pub"
-        ),
-    )
+    __table_args__ = (UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),)
 
 
 class TradeCal(Base):
@@ -290,9 +286,7 @@ class FinancialReports(Base):
     goodwill = Column(Float)
     audit_result = Column(String)
     n_cashflow_act = Column(Float)  # 经营活动产生的现金流量净额
-    __table_args__ = (
-        Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
-    )
+    __table_args__ = (Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),)
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
@@ -559,9 +553,7 @@ class TaskHistory(Base):
     description = Column(String)
     error = Column(String)
     result = Column(String)
-    created_at = Column(
-        DateTime(timezone=False), server_default=func.now(), nullable=False, index=True
-    )
+    created_at = Column(DateTime(timezone=False), server_default=func.now(), nullable=False, index=True)
     started_at = Column(DateTime(timezone=False))
     completed_at = Column(DateTime(timezone=False))
 

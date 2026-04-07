@@ -68,9 +68,7 @@ class HealthCheckMixin:
             sync_records = await self.cache.get_sync_status()
 
             # _read_db returns a pandas DataFrame
-            if sync_records is None or (
-                hasattr(sync_records, "empty") and sync_records.empty
-            ):
+            if sync_records is None or (hasattr(sync_records, "empty") and sync_records.empty):
                 self._quality_tier = 0
                 logger.warning(
                     "[DataProcessor] FastCheck | ⚠️ No sync records. Degrading Tier to CRITICAL (0)",
@@ -83,9 +81,7 @@ class HealthCheckMixin:
 
             # Get all critical tables from data dictionary
             critical_tables = [
-                name
-                for name, meta in TABLE_DEFINITIONS.items()
-                if meta.get("quality_config", {}).get("critical")
+                name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
             ]
 
             # Check daily_quotes first (primary gate)
@@ -156,9 +152,7 @@ class HealthCheckMixin:
                     last_date = info.get("last_data_date", "") if info else ""
                     if last_date:
                         try:
-                            table_lag = (
-                                get_now() - parse_date(str(last_date), "%Y%m%d")
-                            ).days
+                            table_lag = (get_now() - parse_date(str(last_date), "%Y%m%d")).days
                             if table_lag > TIER_QUOTE_FRESHNESS_DAYS:
                                 stale_critical.append(table)
                         except (ValueError, TypeError):
@@ -177,9 +171,7 @@ class HealthCheckMixin:
                     fin_date = fin_info.get("last_data_date", "") if fin_info else ""
                     if fin_date:
                         try:
-                            fin_lag = (
-                                get_now() - parse_date(str(fin_date), "%Y%m%d")
-                            ).days
+                            fin_lag = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
                             if fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS:
                                 self._quality_tier = 3  # GOLD
                         except (ValueError, TypeError):
@@ -207,9 +199,7 @@ class HealthCheckMixin:
         """Check data health status. Read-only diagnostic — immune to sync cancellation."""
         now = time.time()
         # 10s cache to prevent double-tap on startup
-        if self._health_cache.get("data") and (
-            now - self._health_cache.get("time", 0) < 10
-        ):
+        if self._health_cache.get("data") and (now - self._health_cache.get("time", 0) < 10):
             return self._health_cache["data"]
 
         try:
@@ -221,9 +211,7 @@ class HealthCheckMixin:
 
             years = ConfigHandler.get_init_history_years()
             # Use a safe 2.0 multiplier for trade-days to natural-days conversion
-            rough_start = (
-                end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))
-            ).date()
+            rough_start = (end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))).date()
             all_dates = await self.get_trade_dates(  # type: ignore
                 start_date=rough_start,
                 end_date=end_date,
@@ -231,11 +219,7 @@ class HealthCheckMixin:
             if all_dates and len(all_dates) >= (years * 250):
                 start_date = all_dates[-(years * 250)]
             else:
-                start_date = (
-                    all_dates[0]
-                    if all_dates
-                    else (end_date_obj - datetime.timedelta(days=365 * years)).date()
-                )
+                start_date = all_dates[0] if all_dates else (end_date_obj - datetime.timedelta(days=365 * years)).date()
 
             official_dates = await self.get_trade_dates(start_date, end_date)  # type: ignore
 
@@ -286,20 +270,12 @@ class HealthCheckMixin:
 
             # Identify missing critical tables dynamically from data dictionary
             critical_tables = [
-                name
-                for name, meta in TABLE_DEFINITIONS.items()
-                if meta.get("quality_config", {}).get("critical")
+                name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
             ]
-            missing_critical = [
-                t for t in critical_tables if tables.get(t, {}).get("ratio", 0) < 0.1
-            ]
+            missing_critical = [t for t in critical_tables if tables.get(t, {}).get("ratio", 0) < 0.1]
 
             # Count all missing stock tables
-            all_missing = [
-                t
-                for t, v in tables.items()
-                if v.get("type") != "global" and v.get("ratio", 0) < 0.1
-            ]
+            all_missing = [t for t, v in tables.items() if v.get("type") != "global" and v.get("ratio", 0) < 0.1]
 
             # Determine Data Status
             data_status = "green"
@@ -324,19 +300,14 @@ class HealthCheckMixin:
                     # Strategy classes may use @property, requiring instantiation to evaluate
                     obj = cls()
                     days = obj.required_history_days
-                    if not isinstance(days, property) and isinstance(
-                        days, (int, float)
-                    ):
+                    if not isinstance(days, property) and isinstance(days, (int, float)):
                         max_required = max(max_required, int(days))
                 except Exception as e:
-                    logger.debug(
-                        f"Unable to read required_history_days from {cls.__name__}: {e}"
-                    )
+                    logger.debug(f"Unable to read required_history_days from {cls.__name__}: {e}")
             depth_threshold = (
                 min(
                     1.0,
-                    (max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER)
-                    / get_health_depth_full_trade_days(),
+                    (max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER) / get_health_depth_full_trade_days(),
                 )
                 if max_required > 0
                 else 0
@@ -365,8 +336,7 @@ class HealthCheckMixin:
                 t
                 for t in critical_tables
                 if tables.get(t, {}).get("breadth_ratio") is not None
-                and tables.get(t, {}).get("breadth_ratio", 1.0)
-                < HEALTH_THRESHOLD_BREADTH
+                and tables.get(t, {}).get("breadth_ratio", 1.0) < HEALTH_THRESHOLD_BREADTH
             ]
             if missing_breadth:
                 if data_status == "green":
@@ -562,15 +532,9 @@ class HealthCheckMixin:
 
             # 4. Aggregate
             avg_continuity = (
-                sum(scan_results["continuity"]) / len(scan_results["continuity"])
-                if scan_results["continuity"]
-                else 0
+                sum(scan_results["continuity"]) / len(scan_results["continuity"]) if scan_results["continuity"] else 0
             )
-            avg_recency = (
-                sum(scan_results["recency"]) / len(scan_results["recency"])
-                if scan_results["recency"]
-                else 99
-            )
+            avg_recency = sum(scan_results["recency"]) / len(scan_results["recency"]) if scan_results["recency"] else 99
 
             tier = 1
             if avg_continuity > 0.95 and avg_recency < 5:

@@ -21,12 +21,10 @@ class TestV3CodeReviewIssues:
 
     def test_financial_report_schema_cols_has_goodwill_and_audit_result(self):
         assert "goodwill" in FINANCIAL_REPORT_SCHEMA_COLS, (
-            "FINANCIAL_REPORT_SCHEMA_COLS missing 'goodwill' - "
-            "incremental sync will drop this field"
+            "FINANCIAL_REPORT_SCHEMA_COLS missing 'goodwill' - incremental sync will drop this field"
         )
         assert "audit_result" in FINANCIAL_REPORT_SCHEMA_COLS, (
-            "FINANCIAL_REPORT_SCHEMA_COLS missing 'audit_result' - "
-            "incremental sync will drop this field"
+            "FINANCIAL_REPORT_SCHEMA_COLS missing 'audit_result' - incremental sync will drop this field"
         )
 
     def test_get_cached_dates_for_table_has_all_critical_tables(self):
@@ -51,24 +49,16 @@ class TestV3CodeReviewIssues:
             if f'"{table}"' not in source and f"'{table}'" not in source:
                 missing.append(table)
 
-        assert not missing, (
-            f"get_cached_dates_for_table date_col_map missing tables: {missing}"
-        )
+        assert not missing, f"get_cached_dates_for_table date_col_map missing tables: {missing}"
 
     def test_validate_schema_definitions_includes_common_columns(self):
         source = inspect.getsource(validate_schema_definitions)
-        assert "COMMON_COLUMNS" in source, (
-            "validate_schema_definitions should include COMMON_COLUMNS in dd_cols"
-        )
+        assert "COMMON_COLUMNS" in source, "validate_schema_definitions should include COMMON_COLUMNS in dd_cols"
 
     def test_holder_sync_uses_get_now(self):
         source = inspect.getsource(HolderSyncStrategy)
-        assert "get_now()" in source, (
-            "HolderSyncStrategy should use get_now() instead of datetime.date.today()"
-        )
-        assert "datetime.date.today()" not in source, (
-            "HolderSyncStrategy should not use datetime.date.today()"
-        )
+        assert "get_now()" in source, "HolderSyncStrategy should use get_now() instead of datetime.date.today()"
+        assert "datetime.date.today()" not in source, "HolderSyncStrategy should not use datetime.date.today()"
 
     def test_historical_sync_moneyflow_accepts_datetime_date(self):
         source = inspect.getsource(HistoricalSyncStrategy.sync_moneyflow)
@@ -84,9 +74,7 @@ class TestV3CodeReviewIssues:
 
     def test_historical_sync_uses_core_tables_for_resume(self):
         source = inspect.getsource(HistoricalSyncStrategy._run_historical_sync)
-        assert "core_tables" in source, (
-            "_run_historical_sync should use core_tables for breakpoint resume"
-        )
+        assert "core_tables" in source, "_run_historical_sync should use core_tables for breakpoint resume"
         assert "daily_quotes" in source and "daily_indicators" in source, (
             "core_tables should include daily_quotes and daily_indicators"
         )
@@ -106,15 +94,11 @@ class TestV3CodeReviewIssues:
 
     def test_sync_daily_market_snapshot_accepts_datetime_date(self):
         source = inspect.getsource(HistoricalSyncStrategy.sync_daily_market_snapshot)
-        assert "datetime.date" in source, (
-            "sync_daily_market_snapshot should accept datetime.date, not str"
-        )
+        assert "datetime.date" in source, "sync_daily_market_snapshot should accept datetime.date, not str"
 
     def test_sync_one_day_uses_datetime_date(self):
         source = inspect.getsource(HistoricalSyncStrategy._run_historical_sync)
-        assert "datetime.date" in source, (
-            "sync_one_day should use datetime.date for type consistency"
-        )
+        assert "datetime.date" in source, "sync_one_day should use datetime.date for type consistency"
 
     def test_validate_schema_definitions_phantom_cols_excludes_common(self):
         source = inspect.getsource(validate_schema_definitions)

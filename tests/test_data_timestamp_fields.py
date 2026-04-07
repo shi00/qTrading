@@ -58,9 +58,7 @@ class TestCreatedAtSchema:
         """验证表存在 created_at 字段"""
         table = Base.metadata.tables.get(table_name)
         assert table is not None, f"Table {table_name} not found in metadata"
-        assert "created_at" in table.columns, (
-            f"Table {table_name} missing created_at column"
-        )
+        assert "created_at" in table.columns, f"Table {table_name} missing created_at column"
 
     @pytest.mark.parametrize("table_name", TABLES_WITH_CREATED_AT)
     def test_created_at_has_server_default(self, table_name):
@@ -68,9 +66,7 @@ class TestCreatedAtSchema:
         table = Base.metadata.tables.get(table_name)
         col = table.columns.get("created_at")
         assert col is not None, f"Table {table_name} missing created_at column"
-        assert col.server_default is not None, (
-            f"Table {table_name}.created_at missing server_default"
-        )
+        assert col.server_default is not None, f"Table {table_name}.created_at missing server_default"
 
 
 class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
@@ -79,9 +75,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """使用独立的 test_astock 数据库进行测试"""
 
-        self.test_db_url = (
-            "postgresql+asyncpg://postgres:123456@localhost:5432/test_astock"
-        )
+        self.test_db_url = "postgresql+asyncpg://postgres:123456@localhost:5432/test_astock"
         self.engine = create_async_engine(self.test_db_url, echo=False)
 
         from data.persistence.models import Base
@@ -94,16 +88,8 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
         """清理测试数据"""
         if hasattr(self, "engine"):
             async with self.engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        "DELETE FROM sync_status WHERE table_name LIKE 'test_created_at_%'"
-                    )
-                )
-                await conn.execute(
-                    text(
-                        "DELETE FROM daily_indicators WHERE ts_code LIKE 'test_created_at_%'"
-                    )
-                )
+                await conn.execute(text("DELETE FROM sync_status WHERE table_name LIKE 'test_created_at_%'"))
+                await conn.execute(text("DELETE FROM daily_indicators WHERE ts_code LIKE 'test_created_at_%'"))
             await self.engine.dispose()
 
     async def test_created_at_equals_updated_at_on_insert(self):
@@ -130,9 +116,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
 
         async with self.engine.connect() as conn:
             result = await conn.execute(
-                text(
-                    "SELECT created_at, updated_at FROM daily_indicators WHERE ts_code = :ts_code"
-                ),
+                text("SELECT created_at, updated_at FROM daily_indicators WHERE ts_code = :ts_code"),
                 {"ts_code": ts_code},
             )
             row = result.fetchone()
@@ -171,9 +155,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
 
         async with self.engine.connect() as conn:
             result = await conn.execute(
-                text(
-                    "SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"
-                ),
+                text("SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"),
                 {"table_name": table_name},
             )
             row = result.fetchone()
@@ -207,9 +189,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
 
         async with self.engine.connect() as conn:
             result = await conn.execute(
-                text(
-                    "SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"
-                ),
+                text("SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"),
                 {"table_name": table_name},
             )
             row = result.fetchone()

@@ -34,9 +34,7 @@ class TokenBucket:
     def _consume_reserve(self, tokens):
         """Internal method to calculate wait time and update tokens under lock"""
         if tokens > self.capacity:
-            raise ValueError(
-                f"Requested tokens ({tokens}) exceed bucket capacity ({self.capacity})"
-            )
+            raise ValueError(f"Requested tokens ({tokens}) exceed bucket capacity ({self.capacity})")
 
         with self.lock:
             now = time.monotonic()

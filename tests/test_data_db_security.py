@@ -25,21 +25,11 @@ class TestDatabaseManagerSecurity(TestDatabaseBase):
 
         async with self._ddl_engine.begin() as conn:
             await conn.execute(
-                text(
-                    "CREATE TABLE IF NOT EXISTS test_users (id SERIAL PRIMARY KEY, username TEXT, password TEXT)"
-                )
+                text("CREATE TABLE IF NOT EXISTS test_users (id SERIAL PRIMARY KEY, username TEXT, password TEXT)")
             )
             await conn.execute(text("DELETE FROM test_users"))
-            await conn.execute(
-                text(
-                    "INSERT INTO test_users (username, password) VALUES ('admin', 'secret')"
-                )
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO test_users (username, password) VALUES ('guest', '12345')"
-                )
-            )
+            await conn.execute(text("INSERT INTO test_users (username, password) VALUES ('admin', 'secret')"))
+            await conn.execute(text("INSERT INTO test_users (username, password) VALUES ('guest', '12345')"))
 
     async def asyncTearDown(self):
         if hasattr(self, "db_manager"):

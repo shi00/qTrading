@@ -155,11 +155,7 @@ class ScreenerViewModel:
                     await self.data_processor.init_data()
                     context = await self.data_processor.get_strategy_data()
 
-                if (
-                    not context
-                    or "screening_data" not in context
-                    or context["screening_data"].empty
-                ):
+                if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")
 
                 context["data_processor"] = self.data_processor
@@ -397,10 +393,7 @@ class ScreenerViewModel:
         self._ai_buffer.append(row_data)
 
         now = time.time()
-        if (
-            now - self._last_ai_update > self.AI_UPDATE_INTERVAL
-            or len(self._ai_buffer) >= 20
-        ):
+        if now - self._last_ai_update > self.AI_UPDATE_INTERVAL or len(self._ai_buffer) >= 20:
             # Trigger Batch Update
             # Note: We trigger a task to run the update on main thread context eventually,
             # but here we are likely in a background thread from AI Strategy?

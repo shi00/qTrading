@@ -92,8 +92,7 @@ class NorthboundStrategy(PolarsBaseStrategy):
                 nb_lf.drop_nulls(subset=["ratio"])
                 .filter(pl.col("ratio") > target_ratio)
                 .filter(
-                    pl.col("ts_code").str.ends_with(".SH")
-                    | pl.col("ts_code").str.ends_with(".SZ"),
+                    pl.col("ts_code").str.ends_with(".SH") | pl.col("ts_code").str.ends_with(".SZ"),
                 )
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("ratio", descending=True)

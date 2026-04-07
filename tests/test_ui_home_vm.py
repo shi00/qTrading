@@ -41,9 +41,7 @@ class TestHomeViewModelInit:
         on_market = MagicMock()
 
         with (
-            patch(
-                "ui.viewmodels.home_view_model.NewsSubscriptionService"
-            ) as mock_news_svc,
+            patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_news_svc,
             patch("ui.viewmodels.home_view_model.MarketDataService") as mock_market_svc,
         ):
             mock_news_svc.return_value.add_listener = MagicMock()
@@ -59,9 +57,7 @@ class TestHomeViewModelInit:
         vm = HomeViewModel()
 
         with (
-            patch(
-                "ui.viewmodels.home_view_model.NewsSubscriptionService"
-            ) as mock_news_svc,
+            patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_news_svc,
             patch("ui.viewmodels.home_view_model.MarketDataService") as mock_market_svc,
         ):
             mock_news_svc.return_value.remove_listener = MagicMock()
@@ -261,9 +257,7 @@ class TestHomeViewModelNewsData:
     @pytest.mark.asyncio
     async def test_fetch_news_batch_error(self, vm):
         """新闻获取错误"""
-        vm.processor.cache.get_market_news = AsyncMock(
-            side_effect=Exception("Database Error")
-        )
+        vm.processor.cache.get_market_news = AsyncMock(side_effect=Exception("Database Error"))
 
         result = await vm._fetch_news_batch(0)
 
@@ -399,9 +393,7 @@ class TestHomeViewModelPagination:
         page2 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20, 40)]})
         page3 = pd.DataFrame({"title": [f"新闻{i}" for i in range(40, 55)]})
 
-        vm.processor.cache.get_market_news = AsyncMock(
-            side_effect=[page1, page2, page3]
-        )
+        vm.processor.cache.get_market_news = AsyncMock(side_effect=[page1, page2, page3])
 
         await vm.refresh_news()
         assert vm.has_more_news is True

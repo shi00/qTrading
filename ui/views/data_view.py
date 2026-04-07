@@ -336,8 +336,7 @@ class TableViewerTab(ft.Container):
 
             # Update UI on main thread
             self.table_selector.options = [
-                ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t))
-                for t in tables
+                ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in tables
             ]
             self.table_selector.disabled = False
 
@@ -415,10 +414,7 @@ class TableViewerTab(ft.Container):
             for col in schema:
                 c_name = col["name"]
                 c_type = col.get("type", "").upper()
-                if any(
-                    x in c_type
-                    for x in ["INT", "REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL"]
-                ):
+                if any(x in c_type for x in ["INT", "REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL"]):
                     self.numeric_cols.add(c_name)
 
             # Update Filter Dropdown
@@ -576,20 +572,12 @@ class TableViewerTab(ft.Container):
                         str_val,
                         size=13,
                         max_lines=None if is_long_text else 1,  # 新闻内容不限制行数
-                        overflow=ft.TextOverflow.VISIBLE
-                        if is_long_text
-                        else ft.TextOverflow.ELLIPSIS,
+                        overflow=ft.TextOverflow.VISIBLE if is_long_text else ft.TextOverflow.ELLIPSIS,
                         font_family="Roboto Mono"
-                        if is_numeric
-                        or "code" in col_name.lower()
-                        or "date" in col_name.lower()
+                        if is_numeric or "code" in col_name.lower() or "date" in col_name.lower()
                         else None,
-                        color=AppColors.TABLE_CELL_NUMERIC
-                        if is_numeric
-                        else AppColors.TABLE_CELL_TEXT,
-                        text_align=ft.TextAlign.LEFT
-                        if is_long_text
-                        else ft.TextAlign.CENTER,  # 新闻内容左对齐
+                        color=AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT,
+                        text_align=ft.TextAlign.LEFT if is_long_text else ft.TextAlign.CENTER,  # 新闻内容左对齐
                     )
 
                     # 新闻内容使用左对齐容器，并设置固定宽度保证换行
@@ -609,11 +597,7 @@ class TableViewerTab(ft.Container):
 
                     cells.append(ft.DataCell(cell_container))
 
-                row_color = (
-                    AppColors.TABLE_ROW_ODD
-                    if idx % 2 == 0
-                    else AppColors.TABLE_ROW_EVEN
-                )
+                row_color = AppColors.TABLE_ROW_ODD if idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
                 self.data_table.rows.append(ft.DataRow(cells=cells, color=row_color))
 
             # Update Info Labels
@@ -714,11 +698,7 @@ class TableViewerTab(ft.Container):
             if self.filter_val.value:
                 filter_col = self.filter_col.value
                 filter_val = self.filter_val.value
-                if (
-                    filter_col
-                    and "date" in filter_col.lower()
-                    and re.match(r"^\d{4}-\d{2}-\d{2}$", filter_val)
-                ):
+                if filter_col and "date" in filter_col.lower() and re.match(r"^\d{4}-\d{2}-\d{2}$", filter_val):
                     filter_val = filter_val.replace("-", "")
                 filters.append((filter_col, self.filter_op.value, filter_val))
 
@@ -810,9 +790,7 @@ class TableViewerTab(ft.Container):
 
         # Update Rows
         for i, row in enumerate(self.data_table.rows):  # type: ignore
-            row.color = (
-                AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
-            )
+            row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
             for cell in row.cells:
                 content = cell.content
                 if isinstance(content, ft.Container):
@@ -820,11 +798,7 @@ class TableViewerTab(ft.Container):
                 if isinstance(content, ft.Text):
                     # Check if numeric based on font family?
                     is_numeric = "Roboto" in (content.font_family or "")
-                    content.color = (
-                        AppColors.TABLE_CELL_NUMERIC
-                        if is_numeric
-                        else AppColors.TABLE_CELL_TEXT
-                    )
+                    content.color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
 
         if self.page:
             self.update()
@@ -1014,9 +988,7 @@ class SQLConsoleTab(ft.Container):
 
                             if isinstance(val, (datetime.date, datetime.datetime)):
                                 str_val = val.strftime("%Y-%m-%d")
-                            elif (
-                                isinstance(val, str) and len(val) == 8 and val.isdigit()
-                            ):
+                            elif isinstance(val, str) and len(val) == 8 and val.isdigit():
                                 str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
                         cells.append(
                             ft.DataCell(
@@ -1028,11 +1000,7 @@ class SQLConsoleTab(ft.Container):
                             ),
                         )
 
-                    row_color = (
-                        AppColors.TABLE_ROW_ODD
-                        if row_idx % 2 == 0
-                        else AppColors.TABLE_ROW_EVEN
-                    )
+                    row_color = AppColors.TABLE_ROW_ODD if row_idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
                     self.result_table.rows.append(
                         ft.DataRow(cells=cells, color=row_color),
                     )
@@ -1085,9 +1053,7 @@ class SQLConsoleTab(ft.Container):
 
         # Table Rows
         for i, row in enumerate(self.result_table.rows):  # type: ignore
-            row.color = (
-                AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
-            )
+            row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
             for cell in row.cells:
                 if isinstance(cell.content, ft.Text):
                     cell.content.color = AppColors.TABLE_CELL_TEXT

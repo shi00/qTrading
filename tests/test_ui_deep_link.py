@@ -37,9 +37,7 @@ class TestDeepLinking(unittest.TestCase):
                 mock_vm.run_strategy = AsyncMock()
 
                 view = ScreenerView(self.page)
-                view._Control__page = (
-                    self.page
-                )  # Simulate mounted state  # type: ignore
+                view._Control__page = self.page  # Simulate mounted state  # type: ignore
                 # Mock update methods to avoid "Control must be added to the page" error
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
@@ -85,9 +83,7 @@ class TestDeepLinking(unittest.TestCase):
                 mock_vm.run_strategy = AsyncMock()
 
                 view = ScreenerView(self.page)
-                view._Control__page = (
-                    self.page
-                )  # Simulate mounted state  # type: ignore
+                view._Control__page = self.page  # Simulate mounted state  # type: ignore
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
                 view.log_view.update = MagicMock()

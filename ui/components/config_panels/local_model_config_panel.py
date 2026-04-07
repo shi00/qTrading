@@ -137,9 +137,7 @@ class LocalModelConfigPanel(ft.Container):
         self.ctx_input = ft.Dropdown(
             label=I18n.get("settings_local_ctx"),
             value=str(local_cfg.get("n_ctx", 4096)),
-            options=[
-                ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]
-            ],
+            options=[ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]],
             width=_INPUT_WIDTH_SMALL,
             on_change=self._on_input_change,
         )
@@ -253,14 +251,8 @@ class LocalModelConfigPanel(ft.Container):
             visible=not self._compact,
         )
 
-        compact_main_align = (
-            ft.MainAxisAlignment.CENTER if self._compact else ft.MainAxisAlignment.START
-        )
-        compact_cross_align = (
-            ft.CrossAxisAlignment.CENTER
-            if self._compact
-            else ft.CrossAxisAlignment.START
-        )
+        compact_main_align = ft.MainAxisAlignment.CENTER if self._compact else ft.MainAxisAlignment.START
+        compact_cross_align = ft.CrossAxisAlignment.CENTER if self._compact else ft.CrossAxisAlignment.START
 
         action_buttons = ft.Row(
             controls=[
@@ -275,9 +267,7 @@ class LocalModelConfigPanel(ft.Container):
             controls=[
                 header_text,
                 desc_text,
-                ft.Container(height=10)
-                if not self._compact
-                else ft.Container(height=5),
+                ft.Container(height=10) if not self._compact else ft.Container(height=5),
                 ft.Row(
                     [
                         self.model_path_input,
@@ -287,13 +277,9 @@ class LocalModelConfigPanel(ft.Container):
                     vertical_alignment=ft.CrossAxisAlignment.END,
                     alignment=compact_main_align,
                 ),
-                ft.Container(height=10)
-                if not self._compact
-                else ft.Container(height=5),
+                ft.Container(height=10) if not self._compact else ft.Container(height=5),
                 self.advanced_tile,
-                ft.Container(height=10)
-                if not self._compact
-                else ft.Container(height=5),
+                ft.Container(height=10) if not self._compact else ft.Container(height=5),
                 action_buttons,
                 ft.Row(
                     [self.status_icon, self.status_text],
@@ -466,9 +452,7 @@ class LocalModelConfigPanel(ft.Container):
         timeout_str = self.timeout_input.value.strip()
         timeout = int(timeout_str) if timeout_str else 300
 
-        gpu_layers = (
-            -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value)
-        )
+        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value)
 
         ConfigHandler.save_local_ai_config(
             model_path=model_path,
@@ -483,15 +467,11 @@ class LocalModelConfigPanel(ft.Container):
         return True
 
     def get_current_config(self) -> dict:
-        gpu_layers = (
-            -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value)
-        )
+        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value)
 
         return {
             "model_path": self.model_path_input.value.strip(),
-            "timeout": int(self.timeout_input.value)
-            if self.timeout_input.value.strip()
-            else 300,
+            "timeout": int(self.timeout_input.value) if self.timeout_input.value.strip() else 300,
             "n_threads": int(self.threads_input.value),
             "n_gpu_layers": gpu_layers,
             "n_batch": int(self.batch_input.value),

@@ -141,19 +141,13 @@ def log_async_operation(
 
                 # 计算耗时
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
-                elapsed_str = (
-                    f"{elapsed_ms:.1f}ms"
-                    if elapsed_ms < 1000
-                    else f"{elapsed_ms / 1000:.2f}s"
-                )
+                elapsed_str = f"{elapsed_ms:.1f}ms" if elapsed_ms < 1000 else f"{elapsed_ms / 1000:.2f}s"
 
                 # 构建结果日志
                 result_info = ""
                 if log_result and result is not None:
                     if hasattr(result, "__len__"):
-                        result_info = (
-                            f" | result: {type(result).__name__}({len(result)} items)"
-                        )
+                        result_info = f" | result: {type(result).__name__}({len(result)} items)"
                     else:
                         result_info = f" | result: {type(result).__name__}"
 
@@ -173,11 +167,7 @@ def log_async_operation(
 
             except Exception as e:
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
-                elapsed_str = (
-                    f"{elapsed_ms:.1f}ms"
-                    if elapsed_ms < 1000
-                    else f"{elapsed_ms / 1000:.2f}s"
-                )
+                elapsed_str = f"{elapsed_ms:.1f}ms" if elapsed_ms < 1000 else f"{elapsed_ms / 1000:.2f}s"
 
                 if log_exceptions:
                     # 脱敏异常信息
@@ -318,9 +308,7 @@ class AsyncOperationLogger:
                     return obj.isoformat()
                 raise TypeError(f"Type {type(obj)} not serializable")
 
-            metrics_str = (
-                f" | metrics: {json.dumps(self.metrics, default=_json_serial)}"
-            )
+            metrics_str = f" | metrics: {json.dumps(self.metrics, default=_json_serial)}"
 
         # 记录完成
         if exc_type is None:

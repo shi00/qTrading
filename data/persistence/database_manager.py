@@ -46,10 +46,7 @@ class DatabaseManager:
             return
 
         if not config.DB_URL_SYNC:
-            raise RuntimeError(
-                "Database URL is not configured. "
-                "Please complete the onboarding wizard first."
-            )
+            raise RuntimeError("Database URL is not configured. Please complete the onboarding wizard first.")
 
         try:
             pool_size = int(ConfigHandler.get_db_connection_pool_size())
@@ -161,9 +158,7 @@ class DatabaseManager:
             raise ValueError(f"Invalid table name: {table_name}")
 
     @staticmethod
-    def _apply_filters(
-        stmt: typing.Any, filters: dict | None, schema_cols: typing.Any = None
-    ):
+    def _apply_filters(stmt: typing.Any, filters: dict | None, schema_cols: typing.Any = None):
         """Apply WHERE filters using SQLAlchemy Core operators (zero f-string).
         schema_cols: optional set of valid column names for whitelist validation."""
         for col_name, op, val in filters:

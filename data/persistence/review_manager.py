@@ -220,7 +220,9 @@ class ReviewManager:
         if losses:
             xml += "  [Mistakes to Avoid - Do NOT repeat]\n"
             for loss in losses:
-                xml += f"  - {loss['code']} ({loss['name']}): Predicted score {loss['score']}, actual {loss['pct']:.1f}%\n"
+                xml += (
+                    f"  - {loss['code']} ({loss['name']}): Predicted score {loss['score']}, actual {loss['pct']:.1f}%\n"
+                )
 
         if not wins and not losses:
             xml += "  No historical data available yet.\n"

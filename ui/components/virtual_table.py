@@ -167,16 +167,8 @@ class VirtualTable(ft.Column):
                 except ValueError:
                     pass
 
-                text_color = (
-                    AppColors.TABLE_CELL_NUMERIC
-                    if is_numeric
-                    else AppColors.TABLE_CELL_TEXT
-                )
-                alignment = (
-                    ft.alignment.center_right
-                    if is_numeric
-                    else ft.alignment.center_left
-                )
+                text_color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
+                alignment = ft.alignment.center_right if is_numeric else ft.alignment.center_left
 
                 # Content
                 # Red/Green numeric coloring for A-share (Red up, Green down)
@@ -185,17 +177,9 @@ class VirtualTable(ft.Column):
                     try:
                         num_val = float(val.replace("%", "").replace(",", ""))
                         if num_val > 0:
-                            text_color = (
-                                AppColors.UP_RED
-                                if hasattr(AppColors, "UP_RED")
-                                else "#F44336"
-                            )
+                            text_color = AppColors.UP_RED if hasattr(AppColors, "UP_RED") else "#F44336"
                         elif num_val < 0:
-                            text_color = (
-                                AppColors.DOWN_GREEN
-                                if hasattr(AppColors, "DOWN_GREEN")
-                                else "#4CAF50"
-                            )
+                            text_color = AppColors.DOWN_GREEN if hasattr(AppColors, "DOWN_GREEN") else "#4CAF50"
                     except (ValueError, TypeError):
                         pass
 

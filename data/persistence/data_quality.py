@@ -18,9 +18,7 @@ class DataQualityService:
     LAG_ERROR = -1
 
     @classmethod
-    def check_continuity(
-        cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame
-    ) -> dict[str, Any]:
+    def check_continuity(cls, df: pd.DataFrame, date_col: str, trade_cal: pd.DataFrame) -> dict[str, Any]:
         """
         Tier 2: Check for missing trading days in a time-series.
 
@@ -50,9 +48,7 @@ class DataQualityService:
 
         target_dates = set(date_series.dt.date)
 
-        start_date_obj = (
-            start_date.date() if hasattr(start_date, "date") else start_date
-        )
+        start_date_obj = start_date.date() if hasattr(start_date, "date") else start_date
         end_date_obj = end_date.date() if hasattr(end_date, "date") else end_date
 
         # Convert trade_cal cal_date to datetime for proper comparison
@@ -89,9 +85,7 @@ class DataQualityService:
         }
 
     @classmethod
-    def check_recency(
-        cls, df: pd.DataFrame, date_col: str, ref_date: typing.Any
-    ) -> dict[str, Any]:
+    def check_recency(cls, df: pd.DataFrame, date_col: str, ref_date: typing.Any) -> dict[str, Any]:
         """
         Tier 2: Check data freshness against a reference date (usually latest trading day).
         ref_date can be a string (YYYYMMDD), datetime.date, or datetime.datetime.
@@ -137,9 +131,7 @@ class DataQualityService:
         return ratios
 
     @staticmethod
-    def check_cross_validation(
-        df: pd.DataFrame, rules: list[tuple[str, str, float]]
-    ) -> list[str]:
+    def check_cross_validation(df: pd.DataFrame, rules: list[tuple[str, str, float]]) -> list[str]:
         """
         Tier 3: Reliability Cross-Validation using simple expression evaluation.
 
@@ -181,9 +173,7 @@ class DataQualityService:
         return issues
 
     @staticmethod
-    def check_price_vs_factor(
-        df_price: pd.DataFrame, df_adj: pd.DataFrame
-    ) -> dict[str, Any]:
+    def check_price_vs_factor(df_price: pd.DataFrame, df_adj: pd.DataFrame) -> dict[str, Any]:
         """
         Tier 3: Verify Price * AdjFactor consistency.
         Requires a joined view of raw and adjusted prices.

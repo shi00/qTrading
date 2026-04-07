@@ -55,10 +55,7 @@ class SettingsView(ft.Container):
         # 3. Build Tab Bar from config
         tab_bar = ft.Container(
             content=ft.Row(
-                [
-                    self._build_tab_button(I18n.get(key), icon, i)
-                    for i, (key, icon) in enumerate(self.TAB_CONFIG)
-                ],
+                [self._build_tab_button(I18n.get(key), icon, i) for i, (key, icon) in enumerate(self.TAB_CONFIG)],
                 alignment=ft.MainAxisAlignment.START,
                 spacing=10,
                 scroll=ft.ScrollMode.HIDDEN,
@@ -119,12 +116,8 @@ class SettingsView(ft.Container):
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:
         """Centralized tab button style factory."""
         return ft.ButtonStyle(
-            color=AppColors.TEXT_ON_PRIMARY
-            if is_selected
-            else AppColors.TEXT_SECONDARY,
-            icon_color=AppColors.TEXT_ON_PRIMARY
-            if is_selected
-            else AppColors.TEXT_SECONDARY,
+            color=AppColors.TEXT_ON_PRIMARY if is_selected else AppColors.TEXT_SECONDARY,
+            icon_color=AppColors.TEXT_ON_PRIMARY if is_selected else AppColors.TEXT_SECONDARY,
             bgcolor=AppColors.PRIMARY if is_selected else ft.Colors.TRANSPARENT,
             elevation=0,
             shape=ft.RoundedRectangleBorder(radius=8),

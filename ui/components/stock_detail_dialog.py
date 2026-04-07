@@ -240,9 +240,7 @@ class StockDetailDialog(ft.AlertDialog):
                 score_val = 0
 
             score_color = (
-                AppColors.SUCCESS
-                if score_val >= 80
-                else (AppColors.WARNING if score_val >= 60 else AppColors.ERROR)
+                AppColors.SUCCESS if score_val >= 80 else (AppColors.WARNING if score_val >= 60 else AppColors.ERROR)
             )
 
             ai_section = ft.Column(
@@ -276,9 +274,7 @@ class StockDetailDialog(ft.AlertDialog):
                     ft.Divider(height=10, color=AppColors.DIVIDER),
                     ft.Container(
                         content=ft.Markdown(
-                            str(ai_reason)
-                            if ai_reason
-                            else I18n.get("detail_ai_no_analysis"),
+                            str(ai_reason) if ai_reason else I18n.get("detail_ai_no_analysis"),
                             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                             selectable=True,
                             # Markdown styles need care, but default usually adapts or we can set code_theme?

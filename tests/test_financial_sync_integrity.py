@@ -287,9 +287,7 @@ class TestFinancialDataQuality:
             }
         )
 
-        cashflow_quality = (
-            mock_df["n_cashflow_act"].iloc[0] / mock_df["n_income_attr_p"].iloc[0]
-        )
+        cashflow_quality = mock_df["n_cashflow_act"].iloc[0] / mock_df["n_income_attr_p"].iloc[0]
 
         assert cashflow_quality > 1.0
 

@@ -242,9 +242,7 @@ class AIStrategyMixin:
                     except Exception:
                         return []
 
-            news_tasks = {
-                code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes
-            }
+            news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Ultimate Pipeline init failed: {e}")
 
@@ -284,9 +282,7 @@ class AIStrategyMixin:
         auxiliary_data = {}
         try:
             auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes)
-            logger.info(
-                f"[AIStrategyMixin] Pre-fetched auxiliary data for {len(auxiliary_data)} stocks"
-            )
+            logger.info(f"[AIStrategyMixin] Pre-fetched auxiliary data for {len(auxiliary_data)} stocks")
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to pre-fetch auxiliary data: {e}")
 
@@ -308,9 +304,7 @@ class AIStrategyMixin:
         )
 
         # --- Strategy-specific prefetch hook ---
-        prefetched = await self._prefetch_strategy_specific(
-            candidates_df, context, prefetched
-        )
+        prefetched = await self._prefetch_strategy_specific(candidates_df, context, prefetched)
 
         # --- Sequential Analysis Loop ---
         total_tasks = len(candidates_df)
@@ -366,18 +360,12 @@ class AIStrategyMixin:
                     history_df=hist_df,
                     news=news_list,
                     ui_prompt_override=ui_prompt_override,
-                    vol_ratio_threshold=context.get("params", {}).get(
-                        "vol_ratio_threshold", 1.5
-                    ),
+                    vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
                 )
 
                 completed_count += 1
 
-                if (
-                    isinstance(res, Exception)
-                    or res is None
-                    or res.get("score", 0) == 0
-                ):
+                if isinstance(res, Exception) or res is None or res.get("score", 0) == 0:
                     if on_progress:
                         on_progress(
                             completed_count,
@@ -412,18 +400,12 @@ class AIStrategyMixin:
                         summary += f" (风险点: {uncertainty_str})"
 
                 score_raw = res.get("score", 0)
-                row_dict["ai_score"] = (
-                    min(100, max(0, int(score_raw)))
-                    if isinstance(score_raw, (int, float))
-                    else 0
-                )
+                row_dict["ai_score"] = min(100, max(0, int(score_raw))) if isinstance(score_raw, (int, float)) else 0
                 row_dict["ai_reason"] = summary
                 thinking_raw = res.get("thinking", "")
                 row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
                 row_dict["confidence"] = (
-                    min(100, max(1, int(confidence)))
-                    if isinstance(confidence, (int, float))
-                    else 50
+                    min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else 50
                 )
                 final_rows.append(row_dict)
 
@@ -517,28 +499,16 @@ class AIStrategyMixin:
             }
 
             # 2b. Technical Structure (MA alignment + volume trend from history_df)
-            tech_structure = self._compute_technical_structure(
-                history_df, vol_ratio_threshold=vol_ratio_threshold
-            )
+            tech_structure = self._compute_technical_structure(history_df, vol_ratio_threshold=vol_ratio_threshold)
             tech_context.update(tech_structure)
 
             # 2c. RSI Oversold Features (for oversold strategy enhancement)
-            if (
-                history_df is not None
-                and not history_df.empty
-                and len(history_df) >= 30
-            ):
+            if history_df is not None and not history_df.empty and len(history_df) >= 30:
                 df_sorted = history_df.sort_values("trade_date", ascending=True)
-                rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(
-                    df_sorted["close"], period=14
-                )
+                rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(df_sorted["close"], period=14)
                 row["_rsi_feature_text"] = rsi_features.get("feature_text", "")
-                row["_rsi_consecutive_days"] = rsi_features.get(
-                    "consecutive_oversold_days", 0
-                )
-                row["_rsi_days_since_healthy"] = rsi_features.get(
-                    "days_since_healthy", 99
-                )
+                row["_rsi_consecutive_days"] = rsi_features.get("consecutive_oversold_days", 0)
+                row["_rsi_days_since_healthy"] = rsi_features.get("days_since_healthy", 99)
                 row["_rsi_stagnation"] = rsi_features.get("stagnation_detected", False)
             else:
                 row["_rsi_feature_text"] = ""
@@ -566,14 +536,10 @@ class AIStrategyMixin:
                     if block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
                 except Exception as e:
-                    logger.warning(
-                        f"[AIStrategyMixin] Context builder '{name}' failed: {e}"
-                    )
+                    logger.warning(f"[AIStrategyMixin] Context builder '{name}' failed: {e}")
 
             if custom_context_blocks:
-                strategy_ctx = (
-                    strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
-                )
+                strategy_ctx = strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
 
             # 6. Capital Flow (filter pre-fetched batch data by ts_code)
             capital_flow_text = self._build_capital_flow_text(
@@ -585,14 +551,10 @@ class AIStrategyMixin:
             base_financials = self._build_financials_text(row)
 
             # 7a. Multi-Period Financial Trends (Phase 1.2)
-            multi_period_text = await self._build_multi_period_financials(
-                ts_code, dp.cache, prefetched.auxiliary_data
-            )
+            multi_period_text = await self._build_multi_period_financials(ts_code, dp.cache, prefetched.auxiliary_data)
 
             # 7b. Auxiliary Data (Phase 1.2)
-            auxiliary_text = await self._build_auxiliary_data_text(
-                ts_code, dp.cache, prefetched.auxiliary_data
-            )
+            auxiliary_text = await self._build_auxiliary_data_text(ts_code, dp.cache, prefetched.auxiliary_data)
 
             # 7c. Macro Context (Phase 1.3) - build once per batch
             if not hasattr(prefetched, "macro_context") or not prefetched.macro_context:
@@ -649,9 +611,7 @@ class AIStrategyMixin:
     # ============================================================
 
     @staticmethod
-    def _compute_technical_structure(
-        history_df, vol_ratio_threshold: float = 1.5
-    ) -> dict:
+    def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.5) -> dict:
         """
         Compute MA alignment and volume trend from history DataFrame.
         Returns a dict of human-readable technical structure signals.
@@ -677,17 +637,11 @@ class AIStrategyMixin:
 
             if ma5 is not None and ma10 is not None and ma20 is not None:
                 if ma5 > ma10 > ma20:
-                    result["ma_alignment"] = (
-                        f"多头排列 (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
-                    )
+                    result["ma_alignment"] = f"多头排列 (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
                 elif ma5 < ma10 < ma20:
-                    result["ma_alignment"] = (
-                        f"空头排列 (MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f})"
-                    )
+                    result["ma_alignment"] = f"空头排列 (MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f})"
                 else:
-                    result["ma_alignment"] = (
-                        f"交叉缠绕 (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
-                    )
+                    result["ma_alignment"] = f"交叉缠绕 (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
 
                 if ma20 != 0:
                     deviation = ((current_price - ma20) / ma20) * 100
@@ -722,9 +676,7 @@ class AIStrategyMixin:
                 else:
                     pct_5d = 0.0
                 closes_5d = ", ".join([f"{c:.2f}" for c in close.tail(5).tolist()])
-                result["price_trend_5d"] = (
-                    f"5日涨跌 {pct_5d:+.1f}% (收盘序列: {closes_5d})"
-                )
+                result["price_trend_5d"] = f"5日涨跌 {pct_5d:+.1f}% (收盘序列: {closes_5d})"
             else:
                 result["price_trend_5d"] = "数据不足"
 
@@ -787,9 +739,7 @@ class AIStrategyMixin:
                 # Compute long-term CAGR and Max Drawdown on `df`
                 first_close_macro = df["close"].iloc[0]
                 if first_close_macro > 0:
-                    macro_cagr = (
-                        f"{((df['close'].iloc[-1] / first_close_macro) - 1) * 100:.1f}%"
-                    )
+                    macro_cagr = f"{((df['close'].iloc[-1] / first_close_macro) - 1) * 100:.1f}%"
                 roll_max = df["close"].cummax()
                 drawdown = (df["close"] - roll_max) / roll_max
                 macro_mdd = f"{drawdown.min() * 100:.1f}%"
@@ -808,14 +758,8 @@ class AIStrategyMixin:
             # 2. Trend & Swing Factors (with division-by-zero guards)
             first_close = close.iloc[0]
             fifth_ago_close = close.iloc[-5]
-            pct_all = (
-                ((close.iloc[-1] / first_close) - 1) * 100 if first_close > 0 else 0.0
-            )
-            pct_5d = (
-                ((close.iloc[-1] / fifth_ago_close) - 1) * 100
-                if fifth_ago_close > 0
-                else 0.0
-            )
+            pct_all = ((close.iloc[-1] / first_close) - 1) * 100 if first_close > 0 else 0.0
+            pct_5d = ((close.iloc[-1] / fifth_ago_close) - 1) * 100 if fifth_ago_close > 0 else 0.0
 
             # 20-Day MA Bias
             bias_str = "N/A (insufficient data)"
@@ -843,9 +787,7 @@ class AIStrategyMixin:
                         else:
                             break
                 consec_str = (
-                    f"连续{'上涨' if sign_last > 0 else '下跌'} {consec_days} 天"
-                    if consec_days > 1
-                    else "横盘整理"
+                    f"连续{'上涨' if sign_last > 0 else '下跌'} {consec_days} 天" if consec_days > 1 else "横盘整理"
                 )
 
             # 3. Drawdown Factor
@@ -866,11 +808,7 @@ class AIStrategyMixin:
                     vol_older_avg = 0.0
                 vol_ratio_5d = vol_5d_avg / vol_older_avg if vol_older_avg > 0 else 1.0
                 vol_desc = (
-                    "显著放量"
-                    if vol_ratio_5d > vol_ratio_threshold
-                    else "显著缩量"
-                    if vol_ratio_5d < 0.7
-                    else "平稳"
+                    "显著放量" if vol_ratio_5d > vol_ratio_threshold else "显著缩量" if vol_ratio_5d < 0.7 else "平稳"
                 )
                 vol_line = f"- 成交量状态: {vol_desc}（相对历史基准），量比 = {vol_ratio_5d:.2f}。"
 
@@ -967,11 +905,7 @@ class AIStrategyMixin:
             if not stock_tl.empty:
                 row = stock_tl.iloc[0]
                 reason = row.get("reason")
-                reason = (
-                    reason
-                    if reason and not (isinstance(reason, float) and reason != reason)
-                    else "N/A"
-                )
+                reason = reason if reason and not (isinstance(reason, float) and reason != reason) else "N/A"
                 net_amt = sf(row.get("net_amount"))
                 parts.append(f"龙虎榜: 是 (原因: {reason}, 净买入: {net_amt:.2f}万元)")
             else:
@@ -1013,11 +947,7 @@ class AIStrategyMixin:
         """
 
         try:
-            if (
-                prefetched
-                and ts_code in prefetched
-                and "financial_history" in prefetched[ts_code]
-            ):
+            if prefetched and ts_code in prefetched and "financial_history" in prefetched[ts_code]:
                 df = prefetched[ts_code]["financial_history"]
             else:
                 df = await cache.get_financial_reports_history(ts_code, periods=8)
@@ -1048,9 +978,7 @@ class AIStrategyMixin:
             if "netprofit_yoy" in df.columns:
                 profit_yoy_values = df["netprofit_yoy"].dropna().tolist()
                 if profit_yoy_values:
-                    profit_yoy_str = ", ".join(
-                        [f"{v:.2f}" for v in profit_yoy_values[:4]]
-                    )
+                    profit_yoy_str = ", ".join([f"{v:.2f}" for v in profit_yoy_values[:4]])
                     parts.append(f"净利润增速趋势: {profit_yoy_str}")
 
             if "n_cashflow_act" in df.columns and "n_income_attr_p" in df.columns:
@@ -1066,9 +994,7 @@ class AIStrategyMixin:
             return "\n".join(parts) if parts else "财务数据不足"
 
         except Exception as e:
-            logger.warning(
-                f"[AIMixin] Failed to build multi-period financials for {ts_code}: {e}"
-            )
+            logger.warning(f"[AIMixin] Failed to build multi-period financials for {ts_code}: {e}")
             return "财务数据获取失败"
 
     async def _build_auxiliary_data_text(
@@ -1125,11 +1051,7 @@ class AIStrategyMixin:
                     has_data = True
 
             # 分红记录
-            if (
-                prefetched
-                and ts_code in prefetched
-                and "dividend" in prefetched[ts_code]
-            ):
+            if prefetched and ts_code in prefetched and "dividend" in prefetched[ts_code]:
                 dividend_df = prefetched[ts_code]["dividend"]
             else:
                 dividend_df = await cache.get_dividend(ts_code)
@@ -1159,19 +1081,13 @@ class AIStrategyMixin:
                     has_data = True
 
             # 第一大股东
-            if (
-                prefetched
-                and ts_code in prefetched
-                and "holders" in prefetched[ts_code]
-            ):
+            if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]
             else:
                 holders_df = await cache.get_top10_holders(ts_code)
 
             if holders_df is not None and not holders_df.empty:
-                latest_holders = holders_df[
-                    holders_df["end_date"] == holders_df["end_date"].max()
-                ]
+                latest_holders = holders_df[holders_df["end_date"] == holders_df["end_date"].max()]
                 if not latest_holders.empty:
                     top_holder = latest_holders.iloc[0].get("holder_name", "未知")
                     top_ratio = latest_holders.iloc[0].get("hold_ratio", 0)
@@ -1179,11 +1095,7 @@ class AIStrategyMixin:
                     has_data = True
 
             # 股东人数
-            if (
-                prefetched
-                and ts_code in prefetched
-                and "holdernumber" in prefetched[ts_code]
-            ):
+            if prefetched and ts_code in prefetched and "holdernumber" in prefetched[ts_code]:
                 holder_num = prefetched[ts_code]["holdernumber"]
             else:
                 holder_num = await cache.get_stk_holdernumber(ts_code)
@@ -1200,15 +1112,11 @@ class AIStrategyMixin:
                             trend = "↑ 筹码分散"
                         else:
                             trend = "→ 基本稳定"
-                        lines.append(
-                            f"- 股东人数: {curr_num:,}户 ({trend} {change_pct:+.1f}%)"
-                        )
+                        lines.append(f"- 股东人数: {curr_num:,}户 ({trend} {change_pct:+.1f}%)")
                         has_data = True
 
         except Exception as e:
-            logger.warning(
-                f"[AIMixin] Failed to build auxiliary data for {ts_code}: {e}"
-            )
+            logger.warning(f"[AIMixin] Failed to build auxiliary data for {ts_code}: {e}")
 
         if has_data:
             return "\n".join(lines) + "\n"

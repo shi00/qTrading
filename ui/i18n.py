@@ -74,9 +74,7 @@ class I18n:
         if normalized_locale in SUPPORTED_LOCALES:
             cls._locale = normalized_locale
         else:
-            logger.warning(
-                f"[I18n] Unsupported locale '{config_locale}', falling back to {DEFAULT_LOCALE}"
-            )
+            logger.warning(f"[I18n] Unsupported locale '{config_locale}', falling back to {DEFAULT_LOCALE}")
             cls._locale = DEFAULT_LOCALE
 
         cls._initialized = True
@@ -207,55 +205,32 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             return {"code": "invalid", "message": I18n.get("wizard_err_token_invalid")}
         if "timeout" in error_str or "timed out" in error_str:
             return {"code": "timeout", "message": I18n.get("wizard_err_token_timeout")}
-        if (
-            "connection" in error_str
-            or "network" in error_str
-            or "connect" in error_str
-        ):
+        if "connection" in error_str or "network" in error_str or "connect" in error_str:
             return {"code": "network", "message": I18n.get("wizard_err_token_network")}
         if "抱歉" in error_str or "每分钟" in error_str or "限制" in error_str:
             return {"code": "server", "message": I18n.get("wizard_err_token_server")}
         return {"code": "unknown", "message": I18n.get("wizard_err_token_unknown")}
 
     if context == "llm":
-        if (
-            "401" in error_str
-            or "unauthorized" in error_str
-            or "invalid api key" in error_str
-        ):
+        if "401" in error_str or "unauthorized" in error_str or "invalid api key" in error_str:
             return {"code": "auth_failed", "message": I18n.get("llm_err_auth_failed")}
         if "403" in error_str or "forbidden" in error_str:
             return {"code": "forbidden", "message": I18n.get("llm_err_forbidden")}
         if "404" in error_str or "not found" in error_str:
             return {"code": "not_found", "message": I18n.get("llm_err_not_found")}
-        if (
-            "429" in error_str
-            or "rate limit" in error_str
-            or "too many requests" in error_str
-        ):
+        if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
             return {"code": "rate_limit", "message": I18n.get("llm_err_rate_limit")}
-        if (
-            "500" in error_str
-            or "502" in error_str
-            or "503" in error_str
-            or "504" in error_str
-        ):
+        if "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
             return {"code": "server_error", "message": I18n.get("llm_err_server")}
         if "timeout" in error_str or "timed out" in error_str:
             return {"code": "timeout", "message": I18n.get("llm_err_timeout")}
-        if (
-            "connection" in error_str
-            or "network" in error_str
-            or "connect" in error_str
-        ):
+        if "connection" in error_str or "network" in error_str or "connect" in error_str:
             return {"code": "network", "message": I18n.get("llm_err_network")}
         if "dns" in error_str or "getaddrinfo" in error_str:
             return {"code": "dns", "message": I18n.get("llm_err_dns")}
         if "ssl" in error_str or "certificate" in error_str:
             return {"code": "ssl", "message": I18n.get("llm_err_ssl")}
-        if "model" in error_str and (
-            "not found" in error_str or "unsupported" in error_str
-        ):
+        if "model" in error_str and ("not found" in error_str or "unsupported" in error_str):
             return {
                 "code": "model_not_found",
                 "message": I18n.get("llm_err_model_not_found"),
@@ -279,11 +254,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
     if context == "chart":
         if "timeout" in error_str or "timed out" in error_str:
             return {"code": "timeout", "message": I18n.get("detail_err_chart_timeout")}
-        if (
-            "connection" in error_str
-            or "network" in error_str
-            or "connect" in error_str
-        ):
+        if "connection" in error_str or "network" in error_str or "connect" in error_str:
             return {"code": "network", "message": I18n.get("detail_err_chart_network")}
         if "data" in error_str or "empty" in error_str or "null" in error_str:
             return {"code": "data", "message": I18n.get("detail_err_chart_data")}

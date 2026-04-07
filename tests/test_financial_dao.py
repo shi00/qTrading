@@ -133,9 +133,7 @@ class TestFinancialDaoBatchPerformance:
                 }
             )
 
-        with patch.object(
-            financial_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls
-        ):
+        with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls):
             ts_codes = ["000001.SZ", "000002.SZ", "600000.SH"]
             await financial_dao.get_fina_audit_batch(ts_codes)
 
@@ -160,9 +158,7 @@ class TestFinancialDaoEdgeCases:
             new_callable=AsyncMock,
             side_effect=Exception("DB Error"),
         ):
-            df = await financial_dao.get_financial_reports_history(
-                "000001.SZ", periods=8
-            )
+            df = await financial_dao.get_financial_reports_history("000001.SZ", periods=8)
 
             assert df is not None
             assert df.empty
@@ -178,9 +174,7 @@ class TestFinancialDaoEdgeCases:
             new_callable=AsyncMock,
             return_value=None,
         ):
-            df = await financial_dao.get_financial_reports_history(
-                "000001.SZ", periods=8
-            )
+            df = await financial_dao.get_financial_reports_history("000001.SZ", periods=8)
 
             assert df is not None
             assert df.empty
@@ -196,9 +190,7 @@ class TestFinancialDaoEdgeCases:
             new_callable=AsyncMock,
             return_value=pd.DataFrame(),
         ):
-            df = await financial_dao.get_financial_reports_history(
-                "000001.SZ", periods=8
-            )
+            df = await financial_dao.get_financial_reports_history("000001.SZ", periods=8)
 
             assert df is not None
             assert df.empty
@@ -232,9 +224,7 @@ class TestCashflowField:
             new_callable=AsyncMock,
             return_value=mock_df,
         ):
-            df = await financial_dao.get_financial_reports_history(
-                "000001.SZ", periods=8
-            )
+            df = await financial_dao.get_financial_reports_history("000001.SZ", periods=8)
 
             assert "n_cashflow_act" in df.columns
             assert df["n_cashflow_act"].iloc[0] == 100000000

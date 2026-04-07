@@ -121,11 +121,7 @@ class DoubaoTagger:
                         data = json.loads(potential_json)
                         if isinstance(data, list) and len(data) > 0:
                             # 判定是否包含最后一只股票，或者数量达标 (生成结束的标志)
-                            last_found = any(
-                                isinstance(d, dict)
-                                and d.get("ts_code") == last_stock_code
-                                for d in data
-                            )
+                            last_found = any(isinstance(d, dict) and d.get("ts_code") == last_stock_code for d in data)
                             if last_found or len(data) == len(stocks):
                                 response_text = potential_json
                                 break
@@ -234,11 +230,7 @@ class DoubaoTagger:
                 if not stocks and exclude_codes:
                     print("⚠️ 正常股票已遍历完毕，开始攻坚错题本排查队列...", flush=True)
                     # 清洗错题本：移除重试超过阈值的死忠坏账
-                    exclude_codes = [
-                        c
-                        for c in exclude_codes
-                        if self.exclude_counter[c] < MAX_EXCLUDE_RETRIES
-                    ]
+                    exclude_codes = [c for c in exclude_codes if self.exclude_counter[c] < MAX_EXCLUDE_RETRIES]
                     if not exclude_codes:
                         print("🚫 错题本重试全线溃败或已清空，彻底结束。", flush=True)
                         break
@@ -259,9 +251,7 @@ class DoubaoTagger:
                     # 如果有修复的错题，要从 exclude 中移除
                     processed_codes = [s[0] for s in stocks]
                     processed_count += len(processed_codes)
-                    exclude_codes = [
-                        c for c in exclude_codes if c not in processed_codes
-                    ]
+                    exclude_codes = [c for c in exclude_codes if c not in processed_codes]
                 else:
                     consecutive_failures += 1
                     for s in stocks:

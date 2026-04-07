@@ -93,9 +93,7 @@ class DatabaseMigrator:
 
         try:
             await ThreadPoolManager().run_async(TaskType.IO, run_alembic_upgrade)
-            logger.debug(
-                "[DatabaseMigrator] Database schema updated to latest version."
-            )
+            logger.debug("[DatabaseMigrator] Database schema updated to latest version.")
         except Exception as e:
             logger.error(
                 f"[DatabaseMigrator] Schema upgrade failed: {e}",

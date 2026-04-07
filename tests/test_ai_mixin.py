@@ -141,9 +141,7 @@ class TestComputeTechnicalStructure:
             }
         )
         result = AIStrategyMixin._compute_technical_structure(df)
-        assert (
-            result["ma_alignment"] != "计算错误" or "数据不足" in result["ma_alignment"]
-        )
+        assert result["ma_alignment"] != "计算错误" or "数据不足" in result["ma_alignment"]
 
     def test_with_adj_factor(self):
         """带复权因子的数据"""
@@ -354,23 +352,13 @@ class TestAIStrategyMixinRunAnalysis:
             "params": {},
         }
         context["data_processor"].is_cancelled = MagicMock(return_value=False)
-        context["data_processor"].get_latest_trade_date = AsyncMock(
-            return_value=datetime.date(2024, 3, 21)
-        )
+        context["data_processor"].get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 3, 21))
         context["data_processor"].cache = MagicMock()
         context["data_processor"].cache.get_concepts = AsyncMock(return_value={})
-        context["data_processor"].cache.get_daily_quotes = AsyncMock(
-            return_value=pd.DataFrame()
-        )
-        context["data_processor"].cache.get_moneyflow = AsyncMock(
-            return_value=pd.DataFrame()
-        )
-        context["data_processor"].cache.get_top_list = AsyncMock(
-            return_value=pd.DataFrame()
-        )
-        context["data_processor"].cache.get_northbound = AsyncMock(
-            return_value=pd.DataFrame()
-        )
+        context["data_processor"].cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        context["data_processor"].cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        context["data_processor"].cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        context["data_processor"].cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
         return context
 
     @pytest.mark.asyncio
@@ -453,9 +441,7 @@ class TestAIStrategyMixinRunAnalysis:
                 ) as mock_prefetch:
                     mock_prefetch.return_value = PreFetchedContext()
 
-                    result = await mock_strategy.run_ai_analysis(
-                        candidates, mock_context
-                    )
+                    result = await mock_strategy.run_ai_analysis(candidates, mock_context)
 
                     assert len(result) <= 2
 
@@ -493,65 +479,47 @@ class TestAIStrategyMixinAnalyzeSingle:
         return client
 
     @pytest.mark.asyncio
-    async def test_analyze_with_empty_history(
-        self, mock_strategy, mock_dp, mock_ai_client
-    ):
+    async def test_analyze_with_empty_history(self, mock_strategy, mock_dp, mock_ai_client):
         """空历史数据分析"""
         row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
         prefetched = PreFetchedContext()
 
-        result = await mock_strategy._mixin_analyze_single(
-            row, mock_dp, mock_ai_client, prefetched
-        )
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
 
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_analyze_with_missing_concepts(
-        self, mock_strategy, mock_dp, mock_ai_client
-    ):
+    async def test_analyze_with_missing_concepts(self, mock_strategy, mock_dp, mock_ai_client):
         """缺少概念数据"""
         row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
         prefetched = PreFetchedContext(concepts_map={})
 
-        result = await mock_strategy._mixin_analyze_single(
-            row, mock_dp, mock_ai_client, prefetched
-        )
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
 
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_analyze_with_missing_news(
-        self, mock_strategy, mock_dp, mock_ai_client
-    ):
+    async def test_analyze_with_missing_news(self, mock_strategy, mock_dp, mock_ai_client):
         """缺少新闻数据"""
         row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
         prefetched = PreFetchedContext(news_tasks={})
 
-        result = await mock_strategy._mixin_analyze_single(
-            row, mock_dp, mock_ai_client, prefetched
-        )
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
 
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_analyze_with_missing_capital_flow(
-        self, mock_strategy, mock_dp, mock_ai_client
-    ):
+    async def test_analyze_with_missing_capital_flow(self, mock_strategy, mock_dp, mock_ai_client):
         """缺少资金流数据"""
         row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
         prefetched = PreFetchedContext(capital={})
 
-        result = await mock_strategy._mixin_analyze_single(
-            row, mock_dp, mock_ai_client, prefetched
-        )
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
 
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_analyze_with_all_data_present(
-        self, mock_strategy, mock_dp, mock_ai_client
-    ):
+    async def test_analyze_with_all_data_present(self, mock_strategy, mock_dp, mock_ai_client):
         """所有数据都存在"""
         history_df = pd.DataFrame(
             {
@@ -598,25 +566,19 @@ class TestAIStrategyMixinAnalyzeSingle:
         row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
         prefetched = PreFetchedContext()
 
-        result = await mock_strategy._mixin_analyze_single(
-            row, mock_dp, mock_ai_client, prefetched
-        )
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
 
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_analyze_with_zero_score(
-        self, mock_strategy, mock_dp, mock_ai_client
-    ):
+    async def test_analyze_with_zero_score(self, mock_strategy, mock_dp, mock_ai_client):
         """AI 返回零分"""
         mock_ai_client.analyze_stock = AsyncMock(return_value={"score": 0})
 
         row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
         prefetched = PreFetchedContext()
 
-        result = await mock_strategy._mixin_analyze_single(
-            row, mock_dp, mock_ai_client, prefetched
-        )
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
 
         assert result["score"] == 0
 
@@ -672,9 +634,7 @@ class TestMultiPeriodFinancials:
     @pytest.mark.asyncio
     async def test_build_multi_period_financials_success(self, mock_cache):
         """成功构建多期财务趋势"""
-        result = await AIStrategyMixin()._build_multi_period_financials(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_multi_period_financials("000001.SZ", mock_cache)
 
         assert result is not None
         assert "ROE趋势" in result or "财务数据不足" in result
@@ -682,13 +642,9 @@ class TestMultiPeriodFinancials:
     @pytest.mark.asyncio
     async def test_build_multi_period_financials_empty(self, mock_cache):
         """空财务数据"""
-        mock_cache.get_financial_reports_history = AsyncMock(
-            return_value=pd.DataFrame()
-        )
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
 
-        result = await AIStrategyMixin()._build_multi_period_financials(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_multi_period_financials("000001.SZ", mock_cache)
 
         assert result == "财务数据不足"
 
@@ -697,18 +653,14 @@ class TestMultiPeriodFinancials:
         """None 财务数据"""
         mock_cache.get_financial_reports_history = AsyncMock(return_value=None)
 
-        result = await AIStrategyMixin()._build_multi_period_financials(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_multi_period_financials("000001.SZ", mock_cache)
 
         assert result == "财务数据不足"
 
     @pytest.mark.asyncio
     async def test_build_multi_period_financials_cashflow_ratio(self, mock_cache):
         """现金流/净利润比率计算"""
-        result = await AIStrategyMixin()._build_multi_period_financials(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_multi_period_financials("000001.SZ", mock_cache)
 
         assert result is not None
 
@@ -721,9 +673,7 @@ class TestAuxiliaryDataText:
         """创建模拟缓存"""
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(
-            return_value=pd.DataFrame(
-                {"ts_code": ["000001.SZ"], "audit_result": ["标准无保留意见"]}
-            )
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "audit_result": ["标准无保留意见"]})
         )
         cache.get_fina_mainbz = AsyncMock(
             return_value=pd.DataFrame(
@@ -741,9 +691,7 @@ class TestAuxiliaryDataText:
                 }
             )
         )
-        cache.get_pledge_stat = AsyncMock(
-            return_value=pd.DataFrame({"pledge_ratio": [15.5]})
-        )
+        cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"pledge_ratio": [15.5]}))
         cache.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -766,9 +714,7 @@ class TestAuxiliaryDataText:
     @pytest.mark.asyncio
     async def test_build_auxiliary_data_success(self, mock_cache):
         """成功构建辅助数据"""
-        result = await AIStrategyMixin()._build_auxiliary_data_text(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_auxiliary_data_text("000001.SZ", mock_cache)
 
         assert result is not None
         assert result != "无辅助数据"
@@ -791,9 +737,7 @@ class TestAuxiliaryDataText:
             }
         }
 
-        result = await AIStrategyMixin()._build_auxiliary_data_text(
-            "000001.SZ", mock_cache, prefetched
-        )
+        result = await AIStrategyMixin()._build_auxiliary_data_text("000001.SZ", mock_cache, prefetched)
 
         assert result is not None
 
@@ -807,22 +751,16 @@ class TestAuxiliaryDataText:
         mock_cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         mock_cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
 
-        result = await AIStrategyMixin()._build_auxiliary_data_text(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_auxiliary_data_text("000001.SZ", mock_cache)
 
         assert result == "无辅助数据"
 
     @pytest.mark.asyncio
     async def test_build_auxiliary_data_high_pledge_warning(self, mock_cache):
         """高质押比例警告"""
-        mock_cache.get_pledge_stat = AsyncMock(
-            return_value=pd.DataFrame({"pledge_ratio": [50.0]})
-        )
+        mock_cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"pledge_ratio": [50.0]}))
 
-        result = await AIStrategyMixin()._build_auxiliary_data_text(
-            "000001.SZ", mock_cache
-        )
+        result = await AIStrategyMixin()._build_auxiliary_data_text("000001.SZ", mock_cache)
 
         assert "质押比例较高" in result or result == "无辅助数据"
 
@@ -834,12 +772,8 @@ class TestMacroContext:
     def mock_cache(self):
         """创建模拟缓存"""
         cache = MagicMock()
-        cache.get_macro_economy = AsyncMock(
-            return_value=pd.DataFrame({"m2_yoy": [8.5], "cpi": [0.2], "ppi": [-2.5]})
-        )
-        cache.get_shibor_latest = AsyncMock(
-            return_value=pd.DataFrame({"on": [2.0], "1w": [2.5], "3m": [3.0]})
-        )
+        cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame({"m2_yoy": [8.5], "cpi": [0.2], "ppi": [-2.5]}))
+        cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame({"on": [2.0], "1w": [2.5], "3m": [3.0]}))
         return cache
 
     @pytest.mark.asyncio

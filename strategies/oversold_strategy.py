@@ -100,10 +100,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         if rsi_feature:
             context_parts.append(f"【形态反馈】{rsi_feature}")
 
-        context_parts.append(
-            "请评估：这是「黄金坑」反弹机会（如恐慌急跌/钝化），"
-            "还是基本面恶化导致的「无底洞」下跌？"
-        )
+        context_parts.append("请评估：这是「黄金坑」反弹机会（如恐慌急跌/钝化），还是基本面恶化导致的「无底洞」下跌？")
 
         return "\n".join(context_parts)
 
@@ -139,9 +136,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         # --- Phase 2: AI Analysis (via Mixin) ---
         return await self.run_ai_analysis(candidates, context)
 
-    async def _math_filter(
-        self, context: typing.Any, rsi_period: typing.Any, rsi_threshold: typing.Any
-    ):
+    async def _math_filter(self, context: typing.Any, rsi_period: typing.Any, rsi_threshold: typing.Any):
         """
         Phase 1: Pure mathematical RSI filtering using Polars.
         Returns a Pandas DataFrame of candidates sorted by RSI ascending.
@@ -168,9 +163,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             return pd.DataFrame()
 
         # Use trading days instead of calendar days for accurate RSI calculation
-        start_date_obj = await dp.trade_calendar.get_start_date_by_trade_days(
-            end_date_obj, 120
-        )
+        start_date_obj = await dp.trade_calendar.get_start_date_by_trade_days(end_date_obj, 120)
         if not start_date_obj:
             logger.warning(
                 "[OversoldStrategy] Failed to get start date by trade days, falling back to calendar days.",
@@ -210,11 +203,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             # Calculate QFQ Close (前复权收盘价)
             if "adj_factor" in df.columns:
                 qfq_expr = (
-                    pl.col("close")
-                    * (
-                        pl.col("adj_factor")
-                        / pl.col("adj_factor").last().over("ts_code")
-                    )
+                    pl.col("close") * (pl.col("adj_factor") / pl.col("adj_factor").last().over("ts_code"))
                 ).alias("qfq_close")
                 df_lazy = df_lazy.with_columns(qfq_expr)
             else:
@@ -284,9 +273,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             if hasattr(dp.cache, "get_daily_indicators_bulk"):
                 end_date = prefetched.trade_date
                 if end_date:
-                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(
-                        end_date, 30
-                    )
+                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(end_date, 30)
                     if not start_date:
                         start_date = end_date - datetime.timedelta(days=45)  # type: ignore
                     prefetched.indicators = await dp.cache.get_daily_indicators_bulk(
@@ -308,9 +295,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             if hasattr(dp.cache, "get_index_daily_range"):
                 trade_date = prefetched.trade_date
                 if trade_date:
-                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(
-                        trade_date, 30
-                    )
+                    start_date = await dp.trade_calendar.get_start_date_by_trade_days(trade_date, 30)
                     if not start_date:
                         start_date = trade_date - datetime.timedelta(days=45)  # type: ignore
 
@@ -328,9 +313,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                             if idx_data.empty:
                                 continue
 
-                            idx_data = idx_data.sort_values(
-                                "trade_date", ascending=True
-                            )
+                            idx_data = idx_data.sort_values("trade_date", ascending=True)
 
                             current_row = idx_data[
                                 idx_data["trade_date"] == trade_date.strftime("%Y%m%d")  # type: ignore
@@ -338,21 +321,13 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                             if current_row.empty:
                                 current_row = idx_data.tail(1)
 
-                            pct_chg = (
-                                current_row["pct_chg"].iloc[0]
-                                if "pct_chg" in current_row.columns
-                                else 0
-                            )
+                            pct_chg = current_row["pct_chg"].iloc[0] if "pct_chg" in current_row.columns else 0
 
                             ma20 = None
                             trend = "未知"
                             if len(idx_data) >= 20 and "close" in idx_data.columns:
                                 ma20 = idx_data["close"].tail(20).mean()
-                                current_close = (
-                                    current_row["close"].iloc[0]
-                                    if "close" in current_row.columns
-                                    else 0
-                                )
+                                current_close = current_row["close"].iloc[0] if "close" in current_row.columns else 0
                                 if ma20 and current_close:
                                     if current_close > ma20 * 1.02:
                                         trend = "多头趋势"
@@ -376,10 +351,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         """
         计算各行业的涨跌统计。
         """
-        if (
-            "industry" not in screening_data.columns
-            or "pct_chg" not in screening_data.columns
-        ):
+        if "industry" not in screening_data.columns or "pct_chg" not in screening_data.columns:
             return {}
 
         stats = {}
@@ -418,9 +390,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             if len(recent_5) >= 3:
                 current_turnover = recent_5[turnover_col].iloc[0]
                 avg_5d = recent_5[turnover_col].mean()
-                avg_20d = (
-                    recent_20[turnover_col].mean() if len(recent_20) >= 20 else None
-                )
+                avg_20d = recent_20[turnover_col].mean() if len(recent_20) >= 20 else None
 
                 if pd.isna(current_turnover) or pd.isna(avg_5d):  # type: ignore
                     return "换手率数据: 包含无效值"
@@ -534,42 +504,26 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 boll_lower = ma20 - 2 * std20
                 if pd.notna(boll_lower) and boll_lower > 0:
                     dist_boll = (current_close - boll_lower) / boll_lower * 100
-                    parts.append(
-                        f"布林下轨(动态支撑): {boll_lower:.2f} (距离 {dist_boll:+.2f}%)"
-                    )
+                    parts.append(f"布林下轨(动态支撑): {boll_lower:.2f} (距离 {dist_boll:+.2f}%)")
 
         # 2. 60日量价均价 (VWAC) - 筹码成本区
-        if (
-            len(recent_60) >= 20
-            and "vol" in recent_60.columns
-            and "close" in recent_60.columns
-        ):
+        if len(recent_60) >= 20 and "vol" in recent_60.columns and "close" in recent_60.columns:
             vol_sum = recent_60["vol"].sum()
             if vol_sum > 0:
                 vwac_60 = (recent_60["close"] * recent_60["vol"]).sum() / vol_sum
                 if pd.notna(vwac_60) and vwac_60 > 0:
                     dist_vwac = (current_close - vwac_60) / vwac_60 * 100
-                    parts.append(
-                        f"60日量价均价(VWAC): {vwac_60:.2f} (距离 {dist_vwac:+.2f}%)"
-                    )
+                    parts.append(f"60日量价均价(VWAC): {vwac_60:.2f} (距离 {dist_vwac:+.2f}%)")
 
         # 3. 近60日最大放量柱支撑 - 主力成本区
-        if (
-            len(recent_60) >= 5
-            and "vol" in recent_60.columns
-            and "close" in recent_60.columns
-        ):
+        if len(recent_60) >= 5 and "vol" in recent_60.columns and "close" in recent_60.columns:
             vol_values = recent_60["vol"].values
             if len(vol_values) > 0 and vol_values.max() > 0:
                 max_vol_pos = vol_values.argmax()
                 max_vol_support = recent_60["close"].iloc[max_vol_pos]
                 if pd.notna(max_vol_support) and max_vol_support > 0:
-                    dist_vol_peak = (
-                        (current_close - max_vol_support) / max_vol_support * 100
-                    )
-                    parts.append(
-                        f"近60日最大放量柱支撑: {max_vol_support:.2f} (距离 {dist_vol_peak:+.2f}%)"
-                    )
+                    dist_vol_peak = (current_close - max_vol_support) / max_vol_support * 100
+                    parts.append(f"近60日最大放量柱支撑: {max_vol_support:.2f} (距离 {dist_vol_peak:+.2f}%)")
 
         # 4. 120日价值区下沿 (前低集群) - 结构支撑
         if len(history_df) >= 120:
@@ -577,8 +531,6 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             val_120 = close_120.quantile(0.1)
             if pd.notna(val_120) and val_120 > 0:
                 dist_val = (current_close - val_120) / val_120 * 100
-                parts.append(
-                    f"120日价值区下沿(前低集群): {val_120:.2f} (距离 {dist_val:+.2f}%)"
-                )
+                parts.append(f"120日价值区下沿(前低集群): {val_120:.2f} (距离 {dist_val:+.2f}%)")
 
         return "\n".join(parts) if parts else "支撑位分析: 无有效数据"

@@ -135,11 +135,7 @@ class DividendStrategy(PolarsBaseStrategy):
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
         dv_min = p.get("dv_min", 4)
-        return (
-            lf.drop_nulls(subset=["dv_ttm"])
-            .filter(pl.col("dv_ttm") > dv_min)
-            .sort("dv_ttm", descending=True)
-        )
+        return lf.drop_nulls(subset=["dv_ttm"]).filter(pl.col("dv_ttm") > dv_min).sort("dv_ttm", descending=True)
 
 
 @register_strategy("cashflow")

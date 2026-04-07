@@ -295,9 +295,7 @@ class DatabaseConfigPanel(ft.Container):
     def validate(self) -> tuple[bool, str]:
         host = self.db_host_input.value.strip()
         if not host:
-            return False, I18n.get(
-                "wizard_err_host_required", default="Host is required"
-            )
+            return False, I18n.get("wizard_err_host_required", default="Host is required")
 
         try:
             port = int(self.db_port_input.value.strip() or 5432)
@@ -307,21 +305,15 @@ class DatabaseConfigPanel(ft.Container):
                     default="Port must be between 1 and 65535",
                 )
         except ValueError:
-            return False, I18n.get(
-                "wizard_err_port_number", default="Port must be a number"
-            )
+            return False, I18n.get("wizard_err_port_number", default="Port must be a number")
 
         user = self.db_user_input.value.strip()
         if not user:
-            return False, I18n.get(
-                "wizard_err_user_required", default="Username is required"
-            )
+            return False, I18n.get("wizard_err_user_required", default="Username is required")
 
         database = self.db_name_input.value.strip()
         if not database:
-            return False, I18n.get(
-                "wizard_err_db_required", default="Database name is required"
-            )
+            return False, I18n.get("wizard_err_db_required", default="Database name is required")
 
         return True, ""
 
@@ -363,11 +355,7 @@ class DatabaseConfigPanel(ft.Container):
                     database=config["database"],
                 )
                 if info:
-                    self.db_info_text.value = (
-                        f"Version: {info.version}\n"
-                        f"Size: {info.size}\n"
-                        f"Tables: {info.table_count}"
-                    )
+                    self.db_info_text.value = f"Version: {info.version}\nSize: {info.size}\nTables: {info.table_count}"
 
                 if self.on_test_success_callback:
                     self.on_test_success_callback(config)
@@ -429,10 +417,7 @@ class DatabaseConfigPanel(ft.Container):
                 database=config["database"],
             )
 
-            if (
-                result.status == ConnectionStatus.DATABASE_NOT_FOUND
-                and config["create_if_not_exists"]
-            ):
+            if result.status == ConnectionStatus.DATABASE_NOT_FOUND and config["create_if_not_exists"]:
                 success, msg = await DatabaseConfigService.create_database(
                     host=config["host"],
                     port=config["port"],

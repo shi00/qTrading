@@ -246,10 +246,7 @@ class MarketDashboard(ft.Column):
 
         if not hot_concepts:
             # Empty state
-            if (
-                len(self.concepts_row.controls) != 1
-                or self.concepts_row.controls[0] != self.concepts_placeholder
-            ):
+            if len(self.concepts_row.controls) != 1 or self.concepts_row.controls[0] != self.concepts_placeholder:
                 self.concepts_row.controls = [self.concepts_placeholder]
                 if self.page:
                     self.concepts_row.update()
@@ -260,10 +257,7 @@ class MarketDashboard(ft.Column):
         target_count = len(hot_concepts)
 
         # If placeholder is showing, clear it first
-        if (
-            current_count == 1
-            and self.concepts_row.controls[0] == self.concepts_placeholder
-        ):
+        if current_count == 1 and self.concepts_row.controls[0] == self.concepts_placeholder:
             self.concepts_row.controls.clear()
             current_count = 0
 

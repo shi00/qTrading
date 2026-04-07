@@ -62,9 +62,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", "buyer", "seller", name=op.f("pk_block_trade")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "trade_date", "buyer", "seller", name=op.f("pk_block_trade")),
     )
     op.create_table(
         "daily_indicators",
@@ -97,9 +95,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_daily_indicators")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_daily_indicators")),
     )
     op.create_index(
         "ix_daily_indicators_date_code",
@@ -151,9 +147,7 @@ def upgrade() -> None:
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_index(
-        op.f("ix_daily_quotes_trade_date"), "daily_quotes", ["trade_date"], unique=False
-    )
+    op.create_index(op.f("ix_daily_quotes_trade_date"), "daily_quotes", ["trade_date"], unique=False)
     op.create_table(
         "dividend",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -179,13 +173,9 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "ann_date", name=op.f("pk_dividend")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date", name=op.f("pk_dividend")),
     )
-    op.create_index(
-        op.f("ix_dividend_ann_date"), "dividend", ["ann_date"], unique=False
-    )
+    op.create_index(op.f("ix_dividend_ann_date"), "dividend", ["ann_date"], unique=False)
     op.create_table(
         "fina_audit",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -231,13 +221,9 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "ann_date", name=op.f("pk_fina_forecast")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date", name=op.f("pk_fina_forecast")),
     )
-    op.create_index(
-        op.f("ix_fina_forecast_ann_date"), "fina_forecast", ["ann_date"], unique=False
-    )
+    op.create_index(op.f("ix_fina_forecast_ann_date"), "fina_forecast", ["ann_date"], unique=False)
     op.create_table(
         "fina_mainbz",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -260,13 +246,9 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "bz_item", name=op.f("pk_fina_mainbz")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "end_date", "bz_item", name=op.f("pk_fina_mainbz")),
     )
-    op.create_index(
-        op.f("ix_fina_mainbz_end_date"), "fina_mainbz", ["end_date"], unique=False
-    )
+    op.create_index(op.f("ix_fina_mainbz_end_date"), "fina_mainbz", ["end_date"], unique=False)
     op.create_table(
         "financial_reports",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -301,9 +283,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", name=op.f("pk_financial_reports")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_financial_reports")),
     )
     op.create_index(
         op.f("ix_financial_reports_end_date"),
@@ -344,9 +324,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_daily")),
     )
-    op.create_index(
-        op.f("ix_index_daily_trade_date"), "index_daily", ["trade_date"], unique=False
-    )
+    op.create_index(op.f("ix_index_daily_trade_date"), "index_daily", ["trade_date"], unique=False)
     op.create_table(
         "index_dailybasic",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -373,9 +351,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_index_dailybasic")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_dailybasic")),
     )
     op.create_table(
         "index_weight",
@@ -395,13 +371,9 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "index_code", "con_code", "trade_date", name=op.f("pk_index_weight")
-        ),
+        sa.PrimaryKeyConstraint("index_code", "con_code", "trade_date", name=op.f("pk_index_weight")),
     )
-    op.create_index(
-        op.f("ix_index_weight_trade_date"), "index_weight", ["trade_date"], unique=False
-    )
+    op.create_index(op.f("ix_index_weight_trade_date"), "index_weight", ["trade_date"], unique=False)
     op.create_table(
         "limit_list",
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -432,9 +404,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("trade_date", "ts_code", name=op.f("pk_limit_list")),
     )
-    op.create_index(
-        op.f("ix_limit_list_ts_code"), "limit_list", ["ts_code"], unique=False
-    )
+    op.create_index(op.f("ix_limit_list_ts_code"), "limit_list", ["ts_code"], unique=False)
     op.create_table(
         "macro_economy",
         sa.Column("period", sa.Date(), nullable=False),
@@ -477,9 +447,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_margin_daily")),
     )
-    op.create_index(
-        op.f("ix_margin_daily_trade_date"), "margin_daily", ["trade_date"], unique=False
-    )
+    op.create_index(op.f("ix_margin_daily_trade_date"), "margin_daily", ["trade_date"], unique=False)
     op.create_table(
         "market_news",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -495,9 +463,7 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
-        sa.UniqueConstraint(
-            "content_hash", "publish_time", name="uq_market_news_hash_pub"
-        ),
+        sa.UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
     )
     op.create_table(
         "moneyflow_daily",
@@ -533,9 +499,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_moneyflow_daily")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_moneyflow_daily")),
     )
     op.create_index(
         "ix_moneyflow_daily_date_code",
@@ -592,9 +556,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "trade_date", name=op.f("pk_northbound_holding")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_northbound_holding")),
     )
     op.create_index(
         op.f("ix_northbound_holding_trade_date"),
@@ -650,9 +612,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "ann_date", name=op.f("pk_repurchase")),
     )
-    op.create_index(
-        op.f("ix_repurchase_ann_date"), "repurchase", ["ann_date"], unique=False
-    )
+    op.create_index(op.f("ix_repurchase_ann_date"), "repurchase", ["ann_date"], unique=False)
     op.create_table(
         "screening_history",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -750,9 +710,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", name=op.f("pk_stk_holdernumber")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_stk_holdernumber")),
     )
     op.create_index(
         op.f("ix_stk_holdernumber_end_date"),
@@ -784,9 +742,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_basic")),
     )
-    op.create_index(
-        op.f("ix_stock_basic_list_date"), "stock_basic", ["list_date"], unique=False
-    )
+    op.create_index(op.f("ix_stock_basic_list_date"), "stock_basic", ["list_date"], unique=False)
     op.create_table(
         "stock_concepts",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -804,13 +760,9 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "concept_id", name=op.f("pk_stock_concepts")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "concept_id", name=op.f("pk_stock_concepts")),
     )
-    op.create_index(
-        op.f("ix_stock_concepts_ts_code"), "stock_concepts", ["ts_code"], unique=False
-    )
+    op.create_index(op.f("ix_stock_concepts_ts_code"), "stock_concepts", ["ts_code"], unique=False)
     op.create_table(
         "stock_sync_status",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -850,9 +802,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_suspend_d")),
     )
-    op.create_index(
-        op.f("ix_suspend_d_trade_date"), "suspend_d", ["trade_date"], unique=False
-    )
+    op.create_index(op.f("ix_suspend_d_trade_date"), "suspend_d", ["trade_date"], unique=False)
     op.create_table(
         "sync_status",
         sa.Column("table_name", sa.String(), nullable=False),
@@ -894,9 +844,7 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime(), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_task_history")),
     )
-    op.create_index(
-        op.f("ix_task_history_created_at"), "task_history", ["created_at"], unique=False
-    )
+    op.create_index(op.f("ix_task_history_created_at"), "task_history", ["created_at"], unique=False)
     op.create_table(
         "top10_holders",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -920,9 +868,7 @@ def upgrade() -> None:
             server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
-        sa.PrimaryKeyConstraint(
-            "ts_code", "end_date", "holder_name", name=op.f("pk_top10_holders")
-        ),
+        sa.PrimaryKeyConstraint("ts_code", "end_date", "holder_name", name=op.f("pk_top10_holders")),
     )
     op.create_index(
         op.f("ix_top10_holders_holder_name"),
@@ -1011,9 +957,7 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")
     op.drop_table("repurchase")
     op.drop_table("pledge_stat")
-    op.drop_index(
-        op.f("ix_northbound_holding_trade_date"), table_name="northbound_holding"
-    )
+    op.drop_index(op.f("ix_northbound_holding_trade_date"), table_name="northbound_holding")
     op.drop_table("northbound_holding")
     op.drop_table("moneyflow_hsgt")
     op.drop_index(op.f("ix_moneyflow_daily_trade_date"), table_name="moneyflow_daily")
@@ -1030,9 +974,7 @@ def downgrade() -> None:
     op.drop_table("index_dailybasic")
     op.drop_index(op.f("ix_index_daily_trade_date"), table_name="index_daily")
     op.drop_table("index_daily")
-    op.drop_index(
-        "ix_financial_reports_ts_code_ann_date", table_name="financial_reports"
-    )
+    op.drop_index("ix_financial_reports_ts_code_ann_date", table_name="financial_reports")
     op.drop_index(op.f("ix_financial_reports_end_date"), table_name="financial_reports")
     op.drop_table("financial_reports")
     op.drop_index(op.f("ix_fina_mainbz_end_date"), table_name="fina_mainbz")

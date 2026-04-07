@@ -48,9 +48,7 @@ def generate_declaration_report(declarations: list[DataDeclaration]) -> str:
 
     for decl in declarations:
         status_icon = "✅" if decl.status == "available" else "❌"
-        lines.append(
-            f"| {decl.name} | {decl.prompt_claim} | {status_icon} {decl.status} |"
-        )
+        lines.append(f"| {decl.name} | {decl.prompt_claim} | {status_icon} {decl.status} |")
 
     return "\n".join(lines)
 

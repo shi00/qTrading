@@ -53,9 +53,7 @@ class TushareClient:
                 return
 
             self.token = token or ConfigHandler.get_token()
-            self.timeout = (
-                ConfigHandler.get_tushare_timeout()
-            )  # Custom timeout for Tushare
+            self.timeout = ConfigHandler.get_tushare_timeout()  # Custom timeout for Tushare
             self.max_retries = ConfigHandler.get_request_max_retries()
 
             # Initialize Rate Limiter
@@ -191,9 +189,7 @@ class TushareClient:
                 await asyncio.sleep(1)
         return None
 
-    async def _handle_api_call_paginated(
-        self, func: typing.Callable, max_pages: int = 100, **kwargs: typing.Any
-    ):
+    async def _handle_api_call_paginated(self, func: typing.Callable, max_pages: int = 100, **kwargs: typing.Any):
         import pandas as pd
 
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
@@ -352,9 +348,7 @@ class TushareClient:
     # Whitelist of allowed macro API names to prevent arbitrary API injection
     _MACRO_API_WHITELIST = {"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"}
 
-    async def get_trade_cal(
-        self, start_date: str | None, end_date: str | None, exchange: str = "SSE"
-    ):
+    async def get_trade_cal(self, start_date: str | None, end_date: str | None, exchange: str = "SSE"):
         """
         Get trade calendar.
         Note: This is the raw API wrapper. For is_trading_day checks, use is_trading_day()
@@ -451,9 +445,7 @@ class TushareClient:
 
         return df_daily
 
-    async def get_daily_basic(
-        self, trade_date: str | None = None, ts_code: str | None = None
-    ):  # type: ignore
+    async def get_daily_basic(self, trade_date: str | None = None, ts_code: str | None = None):  # type: ignore
         """Get daily basic indicators (PE, PB, Turnover, etc.)"""
         return await self._handle_api_call(
             self.pro.daily_basic,
@@ -647,9 +639,7 @@ class TushareClient:
             fields="trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         )
 
-    async def get_index_dailybasic(
-        self, trade_date: str | None = None, ts_code: str | None = None
-    ):
+    async def get_index_dailybasic(self, trade_date: str | None = None, ts_code: str | None = None):
         """Get index daily indicators (PE, PB, etc.)"""  # type: ignore
 
         return await self._handle_api_call(
@@ -685,9 +675,7 @@ class TushareClient:
             fields="trade_date,ts_code,name,close,pct_chg,amp,fc_ratio,fl_ratio,fd_amount,first_time,last_time,open_times,strth,limit",
         )
 
-    async def get_suspend_d(
-        self, trade_date: str | None = None, ts_code: str | None = None
-    ):
+    async def get_suspend_d(self, trade_date: str | None = None, ts_code: str | None = None):
         """Get daily suspension list"""  # type: ignore
 
         return await self._handle_api_call(
@@ -698,9 +686,7 @@ class TushareClient:
             fields="ts_code,trade_date,suspend_timing,suspend_type",
         )
 
-    async def get_margin_detail(
-        self, trade_date: str | None = None, ts_code: str | None = None
-    ):
+    async def get_margin_detail(self, trade_date: str | None = None, ts_code: str | None = None):
         """Get individual stock margin detail"""
 
         return await self._handle_api_call(
@@ -765,9 +751,7 @@ class TushareClient:
             fields="ts_code,end_date,bz_item,bz_sales,bz_profit,bz_cost,curr_type,update_flag",
         )
 
-    async def get_pledge_stat(
-        self, ts_code: str | None = None, end_date: str | None = None
-    ):
+    async def get_pledge_stat(self, ts_code: str | None = None, end_date: str | None = None):
         """Get share pledge statistics"""  # type: ignore
 
         return await self._handle_api_call_paginated(
@@ -812,9 +796,7 @@ class TushareClient:
             fields="ts_code,end_date,ann_date,div_proc,stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax,record_date,ex_date",
         )
 
-    async def get_shibor(
-        self, start_date: str | None = None, end_date: str | None = None
-    ):  # type: ignore
+    async def get_shibor(self, start_date: str | None = None, end_date: str | None = None):  # type: ignore
         """Get Shibor rates"""
         return await self._handle_api_call(
             self.pro.shibor,
@@ -874,9 +856,7 @@ class TushareClient:
             fields="ts_code,end_date,ann_date,holder_num,holder_num_change,holder_num_ratio",
         )
 
-    async def get_macro_data(
-        self, api_name: str, start_m: str | None = None, end_m: str | None = None
-    ):
+    async def get_macro_data(self, api_name: str, start_m: str | None = None, end_m: str | None = None):
         if api_name not in self._MACRO_API_WHITELIST:
             logger.error(f"[API] Rejected macro API: {api_name} (not in whitelist)")
             return None

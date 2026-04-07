@@ -175,10 +175,7 @@ class NewsFeed(ft.Container):
                 if content_text.value != content:
                     continue
                 for row_ctrl in row.controls:
-                    if (
-                        isinstance(row_ctrl, ft.Text)
-                        and row_ctrl.weight == ft.FontWeight.BOLD
-                    ):
+                    if isinstance(row_ctrl, ft.Text) and row_ctrl.weight == ft.FontWeight.BOLD:
                         row_ctrl.value = translated_tag
                         if self.page:
                             self.news_list.update()
@@ -226,10 +223,7 @@ class NewsFeed(ft.Container):
         Append items at the bottom (Load More).
         """
         # Remove load more btn first if it exists
-        if (
-            self.news_list.controls
-            and self.news_list.controls[-1] == self.load_more_btn
-        ):
+        if self.news_list.controls and self.news_list.controls[-1] == self.load_more_btn:
             self.news_list.controls.pop()
 
         for _, row in news_data.iterrows():
@@ -260,11 +254,7 @@ class NewsFeed(ft.Container):
         time_str = str(row.get("publish_time", "") or "")
 
         is_positive = "利好" in content or "Up" in content or "Gain" in content
-        bg_color = (
-            ft.Colors.with_opacity(0.1, AppColors.UP)
-            if is_positive
-            else ft.Colors.TRANSPARENT
-        )
+        bg_color = ft.Colors.with_opacity(0.1, AppColors.UP) if is_positive else ft.Colors.TRANSPARENT
 
         item = ft.Container(
             content=ft.Column(

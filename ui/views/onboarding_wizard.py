@@ -330,15 +330,9 @@ class OnboardingWizard(ft.Container):
             color=AppColors.ERROR,
             visible=False,
         )
-        self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(
-            self._start_sync, quick=True
-        )
-        self.btn_full_sync.on_click = lambda e: self.app_page.run_task(
-            self._start_sync, quick=False
-        )
-        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(
-            self._cancel_sync
-        )
+        self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(self._start_sync, quick=True)
+        self.btn_full_sync.on_click = lambda e: self.app_page.run_task(self._start_sync, quick=False)
+        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(self._cancel_sync)
 
     def _init_schedule_controls(self):
         self.schedule_enabled = ft.Checkbox(
@@ -453,8 +447,7 @@ class OnboardingWizard(ft.Container):
                     icon=ft.Icons.ARROW_BACK,
                     on_click=lambda e: self.app_page.run_task(self._prev_step),
                     style=AppStyles.secondary_button(),
-                    disabled=(self.sync_in_progress and is_sync_step)
-                    or self._validation_in_progress,
+                    disabled=(self.sync_in_progress and is_sync_step) or self._validation_in_progress,
                 )
             )
         else:
@@ -723,9 +716,7 @@ class OnboardingWizard(ft.Container):
                 offset=ft.Offset(0, 3),
             )
         else:
-            e.control.border = ft.border.all(
-                1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY)
-            )
+            e.control.border = ft.border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY))
             e.control.shadow = ft.BoxShadow(
                 spread_radius=0,
                 blur_radius=8,
@@ -855,9 +846,7 @@ class OnboardingWizard(ft.Container):
                 ),
                 ft.Container(height=10),
                 ft.Text(
-                    I18n.get("wizard_step3_desc").format(
-                        years=years, hours=int(years * 1.5)
-                    ),
+                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
@@ -1189,9 +1178,7 @@ class OnboardingWizard(ft.Container):
     def _on_locale_change(self, new_locale: str = None):
         self.sync_status.value = I18n.get("wizard_status_ready")
         self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
-        self.btn_full_sync.text = I18n.get("wizard_sync_full").format(
-            years=DEFAULT_SYNC_YEARS
-        )
+        self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
         self.btn_cancel_sync.text = I18n.get("wizard_btn_cancel")
         self.schedule_enabled.label = I18n.get("wizard_schedule_label")
         self.schedule_time.label = I18n.get("wizard_schedule_time_label")

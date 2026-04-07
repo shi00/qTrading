@@ -103,11 +103,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 count = await self.dao.save_macro_economy(merged)
                 result.added += count if count else 0
                 logger.debug(f"[MacroSync] Monthly | Saved {count} macro records")
-                latest_period = (
-                    merged["period"].max()
-                    if "period" in merged.columns
-                    else get_now().date()
-                )
+                latest_period = merged["period"].max() if "period" in merged.columns else get_now().date()
                 if isinstance(latest_period, str):
                     if len(latest_period) == 6:
                         latest_period = parse_date(latest_period, "%Y%m").date()
@@ -124,9 +120,7 @@ class MacroSyncStrategy(ISyncStrategy):
             result.errors.append(f"Macro Monthly: {e}")
 
     @classmethod
-    def _merge_macro_data(
-        cls, df_m2: typing.Any, df_cpi: typing.Any, df_ppi: typing.Any
-    ):
+    def _merge_macro_data(cls, df_m2: typing.Any, df_cpi: typing.Any, df_ppi: typing.Any):
         """
         Merge M2/CPI/PPI DataFrames on period column.
 
@@ -146,18 +140,14 @@ class MacroSyncStrategy(ISyncStrategy):
 
         if merged is not None and not merged.empty:
             if "period" not in merged.columns:
-                logger.warning(
-                    "[MacroSync] _merge_macro_data | 'period' column missing after merge, returning None"
-                )
+                logger.warning("[MacroSync] _merge_macro_data | 'period' column missing after merge, returning None")
                 return None
 
             # Tushare macro APIs (cn_m, cn_cpi, cn_ppi) return period as 'YYYYMM' string.
             # base_dao.py's pd.to_datetime(format='mixed') parses 'YYYYMM' as NaT.
             # Here we ensure it's either cleanly parsed or dropped if completely invalid.
             merged["period"] = merged["period"].apply(_parse_period)
-            merged["period"] = pd.to_datetime(
-                merged["period"], format="mixed", errors="coerce"
-            ).dt.date
+            merged["period"] = pd.to_datetime(merged["period"], format="mixed", errors="coerce").dt.date
             merged = merged.dropna(subset=["period"])
 
         return merged
@@ -176,9 +166,7 @@ class MacroSyncStrategy(ISyncStrategy):
             return merged
 
         if target_col not in df.columns:
-            logger.warning(
-                f"[MacroSync] _merge_indicator | '{target_col}' column not found in data, skipping merge"
-            )
+            logger.warning(f"[MacroSync] _merge_indicator | '{target_col}' column not found in data, skipping merge")
             return merged
         if "period" not in df.columns:
             logger.warning(
@@ -200,9 +188,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                rough_start_date = get_now().date() - datetime.timedelta(
-                    days=int(250 * years * 2.0)
-                )
+                rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
                 all_dates = await self.context.processor.get_trade_dates(  # type: ignore
                     start_date=rough_start_date,
                     end_date=today,
@@ -210,38 +196,24 @@ class MacroSyncStrategy(ISyncStrategy):
                 start_date = (
                     all_dates[-(250 * years)]
                     if len(all_dates) >= (250 * years)
-                    else (
-                        all_dates[0]
-                        if all_dates
-                        else (get_now().date() - datetime.timedelta(days=365 * years))
-                    )
+                    else (all_dates[0] if all_dates else (get_now().date() - datetime.timedelta(days=365 * years)))
                 )
             else:
                 try:
                     last_dt = parse_date(latest)
-                    start_date = last_dt.date() + datetime.timedelta(
-                        days=_SHIBOR_RESUME_OFFSET_DAYS
-                    )
+                    start_date = last_dt.date() + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)
                 except ValueError:
                     logger.warning(
                         f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.",
                     )
-                    start_date = get_now().date() - datetime.timedelta(
-                        days=_SHIBOR_FALLBACK_LOOKBACK_DAYS
-                    )
+                    start_date = get_now().date() - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)
 
             if start_date > today:
                 logger.debug("[MacroSync] Shibor already up to date.")
                 return
 
-            start_str = (
-                start_date.strftime("%Y%m%d")
-                if hasattr(start_date, "strftime")
-                else str(start_date)
-            )
-            end_str = (
-                today.strftime("%Y%m%d") if hasattr(today, "strftime") else str(today)
-            )
+            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else str(start_date)
+            end_str = today.strftime("%Y%m%d") if hasattr(today, "strftime") else str(today)
             df = await self.context.api.get_shibor(
                 start_date=start_str,
                 end_date=end_str,
@@ -274,9 +246,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                rough_start_date = today_date - datetime.timedelta(
-                    days=int(250 * years * 2.0)
-                )
+                rough_start_date = today_date - datetime.timedelta(days=int(250 * years * 2.0))
                 all_dates = await self.context.processor.get_trade_dates(  # type: ignore
                     start_date=rough_start_date,
                     end_date=today_date,
@@ -284,11 +254,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 start_date = (
                     all_dates[-(250 * years)]
                     if len(all_dates) >= (250 * years)
-                    else (
-                        all_dates[0]
-                        if all_dates
-                        else (today_date - datetime.timedelta(days=365 * years))
-                    )
+                    else (all_dates[0] if all_dates else (today_date - datetime.timedelta(days=365 * years)))
                 )
             else:
                 last_dt = parse_date(latest)
@@ -302,11 +268,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 logger.debug("[MacroSync] Index weights up to date (monthly).")
                 return
 
-            start_str = (
-                start_date.strftime("%Y%m%d")
-                if hasattr(start_date, "strftime")
-                else str(start_date)
-            )
+            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else str(start_date)
             end_date = today.strftime("%Y%m%d")
             logger.debug(
                 f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",

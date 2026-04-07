@@ -39,26 +39,18 @@ class TestLocaleResourceIntegrity:
             return json.load(f)
 
     def test_zh_cn_file_exists(self, locales_dir):
-        assert (locales_dir / "zh_CN" / "strings.json").exists(), (
-            "zh_CN strings.json file must exist"
-        )
+        assert (locales_dir / "zh_CN" / "strings.json").exists(), "zh_CN strings.json file must exist"
 
     def test_en_us_file_exists(self, locales_dir):
-        assert (locales_dir / "en_US" / "strings.json").exists(), (
-            "en_US strings.json file must exist"
-        )
+        assert (locales_dir / "en_US" / "strings.json").exists(), "en_US strings.json file must exist"
 
     def test_zh_strings_not_empty(self, zh_strings):
         assert len(zh_strings) > 0, "zh_CN strings should not be empty"
-        assert len(zh_strings) >= 500, (
-            f"zh_CN should have at least 500 keys, got {len(zh_strings)}"
-        )
+        assert len(zh_strings) >= 500, f"zh_CN should have at least 500 keys, got {len(zh_strings)}"
 
     def test_en_strings_not_empty(self, en_strings):
         assert len(en_strings) > 0, "en_US strings should not be empty"
-        assert len(en_strings) >= 500, (
-            f"en_US should have at least 500 keys, got {len(en_strings)}"
-        )
+        assert len(en_strings) >= 500, f"en_US should have at least 500 keys, got {len(en_strings)}"
 
     def test_both_locales_have_same_keys(self, zh_strings, en_strings):
         zh_keys = set(zh_strings.keys())
@@ -77,26 +69,18 @@ class TestLocaleResourceIntegrity:
 
     def test_no_empty_values_in_zh(self, zh_strings):
         empty_keys = [k for k, v in zh_strings.items() if not v or not v.strip()]
-        assert len(empty_keys) == 0, (
-            f"zh_CN has empty values for keys: {empty_keys[:10]}"
-        )
+        assert len(empty_keys) == 0, f"zh_CN has empty values for keys: {empty_keys[:10]}"
 
     def test_no_empty_values_in_en(self, en_strings):
         empty_keys = [k for k, v in en_strings.items() if not v or not v.strip()]
-        assert len(empty_keys) == 0, (
-            f"en_US has empty values for keys: {empty_keys[:10]}"
-        )
+        assert len(empty_keys) == 0, f"en_US has empty values for keys: {empty_keys[:10]}"
 
     def test_all_values_are_strings(self, zh_strings, en_strings):
         non_string_zh = [k for k, v in zh_strings.items() if not isinstance(v, str)]
         non_string_en = [k for k, v in en_strings.items() if not isinstance(v, str)]
 
-        assert len(non_string_zh) == 0, (
-            f"zh_CN has non-string values: {non_string_zh[:10]}"
-        )
-        assert len(non_string_en) == 0, (
-            f"en_US has non-string values: {non_string_en[:10]}"
-        )
+        assert len(non_string_zh) == 0, f"zh_CN has non-string values: {non_string_zh[:10]}"
+        assert len(non_string_en) == 0, f"en_US has non-string values: {non_string_en[:10]}"
 
     def test_format_placeholders_consistency(self, zh_strings, en_strings):
         import re

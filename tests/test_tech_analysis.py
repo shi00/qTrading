@@ -141,9 +141,7 @@ class TestMACD(unittest.TestCase):
         """MACD 计算返回正确格式"""
         status, macd_val, hist_val = TechnicalAnalysis.get_macd(self.df)
 
-        self.assertIn(
-            status, ["GOLDEN_CROSS", "DEATH_CROSS", "BULLISH", "BEARISH", "NEUTRAL"]
-        )
+        self.assertIn(status, ["GOLDEN_CROSS", "DEATH_CROSS", "BULLISH", "BEARISH", "NEUTRAL"])
         self.assertIsInstance(macd_val, (int, float))
         self.assertIsInstance(hist_val, (int, float))
 
@@ -466,9 +464,7 @@ class TestPolarsExpressions(unittest.TestCase):
         )
 
         lf = pl.from_pandas(df).lazy()
-        result = lf.with_columns(
-            TechnicalAnalysis.get_rsi_expr("close", period=6, alias="rsi")
-        ).collect()
+        result = lf.with_columns(TechnicalAnalysis.get_rsi_expr("close", period=6, alias="rsi")).collect()
 
         self.assertIn("rsi", result.columns)
         rsi_values = result["rsi"].to_list()
