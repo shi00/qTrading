@@ -21,6 +21,7 @@ class StockDao(BaseDao):
             "industry",
             "market",
             "list_date",
+            "delist_date",
             "list_status",
         ]
 

@@ -15,6 +15,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.i18n import I18n
+from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import (
     AZURE_API_VERSIONS,
@@ -75,6 +76,7 @@ class LLMConfigPanel(ft.Container):
         self._current_provider = "deepseek"
         self._is_azure = False
         self._api_key_modified = False
+        self._is_verifying = False
 
         self._build_ui()
 
@@ -140,9 +142,9 @@ class LLMConfigPanel(ft.Container):
             width=input_width,
         )
 
+        self.status_icon = ft.Icon(visible=False, size=16)
         self.status_text = ft.Text(
             value="",
-            color=ft.Colors.GREEN if ft.Colors else "green",
             size=12,
         )
 
@@ -150,6 +152,7 @@ class LLMConfigPanel(ft.Container):
             text=I18n.get("llm_test_connection"),
             on_click=self._on_test_click,
             icon=ft.Icons.CABLE if ft.Icons else None,
+            style=AppStyles.secondary_button(),
         )
 
         self.refresh_models_button = ft.IconButton(
@@ -163,15 +166,7 @@ class LLMConfigPanel(ft.Container):
             on_click=self._on_save_click,
             icon=ft.Icons.SAVE if ft.Icons else None,
             visible=self._show_save_button,
-        )
-
-        compact_main_align = (
-            ft.MainAxisAlignment.CENTER if self._compact else ft.MainAxisAlignment.START
-        )
-        compact_cross_align = (
-            ft.CrossAxisAlignment.CENTER
-            if self._compact
-            else ft.CrossAxisAlignment.START
+            style=AppStyles.primary_button(),
         )
 
         provider_row = ft.Row(
@@ -230,7 +225,11 @@ class LLMConfigPanel(ft.Container):
                 self.api_key_input,
                 self.azure_row,
                 action_buttons,
-                ft.Row([self.status_text], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row(
+                    [self.status_icon, self.status_text],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=5,
+                ),
                 links_row,
             ],
             spacing=10 if not self._compact else 6,
@@ -423,6 +422,10 @@ class LLMConfigPanel(ft.Container):
         self.api_key_input.value = api_key
         self._api_key_modified = False
 
+    def reload_config(self):
+        self._load_config()
+        self._safe_update()
+
     def _on_api_key_change(self, e):
         self._api_key_modified = True
 
@@ -456,8 +459,8 @@ class LLMConfigPanel(ft.Container):
             self.base_url_input.value = ""
             self.custom_model_input.visible = False
             self.refresh_models_button.visible = False
-            self.status_text.value = I18n.get("llm_switch_provider_hint").format(
-                provider=provider_name
+            self._show_info(
+                I18n.get("llm_switch_provider_hint").format(provider=provider_name)
             )
         elif provider_id == "custom":
             self._is_azure = False
@@ -467,8 +470,8 @@ class LLMConfigPanel(ft.Container):
             self.refresh_models_button.visible = True
             self.base_url_input.value = ""
             self.base_url_input.read_only = False
-            self.status_text.value = I18n.get("llm_switch_provider_hint").format(
-                provider=provider_name
+            self._show_info(
+                I18n.get("llm_switch_provider_hint").format(provider=provider_name)
             )
             self._load_custom_model_history(provider_id)
         else:
@@ -479,8 +482,8 @@ class LLMConfigPanel(ft.Container):
             self.refresh_models_button.visible = provider_id in MODELS_API_COMPATIBLE
             self.base_url_input.value = provider.get("base_url", "")
             self.base_url_input.read_only = True
-            self.status_text.value = I18n.get("llm_switch_provider_hint").format(
-                provider=provider_name
+            self._show_info(
+                I18n.get("llm_switch_provider_hint").format(provider=provider_name)
             )
 
             models = provider.get("models", [])
@@ -560,23 +563,25 @@ class LLMConfigPanel(ft.Container):
         if not self.page:
             return
 
+        if self._is_verifying:
+            self._show_warning(I18n.get("llm_testing_in_progress"))
+            return
+
         self.page.run_task(self._on_llm_test_connection)
 
     async def _on_llm_test_connection(self):
         api_key = self.api_key_input.value
 
         if not api_key:
-            self.status_text.value = I18n.get("llm_test_need_key")
-            self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-            self.update()
+            self._show_warning(I18n.get("llm_test_need_key"))
             return
 
-        self.status_text.value = I18n.get("llm_testing")
-        self.status_text.color = ft.Colors.BLUE if ft.Colors else "blue"
+        self._is_verifying = True
+        self._show_info(I18n.get("llm_testing"))
         self.test_button.disabled = True
         if self.on_loading_change:
             self.on_loading_change(True)
-        self.update()
+        self._safe_update()
 
         try:
             provider = self._current_provider
@@ -588,14 +593,10 @@ class LLMConfigPanel(ft.Container):
                 api_version = self.azure_version_input.value
 
                 if not resource_name:
-                    self.status_text.value = I18n.get("llm_azure_need_resource")
-                    self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-                    self.update()
+                    self._show_warning(I18n.get("llm_azure_need_resource"))
                     return
                 if not deployment_name:
-                    self.status_text.value = I18n.get("llm_azure_need_deployment")
-                    self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-                    self.update()
+                    self._show_warning(I18n.get("llm_azure_need_deployment"))
                     return
 
                 model = deployment_name
@@ -626,29 +627,112 @@ class LLMConfigPanel(ft.Container):
                 )
 
             if result.get("success"):
-                self.status_text.value = I18n.get("llm_test_success")
-                self.status_text.color = ft.Colors.GREEN if ft.Colors else "green"
+                self._show_success(I18n.get("llm_test_success"))
             else:
-                self.status_text.value = (
+                self._show_error(
                     f"{I18n.get('llm_test_failed')}: {result.get('message', '')}"
                 )
-                self.status_text.color = ft.Colors.RED if ft.Colors else "red"
 
         except Exception as ex:
             from services.ai_service import _classify_api_error
 
             error_info = _classify_api_error(ex)
-            self.status_text.value = (
-                f"{I18n.get('llm_test_failed')}: {error_info['message']}"
-            )
-            self.status_text.color = ft.Colors.RED if ft.Colors else "red"
+            self._show_error(f"{I18n.get('llm_test_failed')}: {error_info['message']}")
             logger.error(f"[LLMConfigPanel] Test connection error: {ex}")
 
         finally:
+            self._is_verifying = False
             self.test_button.disabled = False
             if self.on_loading_change:
                 self.on_loading_change(False)
-            self.update()
+            self._safe_update()
+
+    async def async_verify_connection(self) -> bool:
+        provider = self._current_provider
+
+        if self._is_azure:
+            resource_name = self.azure_resource_input.value
+            deployment_name = self.azure_deployment_input.value
+            api_version = self.azure_version_input.value
+
+            if not resource_name:
+                self._show_warning(I18n.get("llm_azure_need_resource"))
+                return False
+            if not deployment_name:
+                self._show_warning(I18n.get("llm_azure_need_deployment"))
+                return False
+
+            model = deployment_name
+            kwargs = {"api_version": api_version, "azure_resource_name": resource_name}
+            base_url = ""
+        else:
+            model = self.model_dropdown.value or self.custom_model_input.value
+            base_url = self.base_url_input.value
+            kwargs = {}
+
+        api_key = self.api_key_input.value
+
+        if not api_key:
+            existing_config = ConfigHandler.get_llm_config()
+            existing_key = existing_config.get("api_key", "")
+            if not existing_key:
+                self._show_warning(I18n.get("llm_test_need_key"))
+                return False
+            api_key = existing_key
+            if not base_url:
+                base_url = existing_config.get("base_url", "")
+
+        if not provider or not model:
+            self._show_error(I18n.get("wizard_err_provider_model_required"))
+            return False
+
+        if self._is_verifying:
+            logger.warning("[LLMConfigPanel] Verification already in progress")
+            return False
+
+        self._is_verifying = True
+        self._set_loading_state(True)
+        self._show_info(I18n.get("llm_testing"))
+
+        try:
+            from services.ai_service import AIService
+
+            result = await AIService.test_connection(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                **kwargs,
+            )
+
+            if result.get("success"):
+                self._show_success(I18n.get("llm_test_success"))
+                return True
+
+            self._show_error(
+                f"{I18n.get('llm_test_failed')}: {result.get('message', '')}"
+            )
+            return False
+
+        except Exception as ex:
+            from services.ai_service import _classify_api_error
+
+            error_info = _classify_api_error(ex)
+            self._show_error(f"{I18n.get('llm_test_failed')}: {error_info['message']}")
+            logger.error(f"[LLMConfigPanel] Verify connection error: {ex}")
+            return False
+
+        finally:
+            self._is_verifying = False
+            self._set_loading_state(False)
+            self._safe_update()
+
+    def _set_loading_state(self, loading: bool):
+        self.test_button.disabled = loading
+        self.save_button.disabled = loading
+
+        if self.on_loading_change:
+            self.on_loading_change(loading)
 
     def _on_refresh_click(self, e):
         if not self.page:
@@ -662,19 +746,14 @@ class LLMConfigPanel(ft.Container):
         base_url = self._normalize_base_url(raw_base_url)
 
         if not api_key:
-            self.status_text.value = I18n.get("llm_refresh_need_key")
-            self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-            self.update()
+            self._show_warning(I18n.get("llm_refresh_need_key"))
             return
 
         if not base_url:
-            self.status_text.value = I18n.get("llm_refresh_need_url")
-            self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-            self.update()
+            self._show_warning(I18n.get("llm_refresh_need_url"))
             return
 
-        self.status_text.value = I18n.get("llm_refreshing")
-        self.status_text.color = ft.Colors.BLUE if ft.Colors else "blue"
+        self._show_info(I18n.get("llm_refreshing"))
         self.refresh_models_button.disabled = True
         if self.on_loading_change:
             self.on_loading_change(True)
@@ -698,8 +777,7 @@ class LLMConfigPanel(ft.Container):
             model_ids = sorted([m["id"] for m in models if m.get("id")])
 
             if not model_ids:
-                self.status_text.value = I18n.get("llm_refresh_empty")
-                self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
+                self._show_warning(I18n.get("llm_refresh_empty"))
                 return
 
             self.model_dropdown.options = [ft.dropdown.Option(m) for m in model_ids]
@@ -709,19 +787,15 @@ class LLMConfigPanel(ft.Container):
 
             self.model_dropdown.update()
 
-            self.status_text.value = I18n.get(
-                "llm_refresh_success", count=len(model_ids)
-            )
-            self.status_text.color = ft.Colors.GREEN if ft.Colors else "green"
+            self._show_success(I18n.get("llm_refresh_success", count=len(model_ids)))
 
         except Exception as ex:
             from ui.i18n import classify_error
 
             error_info = classify_error(ex, context="llm")
-            self.status_text.value = (
+            self._show_error(
                 f"{I18n.get('llm_refresh_failed')}: {error_info['message']}"
             )
-            self.status_text.color = ft.Colors.RED if ft.Colors else "red"
             logger.error(f"[LLMConfigPanel] Refresh models error: {ex}")
 
         finally:
@@ -768,11 +842,7 @@ class LLMConfigPanel(ft.Container):
 
     async def _save_config(self):
         provider = self._current_provider
-
-        if self._api_key_modified:
-            api_key = self.api_key_input.value
-        else:
-            api_key = None
+        api_key = self.api_key_input.value if self._api_key_modified else None
 
         kwargs = {}
 
@@ -782,14 +852,10 @@ class LLMConfigPanel(ft.Container):
             api_version = self.azure_version_input.value
 
             if not resource_name:
-                self.status_text.value = I18n.get("llm_azure_need_resource")
-                self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-                self.update()
+                self._show_warning(I18n.get("llm_azure_need_resource"))
                 return
             if not deployment_name:
-                self.status_text.value = I18n.get("llm_azure_need_deployment")
-                self.status_text.color = ft.Colors.ORANGE if ft.Colors else "orange"
-                self.update()
+                self._show_warning(I18n.get("llm_azure_need_deployment"))
                 return
 
             model = deployment_name
@@ -837,8 +903,7 @@ class LLMConfigPanel(ft.Container):
 
             await AIService().reload_config()
 
-            self.status_text.value = I18n.get("settings_verify_success")
-            self.status_text.color = ft.Colors.GREEN if ft.Colors else "green"
+            self._show_success(I18n.get("settings_verify_success"))
 
             if self.on_save:
                 self.on_save()
@@ -847,10 +912,9 @@ class LLMConfigPanel(ft.Container):
             from ui.i18n import classify_error
 
             error_info = classify_error(ex, context="llm")
-            self.status_text.value = (
+            self._show_error(
                 f"{I18n.get('settings_save_failed')}: {error_info['message']}"
             )
-            self.status_text.color = ft.Colors.RED if ft.Colors else "red"
             logger.error(f"[LLMConfigPanel] Save config error: {ex}")
 
         self.update()
@@ -865,7 +929,7 @@ class LLMConfigPanel(ft.Container):
         Get current configuration values from the panel.
 
         Returns:
-            dict with keys: provider, model, base_url, api_key, and Azure-specific fields
+            dict with provider, model, base_url, api_key, and Azure fields
         """
         provider = self._current_provider
         base_url = self.base_url_input.value
@@ -919,6 +983,45 @@ class LLMConfigPanel(ft.Container):
         except Exception as e:
             logger.error(f"[LLMConfigPanel] Save current config error: {e}")
             return False
+
+    def _show_success(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.SUCCESS
+        self.status_icon.icon = ft.Icons.CHECK_CIRCLE
+        self.status_icon.color = AppColors.SUCCESS
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_error(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.ERROR
+        self.status_icon.icon = ft.Icons.ERROR
+        self.status_icon.color = AppColors.ERROR
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_warning(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.WARNING
+        self.status_icon.icon = ft.Icons.WARNING
+        self.status_icon.color = AppColors.WARNING
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_info(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.PRIMARY
+        self.status_icon.icon = ft.Icons.INFO
+        self.status_icon.color = AppColors.PRIMARY
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _safe_update(self):
+        try:
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.debug(f"Safe update skipped: {e}")
 
     def did_mount(self):
         I18n.subscribe(self._on_locale_change)

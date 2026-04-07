@@ -353,7 +353,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
     async def sync_stock_basic(self):
-        """Sync stock basic info (Step 1 of initialization)."""
+        """Sync stock basic info (Step 1 of initialization).
+
+        Syncs both active stocks (list_status='L') and delisted stocks (list_status='D')
+        to ensure accurate historical stock counts for data integrity validation.
+        """
         if self.is_cancelled():
             return 0
 
@@ -370,21 +374,33 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         try:
             logger.debug("[DataProcessor] Sync Basic | Starting...")
-            df = await self.api.get_stock_list()
 
-            if df is not None and not df.empty:
-                count = await self.cache.save_stock_basic(df)
+            # Single API call for all stocks (active + delisted)
+            df_all = await self.api.get_stock_basic_all()
+
+            if df_all is None or df_all.empty:
+                logger.warning(
+                    "[DataProcessor] Sync Basic | ⚠️ Remote API returned empty dataset",
+                )
+                return 0
+
+            count = await self.cache.save_stock_basic(df_all)
+            if count > 0:
+                active_count = len(df_all[df_all["list_status"] == "L"])
+                delisted_count = len(df_all[df_all["list_status"] == "D"])
+                total_count = count
                 await self.cache.update_sync_status(
                     "stock_basic",
                     get_now().date(),
-                    count,
+                    total_count,
                 )
                 logger.info(
-                    f"[DataProcessor] Sync Basic | ✅ Pushed {count} active stocks",
+                    f"[DataProcessor] Sync Basic | ✅ {active_count} active + {delisted_count} delisted = {total_count} total stocks",
                 )
-                return count
+                return total_count
+
             logger.warning(
-                "[DataProcessor] Sync Basic | ⚠️ Remote API returned empty dataset",
+                "[DataProcessor] Sync Basic | ⚠️ No stocks saved to database",
             )
             return 0
 

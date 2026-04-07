@@ -33,6 +33,7 @@ env/
 
 # Build & Bundling tools
 *.spec
+!AStockScreener.spec
 flet-app.tar.gz
 
 # Installer logs & pip

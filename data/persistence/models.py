@@ -42,6 +42,11 @@ class StockBasic(Base):
     market = Column(String)
     list_date = Column(Date, index=True)
     list_status = Column(String)
+    delist_date = Column(Date, nullable=True, index=True)  # 退市日期
+    __table_args__ = (
+        Index("idx_stock_basic_dates", "list_date", "delist_date"),
+        Index("idx_stock_basic_status", "list_status", "list_date"),
+    )
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
@@ -284,6 +289,7 @@ class FinancialReports(Base):
     netprofit_yoy = Column(Float)
     goodwill = Column(Float)
     audit_result = Column(String)
+    n_cashflow_act = Column(Float)  # 经营活动产生的现金流量净额
     __table_args__ = (
         Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
     )

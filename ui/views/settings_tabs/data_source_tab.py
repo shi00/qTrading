@@ -5,8 +5,8 @@ import flet as ft
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from data.external.tushare_client import TushareClient
 from services.task_manager import TaskManager
+from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.components.settings_widgets import (
     ActionChip,
     DashboardCard,
@@ -18,7 +18,6 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +32,6 @@ class DataSourceTab(ft.Container):
         # Singleton instances (avoid redundant instantiation)
         self._processor = DataProcessor()
         self._cache = CacheManager()
-
-        # State flags
-        self._is_verifying = False
-
-        # Load config
-        current_token = ConfigHandler.get_token()
 
         # --- UI Components ---
 
@@ -86,7 +79,9 @@ class DataSourceTab(ft.Container):
         self.btn_check_health = ft.ElevatedButton(
             text=I18n.get("settings_check_health"),
             icon=ft.Icons.REFRESH,
-            on_click=self.refresh_health_status,
+            on_click=lambda e: (
+                self.page.run_task(self.refresh_health_status, e) if self.page else None
+            ),
             style=style_health,
             height=40,
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -177,56 +172,23 @@ class DataSourceTab(ft.Container):
         )
 
         # 3. Connection Settings
-        self.token_input = ft.TextField(
-            label=I18n.get("settings_token"),
-            password=True,
-            can_reveal_password=True,
-            value="",
-            expand=True,
-            height=40,
-            content_padding=10,
-            text_size=14,
-            on_submit=self.save_and_verify_tushare,
-        )
-        style_save = AppStyles.primary_button()
-        style_save.padding = ft.padding.symmetric(horizontal=15, vertical=0)
-
-        self.btn_save_token = ft.ElevatedButton(
-            text=I18n.get("common_save"),
-            icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
-            on_click=self.save_and_verify_tushare,
-            style=style_save,
-            height=40,
-            width=AppStyles.CONTROL_WIDTH_MD,  # Match width of sync_button
-        )
-        self.status_icon = ft.Icon(ft.Icons.CIRCLE, color=AppColors.TEXT_HINT, size=12)
-        self.status_text = ft.Text(
-            I18n.get("settings_verify_failed"),
-            color=AppColors.TEXT_HINT,
-            size=12,
+        self.tushare_panel = TushareConfigPanel(
+            compact=False,
+            show_save_button=True,
+            show_register_link=False,
+            show_internal_loading=True,
+            on_verify_success=lambda token: self.show_snack(
+                I18n.get("settings_snack_token_verified"),
+                color=AppColors.SUCCESS,
+            ),
+            on_save=self._on_tushare_save,
         )
 
         self.row_token = SettingRow(
             icon=ft.Icons.KEY_ROUNDED,
             title=I18n.get("settings_token"),
             subtitle=I18n.get("settings_token_desc"),
-            control=ft.Column(
-                [
-                    ft.Row(
-                        [self.token_input, self.btn_save_token],
-                        alignment=ft.MainAxisAlignment.END,
-                        spacing=10,
-                    ),
-                    ft.Row(
-                        [self.status_icon, self.status_text],
-                        spacing=5,
-                        alignment=ft.MainAxisAlignment.END,
-                    ),
-                ],
-                spacing=5,
-                alignment=ft.MainAxisAlignment.CENTER,
-                expand=True,
-            ),
+            control=self.tushare_panel,
             icon_color=AppColors.ACCENT,
         )
         self.connection_card = DashboardCard(
@@ -249,7 +211,9 @@ class DataSourceTab(ft.Container):
         self.sync_button = ft.ElevatedButton(
             text=I18n.get("settings_init_data"),
             icon=ft.Icons.CLOUD_DOWNLOAD,
-            on_click=self.init_historical_data,
+            on_click=lambda e: (
+                self.page.run_task(self.init_historical_data, e) if self.page else None
+            ),
             tooltip=I18n.get("settings_init_desc"),
             style=style_init,
             height=40,
@@ -328,6 +292,7 @@ class DataSourceTab(ft.Container):
 
     def _on_mount(self):
         I18n.subscribe(self.refresh_locale)
+        self.tushare_panel.reload_config()
 
     def _on_unmount(self):
         I18n.unsubscribe(self.refresh_locale)
@@ -341,11 +306,6 @@ class DataSourceTab(ft.Container):
 
     def update_theme(self):
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
-        # Input fields use custom colors
-        self.token_input.bgcolor = AppColors.INPUT_BG
-        self.token_input.color = AppColors.INPUT_TEXT
-        self.token_input.border_color = AppColors.INPUT_BORDER
-
         # MetricCards still need UP/DOWN color refresh
         for card in [
             self.metric_sync,
@@ -360,11 +320,6 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     def refresh_locale(self):
-        # Update text labels here... simplified for brevity, in real impl should match SettingsView
-        # We can implement a minimal set for now
-        self.token_input.label = I18n.get("settings_token")
-        self.btn_save_token.text = I18n.get("common_save")
-
         # Historical Data Card
         self.sync_button.text = I18n.get("settings_init_data")
         self.sync_button.tooltip = I18n.get("settings_init_desc")
@@ -386,6 +341,19 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     # --- Logic Methods (Migrated from SettingsView) ---
+
+    def _on_tushare_save(self, config: dict):
+        token = config.get("token", "").strip()
+        if token:
+            ConfigHandler.save_token(token)
+            from data.external.tushare_client import TushareClient
+
+            client = TushareClient()
+            client.set_token(token)
+            self.show_snack(
+                I18n.get("settings_msg_saved", default="Saved successfully."),
+                color=AppColors.SUCCESS,
+            )
 
     async def refresh_health_status(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_check_health")
@@ -829,82 +797,6 @@ class DataSourceTab(ft.Container):
             cancellable=False,
             unique_key="cache_clear",
         )
-
-    async def save_and_verify_tushare(self, e):
-        """Initiate async token verification to avoid blocking UI"""
-        UILogger.log_action("DataSourceTab", "Click", "btn_save_token")
-        # Prevent double-click during verification
-        if self._is_verifying:
-            logger.warning(
-                "[DataSourceTab] Token verification double-click intercepted.",
-            )
-            self.show_snack(
-                I18n.get("settings_status_verifying"),
-                color=AppColors.WARNING,
-            )
-            return
-
-        token = self.token_input.value.strip()  # type: ignore
-        if not token:
-            self.show_snack(I18n.get("settings_snack_token_empty"))
-            return
-
-        self._is_verifying = True
-        self.status_text.value = I18n.get("settings_status_verifying")
-        self.status_text.color = AppColors.WARNING
-        self.status_icon.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.HOURGLASS_TOP  # type: ignore
-        self.btn_save_token.disabled = True
-        self.update()
-
-        # Run verification in background to avoid blocking UI
-        self.page.run_task(self._verify_token_async, token)  # type: ignore
-
-    async def _verify_token_async(self, token: str):
-        """Verify Tushare token in IO thread pool to prevent UI blocking"""
-
-        def _verify_sync(token_to_verify: str) -> bool:
-            """Synchronous verification logic - runs in thread pool"""
-            import tushare as ts
-
-            ts.set_token(token_to_verify)
-            temp_pro = ts.pro_api()
-            # Simple API call to verify token validity
-            temp_pro.trade_cal(exchange="", start_date="20250101", end_date="20250101")
-            return True
-
-        try:
-            # Use project's unified IO thread pool
-            await ThreadPoolManager().run_async(TaskType.IO, _verify_sync, token)
-
-            # Verification passed - Save token and update singleton
-            ConfigHandler.save_token(token)
-
-            # Update singleton with verified token
-            client = TushareClient()
-            client.set_token(token)
-
-            self.status_text.value = I18n.get("settings_snack_token_verified")
-            self.status_text.color = AppColors.SUCCESS
-            self.status_icon.color = AppColors.SUCCESS
-            self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore
-            self.show_snack(
-                I18n.get("settings_snack_token_verified"),
-                color=AppColors.SUCCESS,
-            )
-        except Exception as ex:
-            from ui.i18n import classify_error
-
-            error_info = classify_error(ex, context="token")
-            logger.warning(f"Token verification failed: {ex}")
-            self.status_text.value = error_info["message"]
-            self.status_text.color = AppColors.ERROR
-            self.status_icon.color = AppColors.ERROR
-            self.status_icon.icon = ft.Icons.ERROR  # type: ignore
-        finally:
-            self._is_verifying = False
-            self.btn_save_token.disabled = False
-            self._safe_update()
 
     async def init_historical_data(self, e):
         if self.is_syncing and getattr(self.sync_button, "text", "").startswith(

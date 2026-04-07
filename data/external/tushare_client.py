@@ -150,11 +150,14 @@ class TushareClient:
             except Exception as e:
                 import random
 
-                error_msg = str(e)
+                error_msg = str(e).lower()
                 is_rate_limit = (
                     "每分钟最多访问" in error_msg
                     or "抱歉" in error_msg
                     or "检测到" in error_msg
+                    or "429" in error_msg
+                    or "rate limit" in error_msg
+                    or "频次超限" in error_msg
                 )
                 is_network_error = (
                     isinstance(e, requests.exceptions.RequestException)
@@ -164,8 +167,8 @@ class TushareClient:
                 )
 
                 if is_rate_limit:
-                    sleep_time = (2**i) + random.uniform(0, 1)
-                    logger.debug(
+                    sleep_time = (2**i) * 60 + random.uniform(0, 10)
+                    logger.warning(
                         f"[tushare_api] RATE_LIMITED ({api_name}): backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})",
                     )
                     await asyncio.sleep(sleep_time)
@@ -365,14 +368,30 @@ class TushareClient:
             is_open="1",
         )
 
-    async def get_stock_basic(self):  # type: ignore
-        """Get basic list of all stocks"""
+    async def get_stock_basic(self, list_status: str = "L"):
+        """
+        Get basic list of stocks.
+
+        Args:
+            list_status: 上市状态过滤
+                - "L": 仅上市中（默认，保持向后兼容）
+                - "D": 仅退市
+                - "": 全部（用于数据同步）
+
+        Returns:
+            DataFrame with columns: ts_code, symbol, name, area, industry,
+                                list_date, delist_date, market, list_status
+        """
         return await self._handle_api_call(
             self.pro.stock_basic,
             exchange="",
-            list_status="L",
-            fields="ts_code,symbol,name,area,industry,list_date,market,list_status",
+            list_status=list_status,
+            fields="ts_code,symbol,name,area,industry,list_date,delist_date,market,list_status",
         )
+
+    async def get_stock_basic_all(self):
+        """Get all stocks (including delisted stocks) - for data sync"""
+        return await self.get_stock_basic(list_status="")
 
     async def get_stock_list(self):
         """Alias for get_stock_basic"""

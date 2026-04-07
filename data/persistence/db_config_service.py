@@ -110,7 +110,7 @@ class DatabaseConfigService:
                 database_exists=False,
             )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ConnectionResult(
                 status=ConnectionStatus.TIMEOUT,
                 message=I18n.get("db_err_timeout"),
@@ -323,6 +323,88 @@ class DatabaseConfigService:
             return None
 
     @classmethod
+    async def run_migrations(
+        cls,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+    ) -> tuple[bool, str]:
+        """
+        Run database migrations using Alembic.
+
+        Automatically detects legacy databases and handles schema upgrades.
+        This method is called during application startup and database configuration.
+
+        Args:
+            host: Database host
+            port: Database port
+            user: Database user
+            password: Database password
+            database: Database name
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from data.persistence.db_migrator import DatabaseMigrator
+
+        url = cls.build_url(host, port, user, password, database, async_driver=True)
+
+        try:
+            engine = create_async_engine(url, echo=False)
+
+            await DatabaseMigrator.init_db(engine)
+
+            await engine.dispose()
+
+            logger.info(f"Database migrations completed successfully for '{database}'")
+            return True, I18n.get("db_migrations_success")
+
+        except Exception as e:
+            logger.error(f"Failed to run migrations: {e}", exc_info=True)
+            return False, f"Failed to create tables: {str(e)}"
+
+    @classmethod
+    async def ensure_tables_exist(
+        cls,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+    ) -> tuple[bool, str]:
+        """
+        Ensure all required tables exist in the database.
+
+        This is a convenience method that checks if tables exist and
+        creates them if needed.
+
+        Args:
+            host: Database host
+            port: Database port
+            user: Database user
+            password: Database password
+            database: Database name
+
+        Returns:
+            Tuple of (success, message)
+        """
+        info = await cls.get_database_info(host, port, user, password, database)
+
+        if info is None:
+            return False, I18n.get("db_err_connection")
+
+        if info.table_count > 0:
+            logger.info(f"Database '{database}' already has {info.table_count} tables")
+            return True, I18n.get("db_tables_exist")
+
+        logger.info(f"Database '{database}' is empty, creating tables...")
+        return await cls.run_migrations(host, port, user, password, database)
+
+    @classmethod
     async def get_database_info(
         cls,
         host: str,
@@ -354,7 +436,8 @@ class DatabaseConfigService:
             )
 
             table_count = await conn.fetchval(
-                "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema = 'public'"
             )
 
             await conn.close()

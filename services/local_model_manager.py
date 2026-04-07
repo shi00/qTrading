@@ -46,6 +46,7 @@ class LocalModelManager:
     _model_path: str = ""
     _model_md5: str = ""  # MD5 hash of loaded model file
     _model_stat: tuple = (0, 0)  # (mtime, size)
+    _last_config: dict = {}
     _is_loading: bool = False
     _load_lock = None  # Lazy init to avoid cross-event-loop binding
 
@@ -81,6 +82,7 @@ class LocalModelManager:
 
     def __init__(self):
         self._llm = None
+        self._last_config = {}
 
     def get_loaded_model_path(self) -> str:
         """Return the path of the currently loaded model, or empty string if none."""
@@ -125,6 +127,14 @@ class LocalModelManager:
         if config is None:
             config = ConfigHandler.get_local_ai_config()
 
+        core_config = {
+            "n_threads": config.get("n_threads", 4),
+            "n_batch": config.get("n_batch", 1024),
+            "n_ctx": config.get("n_ctx", 4096),
+            "n_gpu_layers": config.get("n_gpu_layers", 0),
+            "flash_attn": config.get("flash_attn", True),
+        }
+
         async with self._get_load_lock():
             # OPTIMIZATION: Check path equality AND file modification/size to avoid expensive MD5.
             try:
@@ -137,8 +147,9 @@ class LocalModelManager:
                 self._llm
                 and self._model_path == model_path
                 and self._model_stat == current_stat
+                and self._last_config == core_config
             ):
-                # Path is same AND file matches cached timestamp/size -> Skip reload
+                # Path is same, file unchanged, and config unchanged -> Skip reload
                 return True
 
             # If path different OR file changed (mtime/size mismatch) -> Load it
@@ -176,6 +187,7 @@ class LocalModelManager:
                 self._model_path = model_path
                 self._model_md5 = target_md5
                 self._model_stat = current_stat
+                self._last_config = core_config
 
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.info(
@@ -186,6 +198,7 @@ class LocalModelManager:
                 self._llm = None
                 self._model_path = ""  # Reset on failure
                 self._model_stat = (0, 0)
+                self._last_config = {}
                 logger.error(f"[LocalModel] Failed to load model: {e}", exc_info=True)
                 return False
             finally:
@@ -271,7 +284,7 @@ class LocalModelManager:
                     f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}",
                 )
                 return output
-            except asyncio.TimeoutError as te:
+            except TimeoutError as te:
                 logger.error(
                     f"[LocalModel] Inference timed out after {timeout_val}s.",
                     exc_info=False,

@@ -28,9 +28,12 @@ class DatabaseTab(ft.Container):
             on_test_success_callback=self._on_test_success,
             show_header=True,
             compact=False,
+            load_password=True,
         )
 
         self.content = self._build_ui()
+        self.did_mount = self._on_mount
+        self.will_unmount = self._on_unmount
 
     def _build_ui(self):
         """Build the UI layout."""
@@ -72,5 +75,12 @@ class DatabaseTab(ft.Container):
     def _on_test_success(self, config: dict):
         """Handle successful connection test."""
         logger.debug(
-            f"Database connection test successful: {config['host']}:{config['port']}/{config['database']}"
+            f"Database connection test successful: "
+            f"{config['host']}:{config['port']}/{config['database']}"
         )
+
+    def _on_mount(self):
+        self.config_panel.reload_config()
+
+    def _on_unmount(self):
+        pass

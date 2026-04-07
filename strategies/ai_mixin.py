@@ -19,6 +19,7 @@ The Mixin handles:
 import asyncio
 import logging
 import math
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -56,6 +57,8 @@ class PreFetchedContext:
     sector_stats: dict = field(default_factory=dict)
     market_context: dict = field(default_factory=dict)
     market_context_str: str = ""
+    macro_context: str = ""
+    auxiliary_data: dict = field(default_factory=dict)
 
 
 ContextBuilder = Callable[[dict, PreFetchedContext], str]
@@ -277,6 +280,16 @@ class AIStrategyMixin:
             f"[AIStrategyMixin] Pre-fetched capital data: moneyflow={len(moneyflow_df)}, top_list={len(top_list_df)}, northbound={len(northbound_df)}",
         )
 
+        # --- Pre-fetch Auxiliary Data (Audit, Dividend, Pledge, Holders) ---
+        auxiliary_data = {}
+        try:
+            auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes)
+            logger.info(
+                f"[AIStrategyMixin] Pre-fetched auxiliary data for {len(auxiliary_data)} stocks"
+            )
+        except Exception as e:
+            logger.warning(f"[AIStrategyMixin] Failed to pre-fetch auxiliary data: {e}")
+
         # --- Bundle all pre-fetched data into PreFetchedContext ---
         prefetched = PreFetchedContext(
             capital={
@@ -291,6 +304,7 @@ class AIStrategyMixin:
             history_context=history_context,
             global_context=global_context,
             trade_date=trade_date,
+            auxiliary_data=auxiliary_data,
         )
 
         # --- Strategy-specific prefetch hook ---
@@ -568,9 +582,35 @@ class AIStrategyMixin:
             )
 
             # 7. Financials (extract from stock_info which already has screening data)
-            financials_text = self._build_financials_text(row)
+            base_financials = self._build_financials_text(row)
 
-            # 7b. History Feature Summary (Level-3: Factor Extraction + Summarization)
+            # 7a. Multi-Period Financial Trends (Phase 1.2)
+            multi_period_text = await self._build_multi_period_financials(
+                ts_code, dp.cache, prefetched.auxiliary_data
+            )
+
+            # 7b. Auxiliary Data (Phase 1.2)
+            auxiliary_text = await self._build_auxiliary_data_text(
+                ts_code, dp.cache, prefetched.auxiliary_data
+            )
+
+            # 7c. Macro Context (Phase 1.3) - build once per batch
+            if not hasattr(prefetched, "macro_context") or not prefetched.macro_context:
+                prefetched.macro_context = await self._build_macro_context(dp.cache)
+
+            # Combine all financial context
+            financials_parts = [base_financials]
+            invalid_texts = ["财务数据不足", "财务数据获取失败"]
+            if multi_period_text and multi_period_text not in invalid_texts:
+                financials_parts.append(f"\n【多期财务趋势】\n{multi_period_text}")
+            if auxiliary_text and auxiliary_text != "无辅助数据":
+                financials_parts.append(f"\n【辅助数据】\n{auxiliary_text}")
+            if prefetched.macro_context:
+                financials_parts.append(f"\n{prefetched.macro_context}")
+
+            financials_text = "\n".join(financials_parts)
+
+            # 7d. History Feature Summary (Level-3: Factor Extraction + Summarization)
             history_text = self._build_history_text(
                 history_df,
                 ts_code=ts_code,
@@ -953,7 +993,287 @@ class AIStrategyMixin:
         else:
             parts.append("北向持股数据: 暂无")
 
-        return "\n".join(parts) if parts else "资金面数据暂不可用"
+        return "\n".join(parts)
+
+    async def _build_multi_period_financials(
+        self, ts_code: str, cache: typing.Any, prefetched: dict | None = None
+    ) -> str:
+        """
+        构建多期财务趋势数据。
+
+        获取最近8个季度的财务数据，分析ROE、毛利率、营收/利润增速趋势。
+
+        Args:
+            ts_code: 股票代码
+            cache: 数据缓存实例
+            prefetched: 预取的辅助数据
+
+        Returns:
+            财务趋势文本
+        """
+
+        try:
+            if (
+                prefetched
+                and ts_code in prefetched
+                and "financial_history" in prefetched[ts_code]
+            ):
+                df = prefetched[ts_code]["financial_history"]
+            else:
+                df = await cache.get_financial_reports_history(ts_code, periods=8)
+
+            if df is None or df.empty:
+                return "财务数据不足"
+
+            parts = []
+
+            if "roe" in df.columns:
+                roe_values = df["roe"].dropna().tolist()
+                if roe_values:
+                    roe_str = ", ".join([f"{v:.2f}" for v in roe_values[:4]])
+                    parts.append(f"ROE趋势（近{len(roe_values)}季度）: {roe_str}")
+
+            if "grossprofit_margin" in df.columns:
+                margin_values = df["grossprofit_margin"].dropna().tolist()
+                if margin_values:
+                    margin_str = ", ".join([f"{v:.2f}" for v in margin_values[:4]])
+                    parts.append(f"毛利率趋势: {margin_str}")
+
+            if "or_yoy" in df.columns:
+                or_yoy_values = df["or_yoy"].dropna().tolist()
+                if or_yoy_values:
+                    or_yoy_str = ", ".join([f"{v:.2f}" for v in or_yoy_values[:4]])
+                    parts.append(f"营收增速趋势: {or_yoy_str}")
+
+            if "netprofit_yoy" in df.columns:
+                profit_yoy_values = df["netprofit_yoy"].dropna().tolist()
+                if profit_yoy_values:
+                    profit_yoy_str = ", ".join(
+                        [f"{v:.2f}" for v in profit_yoy_values[:4]]
+                    )
+                    parts.append(f"净利润增速趋势: {profit_yoy_str}")
+
+            if "n_cashflow_act" in df.columns and "n_income_attr_p" in df.columns:
+                cf_values = df["n_cashflow_act"].dropna().tolist()
+                profit_values = df["n_income_attr_p"].dropna().tolist()
+                if cf_values and profit_values:
+                    latest_cf = cf_values[0] if cf_values else 0
+                    latest_profit = profit_values[0] if profit_values else 0
+                    if latest_profit > 0:
+                        cf_ratio = latest_cf / latest_profit
+                        parts.append(f"现金流/净利润: {cf_ratio:.2f}")
+
+            return "\n".join(parts) if parts else "财务数据不足"
+
+        except Exception as e:
+            logger.warning(
+                f"[AIMixin] Failed to build multi-period financials for {ts_code}: {e}"
+            )
+            return "财务数据获取失败"
+
+    async def _build_auxiliary_data_text(
+        self,
+        ts_code: str,
+        cache: typing.Any,
+        prefetched: dict | None = None,
+    ) -> str:
+        """
+        构建辅助数据文本。
+
+        包含审计意见、主营构成、分红记录、质押比例、股东信息等辅助信息。
+
+        Args:
+            ts_code: 股票代码
+            cache: 数据缓存实例
+            prefetched: 预取的辅助数据（避免 N+1 查询）
+
+        Returns:
+            辅助数据文本
+        """
+
+        lines = []
+        has_data = False
+
+        try:
+            # 审计意见
+            if prefetched and ts_code in prefetched and "audit" in prefetched[ts_code]:
+                audit_df = prefetched[ts_code]["audit"]
+            else:
+                audit_df = await cache.get_fina_audit(ts_code)
+
+            if audit_df is not None and not audit_df.empty:
+                latest_audit = audit_df.iloc[0]
+                audit_result = latest_audit.get("audit_result", "未知")
+                lines.append(f"- 审计意见: {audit_result}")
+                has_data = True
+
+            # 主营构成
+            if prefetched and ts_code in prefetched and "mainbz" in prefetched[ts_code]:
+                top_business = prefetched[ts_code]["mainbz"]
+            else:
+                top_business = await cache.get_fina_mainbz(ts_code)
+            if top_business is not None and not top_business.empty:
+                total_sales = top_business["bz_sales"].sum()
+                if total_sales > 0:
+                    biz_items = []
+                    for _, row in top_business.head(3).iterrows():
+                        bz_name = row.get("bz_item", "未知")
+                        bz_sales = row.get("bz_sales", 0)
+                        ratio = (bz_sales / total_sales * 100) if total_sales > 0 else 0
+                        biz_items.append(f"{bz_name}({ratio:.1f}%)")
+                    lines.append(f"- 主营构成: {', '.join(biz_items)}")
+                    has_data = True
+
+            # 分红记录
+            if (
+                prefetched
+                and ts_code in prefetched
+                and "dividend" in prefetched[ts_code]
+            ):
+                dividend_df = prefetched[ts_code]["dividend"]
+            else:
+                dividend_df = await cache.get_dividend(ts_code)
+
+            if dividend_df is not None and not dividend_df.empty:
+                recent_div = dividend_df.head(3)
+                div_items = []
+                for _, row in recent_div.iterrows():
+                    end_date = str(row.get("end_date", ""))[:4]
+                    div_proc = row.get("div_proc", "")
+                    div_items.append(f"{end_date}年{div_proc}")
+                lines.append(f"- 近年分红: {', '.join(div_items)}")
+                has_data = True
+
+            # 质押比例
+            if prefetched and ts_code in prefetched and "pledge" in prefetched[ts_code]:
+                pledge_df = prefetched[ts_code]["pledge"]
+            else:
+                pledge_df = await cache.get_pledge_stat(ts_code)
+
+            if pledge_df is not None and not pledge_df.empty:
+                latest_pledge = pledge_df.iloc[0]
+                pledge_ratio = latest_pledge.get("pledge_ratio", 0)
+                if pledge_ratio and pledge_ratio > 0:
+                    warning = " ⚠️ 质押比例较高" if pledge_ratio > 30 else ""
+                    lines.append(f"- 质押比例: {pledge_ratio:.1f}%{warning}")
+                    has_data = True
+
+            # 第一大股东
+            if (
+                prefetched
+                and ts_code in prefetched
+                and "holders" in prefetched[ts_code]
+            ):
+                holders_df = prefetched[ts_code]["holders"]
+            else:
+                holders_df = await cache.get_top10_holders(ts_code)
+
+            if holders_df is not None and not holders_df.empty:
+                latest_holders = holders_df[
+                    holders_df["end_date"] == holders_df["end_date"].max()
+                ]
+                if not latest_holders.empty:
+                    top_holder = latest_holders.iloc[0].get("holder_name", "未知")
+                    top_ratio = latest_holders.iloc[0].get("hold_ratio", 0)
+                    lines.append(f"- 第一大股东: {top_holder} (持股{top_ratio:.2f}%)")
+                    has_data = True
+
+            # 股东人数
+            if (
+                prefetched
+                and ts_code in prefetched
+                and "holdernumber" in prefetched[ts_code]
+            ):
+                holder_num = prefetched[ts_code]["holdernumber"]
+            else:
+                holder_num = await cache.get_stk_holdernumber(ts_code)
+            if holder_num is not None and not holder_num.empty:
+                recent_num = holder_num.head(2)
+                if len(recent_num) >= 2:
+                    curr_num = recent_num.iloc[0].get("holder_num", 0)
+                    prev_num = recent_num.iloc[1].get("holder_num", 0)
+                    if prev_num > 0:
+                        change_pct = (curr_num - prev_num) / prev_num * 100
+                        if change_pct < -5:
+                            trend = "↓ 筹码集中"
+                        elif change_pct > 5:
+                            trend = "↑ 筹码分散"
+                        else:
+                            trend = "→ 基本稳定"
+                        lines.append(
+                            f"- 股东人数: {curr_num:,}户 ({trend} {change_pct:+.1f}%)"
+                        )
+                        has_data = True
+
+        except Exception as e:
+            logger.warning(
+                f"[AIMixin] Failed to build auxiliary data for {ts_code}: {e}"
+            )
+
+        if has_data:
+            return "\n".join(lines) + "\n"
+        return "无辅助数据"
+
+    async def _build_macro_context(self, cache: typing.Any) -> str:
+        """
+        构建宏观经济环境上下文。
+
+        L3 修复：新增 Shibor 利率注入，对价值投资和固收相关策略有重要参考价值。
+
+        Args:
+            cache: 数据缓存实例
+
+        Returns:
+            宏观经济环境文本
+        """
+        lines = ["【宏观经济环境】"]
+        has_data = False
+
+        try:
+            macro = await cache.get_macro_economy()
+            if macro is not None and not macro.empty:
+                latest = macro.iloc[0]
+
+                m2_yoy = latest.get("m2_yoy")
+                if m2_yoy is not None:
+                    lines.append(f"- M2同比增速: {m2_yoy:.2f}%")
+                    has_data = True
+
+                cpi = latest.get("cpi")
+                if cpi is not None:
+                    lines.append(f"- CPI: {cpi:.2f}")
+                    has_data = True
+
+                ppi = latest.get("ppi")
+                if ppi is not None:
+                    lines.append(f"- PPI: {ppi:.2f}")
+                    has_data = True
+
+            shibor = await cache.get_shibor_latest()
+            if shibor is not None and not shibor.empty:
+                shibor_latest = shibor.iloc[0]
+
+                on_rate = shibor_latest.get("on")
+                if on_rate is not None:
+                    lines.append(f"- Shibor隔夜: {on_rate:.2f}%")
+                    has_data = True
+
+                w1_rate = shibor_latest.get("1w")
+                if w1_rate is not None:
+                    lines.append(f"- Shibor1周: {w1_rate:.2f}%")
+                    has_data = True
+
+                m3_rate = shibor_latest.get("3m")
+                if m3_rate is not None:
+                    lines.append(f"- Shibor3个月: {m3_rate:.2f}%")
+                    has_data = True
+
+        except Exception as e:
+            logger.warning(f"[AIMixin] Failed to build macro context: {e}")
+
+        if has_data:
+            return "\n".join(lines) + "\n"
+        return ""
 
     @staticmethod
     def _build_financials_text(row: dict) -> str:
@@ -965,7 +1285,7 @@ class AIStrategyMixin:
         parts = []
 
         def fmt(val, suffix="", fmt_spec=".2f"):
-            """Format a value using _safe_float for NaN safety, returning 'N/A' for missing."""
+            """Format a value using _safe_float for NaN safety."""
             f = sf(val, default=None)  # type: ignore
             if f is None:
                 return "N/A"

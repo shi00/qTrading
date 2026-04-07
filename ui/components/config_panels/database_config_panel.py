@@ -66,6 +66,7 @@ class DatabaseConfigPanel(ft.Container):
         self._show_save_button = show_save_button
         self._load_password = load_password
         self._locale_subscription_id = None
+        self._is_verifying = False
 
         self._init_controls()
         self._load_config()
@@ -129,11 +130,11 @@ class DatabaseConfigPanel(ft.Container):
             on_change=self._on_input_change,
         )
 
+        self.status_icon = ft.Icon(visible=False, size=16)
         self.status_text = ft.Text(
             "",
             size=12,
             color=AppColors.TEXT_SECONDARY,
-            text_align=ft.TextAlign.CENTER,
         )
 
         self.db_info_text = ft.Text(
@@ -170,6 +171,10 @@ class DatabaseConfigPanel(ft.Container):
         else:
             self.db_password_input.value = ""
         self.db_name_input.value = db_config.get("database", "astock")
+
+    def reload_config(self):
+        self._load_config()
+        self._safe_update()
 
     def _build_ui(self):
         children = []
@@ -217,8 +222,9 @@ class DatabaseConfigPanel(ft.Container):
                 ),
                 ft.Container(height=12),
                 ft.Row(
-                    [self.status_text],
+                    [self.status_icon, self.status_text],
                     alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=5,
                 ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -256,6 +262,10 @@ class DatabaseConfigPanel(ft.Container):
             self.on_change()
 
     def _on_test_click(self, e):
+        if self._is_verifying:
+            self._show_warning(I18n.get("db_testing_in_progress"))
+            return
+
         if self.page:
             self.page.run_task(self.test_connection)
 
@@ -318,17 +328,18 @@ class DatabaseConfigPanel(ft.Container):
     async def test_connection(self) -> bool:
         is_valid, error = self.validate()
         if not is_valid:
-            self.status_text.value = f"✗ {error}"
-            self.status_text.color = AppColors.ERROR
-            self._safe_update()
+            self._show_error(error)
             return False
 
-        self.status_text.value = I18n.get("db_testing")
-        self.status_text.color = AppColors.WARNING
+        if self._is_verifying:
+            self._show_warning(I18n.get("db_testing_in_progress"))
+            return False
+
+        self._is_verifying = True
+        self._show_warning(I18n.get("db_testing"))
         self.btn_test.disabled = True
         if self.on_loading_change:
             self.on_loading_change(True)
-        self._safe_update()
 
         try:
             config = self.get_config()
@@ -342,8 +353,7 @@ class DatabaseConfigPanel(ft.Container):
             )
 
             if result.status == ConnectionStatus.SUCCESS:
-                self.status_text.value = f"✓ {result.message}"
-                self.status_text.color = AppColors.SUCCESS
+                self._show_success(result.message)
 
                 info = await DatabaseConfigService.get_database_info(
                     host=config["host"],
@@ -366,36 +376,34 @@ class DatabaseConfigPanel(ft.Container):
 
             elif result.status == ConnectionStatus.DATABASE_NOT_FOUND:
                 if self.db_create_checkbox.value:
-                    self.status_text.value = I18n.get(
-                        "db_will_create",
-                        default="Database not found. Will create on save.",
+                    self._show_warning(
+                        I18n.get(
+                            "db_will_create",
+                            default="Database not found. Will create on save.",
+                        )
                     )
-                    self.status_text.color = AppColors.WARNING
                     return True
                 else:
-                    self.status_text.value = f"✗ {result.message}"
-                    self.status_text.color = AppColors.ERROR
+                    self._show_error(result.message)
                     return False
             else:
-                self.status_text.value = f"✗ {result.message}"
-                self.status_text.color = AppColors.ERROR
+                self._show_error(result.message)
                 return False
 
         except ValueError as e:
             from ui.i18n import classify_error
 
             error_info = classify_error(e, context="db")
-            self.status_text.value = f"✗ {error_info['message']}"
-            self.status_text.color = AppColors.ERROR
+            self._show_error(error_info["message"])
             return False
         except Exception as e:
             from ui.i18n import classify_error
 
             error_info = classify_error(e, context="db")
-            self.status_text.value = f"✗ {error_info['message']}"
-            self.status_text.color = AppColors.ERROR
+            self._show_error(error_info["message"])
             return False
         finally:
+            self._is_verifying = False
             self.btn_test.disabled = False
             if self.on_loading_change:
                 self.on_loading_change(False)
@@ -404,15 +412,11 @@ class DatabaseConfigPanel(ft.Container):
     async def save_config(self) -> bool:
         is_valid, error = self.validate()
         if not is_valid:
-            self.status_text.value = f"✗ {error}"
-            self.status_text.color = AppColors.ERROR
-            self._safe_update()
+            self._show_error(error)
             return False
 
-        self.status_text.value = I18n.get("db_saving")
-        self.status_text.color = AppColors.WARNING
+        self._show_warning(I18n.get("db_saving"))
         self.btn_save.disabled = True
-        self._safe_update()
 
         try:
             config = self.get_config()
@@ -437,12 +441,24 @@ class DatabaseConfigPanel(ft.Container):
                     database=config["database"],
                 )
                 if not success:
-                    self.status_text.value = f"✗ {msg}"
-                    self.status_text.color = AppColors.ERROR
+                    self._show_error(msg)
                     return False
             elif result.status != ConnectionStatus.SUCCESS:
-                self.status_text.value = f"✗ {result.message}"
-                self.status_text.color = AppColors.ERROR
+                self._show_error(result.message)
+                return False
+
+            self._show_warning(I18n.get("db_creating_tables"))
+
+            success, msg = await DatabaseConfigService.ensure_tables_exist(
+                host=config["host"],
+                port=config["port"],
+                user=config["user"],
+                password=config["password"],
+                database=config["database"],
+            )
+
+            if not success:
+                self._show_error(msg)
                 return False
 
             ConfigHandler.save_db_config(
@@ -453,8 +469,7 @@ class DatabaseConfigPanel(ft.Container):
                 database=config["database"],
             )
 
-            self.status_text.value = I18n.get("db_msg_saved")
-            self.status_text.color = AppColors.SUCCESS
+            self._show_success(I18n.get("db_msg_saved"))
 
             if self.on_save_callback:
                 self.on_save_callback(config)
@@ -465,12 +480,35 @@ class DatabaseConfigPanel(ft.Container):
             from ui.i18n import classify_error
 
             error_info = classify_error(e, context="db")
-            self.status_text.value = f"✗ {error_info['message']}"
-            self.status_text.color = AppColors.ERROR
+            self._show_error(error_info["message"])
             return False
         finally:
             self.btn_save.disabled = False
             self._safe_update()
+
+    def _show_success(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.SUCCESS
+        self.status_icon.icon = ft.Icons.CHECK_CIRCLE
+        self.status_icon.color = AppColors.SUCCESS
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_error(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.ERROR
+        self.status_icon.icon = ft.Icons.ERROR
+        self.status_icon.color = AppColors.ERROR
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_warning(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.WARNING
+        self.status_icon.icon = ft.Icons.WARNING
+        self.status_icon.color = AppColors.WARNING
+        self.status_icon.visible = True
+        self._safe_update()
 
     def _safe_update(self):
         try:

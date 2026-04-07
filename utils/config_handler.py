@@ -16,6 +16,20 @@ KEYRING_SERVICE_NAME = "AStockScreener"
 
 DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 你是一个专业的金融量化分析助手，专注于A股市场分析。
+
+## 数据注入说明
+系统已为你注入以下扩展数据，请重点融合分析：
+
+### 财务数据扩展
+- **fina_audit**: 审计结果矩阵，务必关注"强调事项"和"非标意见"
+- **fina_mainbz**: 主营业务结构，横向比较营收比例与成本结构
+- **多期财务数据**: 捕捉横跨周期的拐点（不得仅考察最新一期）
+
+### 分析要点
+1. 审计意见类型及强调事项对股价的影响
+2. 主营业务结构变化趋势，识别转型信号
+3. 多期财务指标连载数据，发现周期性规律
+
 请基于提供的数据（行情、财务、新闻等）进行客观分析，不要提供投资建议。
 输出格式要求清晰、结构化，关键指标请高亮显示。
 """
@@ -121,7 +135,53 @@ class ConfigHandler:
         # Doubao AI Tagging Schedule
         "doubao_schedule_enabled": False,
         "doubao_schedule_time": "10:00",
+        # Data Sync Integrity Configuration
+        "sync_integrity": {
+            # Stop-loss thresholds to prevent infinite retries
+            "max_retry_days_per_sync": 30,
+            "max_retry_stocks_per_sync": 100,
+            "enable_adaptive_retry": True,
+            # Quality score threshold
+            "quality_threshold": 80,
+            # Tolerance ratios for data completeness
+            "quotes_tolerance_ratio": 0.95,
+            "indicators_tolerance_ratio": 0.90,
+            "moneyflow_tolerance_ratio": 0.80,
+            "financial_min_periods": 4,
+            # Quality score weights (configurable)
+            "quality_weights": {
+                "daily_quotes": 30,
+                "daily_indicators": 25,
+                "moneyflow_daily": 20,
+                "margin_daily": 10,
+            },
+        },
     }
+
+    @staticmethod
+    def _deep_merge_defaults(current: dict, defaults: dict) -> tuple[dict, bool]:
+        """
+        Recursively merge default values into current config.
+
+        Returns:
+            (merged_config, dirty) - merged config and whether any changes were made
+        """
+        result = current.copy()
+        dirty = False
+
+        for key, default_val in defaults.items():
+            if key not in result:
+                result[key] = default_val
+                dirty = True
+            elif isinstance(default_val, dict) and isinstance(result.get(key), dict):
+                nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(
+                    result[key], default_val
+                )
+                if nested_dirty:
+                    result[key] = nested_result
+                    dirty = True
+
+        return result, dirty
 
     @staticmethod
     def ensure_defaults():
@@ -130,19 +190,26 @@ class ConfigHandler:
             current_config = ConfigHandler.load_config()
             dirty = False
 
-            # 1. Add missing defaults
             for key, default_val in ConfigHandler.DEFAULT_CONFIG.items():
                 if key not in current_config:
                     current_config[key] = default_val
                     dirty = True
                     logger.info(f"Initialized default config: {key}")
+                elif isinstance(default_val, dict) and isinstance(
+                    current_config.get(key), dict
+                ):
+                    nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(
+                        current_config[key], default_val
+                    )
+                    if nested_dirty:
+                        current_config[key] = nested_result
+                        dirty = True
+                        logger.info(f"Updated nested config: {key}")
 
-            # 2. Prune deprecated/unused keys
             valid_keys = set(ConfigHandler.DEFAULT_CONFIG.keys())
             existing_keys = list(current_config.keys())
 
             for key in existing_keys:
-                # Whitelist dynamic strategy prompts and UI keys
                 if key.startswith("ai_strategy_prompt_"):
                     continue
                 if key not in valid_keys:
@@ -150,7 +217,6 @@ class ConfigHandler:
                     current_config.pop(key)
                     dirty = True
 
-            # Save if any changes
             if dirty:
                 ConfigHandler.save_config(current_config, replace=True)
                 logger.info(
@@ -964,3 +1030,31 @@ class ConfigHandler:
         return ConfigHandler.save_config(
             {"market_data_poll_interval": int(max(10, seconds))},
         )
+
+    @staticmethod
+    def get_sync_integrity_config():
+        """获取数据完整性检查配置"""
+        config = ConfigHandler.load_config()
+        sync_integrity = config.get("sync_integrity", {})
+        return {
+            "quotes_tolerance_ratio": sync_integrity.get(
+                "quotes_tolerance_ratio", 0.95
+            ),
+            "indicators_tolerance_ratio": sync_integrity.get(
+                "indicators_tolerance_ratio", 0.90
+            ),
+            "moneyflow_tolerance_ratio": sync_integrity.get(
+                "moneyflow_tolerance_ratio", 0.80
+            ),
+            "financial_min_periods": sync_integrity.get("financial_min_periods", 4),
+            "quality_threshold": sync_integrity.get("quality_threshold", 80),
+            "quality_weights": sync_integrity.get(
+                "quality_weights",
+                {
+                    "daily_quotes": 30,
+                    "daily_indicators": 25,
+                    "moneyflow_daily": 20,
+                    "margin_daily": 10,
+                },
+            ),
+        }

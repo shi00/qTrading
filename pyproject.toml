@@ -3,7 +3,7 @@
 line-length = 88
 # 匹配 Black 的缩进选项
 indent-width = 4
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # 默认开启 F(Pyflakes), E(pycodestyle errors), W(pycodestyle warnings), I(isort), UP(pyupgrade)

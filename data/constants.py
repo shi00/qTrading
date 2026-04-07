@@ -56,6 +56,7 @@ FINANCIAL_REPORT_SCHEMA_COLS = [
     "netprofit_yoy",
     "goodwill",
     "audit_result",
+    "n_cashflow_act",  # 经营活动产生的现金流量净额
 ]
 
 # Major Market Indices to Track

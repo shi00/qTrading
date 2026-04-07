@@ -9,18 +9,75 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SYNCED_TABLES: list[str] | None = None
 
+LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "block_trade"}
+
+_SAFE_TABLE_NAMES: frozenset[str] = frozenset(
+    {
+        "daily_quotes",
+        "daily_indicators",
+        "moneyflow_daily",
+        "margin_daily",
+        "northbound_holding",
+        "moneyflow_hsgt",
+        "index_daily",
+        "index_dailybasic",
+        "index_weight",
+        "limit_list",
+        "top_list",
+        "block_trade",
+        "suspend_d",
+        "financial_reports",
+        "fina_audit",
+        "fina_forecast",
+        "fina_mainbz",
+        "dividend",
+        "repurchase",
+        "pledge_stat",
+        "shibor_daily",
+        "stk_holdernumber",
+        "top10_holders",
+        "trade_cal",
+        "stock_basic",
+        "macro_economy",
+        "market_news",
+        "cn_m",
+    }
+)
+
 
 def _get_default_synced_tables() -> list[str]:
     """
     Lazy load default synced tables from HistoricalSyncStrategy.
     Avoids circular import at module load time.
+
+    Security: Only returns tables that exist in the hardcoded safe whitelist.
     """
     global _DEFAULT_SYNCED_TABLES
     if _DEFAULT_SYNCED_TABLES is None:
         from data.sync.historical import HistoricalSyncStrategy
 
-        _DEFAULT_SYNCED_TABLES = HistoricalSyncStrategy.SYNCED_TABLES.copy()
+        raw_tables = HistoricalSyncStrategy.SYNCED_TABLES.copy()
+        _DEFAULT_SYNCED_TABLES = [t for t in raw_tables if t in _SAFE_TABLE_NAMES]
     return _DEFAULT_SYNCED_TABLES
+
+
+def _normalize_trade_date(val) -> datetime.date:
+    """
+    Normalize trade date value to datetime.date.
+
+    Handles datetime.datetime, str (YYYYMMDD format), and datetime.date inputs.
+    Returns the original value if conversion fails.
+    """
+    if isinstance(val, datetime.date) and not isinstance(val, datetime.datetime):
+        return val
+    if isinstance(val, datetime.datetime):
+        return val.date()
+    if isinstance(val, str):
+        try:
+            return datetime.datetime.strptime(val, "%Y%m%d").date()
+        except ValueError:
+            return val
+    return val
 
 
 class QuoteDao(BaseDao):
@@ -77,7 +134,11 @@ class QuoteDao(BaseDao):
         if tables is None:
             tables = _get_default_synced_tables()
 
+        allowed_tables = set(_get_default_synced_tables())
         for table in tables:
+            if table not in allowed_tables:
+                logger.warning(f"[QuoteDao] Invalid table name rejected: {table}")
+                return False
             try:
                 df = await self._read_db(
                     f"SELECT 1 as val FROM {table} WHERE trade_date=$1 LIMIT 1",
@@ -89,6 +150,65 @@ class QuoteDao(BaseDao):
                 return False
 
         return True
+
+    async def get_expected_stock_count(self, trade_date: datetime.date | str) -> int:
+        """
+        计算指定日期的理论存活股票数。
+
+        使用 delist_date 精确排除历史某天已退市的股票。
+        同时验证该日期是否为交易日。
+
+        Note:
+            退市逻辑必须与 get_bulk_expected_stock_counts 保持同步。
+            WHERE 条件语义：
+            - list_status='L' 且 delist_date 为空或大于当前日期 → 存活
+            - list_status='D' 且 delist_date 非空且大于当前日期 → 存活（退市后仍有数据）
+
+        Args:
+            trade_date: 交易日期
+
+        Returns:
+            该日理论上应该有行情数据的股票数量
+        """
+        try:
+            df = await self._read_db(
+                """
+                WITH trade_day_check AS (
+                    SELECT 1 as is_trade_day
+                    FROM trade_cal
+                    WHERE cal_date = $1
+                      AND is_open = 1
+                      AND exchange = 'SSE'
+                ),
+                stock_counts AS (
+                    SELECT COUNT(*) as cnt 
+                    FROM stock_basic 
+                    WHERE list_date <= $1 
+                      AND (
+                        (list_status = 'L' AND (delist_date IS NULL OR delist_date > $1))
+                        OR 
+                        (list_status = 'D' AND delist_date IS NOT NULL AND delist_date > $1)
+                      )
+                )
+                SELECT 
+                    COALESCE((SELECT is_trade_day FROM trade_day_check), 0) as is_trade_day,
+                    (SELECT cnt FROM stock_counts) as cnt
+                """,
+                (trade_date,),
+            )
+
+            if df is not None and not df.empty:
+                is_trade_day = int(df["is_trade_day"].iloc[0])
+                if is_trade_day == 0:
+                    logger.debug(f"[QuoteDao] {trade_date} is not a trading day")
+                    return 0
+                return int(df["cnt"].iloc[0])
+            return 0
+        except Exception as e:
+            logger.warning(
+                f"[QuoteDao] Failed to get expected stock count for {trade_date}: {e}"
+            )
+            return 0
 
     async def get_daily_quotes(
         self,
@@ -175,16 +295,19 @@ class QuoteDao(BaseDao):
             "northbound_holding": "trade_date",
             "moneyflow_hsgt": "trade_date",
             "margin_daily": "trade_date",
-            "suspend_d": "trade_date",
-            "financial_reports": "end_date",
             "limit_list": "trade_date",
+            "suspend_d": "trade_date",
             "top_list": "trade_date",
             "block_trade": "trade_date",
             "index_daily": "trade_date",
             "index_dailybasic": "trade_date",
         }
 
-        date_col = date_col_map.get(table_name, "trade_date")
+        if table_name not in date_col_map:
+            logger.warning(f"[QuoteDao] Invalid table name rejected: {table_name}")
+            return set()
+
+        date_col = date_col_map[table_name]
 
         try:
             df = await self._read_db(
@@ -501,3 +624,303 @@ class QuoteDao(BaseDao):
         if not td:
             return pd.DataFrame()
         return await self.get_northbound(trade_date=td)
+
+    async def get_bulk_table_counts(
+        self,
+        table_name: str,
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+    ) -> dict[datetime.date, int]:
+        """
+        批量获取指定时间范围内每天的记录数。
+
+        避免逐日查询，单次SQL返回所有日期的统计。
+
+        Args:
+            table_name: 表名
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            dict[日期, 记录数]
+        """
+        allowed_tables = set(_get_default_synced_tables())
+        if table_name not in allowed_tables:
+            logger.warning(f"[QuoteDao] Invalid table name rejected: {table_name}")
+            return {}
+
+        try:
+            df = await self._read_db(
+                f"""
+                SELECT trade_date, COUNT(*) as cnt 
+                FROM {table_name} 
+                WHERE trade_date BETWEEN $1 AND $2
+                GROUP BY trade_date
+                """,
+                (start_date, end_date),
+            )
+
+            if df is None or df.empty:
+                return {}
+
+            normalized_results = {}
+            for trade_date, count in zip(df["trade_date"], df["cnt"]):
+                normalized_results[_normalize_trade_date(trade_date)] = count
+
+            return normalized_results
+        except Exception as e:
+            logger.warning(
+                f"[QuoteDao] Failed to get bulk counts for {table_name}: {e}"
+            )
+            return {}
+
+    async def get_bulk_expected_stock_counts(
+        self,
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+    ) -> dict[datetime.date, int]:
+        """
+        批量获取指定时间范围内每天的理论存活股票数。
+
+        使用 delist_date 精确排除历史退市股票。
+
+        Note:
+            退市逻辑必须与 get_expected_stock_count 保持同步。
+            WHERE 条件语义：
+            - list_status='L' 且 delist_date 为空或大于当前日期 → 存活
+            - list_status='D' 且 delist_date 非空且大于当前日期 → 存活（退市后仍有数据）
+
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            dict[日期, 理论存活股票数]
+        """
+        try:
+            df = await self._read_db(
+                """
+                WITH trading_days AS (
+                    SELECT cal_date AS trade_date
+                    FROM trade_cal
+                    WHERE cal_date BETWEEN $1 AND $2
+                      AND is_open = 1
+                      AND exchange = 'SSE'
+                ),
+                stock_counts AS (
+                    SELECT 
+                        t.trade_date,
+                        COUNT(s.ts_code) as expected_count
+                    FROM trading_days t
+                    LEFT JOIN stock_basic s ON s.list_date <= t.trade_date 
+                        AND (
+                            (s.list_status = 'L' AND (s.delist_date IS NULL OR s.delist_date > t.trade_date))
+                            OR 
+                            (s.list_status = 'D' AND s.delist_date IS NOT NULL AND s.delist_date > t.trade_date)
+                        )
+                    GROUP BY t.trade_date
+                )
+                SELECT trade_date, expected_count FROM stock_counts
+                ORDER BY trade_date
+                """,
+                (start_date, end_date),
+            )
+
+            if df is None or df.empty:
+                logger.warning(
+                    f"[QuoteDao] No trading days found for range {start_date} to {end_date}"
+                )
+                return {}
+
+            normalized_results = {}
+            for trade_date, count in zip(df["trade_date"], df["expected_count"]):
+                normalized_results[_normalize_trade_date(trade_date)] = count
+
+            return normalized_results
+        except Exception as e:
+            logger.warning(f"[QuoteDao] Failed to get bulk expected counts: {e}")
+            return {}
+
+    async def get_bulk_sync_quality_scores(
+        self,
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+        tables: list | None = None,
+    ) -> dict[datetime.date, dict]:
+        """
+        批量评估指定时间范围内每天的数据同步质量。
+
+        使用批量聚合查询避免 N+1 问题，性能提升数百倍。
+
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期
+            tables: 要检查的表列表
+
+        Returns:
+            {trade_date: quality_info} 字典，其中 quality_info 包含：
+            {
+                "score": 0-100,
+                "expected_base": int,
+                "tables": {table_name: {"count": int, "expected": int, "ratio": float, "passed": bool}},
+                "issues": [str],
+            }
+        """
+        from utils.config_handler import ConfigHandler
+
+        if tables is None:
+            tables = _get_default_synced_tables()
+
+        config = ConfigHandler.get_sync_integrity_config()
+
+        expected_bases = await self.get_bulk_expected_stock_counts(start_date, end_date)
+
+        if not expected_bases:
+            logger.warning(
+                "[QuoteDao] Cannot determine expected bases for quality check"
+            )
+            return {}
+
+        table_counts = {}
+        for table in tables:
+            table_counts[table] = await self.get_bulk_table_counts(
+                table, start_date, end_date
+            )
+
+        table_tolerance_map = {
+            "daily_quotes": config["quotes_tolerance_ratio"],
+            "daily_indicators": config["indicators_tolerance_ratio"],
+            "moneyflow_daily": config["moneyflow_tolerance_ratio"],
+            "margin_daily": config["moneyflow_tolerance_ratio"],
+            "northbound_holding": 0.50,
+            "limit_list": 0.30,
+            "suspend_d": 0.10,
+            "index_daily": 0.95,
+            "index_dailybasic": 0.95,
+            "top_list": 0.30,
+            "block_trade": 0.20,
+            "moneyflow_hsgt": 0.95,
+        }
+
+        results = {}
+
+        for trade_date, expected_base in expected_bases.items():
+            result = {
+                "score": 0,
+                "expected_base": expected_base,
+                "tables": {},
+                "issues": [],
+            }
+
+            if expected_base == 0:
+                result["issues"].append("无法计算理论股票数")
+                results[trade_date] = result
+                continue
+
+            quotes_count = table_counts.get("daily_quotes", {}).get(trade_date, 0)
+            quotes_ratio = quotes_count / expected_base if expected_base > 0 else 0
+            quotes_passed = quotes_ratio >= config["quotes_tolerance_ratio"]
+
+            result["tables"]["daily_quotes"] = {
+                "count": quotes_count,
+                "expected": expected_base,
+                "ratio": quotes_ratio,
+                "passed": quotes_passed,
+            }
+
+            if not quotes_passed:
+                result["issues"].append(
+                    f"daily_quotes: {quotes_count}/{expected_base} ({quotes_ratio:.1%})"
+                )
+
+            reference_count = quotes_count if quotes_count > 0 else expected_base
+
+            total_ratio = quotes_ratio
+            valid_tables = 1
+
+            LOW_FREQUENCY_THRESHOLD = 0.5
+            low_frequency_tables = {
+                t
+                for t, tol in table_tolerance_map.items()
+                if tol < LOW_FREQUENCY_THRESHOLD
+            }
+
+            for table in tables:
+                if table == "daily_quotes":
+                    continue
+
+                count = table_counts.get(table, {}).get(trade_date, 0)
+                tolerance = table_tolerance_map.get(table, 0.80)
+                expected = int(reference_count * tolerance)
+
+                if table in low_frequency_tables:
+                    result["tables"][table] = {
+                        "count": count,
+                        "expected": 0,
+                        "ratio": 1.0,
+                        "passed": True,
+                        "note": "低频事件表，不计入评分",
+                    }
+                    continue
+
+                ratio = min(1.0, count / expected) if expected > 0 else 0
+                passed = count >= expected
+
+                result["tables"][table] = {
+                    "count": count,
+                    "expected": expected,
+                    "ratio": ratio,
+                    "passed": passed,
+                }
+
+                total_ratio += ratio
+                valid_tables += 1
+
+                if not passed:
+                    result["issues"].append(f"{table}: {count}/{expected}")
+
+            if valid_tables > 0:
+                quality_weights = config.get("quality_weights", {})
+                total_weight = 0
+                weighted_score = 0
+
+                for table, info in result["tables"].items():
+                    if "ratio" in info:
+                        weight = quality_weights.get(table, 5)
+                        weighted_score += info["ratio"] * weight
+                        total_weight += weight
+
+                if total_weight > 0:
+                    result["score"] = int(
+                        min(100, (weighted_score / total_weight) * 100)
+                    )
+
+            results[trade_date] = result
+
+        return results
+
+    async def get_sync_quality_score(self, trade_date: datetime.date | str) -> dict:
+        """
+        评估单个日期的数据同步质量（相对基准法）。
+
+        注意：此方法用于单日期实时检查。
+        批量检查请使用 get_bulk_sync_quality_scores 以避免 N+1 查询风暴。
+
+        Returns:
+            {
+                "score": 0-100,
+                "expected_base": int,
+                "tables": {table_name: {"count": int, "expected": int, "ratio": float, "passed": bool}},
+                "issues": [str],
+            }
+        """
+        if isinstance(trade_date, str):
+            normalized = datetime.datetime.strptime(trade_date, "%Y%m%d").date()
+        else:
+            normalized = trade_date
+
+        results = await self.get_bulk_sync_quality_scores(normalized, normalized)
+        return results.get(
+            normalized,
+            {"score": 0, "expected_base": 0, "tables": {}, "issues": ["查询失败"]},
+        )

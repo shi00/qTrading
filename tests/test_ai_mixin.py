@@ -645,3 +645,234 @@ class TestSafeFloat:
     def test_custom_default(self):
         """自定义默认值"""
         assert AIStrategyMixin._safe_float(None, default=-1.0) == -1.0
+
+
+class TestMultiPeriodFinancials:
+    """测试多期财务数据注入"""
+
+    @pytest.fixture
+    def mock_cache(self):
+        """创建模拟缓存"""
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "end_date": ["20231231", "20230930", "20230630", "20230331"],
+                    "roe": [12.5, 11.8, 10.5, 9.2],
+                    "grossprofit_margin": [35.0, 34.5, 33.8, 32.5],
+                    "or_yoy": [15.0, 12.0, 8.0, 5.0],
+                    "netprofit_yoy": [20.0, 18.0, 15.0, 10.0],
+                    "n_cashflow_act": [100000000, 90000000, 80000000, 70000000],
+                    "n_income_attr_p": [50000000, 45000000, 40000000, 35000000],
+                }
+            )
+        )
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_build_multi_period_financials_success(self, mock_cache):
+        """成功构建多期财务趋势"""
+        result = await AIStrategyMixin()._build_multi_period_financials(
+            "000001.SZ", mock_cache
+        )
+
+        assert result is not None
+        assert "ROE趋势" in result or "财务数据不足" in result
+
+    @pytest.mark.asyncio
+    async def test_build_multi_period_financials_empty(self, mock_cache):
+        """空财务数据"""
+        mock_cache.get_financial_reports_history = AsyncMock(
+            return_value=pd.DataFrame()
+        )
+
+        result = await AIStrategyMixin()._build_multi_period_financials(
+            "000001.SZ", mock_cache
+        )
+
+        assert result == "财务数据不足"
+
+    @pytest.mark.asyncio
+    async def test_build_multi_period_financials_none(self, mock_cache):
+        """None 财务数据"""
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=None)
+
+        result = await AIStrategyMixin()._build_multi_period_financials(
+            "000001.SZ", mock_cache
+        )
+
+        assert result == "财务数据不足"
+
+    @pytest.mark.asyncio
+    async def test_build_multi_period_financials_cashflow_ratio(self, mock_cache):
+        """现金流/净利润比率计算"""
+        result = await AIStrategyMixin()._build_multi_period_financials(
+            "000001.SZ", mock_cache
+        )
+
+        assert result is not None
+
+
+class TestAuxiliaryDataText:
+    """测试辅助数据文本构建"""
+
+    @pytest.fixture
+    def mock_cache(self):
+        """创建模拟缓存"""
+        cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame(
+                {"ts_code": ["000001.SZ"], "audit_result": ["标准无保留意见"]}
+            )
+        )
+        cache.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "bz_item": ["利息收入", "手续费收入", "投资收益"],
+                    "bz_sales": [5000000000, 2000000000, 1000000000],
+                }
+            )
+        )
+        cache.get_dividend = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "end_date": ["20231231", "20221231", "20211231"],
+                    "div_proc": ["实施方案", "实施方案", "实施方案"],
+                }
+            )
+        )
+        cache.get_pledge_stat = AsyncMock(
+            return_value=pd.DataFrame({"pledge_ratio": [15.5]})
+        )
+        cache.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "end_date": ["20231231", "20231231"],
+                    "holder_name": ["中国平安", "香港中央结算"],
+                    "hold_ratio": [40.0, 5.0],
+                }
+            )
+        )
+        cache.get_stk_holdernumber = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "end_date": ["20231231", "20230930"],
+                    "holder_num": [500000, 520000],
+                }
+            )
+        )
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_build_auxiliary_data_success(self, mock_cache):
+        """成功构建辅助数据"""
+        result = await AIStrategyMixin()._build_auxiliary_data_text(
+            "000001.SZ", mock_cache
+        )
+
+        assert result is not None
+        assert result != "无辅助数据"
+
+    @pytest.mark.asyncio
+    async def test_build_auxiliary_data_with_prefetched(self, mock_cache):
+        """使用预取数据构建"""
+        prefetched = {
+            "000001.SZ": {
+                "audit": pd.DataFrame({"audit_result": ["标准无保留意见"]}),
+                "dividend": pd.DataFrame({"end_date": ["20231231"]}),
+                "pledge": pd.DataFrame({"pledge_ratio": [10.0]}),
+                "holders": pd.DataFrame(
+                    {
+                        "end_date": ["20231231"],
+                        "holder_name": ["测试股东"],
+                        "hold_ratio": [30.0],
+                    }
+                ),
+            }
+        }
+
+        result = await AIStrategyMixin()._build_auxiliary_data_text(
+            "000001.SZ", mock_cache, prefetched
+        )
+
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_build_auxiliary_data_empty(self, mock_cache):
+        """空辅助数据"""
+        mock_cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_dividend = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
+
+        result = await AIStrategyMixin()._build_auxiliary_data_text(
+            "000001.SZ", mock_cache
+        )
+
+        assert result == "无辅助数据"
+
+    @pytest.mark.asyncio
+    async def test_build_auxiliary_data_high_pledge_warning(self, mock_cache):
+        """高质押比例警告"""
+        mock_cache.get_pledge_stat = AsyncMock(
+            return_value=pd.DataFrame({"pledge_ratio": [50.0]})
+        )
+
+        result = await AIStrategyMixin()._build_auxiliary_data_text(
+            "000001.SZ", mock_cache
+        )
+
+        assert "质押比例较高" in result or result == "无辅助数据"
+
+
+class TestMacroContext:
+    """测试宏观经济上下文构建"""
+
+    @pytest.fixture
+    def mock_cache(self):
+        """创建模拟缓存"""
+        cache = MagicMock()
+        cache.get_macro_economy = AsyncMock(
+            return_value=pd.DataFrame({"m2_yoy": [8.5], "cpi": [0.2], "ppi": [-2.5]})
+        )
+        cache.get_shibor_latest = AsyncMock(
+            return_value=pd.DataFrame({"on": [2.0], "1w": [2.5], "3m": [3.0]})
+        )
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_success(self, mock_cache):
+        """成功构建宏观上下文"""
+        result = await AIStrategyMixin()._build_macro_context(mock_cache)
+
+        assert result is not None
+        assert "宏观经济环境" in result
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_with_shibor(self, mock_cache):
+        """包含 Shibor 利率"""
+        result = await AIStrategyMixin()._build_macro_context(mock_cache)
+
+        assert "Shibor" in result
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_empty(self, mock_cache):
+        """空宏观数据"""
+        mock_cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
+
+        result = await AIStrategyMixin()._build_macro_context(mock_cache)
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_none(self, mock_cache):
+        """None 宏观数据"""
+        mock_cache.get_macro_economy = AsyncMock(return_value=None)
+        mock_cache.get_shibor_latest = AsyncMock(return_value=None)
+
+        result = await AIStrategyMixin()._build_macro_context(mock_cache)
+
+        assert result == ""

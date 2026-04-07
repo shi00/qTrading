@@ -165,6 +165,24 @@ class FinancialSyncStrategy(ISyncStrategy):
         synced_stocks = await self.context.cache.get_completed_step4_stocks(
             sync_version=1,
         )
+
+        # === [断点续传逻辑增强验证] ===
+        # 找出虽然标记为完成，但实际期数不够的残缺股票
+        MIN_PERIODS = ConfigHandler.get_sync_integrity_config().get(
+            "financial_min_periods", 4
+        )
+        incomplete_stocks = await self.context.cache.get_incomplete_financial_stocks(
+            MIN_PERIODS
+        )
+
+        if incomplete_stocks:
+            logger.info(
+                f"[FinancialSync] IntegrityCheck | Found {len(incomplete_stocks)} "
+                f"conceptually complete but actually incomplete stocks. Forcing re-sync."
+            )
+            synced_stocks = set(synced_stocks) - incomplete_stocks
+        # ===================================
+
         pending_stocks = sorted([s for s in all_stocks if s not in synced_stocks])
         skipped_count = total_stocks - len(pending_stocks)
 
@@ -451,6 +469,8 @@ class FinancialSyncStrategy(ISyncStrategy):
             return
 
         total_saved = 0
+        total_mainbz_rows = 0
+        total_audit_rows = 0
         concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         semaphore = asyncio.Semaphore(concurrency)
 
@@ -468,29 +488,25 @@ class FinancialSyncStrategy(ISyncStrategy):
             if not target_list:
                 continue
 
-            tasks = []
-
             async def sync_one_target(item):
-                nonlocal total_saved, total_mainbz_rows, total_audit_rows
                 ts_code = item["ts_code"]
                 period = item["end_date"]
+                result = {"saved": 0, "mainbz": 0, "audit": 0}
 
                 async with semaphore:
                     try:
                         await asyncio.sleep(
                             ConfigHandler.get_sync_request_delay(is_heavy=False),
                         )
-                        # Use internal helper
                         df, aux_counts = await self._fetch_comprehensive_financial_data(
                             ts_code,
                             period=period,
                         )
 
-                        total_mainbz_rows += aux_counts["mainbz"]
-                        total_audit_rows += aux_counts["audit"]
+                        result["mainbz"] = aux_counts["mainbz"]
+                        result["audit"] = aux_counts["audit"]
 
                         if df is not None and not df.empty:
-                            # Apply Schema
                             for col in FINANCIAL_REPORT_SCHEMA_COLS:
                                 if col not in df.columns:
                                     df[col] = None
@@ -499,16 +515,21 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 df[FINANCIAL_REPORT_SCHEMA_COLS],
                             )
                             if count > 0:
-                                total_saved += count
+                                result["saved"] = count
                     except Exception as e:
                         logger.warning(
                             f"[FinancialSync] Incremental | ⚠️ Failed {ts_code} period={period}: {e}",
                         )
 
-            for item in target_list:
-                tasks.append(sync_one_target(item))
+                return result
 
-            await asyncio.gather(*tasks)
+            tasks = [sync_one_target(item) for item in target_list]
+            results = await asyncio.gather(*tasks)
+
+            for r in results:
+                total_saved += r["saved"]
+                total_mainbz_rows += r["mainbz"]
+                total_audit_rows += r["audit"]
 
             day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()
             await self.context.cache.update_sync_status(

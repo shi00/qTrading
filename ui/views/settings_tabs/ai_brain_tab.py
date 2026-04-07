@@ -125,9 +125,11 @@ class AIBrainTab(ft.Container):
         self.btn_save_ai = ft.ElevatedButton(
             text=I18n.get("settings_save_ai"),
             icon=ft.Icons.SAVE,
-            on_click=self._save_ai_settings,
+            on_click=lambda e: (
+                self.page.run_task(self._save_ai_settings, e) if self.page else None
+            ),
             style=AppStyles.primary_button(),
-            width=_INPUT_WIDTH_LARGE,
+            height=40,
         )
 
     def _build_content(self):
@@ -333,6 +335,8 @@ class AIBrainTab(ft.Container):
         """组件挂载后订阅语言变更"""
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
         logger.debug("[AIBrainTab] Subscribed to locale changes")
+        self.llm_config_panel.reload_config()
+        self.local_model_panel.reload_config()
 
     def will_unmount(self):
         """组件卸载前取消订阅"""

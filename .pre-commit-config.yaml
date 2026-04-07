@@ -1,7 +1,6 @@
 repos:
   - repo: local
     hooks:
-      # 1. 静态代码检查 (使用虚拟环境中的 Ruff)
       - id: ruff-check
         name: Ruff Check
         entry: python -m ruff check --fix
@@ -9,27 +8,9 @@ repos:
         types_or: [ python, pyi ]
         require_serial: true
 
-      # 2. 格式化检查 (使用虚拟环境中的 Ruff)
       - id: ruff-format
         name: Ruff Format
         entry: python -m ruff format
         language: system
         types_or: [ python, pyi ]
         require_serial: true
-
-      # 3. 类型检查 (Pyright)
-      - id: pyright
-        name: Pyright Type Check
-        entry: npx pyright
-        language: system
-        types_or: [ python, pyi ]
-        pass_filenames: false
-
-      # 4. 自动化单元测试 (Pytest) - 仅在 push 时运行
-      - id: pytest
-        name: Pytest
-        entry: python -m pytest tests/ -v --tb=short
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-push]

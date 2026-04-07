@@ -20,7 +20,6 @@ Features:
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
 
 import flet as ft
@@ -260,20 +259,14 @@ class OnboardingWizard(ft.Container):
         )
 
     def _init_token_controls(self):
-        saved_token = ConfigHandler.get_token()
-        self.token_input = ft.TextField(
-            label=I18n.get("wizard_token_label"),
-            password=True,
-            can_reveal_password=True,
-            width=AppStyles.CONTROL_WIDTH_LG,
-            hint_text=I18n.get("wizard_token_hint"),
-            value=saved_token or "",
-            on_change=lambda e: self._on_input_change("token"),
-            border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-        )
-        self.token_status = ft.Text(
-            "", size=12, color=AppColors.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER
+        from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
+
+        self.tushare_panel = TushareConfigPanel(
+            compact=True,
+            show_save_button=False,
+            show_register_link=True,
+            show_internal_loading=False,
+            on_loading_change=self._on_panel_loading_change,
         )
 
     def _init_cloud_ai_controls(self):
@@ -283,9 +276,6 @@ class OnboardingWizard(ft.Container):
             show_save_button=False,
             compact=True,
             on_loading_change=self._on_panel_loading_change,
-        )
-        self.ai_status = ft.Text(
-            "", size=12, color=AppColors.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER
         )
 
     def _init_local_model_controls(self):
@@ -298,25 +288,12 @@ class OnboardingWizard(ft.Container):
             compact=True,
             show_internal_loading=False,
             on_change=lambda: self._on_input_change("local_model"),
-            on_loading_change=self._on_local_model_loading_change,
-        )
-        self.local_model_status = ft.Text(
-            "", size=12, color=AppColors.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER
+            on_loading_change=self._on_panel_loading_change,
         )
 
     def _on_panel_loading_change(self, loading: bool):
         """通用面板加载状态回调 - 仅控制遮罩显隐"""
         self._show_loading_overlay(loading)
-        self._safe_update()
-
-    def _on_local_model_loading_change(self, loading: bool):
-        self._show_loading_overlay(loading)
-        if loading:
-            self.local_model_status.value = I18n.get("wizard_model_loading")
-            self.local_model_status.color = AppColors.WARNING
-        else:
-            self.local_model_status.value = self.local_model_panel.status_text.value
-            self.local_model_status.color = self.local_model_panel.status_text.color
         self._safe_update()
 
     def _init_sync_controls(self):
@@ -345,7 +322,7 @@ class OnboardingWizard(ft.Container):
         self.btn_sync_later = ft.TextButton(
             I18n.get("wizard_btn_sync_later"),
             icon=ft.Icons.SCHEDULE,
-            on_click=lambda e: self._skip_sync(),
+            on_click=lambda e: self.app_page.run_task(self._skip_sync),
         )
         self.btn_cancel_sync = ft.ElevatedButton(
             I18n.get("wizard_btn_cancel"),
@@ -782,24 +759,6 @@ class OnboardingWizard(ft.Container):
 
     def _build_token_step(self):
         desc = I18n.get("wizard_step1_desc")
-        url = "https://tushare.pro/register"
-
-        # 清洗文本，移除包含链接的行，避免重复
-        lines = desc.split("\n")
-        cleaned_lines = [line for line in lines if url not in line]
-        cleaned_desc = "\n".join(cleaned_lines)
-
-        link_button = ft.Container(
-            content=ft.TextButton(
-                text=I18n.get("wizard_token_register"),
-                icon=ft.Icons.OPEN_IN_NEW,
-                icon_color=AppColors.ACCENT,
-                tooltip=url,
-                on_click=lambda e: e.page.launch_url(url) if e.page else None,
-                style=ft.ButtonStyle(color=AppColors.ACCENT),
-            ),
-            margin=ft.margin.only(top=5, bottom=15),
-        )
 
         return ft.Column(
             [
@@ -812,14 +771,13 @@ class OnboardingWizard(ft.Container):
                 ),
                 ft.Container(height=10),
                 ft.Text(
-                    cleaned_desc,
+                    desc,
                     size=14,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                link_button,
-                self.token_input,
-                self.token_status,
+                ft.Container(height=20),
+                self.tushare_panel,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -848,7 +806,6 @@ class OnboardingWizard(ft.Container):
                     border_radius=8,
                     bgcolor=AppColors.SURFACE,
                 ),
-                self.ai_status,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -877,7 +834,6 @@ class OnboardingWizard(ft.Container):
                     border_radius=8,
                     bgcolor=AppColors.SURFACE,
                 ),
-                self.local_model_status,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
@@ -1002,6 +958,23 @@ class OnboardingWizard(ft.Container):
             result = await self.database_panel.test_connection()
             if result:
                 config = self.database_panel.get_config()
+
+                from data.persistence.db_config_service import DatabaseConfigService
+
+                success, msg = await DatabaseConfigService.ensure_tables_exist(
+                    host=config["host"],
+                    port=config["port"],
+                    user=config["user"],
+                    password=config["password"],
+                    database=config["database"],
+                )
+
+                if not success:
+                    self.database_panel.status_text.value = f"✗ {msg}"
+                    self.database_panel.status_text.color = AppColors.ERROR
+                    self.database_panel._safe_update()
+                    return False
+
                 ConfigHandler.save_db_config(
                     host=config["host"],
                     port=config["port"],
@@ -1015,115 +988,15 @@ class OnboardingWizard(ft.Container):
             self._safe_update()
 
     async def _validate_and_save_token(self) -> bool:
-        token = self.token_input.value.strip()
-
-        if not token:
-            err_msg = I18n.get("wizard_err_token_required")
-            self.token_status.value = err_msg
-            self.token_status.color = AppColors.ERROR
-            self._safe_update()
-            return False
-
-        self._show_loading_overlay(True)
-        self.token_status.value = I18n.get("wizard_verifying")
-        self.token_status.color = AppColors.WARNING
-        self._safe_update()
-
-        try:
-            import asyncio
-
-            from data.external.tushare_client import TushareClient
-
-            client = TushareClient(token=token)
-            await asyncio.to_thread(
-                client.get_trade_dates, start_date="20250101", end_date="20250101"
-            )
-
-            ConfigHandler.save_token(token)
-
-            self.token_status.value = I18n.get("wizard_msg_token_success")
-            self.token_status.color = AppColors.SUCCESS
-            self._safe_update()
-            return True
-
-        except Exception as ex:
-            from ui.i18n import classify_error
-
-            error_info = classify_error(ex, context="token")
-            self.token_status.value = error_info["message"]
-            self.token_status.color = AppColors.ERROR
-            logger.error(f"[OnboardingWizard] Token verification failed: {ex}")
-            self._safe_update()
-            return False
-        finally:
-            self._show_loading_overlay(False)
-            self._safe_update()
+        return await self.tushare_panel.verify_token()
 
     async def _validate_and_save_cloud_ai(self) -> bool:
-        from services.ai_service import AIService
-
-        config = self.llm_config_panel.get_current_config()
-        provider = config.get("provider", "").strip()
-        model = config.get("model", "").strip()
-
-        if not provider or not model:
-            err_msg = I18n.get("wizard_err_provider_model_required")
-            self.ai_status.value = err_msg
-            self.ai_status.color = AppColors.ERROR
-            self._safe_update()
-            return False
-
-        api_key = config.get("api_key", "").strip()
-        base_url = config.get("base_url", "").strip()
-
-        if not api_key:
-            existing_config = ConfigHandler.get_llm_config()
-            existing_key = existing_config.get("api_key", "")
-            if not existing_key:
-                err_msg = I18n.get("wizard_err_api_key_required")
-                self.ai_status.value = err_msg
-                self.ai_status.color = AppColors.ERROR
-                self._safe_update()
-                return False
-            api_key = existing_key
-            base_url = existing_config.get("base_url", "")
-
-        self._show_loading_overlay(True)
-        self.ai_status.value = I18n.get("wizard_status_verifying")
-        self.ai_status.color = AppColors.TEXT_SECONDARY
-        self._safe_update()
-
-        try:
-            result = await AIService.test_connection(
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-            )
-
-            if not result.get("success"):
-                err_msg = result.get("message", "Connection failed")
-                self.ai_status.value = err_msg
-                self.ai_status.color = AppColors.ERROR
-                self._safe_update()
-                return False
-
+        if await self.llm_config_panel.async_verify_connection():
             self.llm_config_panel.save_current_config()
-
-            self.ai_status.value = I18n.get("wizard_ai_configured")
-            self.ai_status.color = AppColors.SUCCESS
-            self._safe_update()
             return True
 
-        except Exception as e:
-            logger.error(f"[OnboardingWizard] AI connection test failed: {e}")
-            self.ai_status.value = str(e)
-            self.ai_status.color = AppColors.ERROR
-            self._safe_update()
-            return False
-        finally:
-            self._show_loading_overlay(False)
-            self._safe_update()
+        self._safe_update()
+        return False
 
     async def _validate_and_save_local_model(self) -> bool:
         model_path = self.local_model_panel.model_path_input.value.strip()
@@ -1131,39 +1004,12 @@ class OnboardingWizard(ft.Container):
         if not model_path:
             return True
 
-        if not os.path.exists(model_path):
-            self.local_model_status.value = I18n.get("wizard_err_model_not_found")
-            self.local_model_status.color = AppColors.ERROR
-            self._safe_update()
-            return False
+        if await self.local_model_panel.async_verify_model():
+            self.local_model_panel.save_config()
+            return True
 
-        if not model_path.lower().endswith(".gguf"):
-            self.local_model_status.value = I18n.get("wizard_err_model_format")
-            self.local_model_status.color = AppColors.ERROR
-            self._safe_update()
-            return False
-
-        try:
-            if await self.local_model_panel.async_verify_model():
-                self.local_model_panel.save_config()
-                self.local_model_status.value = I18n.get("wizard_model_configured")
-                self.local_model_status.color = AppColors.SUCCESS
-                self._safe_update()
-                return True
-
-            self.local_model_status.value = self.local_model_panel.status_text.value
-            self.local_model_status.color = self.local_model_panel.status_text.color
-            self._safe_update()
-            return False
-        except Exception as e:
-            logger.error(f"[OnboardingWizard] Local model validation failed: {e}")
-            self.local_model_status.value = I18n.get("wizard_err_model_load_failed")
-            self.local_model_status.color = AppColors.ERROR
-            self._safe_update()
-            return False
-        finally:
-            self._show_loading_overlay(False)
-            self._safe_update()
+        self._safe_update()
+        return False
 
     async def _validate_and_save_schedule(self) -> bool:
         enabled = self.schedule_enabled.value
@@ -1341,8 +1187,6 @@ class OnboardingWizard(ft.Container):
             self._locale_subscription_id = None
 
     def _on_locale_change(self, new_locale: str = None):
-        self.token_input.label = I18n.get("wizard_token_label")
-        self.token_input.hint_text = I18n.get("wizard_token_hint")
         self.sync_status.value = I18n.get("wizard_status_ready")
         self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
         self.btn_full_sync.text = I18n.get("wizard_sync_full").format(

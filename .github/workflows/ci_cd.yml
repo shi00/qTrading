@@ -1,0 +1,131 @@
+name: AStockScreener CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - '**.py'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/ci_cd.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-checks:
+    name: Code Quality & Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: 123456
+          POSTGRES_DB: test_astock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Setup Node for Pyright
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies (with fallback for heavy packages)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || echo "Some optional deps failed to install, continuing..."
+          pip install -r requirements-dev.txt
+
+      - name: Ruff Check & Format
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Pyright Type Check
+        # User explicitly requested this to fail the build if type errors occur
+        continue-on-error: false
+        run: npx pyright
+
+      - name: Run Pytest
+        env:
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5432
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: 123456
+        run: python -m pytest tests/ -v --tb=short
+
+  build-windows:
+    name: Build Windows EXE (${{ matrix.variant }})
+    needs: ci-checks
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - variant: cpu
+            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cpu
+          - variant: cuda
+            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cu121
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install UPX
+        run: choco install upx -y
+
+      - name: Build EXE with PyInstaller
+        run: pyinstaller AStockScreener.spec
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AStockScreener-${{ github.ref_name }}-windows-${{ matrix.variant }}
+          path: dist/AStockScreener.exe
+          retention-days: 30
+
+      - name: Rename EXE for Release
+        run: |
+          Move-Item -Path dist/AStockScreener.exe -Destination dist/AStockScreener-${{ matrix.variant }}.exe
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AStockScreener-${{ matrix.variant }}.exe
+          generate_release_notes: true

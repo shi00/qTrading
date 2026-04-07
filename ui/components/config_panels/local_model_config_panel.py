@@ -64,6 +64,7 @@ class LocalModelConfigPanel(ft.Container):
         self._compact = compact
         self._show_internal_loading = show_internal_loading
         self._locale_subscription_id = None
+        self._is_verifying = False
 
         self._build_ui()
 
@@ -149,6 +150,7 @@ class LocalModelConfigPanel(ft.Container):
             on_change=self._on_input_change,
         )
 
+        self.status_icon = ft.Icon(visible=False, size=16)
         self.status_text = ft.Text(
             value="",
             size=12,
@@ -293,7 +295,11 @@ class LocalModelConfigPanel(ft.Container):
                 if not self._compact
                 else ft.Container(height=5),
                 action_buttons,
-                ft.Row([self.status_text], alignment=compact_main_align),
+                ft.Row(
+                    [self.status_icon, self.status_text],
+                    alignment=compact_main_align,
+                    spacing=5,
+                ),
             ],
             spacing=10 if not self._compact else 6,
             horizontal_alignment=compact_cross_align,
@@ -323,6 +329,22 @@ class LocalModelConfigPanel(ft.Container):
         if self.on_change:
             self.on_change()
 
+    def reload_config(self):
+        local_cfg = ConfigHandler.get_local_ai_config()
+        self.model_path_input.value = local_cfg.get("local_model_path", "")
+        timeout_val = ConfigHandler.get_local_ai_timeout()
+        self.timeout_input.value = str(timeout_val) if timeout_val is not None else ""
+        self.threads_input.value = local_cfg.get("n_threads", 4)
+        current_gpu_layers = local_cfg.get("n_gpu_layers", -1)
+        is_gpu_auto = current_gpu_layers == -1
+        self.gpu_auto_switch.value = is_gpu_auto
+        self.gpu_layers_input.value = current_gpu_layers if not is_gpu_auto else 0
+        self.gpu_layers_input.visible = not is_gpu_auto
+        self.batch_input.value = str(local_cfg.get("n_batch", 512))
+        self.ctx_input.value = str(local_cfg.get("n_ctx", 4096))
+        self.flash_attn_switch.value = local_cfg.get("flash_attn", True)
+        self._safe_update()
+
     def _on_select_file_click(self, e):
         if self.page:
             self.file_picker.pick_files(
@@ -338,6 +360,10 @@ class LocalModelConfigPanel(ft.Container):
                 self.on_change()
 
     def _on_verify_click(self, e):
+        if self._is_verifying:
+            self._show_warning(I18n.get("wizard_model_verifying"))
+            return
+
         if self.page:
             self.page.run_task(self._async_verify_and_notify)
 
@@ -349,9 +375,7 @@ class LocalModelConfigPanel(ft.Container):
     def _on_save_click(self, e):
         result = self.save_config()
         if result:
-            self.status_text.value = I18n.get("wizard_model_configured")
-            self.status_text.color = AppColors.SUCCESS
-            self._safe_update()
+            self._show_success(I18n.get("wizard_model_configured"))
             if self.on_save:
                 self.on_save()
 
@@ -362,21 +386,15 @@ class LocalModelConfigPanel(ft.Container):
         model_path = self.model_path_input.value.strip()
 
         if not model_path:
-            self.status_text.value = I18n.get("wizard_err_model_required")
-            self.status_text.color = AppColors.ERROR
-            self._safe_update()
+            self._show_error(I18n.get("wizard_err_model_required"))
             return False
 
         if not os.path.exists(model_path):
-            self.status_text.value = I18n.get("wizard_err_model_not_found")
-            self.status_text.color = AppColors.ERROR
-            self._safe_update()
+            self._show_error(I18n.get("wizard_err_model_not_found"))
             return False
 
         if not model_path.lower().endswith(".gguf"):
-            self.status_text.value = I18n.get("wizard_err_model_format")
-            self.status_text.color = AppColors.ERROR
-            self._safe_update()
+            self._show_error(I18n.get("wizard_err_model_format"))
             return False
 
         timeout_str = self.timeout_input.value.strip()
@@ -385,47 +403,52 @@ class LocalModelConfigPanel(ft.Container):
             if not (0 < timeout <= 3600):
                 raise ValueError("Range")
         except ValueError:
-            self.status_text.value = I18n.get("ai_snack_invalid_range").format(
-                field=I18n.get("settings_local_ai_timeout"),
-                min=1,
-                max=3600,
+            self._show_error(
+                I18n.get("ai_snack_invalid_range").format(
+                    field=I18n.get("settings_local_ai_timeout"),
+                    min=1,
+                    max=3600,
+                )
             )
-            self.status_text.color = AppColors.ERROR
-            self._safe_update()
             return False
 
+        if self._is_verifying:
+            logger.warning("[LocalModelConfigPanel] Verification already in progress")
+            return False
+
+        self._is_verifying = True
+        self._show_warning(I18n.get("wizard_model_loading"))
         self._set_loading_state(True)
-        self.status_text.value = I18n.get("wizard_model_loading")
-        self.status_text.color = AppColors.WARNING
-        self._safe_update()
 
         try:
+            import asyncio
+
             from services.local_model_manager import LocalModelManager
+
+            # Ensure Flet renders the loading mask even if the
+            # model is cached and returns instantly
+            await asyncio.sleep(0.5)
 
             config = self.get_current_config()
             manager = await LocalModelManager.get_instance()
             success = await manager.load_model(model_path, config)
 
             if not success:
-                self.status_text.value = I18n.get("wizard_err_model_load_failed")
-                self.status_text.color = AppColors.ERROR
-                self._set_loading_state(False)
-                self._safe_update()
+                self._show_error(I18n.get("wizard_err_model_load_failed"))
                 return False
 
-            self.status_text.value = I18n.get("wizard_model_configured")
-            self.status_text.color = AppColors.SUCCESS
-            self._set_loading_state(False)
-            self._safe_update()
+            self._show_success(I18n.get("wizard_model_configured"))
             return True
 
         except Exception as e:
             logger.error(f"[LocalModelConfigPanel] Model verification failed: {e}")
-            self.status_text.value = I18n.get("wizard_err_model_load_failed")
-            self.status_text.color = AppColors.ERROR
+            self._show_error(I18n.get("wizard_err_model_load_failed"))
+            return False
+
+        finally:
+            self._is_verifying = False
             self._set_loading_state(False)
             self._safe_update()
-            return False
 
     def _set_loading_state(self, loading: bool):
         if self._show_internal_loading:
@@ -491,6 +514,30 @@ class LocalModelConfigPanel(ft.Container):
         self.ctx_input.value = str(config.get("n_ctx", 4096))
         self.flash_attn_switch.value = config.get("flash_attn", True)
 
+        self._safe_update()
+
+    def _show_success(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.SUCCESS
+        self.status_icon.icon = ft.Icons.CHECK_CIRCLE
+        self.status_icon.color = AppColors.SUCCESS
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_error(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.ERROR
+        self.status_icon.icon = ft.Icons.ERROR
+        self.status_icon.color = AppColors.ERROR
+        self.status_icon.visible = True
+        self._safe_update()
+
+    def _show_warning(self, message: str):
+        self.status_text.value = message
+        self.status_text.color = AppColors.WARNING
+        self.status_icon.icon = ft.Icons.WARNING
+        self.status_icon.color = AppColors.WARNING
+        self.status_icon.visible = True
         self._safe_update()
 
     def _safe_update(self):

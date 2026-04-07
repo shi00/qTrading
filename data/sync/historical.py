@@ -43,6 +43,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
         "index_dailybasic",
     ]
 
+    CORE_RESUME_TABLES = [
+        "daily_quotes",
+        "daily_indicators",
+    ]
+
     def __init__(self, context: typing.Any):
         super().__init__(context)
         self._lazy_event = None  # ST-01: Lazy init
@@ -90,6 +95,37 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         try:
             await self._run_historical_sync(days, progress_callback, result)
+
+            if result.status in ["success", "partial"]:
+                end_date = get_now().date()
+                start_date = (get_now() - datetime.timedelta(days=days)).date()
+                try:
+                    quality_results = (
+                        await self.context.cache.get_bulk_sync_quality_scores(
+                            start_date=start_date,
+                            end_date=end_date,
+                            tables=list(self.SYNCED_TABLES),
+                        )
+                    )
+                    for date, quality in quality_results.items():
+                        result.quality_scores[date] = quality.get("score", 0)
+                        result.expected_bases[date] = quality.get("expected_base", 0)
+                        if quality.get("issues"):
+                            result.warnings.extend(
+                                [f"{date}: {issue}" for issue in quality["issues"][:2]]
+                            )
+
+                        tables_info = quality.get("tables", {})
+                        for table, info in tables_info.items():
+                            if table not in result.table_stats:
+                                result.table_stats[table] = {"count": 0}
+                            result.table_stats[table]["count"] += info.get("count", 0)
+
+                except Exception as qe:
+                    logger.warning(
+                        f"[HistoricalSync] Report | Failed to collect quality scores: {qe}"
+                    )
+
         except asyncio.CancelledError:
             result.status = "cancelled"
         except Exception as e:
@@ -134,6 +170,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # Breakpoint Resume (Check Cache for all Critical tables)
         # All tables that are synced in sync_daily_market_snapshot
+        # Enhanced: Quality Score Verification (Phase 2.4)
+        try:
+            sync_integrity_config = ConfigHandler.get_sync_integrity_config()
+            QUALITY_THRESHOLD = sync_integrity_config.get("quality_threshold", 80)
+        except Exception:
+            QUALITY_THRESHOLD = 80
+
         try:
             cached_dates_per_table = {}
             for table in self.SYNCED_TABLES:
@@ -142,20 +185,80 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 ] = await self.context.cache.get_cached_dates_for_table(table)
 
             existing = set()
-            all_dates = [
-                cached_dates_per_table.get(t, set()) for t in self.SYNCED_TABLES
+            core_dates = [
+                cached_dates_per_table.get(t, set()) for t in self.CORE_RESUME_TABLES
             ]
-            if all(all_dates):
-                existing = set.intersection(*all_dates)
+            if core_dates and all(core_dates):
+                existing = set.intersection(*core_dates)
+
+            def normalize_date(d):
+                if isinstance(d, datetime.date):
+                    return d.strftime("%Y%m%d")
+                return str(d)
+
+            def to_date_key(d):
+                if isinstance(d, datetime.date):
+                    return d
+                if isinstance(d, str):
+                    try:
+                        return datetime.datetime.strptime(d, "%Y%m%d").date()
+                    except ValueError:
+                        return d
+                return d
+
+            existing_str = {normalize_date(d) for d in existing}
+            trade_dates_str = {normalize_date(d) for d in trade_dates}
+            existing_in_range = existing_str & trade_dates_str
+
+            dates_to_verify = sorted(
+                [d for d in trade_dates if normalize_date(d) in existing_in_range]
+            )
+            low_quality_dates = []
+
+            if dates_to_verify:
+                try:
+                    quality_results = (
+                        await self.context.cache.get_bulk_sync_quality_scores(
+                            start_date=dates_to_verify[0],
+                            end_date=dates_to_verify[-1],
+                            tables=list(self.SYNCED_TABLES),
+                        )
+                    )
+
+                    for date in dates_to_verify:
+                        date_key = to_date_key(date)
+                        quality = quality_results.get(date_key)
+                        if (
+                            quality is not None
+                            and quality.get("score", 0) < QUALITY_THRESHOLD
+                        ):
+                            low_quality_dates.append(date)
+                            issues_str = ", ".join(quality.get("issues", [])[:3])
+                            logger.debug(
+                                f"[HistoricalSync] QualityCheck | {date} score={quality.get('score')} < {QUALITY_THRESHOLD}, "
+                                f"expected_base={quality.get('expected_base')}, issues: [{issues_str}]"
+                            )
+
+                    if low_quality_dates:
+                        logger.info(
+                            f"[HistoricalSync] QualityCheck | Found {len(low_quality_dates)} low-quality dates, will re-sync"
+                        )
+                        for d in low_quality_dates:
+                            existing.discard(d)
+                            existing_str.discard(normalize_date(d))
+                except Exception as qe:
+                    logger.warning(f"[HistoricalSync] QualityCheck | Failed: {qe}")
 
             original_count = len(trade_dates)
-            trade_dates = [d for d in trade_dates if d not in existing]
+            trade_dates = [
+                d for d in trade_dates if normalize_date(d) not in existing_str
+            ]
             skipped = original_count - len(trade_dates)
             result.updated += skipped
 
             if skipped > 0:
                 logger.debug(
-                    f"[HistoricalSync] Resume | Skipped {skipped} dates (all {len(self.SYNCED_TABLES)} synced tables present).",
+                    f"[HistoricalSync] Resume | Skipped {skipped} high-quality dates (threshold={QUALITY_THRESHOLD}).",
                 )
         except Exception as e:
             logger.warning(f"[HistoricalSync] Resume | ⚠️ Cache check failed: {e}")
@@ -192,7 +295,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     return
 
                 try:
-                    await self.sync_daily_market_snapshot(date)
+                    await self.sync_daily_market_snapshot(date, result=result)
                     processed_count += 1
                     result.added += 1
                     if progress_callback:
@@ -254,7 +357,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
                     async with sem:
                         try:
-                            await self.sync_daily_market_snapshot(date)
+                            await self.sync_daily_market_snapshot(date, result=result)
                             logger.debug(
                                 f"[HistoricalSync] Retry | ✅ Recovered {date}",
                             )
@@ -302,7 +405,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
 
     async def sync_daily_market_snapshot(
-        self, trade_date: datetime.date | None, force: bool = False
+        self,
+        trade_date: datetime.date | None,
+        force: bool = False,
+        sync_result: "SyncResult | None" = None,
     ):
         """
         Sync ALL data types for a single day.
@@ -547,16 +653,19 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     f"[HistoricalSync] Skipping sync_status for {table_name} due to fetch/save failure"
                 )
 
-        def verify_data_integrity(key: str, result: typing.Any):
-            if not isinstance(result, dict):
+        def verify_data_integrity(key: str, result_data: typing.Any):
+            if not isinstance(result_data, dict):
                 return
-            saved = result.get("saved")
-            fetched = result.get("fetched")
+            saved = result_data.get("saved")
+            fetched = result_data.get("fetched")
             if saved is not None and fetched > 0 and saved != fetched:
-                logger.warning(
+                warning_msg = (
                     f"[HistoricalSync] DaySync | ⚠️ Data integrity issue for {key} on {trade_date}: "
                     f"fetched={fetched} rows but saved={saved} rows"
                 )
+                logger.warning(warning_msg)
+                if sync_result is not None:
+                    sync_result.warnings.append(warning_msg)
 
         await safe_update_status("daily_quotes", quotes_rows, trade_date)
         verify_data_integrity("quotes", quotes_rows)

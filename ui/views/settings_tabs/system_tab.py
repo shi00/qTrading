@@ -208,7 +208,11 @@ class SystemTab(ft.Container):
                         icon=ft.Icons.SAVE_ROUNDED,
                         icon_color=AppColors.PRIMARY,
                         tooltip=I18n.get("settings_save_config"),
-                        on_click=self.save_thread_pool_settings,
+                        on_click=lambda e: (
+                            self.page.run_task(self.save_thread_pool_settings, e)
+                            if self.page
+                            else None
+                        ),
                     ),
                 ],
                 spacing=5,
