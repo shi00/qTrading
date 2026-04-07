@@ -4,6 +4,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
+import contextlib
 import unittest
 
 from sqlalchemy import text
@@ -69,10 +70,8 @@ async def _truncate_all_tables(engine: AsyncEngine):
     """Truncate all tables for test isolation (fast, no DDL)."""
     async with engine.begin() as conn:
         for table in TABLE_NAMES:
-            try:
+            with contextlib.suppress(Exception):
                 await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
-            except Exception:
-                pass
 
 
 class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):

@@ -65,12 +65,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self.trade_calendar = TradeCalendarService(self.cache, self.api)
 
             self._first_news_sync = True
-            self._cancel_event = (
-                None  # ST-01: Lazy initialization to avoid loop binding issues
-            )
-            self._quality_tier = (
-                None  # None=Uninitialized, 0=Critical, 1=Bronze, 2=Silver, 3=Gold
-            )
+            self._cancel_event = None  # ST-01: Lazy initialization to avoid loop binding issues
+            self._quality_tier = None  # None=Uninitialized, 0=Critical, 1=Bronze, 2=Silver, 3=Gold
 
             # Initialize Context & Strategies
             self.context = SyncContext(
@@ -118,9 +114,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """
         logger.debug("[DataProcessor] Stop | Cancel requested")
         self._get_cancel_event().set()
-        self._quality_tier = (
-            None  # Reset to uninitialized; will re-evaluate on next strategy run
-        )
+        self._quality_tier = None  # Reset to uninitialized; will re-evaluate on next strategy run
 
         # Propagate to all strategies
         for name, strategy in self.strategies.items():
@@ -493,9 +487,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             full_df = full_df.rename(columns={"id": "concept_id"})
             # Ensure unique
-            full_df = full_df[
-                ["ts_code", "concept_name", "concept_id"]
-            ].drop_duplicates()
+            full_df = full_df[["ts_code", "concept_name", "concept_id"]].drop_duplicates()
 
             # Atomic overwrite (refresh)
             count = await self.cache.overwrite_concepts(full_df)
@@ -535,10 +527,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             today_date = now.date()
 
             latest_date = await self.trade_calendar.get_latest_trade_date()
-            if latest_date:
-                date = latest_date
-            else:
-                date = today_date
+            date = latest_date or today_date
 
             async def get_idx(code, name_key):
                 df = await self.cache.get_index_daily(ts_code=code, trade_date=date)
@@ -573,9 +562,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                         if abs(val) > 100
                         else f"{val:.0f}{I18n.get('unit_wan')}"
                     )
-                    sub_str = (
-                        I18n.get("home_inflow") if val > 0 else I18n.get("home_outflow")
-                    )
+                    sub_str = I18n.get("home_inflow") if val > 0 else I18n.get("home_outflow")
                     return {"name": name, "value": val_str, "sub": sub_str}
                 return {"name": name, "value": "-", "sub": "-"}
 
@@ -641,10 +628,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Optimized based on user feedback (Steps 1 & 2 represent 2% total)
         # Added Step 5 (AI Data) -> 10%
         # For quick mode, redistribute weights (skip steps 3 & 4)
-        if quick:
-            STEP_WEIGHTS = [10, 10, 0, 0, 50, 30]
-        else:
-            STEP_WEIGHTS = [1, 1, 45, 38, 10, 5]
+        STEP_WEIGHTS = [10, 10, 0, 0, 50, 30] if quick else [1, 1, 45, 38, 10, 5]
         current_step = 0
 
         def report_step(step_num, sub_progress=0, sub_total=1, sub_msg=""):
@@ -770,11 +754,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return result
 
         except Exception as e:
-            step_label = (
-                I18n.get(f"init_step_{current_step}")
-                if current_step > 0
-                else "Initialization"
-            )
+            step_label = I18n.get(f"init_step_{current_step}") if current_step > 0 else "Initialization"
             logger.error(
                 f"[DataProcessor] Init | ❌ System init unexpectedly failed at {step_label}: {e}",
                 exc_info=True,
@@ -787,11 +767,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
         rough_start = (get_now() - datetime.timedelta(days=int(days * 2.0))).date()
         all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end)
-        start = (
-            all_dates[-days]
-            if len(all_dates) >= days
-            else (all_dates[0] if all_dates else rough_start)
-        )
+        start = all_dates[-days] if len(all_dates) >= days else (all_dates[0] if all_dates else rough_start)
         return await self.cache.get_daily_quotes(
             ts_code=ts_code,
             start_date=start,

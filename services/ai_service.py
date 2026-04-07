@@ -127,9 +127,7 @@ class AIService:
         这里缓存配置供后续调用使用
         """
         if not LITELLM_AVAILABLE:
-            logger.warning(
-                "[AIService] Config | ⚠️ LiteLLM not available. Cloud features disabled."
-            )
+            logger.warning("[AIService] Config | ⚠️ LiteLLM not available. Cloud features disabled.")
             self._is_cloud_configured = False
             return
 
@@ -137,9 +135,7 @@ class AIService:
 
         api_key = llm_config.get("api_key")
         if not api_key:
-            logger.warning(
-                "[AIService] Config | ⚠️ API Key not found. Cloud features disabled."
-            )
+            logger.warning("[AIService] Config | ⚠️ API Key not found. Cloud features disabled.")
             self._is_cloud_configured = False
             return
 
@@ -150,24 +146,18 @@ class AIService:
             resource_name = llm_config.get("azure_resource_name", "")
             deployment_name = llm_config.get("azure_deployment_name", "")
             if not resource_name:
-                logger.warning(
-                    "[AIService] Config | ⚠️ Azure resource name not found. Cloud features disabled."
-                )
+                logger.warning("[AIService] Config | ⚠️ Azure resource name not found. Cloud features disabled.")
                 self._is_cloud_configured = False
                 return
             if not deployment_name:
-                logger.warning(
-                    "[AIService] Config | ⚠️ Azure deployment name not found. Cloud features disabled."
-                )
+                logger.warning("[AIService] Config | ⚠️ Azure deployment name not found. Cloud features disabled.")
                 self._is_cloud_configured = False
                 return
             base_url = f"https://{resource_name}.openai.azure.com"
             llm_config["base_url"] = base_url
             llm_config["model"] = deployment_name
         elif not base_url:
-            logger.error(
-                "[AIService] Config | ❌ 'base_url' is mandatory for cloud LLM."
-            )
+            logger.error("[AIService] Config | ❌ 'base_url' is mandatory for cloud LLM.")
             self._is_cloud_configured = False
             return
 
@@ -209,16 +199,12 @@ class AIService:
             request_params["model"] = f"azure/{model}"
             azure_resource_name = llm_config.get("azure_resource_name", "")
             if azure_resource_name:
-                request_params["api_base"] = (
-                    f"https://{azure_resource_name}.openai.azure.com"
-                )
+                request_params["api_base"] = f"https://{azure_resource_name}.openai.azure.com"
             else:
                 request_params["api_base"] = llm_config.get("base_url", "")
             from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
-            request_params["api_version"] = llm_config.get(
-                "api_version", AZURE_DEFAULT_API_VERSION
-            )
+            request_params["api_version"] = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
         else:
             prefix_map = {
                 "openai": "openai",
@@ -324,9 +310,7 @@ class AIService:
                     if hasattr(chunk, "usage") and chunk.usage:
                         usage = {
                             "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
-                            "completion_tokens": getattr(
-                                chunk.usage, "completion_tokens", 0
-                            ),
+                            "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
                             "total_tokens": getattr(chunk.usage, "total_tokens", 0),
                         }
                     continue
@@ -363,9 +347,7 @@ class AIService:
             if hasattr(response, "usage") and response.usage:
                 result["usage"] = {
                     "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(
-                        response.usage, "completion_tokens", 0
-                    ),
+                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
                     "total_tokens": getattr(response.usage, "total_tokens", 0),
                 }
 
@@ -436,9 +418,7 @@ class AIService:
                     on_chunk=on_chunk,
                     temperature=temperature,
                     timeout=timeout,
-                    response_format={"type": "json_object"}
-                    if json_mode and not on_chunk
-                    else None,
+                    response_format={"type": "json_object"} if json_mode and not on_chunk else None,
                 )
                 response_content = result["content"]
 
@@ -511,10 +491,7 @@ class AIService:
 
         # Format news
         news_text = "\n".join(
-            [
-                f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}"
-                for n in news_list[:5]
-            ],
+            [f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}" for n in news_list[:5]],
         )
         if not news_list:
             news_text = "No recent news found."
@@ -524,11 +501,7 @@ class AIService:
             # Check if concepts are already injected by Strategy (Preferred)
             injected_concepts = stock_info.get("concepts")
 
-            if (
-                injected_concepts
-                and isinstance(injected_concepts, list)
-                and len(injected_concepts) > 0
-            ):
+            if injected_concepts and isinstance(injected_concepts, list) and len(injected_concepts) > 0:
                 # Use injected
                 concepts_str = ", ".join(injected_concepts[:8])
                 stock_info["concepts"] = concepts_str
@@ -555,11 +528,7 @@ class AIService:
                 pass
             return True
 
-        clean_stock_info = {
-            k: v
-            for k, v in stock_info.items()
-            if not str(k).startswith("_") and is_valid_value(v)
-        }
+        clean_stock_info = {k: v for k, v in stock_info.items() if not str(k).startswith("_") and is_valid_value(v)}
 
         stock_xml = "\n".join([f"  {k}: {v}" for k, v in clean_stock_info.items()])
 
@@ -591,16 +560,8 @@ class AIService:
                 system_prompt += "\n\n" + _UNIVERSAL_RULES
 
         # Capital flow and financials: use real data or fallback
-        capital_flow_content = (
-            capital_flow_text
-            if capital_flow_text
-            else "(Data not available yet, assume neutral)"
-        )
-        financials_content = (
-            financials_text
-            if financials_text
-            else "(Data not available yet, assume neutral)"
-        )
+        capital_flow_content = capital_flow_text if capital_flow_text else "(Data not available yet, assume neutral)"
+        financials_content = financials_text if financials_text else "(Data not available yet, assume neutral)"
 
         # 倒金字塔结构：核心策略指令置于最末尾，贴近生成区
         # 解决 "Lost in the Middle" 注意力衰减问题
@@ -622,19 +583,13 @@ class AIService:
         if news_text and news_text != "No recent news found.":
             user_prompt_parts.append(f"<recent_news>\n{news_text}\n</recent_news>")
         if financials_content and "Data not available" not in financials_content:
-            user_prompt_parts.append(
-                f"<financials>\n{financials_content}\n</financials>"
-            )
+            user_prompt_parts.append(f"<financials>\n{financials_content}\n</financials>")
         if capital_flow_content and "Data not available" not in capital_flow_content:
-            user_prompt_parts.append(
-                f"<capital_flow>\n{capital_flow_content}\n</capital_flow>"
-            )
+            user_prompt_parts.append(f"<capital_flow>\n{capital_flow_content}\n</capital_flow>")
 
         # 4. 历史价格序列 (Bottom-Mid)
         if history_text:
-            user_prompt_parts.append(
-                f"<recent_price_action>\n{history_text}\n</recent_price_action>"
-            )
+            user_prompt_parts.append(f"<recent_price_action>\n{history_text}\n</recent_price_action>")
 
         # 5. Few-Shot 学习样例
         if history_context:
@@ -704,7 +659,7 @@ class AIService:
             )
             return res
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "[AIService] Analyze | ❌ Timeout (120s exceeded)",
                 exc_info=True,
@@ -845,7 +800,7 @@ class AIService:
             return False
 
         try:
-            result = await self._chat_completion_litellm(
+            await self._chat_completion_litellm(
                 messages=[{"role": "user", "content": "Hi"}],
                 max_tokens=1,
                 timeout=10.0,
@@ -911,9 +866,7 @@ class AIService:
             if hasattr(response, "usage") and response.usage:
                 result["usage"] = {
                     "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(
-                        response.usage, "completion_tokens", 0
-                    ),
+                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
                     "total_tokens": getattr(response.usage, "total_tokens", 0),
                 }
 

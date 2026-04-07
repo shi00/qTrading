@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 
 import flet as ft
@@ -117,10 +118,8 @@ class HomeView(ft.Container):
             except Exception:
                 pass
             self._pubsub_subscribed = False
-        try:
+        with contextlib.suppress(Exception):
             I18n.unsubscribe(self.refresh_locale)
-        except Exception:
-            pass
         if self._init_task:
             self._init_task.cancel()
 

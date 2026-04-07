@@ -1,3 +1,4 @@
+import contextlib
 import logging
 
 import flet as ft
@@ -257,10 +258,8 @@ class TaskCenterView(ft.Container):
             cards = [self._build_task_card(t) for t in page_tasks]
             self.scroll_area.controls = cards
 
-        try:
+        with contextlib.suppress(Exception):
             self.update()
-        except Exception:
-            pass
 
     def _build_task_card(self, t: AppTask) -> ft.Container:
         """Build a single task card with status badge, progress, and actions."""
@@ -410,9 +409,7 @@ class TaskCenterView(ft.Container):
 
         # --- Card assembly ---
         # Highlight running tasks with left accent border
-        left_border_color = (
-            status_color if t.status == TaskStatus.RUNNING else ft.Colors.TRANSPARENT
-        )
+        left_border_color = status_color if t.status == TaskStatus.RUNNING else ft.Colors.TRANSPARENT
 
         card = ft.Container(
             content=ft.Column(

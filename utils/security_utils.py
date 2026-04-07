@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import logging
 import os
 import secrets
@@ -131,10 +132,8 @@ class SecurityManager:
         except Exception as e:
             logger.error(f"Error saving key: {e}")
             if os.path.exists(tmp_file):
-                try:
+                with contextlib.suppress(Exception):
                     os.remove(tmp_file)
-                except Exception:
-                    pass
             raise e
 
     @staticmethod

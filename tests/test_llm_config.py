@@ -131,9 +131,7 @@ class TestConfigHandlerLLM:
             azure_deployment_name="gpt-4o-deployment",
         )
 
-        with patch(
-            "utils.config_handler.keyring.get_password", return_value="azure-key"
-        ):
+        with patch("utils.config_handler.keyring.get_password", return_value="azure-key"):
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "azure"
@@ -157,9 +155,7 @@ class TestConfigHandlerLLM:
             }
         )
 
-        with patch(
-            "utils.config_handler.keyring.get_password", return_value="azure-key"
-        ):
+        with patch("utils.config_handler.keyring.get_password", return_value="azure-key"):
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "azure"
@@ -286,9 +282,7 @@ class TestAIServiceLiteLLM:
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
             service = AIService()
             assert service._litellm_config is not None
-            assert "myresource.openai.azure.com" in service._litellm_config.get(
-                "base_url", ""
-            )
+            assert "myresource.openai.azure.com" in service._litellm_config.get("base_url", "")
 
     def test_setup_client_missing_api_key(self, isolated_config):
         """Test: _setup_client handles missing API key"""
@@ -336,14 +330,10 @@ class TestAIServiceLiteLLM:
                 "base_url": "https://api.deepseek.com",
             }
 
-            with patch(
-                "services.ai_service.acompletion", new_callable=AsyncMock
-            ) as mock_acompletion:
+            with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_acompletion:
                 mock_acompletion.return_value = mock_response
 
-                result = await service._chat_completion(
-                    [{"role": "user", "content": "Hello"}], json_mode=True
-                )
+                result = await service._chat_completion([{"role": "user", "content": "Hello"}], json_mode=True)
 
                 assert result == {"result": "Test response"}
 
@@ -517,10 +507,8 @@ class TestLLMProviders:
             + PROVIDER_CATEGORIES.get("custom", [])
         )
 
-        for provider_id in LLM_PROVIDERS.keys():
-            assert provider_id in all_categorized, (
-                f"Provider {provider_id} not in any category"
-            )
+        for provider_id in LLM_PROVIDERS:
+            assert provider_id in all_categorized, f"Provider {provider_id} not in any category"
 
 
 class TestIntegration:
@@ -568,9 +556,7 @@ class TestIntegration:
             azure_deployment_name="gpt-4o-deployment",
         )
 
-        with patch(
-            "utils.config_handler.keyring.get_password", return_value="azure-test-key"
-        ):
+        with patch("utils.config_handler.keyring.get_password", return_value="azure-test-key"):
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "azure"

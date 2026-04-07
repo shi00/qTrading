@@ -114,9 +114,7 @@ class TestStepConfig:
         """Test validate_before_next steps are marked correctly"""
         from ui.views.onboarding_wizard import STEP_CONFIGS
 
-        validate_steps = [
-            config.id for config in STEP_CONFIGS if config.validate_before_next
-        ]
+        validate_steps = [config.id for config in STEP_CONFIGS if config.validate_before_next]
         assert validate_steps == [
             "database",
             "token",
@@ -358,9 +356,8 @@ class TestOnboardingCompleteCallSequence:
         config = STEP_CONFIGS[7]
         assert config.id == "complete"
 
-        if config.id == "complete":
-            if wizard.on_complete:
-                await wizard.on_complete()
+        if config.id == "complete" and wizard.on_complete:
+            await wizard.on_complete()
 
         wizard.on_complete.assert_called_once()
 
@@ -391,9 +388,7 @@ class TestCloudAIConnectionValidation:
         """Test that _validate_and_save_cloud_ai calls AIService.test_connection"""
         from services.ai_service import AIService
 
-        assert hasattr(AIService, "test_connection"), (
-            "AIService should have test_connection static method"
-        )
+        assert hasattr(AIService, "test_connection"), "AIService should have test_connection static method"
 
         import inspect
 
@@ -410,9 +405,7 @@ class TestCloudAIConnectionValidation:
         from unittest.mock import AsyncMock
 
         with patch("services.ai_service.AIService") as mock_ai_service:
-            mock_ai_service.test_connection = AsyncMock(
-                return_value={"success": False, "message": "Invalid API key"}
-            )
+            mock_ai_service.test_connection = AsyncMock(return_value={"success": False, "message": "Invalid API key"})
 
             result = await mock_ai_service.test_connection(
                 provider="deepseek",
@@ -464,9 +457,7 @@ class TestQuickParameterFunctionality:
         mock_dp.sync_comprehensive_fundamentals = AsyncMock()
         mock_dp.strategies = {
             "macro": MagicMock(run=AsyncMock(return_value=MagicMock(status="success"))),
-            "holder": MagicMock(
-                run=AsyncMock(return_value=MagicMock(status="success"))
-            ),
+            "holder": MagicMock(run=AsyncMock(return_value=MagicMock(status="success"))),
         }
         mock_dp.check_data_health = AsyncMock(return_value={})
         mock_dp.is_cancelled = MagicMock(return_value=False)
@@ -514,9 +505,7 @@ class TestScheduleConfigCompleteness:
 
         for time in invalid_formats:
             if time:
-                assert not re.match(pattern, time), (
-                    f"{time} should NOT match format HH:MM"
-                )
+                assert not re.match(pattern, time), f"{time} should NOT match format HH:MM"
 
     def test_schedule_time_range_validation(self):
         """Test that schedule time validates hour (0-23) and minute (0-59) ranges"""
@@ -925,9 +914,7 @@ class TestSliderLabelAttribute:
                         break
 
             slider_block = content[start:end]
-            assert "label=" in slider_block, (
-                f"Slider should have label attribute: {slider_block[:100]}"
-            )
+            assert "label=" in slider_block, f"Slider should have label attribute: {slider_block[:100]}"
 
     def test_local_model_panel_slider_has_label(self):
         """Test that local_model_config_panel Slider has label attribute"""
@@ -960,9 +947,7 @@ class TestSliderLabelAttribute:
                         break
 
             slider_block = content[start:end]
-            assert "label=" in slider_block, (
-                f"Slider should have label attribute: {slider_block[:100]}"
-            )
+            assert "label=" in slider_block, f"Slider should have label attribute: {slider_block[:100]}"
 
 
 class TestI18nKeys:
@@ -1022,7 +1007,4 @@ class TestCloudAIValidationSaveConfig:
         source = inspect.getsource(OnboardingWizard._validate_and_save_cloud_ai)
 
         assert "save_current_config" in source
-        assert (
-            "api_key_modified" not in source
-            or "if self.llm_config_panel.api_key_modified" not in source
-        )
+        assert "api_key_modified" not in source or "if self.llm_config_panel.api_key_modified" not in source

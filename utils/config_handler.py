@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -174,9 +175,7 @@ class ConfigHandler:
                 result[key] = default_val
                 dirty = True
             elif isinstance(default_val, dict) and isinstance(result.get(key), dict):
-                nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(
-                    result[key], default_val
-                )
+                nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(result[key], default_val)
                 if nested_dirty:
                     result[key] = nested_result
                     dirty = True
@@ -195,12 +194,8 @@ class ConfigHandler:
                     current_config[key] = default_val
                     dirty = True
                     logger.info(f"Initialized default config: {key}")
-                elif isinstance(default_val, dict) and isinstance(
-                    current_config.get(key), dict
-                ):
-                    nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(
-                        current_config[key], default_val
-                    )
+                elif isinstance(default_val, dict) and isinstance(current_config.get(key), dict):
+                    nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(current_config[key], default_val)
                     if nested_dirty:
                         current_config[key] = nested_result
                         dirty = True
@@ -241,10 +236,8 @@ class ConfigHandler:
         except Exception as e:
             logger.error(f"Atomic save failed for {path}: {e}")
             if os.path.exists(tmp_file):
-                try:
+                with contextlib.suppress(Exception):
                     os.remove(tmp_file)
-                except Exception:
-                    pass
             return False
 
     @staticmethod
@@ -332,10 +325,8 @@ class ConfigHandler:
     @staticmethod
     def save_token(token):
         if not token:
-            try:
+            with contextlib.suppress(Exception):
                 keyring.delete_password(KEYRING_SERVICE_NAME, "ts_token")
-            except Exception:
-                pass
             return ConfigHandler.save_config({"ts_token": ""})
 
         try:
@@ -579,9 +570,7 @@ class ConfigHandler:
 
     @staticmethod
     def set_no_proxy_domains(domains):
-        if not isinstance(domains, list) or not all(
-            isinstance(x, str) for x in domains
-        ):
+        if not isinstance(domains, list) or not all(isinstance(x, str) for x in domains):
             logger.error("Invalid no-proxy domains format: must be list of strings")
             return False
         return ConfigHandler.save_config({"no_proxy_domains": domains})
@@ -664,16 +653,12 @@ class ConfigHandler:
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                 except Exception as e:
-                    logger.warning(
-                        f"Keyring save failed: {e}. Falling back to SecurityManager."
-                    )
+                    logger.warning(f"Keyring save failed: {e}. Falling back to SecurityManager.")
                     encrypted_key = SecurityManager.encrypt_data(api_key)
                     ConfigHandler.save_config({"ai_api_key": encrypted_key})
             else:
-                try:
+                with contextlib.suppress(Exception):
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
-                except Exception:
-                    pass
                 ConfigHandler.save_config({"ai_api_key": ""})
 
         return True
@@ -1037,15 +1022,9 @@ class ConfigHandler:
         config = ConfigHandler.load_config()
         sync_integrity = config.get("sync_integrity", {})
         return {
-            "quotes_tolerance_ratio": sync_integrity.get(
-                "quotes_tolerance_ratio", 0.95
-            ),
-            "indicators_tolerance_ratio": sync_integrity.get(
-                "indicators_tolerance_ratio", 0.90
-            ),
-            "moneyflow_tolerance_ratio": sync_integrity.get(
-                "moneyflow_tolerance_ratio", 0.80
-            ),
+            "quotes_tolerance_ratio": sync_integrity.get("quotes_tolerance_ratio", 0.95),
+            "indicators_tolerance_ratio": sync_integrity.get("indicators_tolerance_ratio", 0.90),
+            "moneyflow_tolerance_ratio": sync_integrity.get("moneyflow_tolerance_ratio", 0.80),
             "financial_min_periods": sync_integrity.get("financial_min_periods", 4),
             "quality_threshold": sync_integrity.get("quality_threshold", 80),
             "quality_weights": sync_integrity.get(

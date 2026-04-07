@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import logging
 import time
@@ -39,9 +40,7 @@ class BaseDao:
         self.engine = engine
 
     @staticmethod
-    def _prepare_data_params(
-        df: pd.DataFrame, cols: list, table_name: str | None = None
-    ):
+    def _prepare_data_params(df: pd.DataFrame, cols: list, table_name: str | None = None):
         if df is None or df.empty:
             return None
 
@@ -61,19 +60,13 @@ class BaseDao:
                 if col in df.columns:
                     try:
                         # Attempt to parse strictly with coerce, avoiding setting slice on copy
-                        df[col] = pd.to_datetime(
-                            df[col], format="mixed", errors="coerce"
-                        ).dt.date
+                        df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce").dt.date
                     except Exception:
                         pass
             for col in target_datetime_cols:
                 if col in df.columns:
-                    try:
-                        df[col] = pd.to_datetime(
-                            df[col], format="mixed", errors="coerce"
-                        )
-                    except Exception:
-                        pass
+                    with contextlib.suppress(Exception):
+                        df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce")
 
         df_clean = df[cols]
 
@@ -100,10 +93,7 @@ class BaseDao:
                 return val.to_pydatetime().replace(tzinfo=None)
             return val
 
-        return [
-            tuple(_to_native(v) for v in row)
-            for row in df_clean.itertuples(index=False, name=None)
-        ]
+        return [tuple(_to_native(v) for v in row) for row in df_clean.itertuples(index=False, name=None)]
 
     async def _write_db(
         self,
@@ -118,10 +108,7 @@ class BaseDao:
 
         if params:
             if is_many:
-                params = [
-                    tuple(self._convert_param_for_asyncpg(p) for p in row)
-                    for row in params
-                ]
+                params = [tuple(self._convert_param_for_asyncpg(p) for p in row) for row in params]
             else:
                 params = (
                     tuple(self._convert_param_for_asyncpg(p) for p in params)
@@ -247,13 +234,9 @@ class BaseDao:
             # Vectorized conversion to native date/datetime objects before dict generation
             for col in df_clean.columns:
                 if col in target_date_cols:
-                    df_clean[col] = pd.to_datetime(
-                        df_clean[col], format="mixed", errors="coerce"
-                    ).dt.date
+                    df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce").dt.date
                 elif col in target_datetime_cols:
-                    df_clean[col] = pd.to_datetime(
-                        df_clean[col], format="mixed", errors="coerce"
-                    )
+                    df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
 
             records = df_clean.to_dict(orient="records")
 
@@ -279,9 +262,7 @@ class BaseDao:
                         record[k] = v.to_pydatetime().replace(tzinfo=None)
             return records
 
-        records = await ThreadPoolManager().run_async(
-            TaskType.CPU, _prepare_records, df_slice
-        )
+        records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
 
         stmt = pg_insert(table)
         update_cols = [c for c in columns if c not in pk_columns and c != "created_at"]
@@ -364,9 +345,7 @@ class BaseDao:
             try:
                 clean_val = val.strip()
                 if len(clean_val) == 8 and clean_val.isdigit():
-                    return datetime.date(
-                        int(clean_val[:4]), int(clean_val[4:6]), int(clean_val[6:8])
-                    )
+                    return datetime.date(int(clean_val[:4]), int(clean_val[4:6]), int(clean_val[6:8]))
                 elif (
                     len(clean_val) == 10
                     and clean_val[4] == "-"
@@ -375,9 +354,7 @@ class BaseDao:
                     and clean_val[4] == "/"
                     and clean_val[7] == "/"
                 ):
-                    return datetime.date(
-                        int(clean_val[:4]), int(clean_val[5:7]), int(clean_val[8:10])
-                    )
+                    return datetime.date(int(clean_val[:4]), int(clean_val[5:7]), int(clean_val[8:10]))
                 elif "T" in clean_val:
                     try:
                         import pandas as pd

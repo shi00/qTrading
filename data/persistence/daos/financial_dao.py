@@ -221,9 +221,7 @@ class FinancialDao(BaseDao):
             pk_columns=["ts_code", "end_date", "ann_date"],
         )
 
-    async def get_financial_reports_history(
-        self, ts_code: str, periods: int = 8
-    ) -> pd.DataFrame:
+    async def get_financial_reports_history(self, ts_code: str, periods: int = 8) -> pd.DataFrame:
         """
         获取多期财务报告历史。
 
@@ -237,7 +235,7 @@ class FinancialDao(BaseDao):
         try:
             df = await self._read_db(
                 """
-                SELECT 
+                SELECT
                     ts_code, end_date, ann_date, report_type,
                     total_revenue, revenue, n_income, n_income_attr_p,
                     total_assets, total_liab, total_hldr_eqy_exc_min_int,
@@ -254,14 +252,10 @@ class FinancialDao(BaseDao):
 
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(
-                f"[FinancialDao] Failed to get financial history for {ts_code}: {e}"
-            )
+            logger.warning(f"[FinancialDao] Failed to get financial history for {ts_code}: {e}")
             return pd.DataFrame()
 
-    async def get_financial_reports_history_batch(
-        self, ts_codes: list[str], periods: int = 8
-    ) -> pd.DataFrame:
+    async def get_financial_reports_history_batch(self, ts_codes: list[str], periods: int = 8) -> pd.DataFrame:
         """
         批量获取多只股票的财务报告历史。
 
@@ -279,7 +273,7 @@ class FinancialDao(BaseDao):
             placeholders = ", ".join([f"${i + 1}" for i in range(len(ts_codes))])
             sql = f"""
                 SELECT * FROM (
-                    SELECT 
+                    SELECT
                         ts_code, end_date, ann_date, report_type,
                         total_revenue, revenue, n_income, n_income_attr_p,
                         total_assets, total_liab, total_hldr_eqy_exc_min_int,
@@ -289,7 +283,7 @@ class FinancialDao(BaseDao):
                         ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
                     FROM financial_reports
                     WHERE ts_code IN ({placeholders})
-                ) sub 
+                ) sub
                 WHERE rn <= ${len(ts_codes) + 1}
                 ORDER BY ts_code, end_date DESC
             """
@@ -320,7 +314,7 @@ class FinancialDao(BaseDao):
         try:
             placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
             sql = f"""
-                SELECT DISTINCT ON (ts_code) 
+                SELECT DISTINCT ON (ts_code)
                     ts_code, end_date, audit_result, audit_sign, audit_fees, audit_agency
                 FROM fina_audit
                 WHERE ts_code IN ({placeholders})
@@ -378,7 +372,7 @@ class FinancialDao(BaseDao):
         try:
             placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
             sql = f"""
-                SELECT DISTINCT ON (ts_code) 
+                SELECT DISTINCT ON (ts_code)
                     ts_code, end_date, pledge_count, pledge_ratio
                 FROM pledge_stat
                 WHERE ts_code IN ({placeholders})
@@ -405,18 +399,16 @@ class FinancialDao(BaseDao):
             df = await self._read_db(
                 """
                 SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                FROM fina_mainbz 
-                WHERE ts_code = $1 
-                ORDER BY end_date DESC, bz_sales DESC 
+                FROM fina_mainbz
+                WHERE ts_code = $1
+                ORDER BY end_date DESC, bz_sales DESC
                 LIMIT 10
                 """,
                 (ts_code,),
             )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(
-                f"[FinancialDao] Failed to get fina_mainbz for {ts_code}: {e}"
-            )
+            logger.warning(f"[FinancialDao] Failed to get fina_mainbz for {ts_code}: {e}")
             return pd.DataFrame()
 
     async def get_fina_mainbz_batch(self, ts_codes: list[str]) -> pd.DataFrame:
@@ -441,7 +433,7 @@ class FinancialDao(BaseDao):
                 SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                 FROM (
                     SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
-                    FROM fina_mainbz 
+                    FROM fina_mainbz
                     WHERE ts_code IN ({placeholders})
                 ) sub
                 WHERE dr = 1
@@ -549,7 +541,5 @@ class FinancialDao(BaseDao):
                 return set(df["ts_code"])
             return set()
         except Exception as e:
-            logger.warning(
-                f"[FinancialDao] Failed to get incomplete financial stocks: {e}"
-            )
+            logger.warning(f"[FinancialDao] Failed to get incomplete financial stocks: {e}")
             return set()

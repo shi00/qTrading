@@ -32,17 +32,13 @@ class TestTushareApiFieldNames:
 
     def test_top_list_field_documentation(self):
         source = inspect.getsource(TushareClient.get_top_list)
-        assert (
-            "top_list" in source.lower()
-            or "dragon" in source.lower()
-            or "lhb" in source.lower()
-        ), "get_top_list should be documented"
+        assert "top_list" in source.lower() or "dragon" in source.lower() or "lhb" in source.lower(), (
+            "get_top_list should be documented"
+        )
 
     def test_suspend_d_field_documentation(self):
         source = inspect.getsource(TushareClient.get_suspend_d)
-        assert "suspend_type" in source, (
-            "get_suspend_d should document 'suspend_type' field"
-        )
+        assert "suspend_type" in source, "get_suspend_d should document 'suspend_type' field"
 
 
 class TestApiFieldsExplicit:
@@ -131,7 +127,7 @@ class TestApiFieldsMatchDaoCols:
                 issues.append(f"{api_name}: no fields parameter found")
                 continue
 
-            for dao_cls_name, dao_cls in dao_map.items():
+            for _dao_cls_name, dao_cls in dao_map.items():
                 if hasattr(dao_cls, dao_name):
                     dao_method = getattr(dao_cls, dao_name)
                     dao_cols = extract_cols_from_method(dao_method)
@@ -150,9 +146,7 @@ class TestApiFieldsMatchDaoCols:
 
     def test_moneyflow_has_net_mf_amount(self):
         api_fields = extract_fields_from_api_method(TushareClient.get_moneyflow)
-        assert "net_mf_amount" in api_fields, (
-            "get_moneyflow must include net_mf_amount in fields"
-        )
+        assert "net_mf_amount" in api_fields, "get_moneyflow must include net_mf_amount in fields"
 
     def test_index_daily_has_all_fields(self):
         api_fields = extract_fields_from_api_method(TushareClient.get_index_daily)

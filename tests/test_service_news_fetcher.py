@@ -79,7 +79,7 @@ class TestGetStockNews(unittest.TestCase):
     def test_get_stock_news_timeout(self, mock_pool):
         """超时返回空列表"""
         mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_manager.run_async = AsyncMock(side_effect=TimeoutError())
         mock_pool.return_value = mock_manager
 
         async def run_test():

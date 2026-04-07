@@ -73,9 +73,7 @@ class TestQuoteDaoIntegrity:
 
         场景：验证单次查询获取指定表的记录数
         """
-        counts = await quote_dao.get_bulk_table_counts(
-            "daily_quotes", "20240101", "20240131"
-        )
+        counts = await quote_dao.get_bulk_table_counts("daily_quotes", "20240101", "20240131")
 
         assert isinstance(counts, dict)
 
@@ -89,7 +87,7 @@ class TestQuoteDaoIntegrity:
         scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240105")
 
         assert isinstance(scores, dict)
-        for date, quality_info in scores.items():
+        for _date, quality_info in scores.items():
             assert isinstance(quality_info, dict)
             assert 0 <= quality_info.get("score", 0) <= 100
 
@@ -151,9 +149,7 @@ class TestQuoteDaoBoundary:
         """
         边界测试：空日期范围
         """
-        counts = await quote_dao.get_bulk_table_counts(
-            "daily_quotes", "20990101", "20990105"
-        )
+        counts = await quote_dao.get_bulk_table_counts("daily_quotes", "20990101", "20990105")
 
         assert isinstance(counts, dict)
         assert len(counts) == 0
@@ -187,9 +183,7 @@ class TestQuoteDaoPerformance:
             call_count += 1
             return {"daily_quotes": {}}
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls
-        ):
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls):
             await quote_dao.get_bulk_sync_quality_scores("20210101", "20231231")
 
             assert call_count <= 20, f"Expected <= 20 DB calls, got {call_count}"
@@ -241,8 +235,6 @@ class TestQualityScoreWeights:
                 return_value={"20240101": 5000},
             ),
         ):
-            scores = await quote_dao.get_bulk_sync_quality_scores(
-                "20240101", "20240101"
-            )
+            scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
 
             assert isinstance(scores, dict)

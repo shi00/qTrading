@@ -48,9 +48,7 @@ class TestDataDictionaryAlignment:
         dict_cols = get_data_dict_columns("daily_quotes")
         expected = model_cols - {"updated_at", "created_at"}
         missing = expected - dict_cols
-        assert not missing, (
-            f"Data dictionary missing columns for daily_quotes: {missing}"
-        )
+        assert not missing, f"Data dictionary missing columns for daily_quotes: {missing}"
 
     def test_top_list_data_dict(self):
         model_cols = get_model_columns(TopList)
@@ -64,9 +62,7 @@ class TestDataDictionaryAlignment:
         dict_cols = get_data_dict_columns("block_trade")
         expected = model_cols - {"updated_at", "created_at"}
         missing = expected - dict_cols
-        assert not missing, (
-            f"Data dictionary missing columns for block_trade: {missing}"
-        )
+        assert not missing, f"Data dictionary missing columns for block_trade: {missing}"
 
     def test_limit_list_data_dict(self):
         model_cols = get_model_columns(LimitList)
@@ -87,18 +83,14 @@ class TestDataDictionaryAlignment:
         dict_cols = get_data_dict_columns("moneyflow_daily")
         expected = model_cols - {"updated_at", "created_at"}
         missing = expected - dict_cols
-        assert not missing, (
-            f"Data dictionary missing columns for moneyflow_daily: {missing}"
-        )
+        assert not missing, f"Data dictionary missing columns for moneyflow_daily: {missing}"
 
     def test_financial_reports_data_dict(self):
         model_cols = get_model_columns(FinancialReports)
         dict_cols = get_data_dict_columns("financial_reports")
         expected = model_cols - {"updated_at", "created_at"}
         missing = expected - dict_cols
-        assert not missing, (
-            f"Data dictionary missing columns for financial_reports: {missing}"
-        )
+        assert not missing, f"Data dictionary missing columns for financial_reports: {missing}"
 
     def test_dividend_data_dict(self):
         model_cols = get_model_columns(Dividend)
@@ -144,9 +136,7 @@ class TestDataDictionaryColumnValidation:
             if missing:
                 missing_in_dd[table_name] = missing
 
-        assert not missing_in_dd, (
-            f"ORM columns missing in data dictionary: {missing_in_dd}"
-        )
+        assert not missing_in_dd, f"ORM columns missing in data dictionary: {missing_in_dd}"
 
 
 class TestTop10HoldersHoldChange:
@@ -154,20 +144,16 @@ class TestTop10HoldersHoldChange:
 
     def test_hold_change_in_orm(self):
         model_cols = get_model_columns(Top10Holders)
-        assert "hold_change" in model_cols, (
-            "Top10Holders ORM should have hold_change column"
-        )
+        assert "hold_change" in model_cols, "Top10Holders ORM should have hold_change column"
 
     def test_hold_change_in_data_dictionary(self):
         dd_cols = get_data_dict_columns("top10_holders")
-        assert "hold_change" in dd_cols, (
-            "Data dictionary defines hold_change for top10_holders"
-        )
+        assert "hold_change" in dd_cols, "Data dictionary defines hold_change for top10_holders"
 
     def test_top10_holders_consistency(self):
         import re
 
-        model_cols = get_model_columns(Top10Holders) - {"updated_at", "created_at"}
+        get_model_columns(Top10Holders) - {"updated_at", "created_at"}
 
         source = inspect.getsource(HolderDao.save_top10_holders)
         pattern = r"(?:cols|columns)\s*=\s*\[([^\]]+)\]"
@@ -181,7 +167,7 @@ class TestTop10HoldersHoldChange:
             if item and not item.startswith("#"):
                 dao_cols.add(item)
 
-        dd_cols = get_data_dict_columns("top10_holders")
+        get_data_dict_columns("top10_holders")
 
         assert "hold_change" in dao_cols, "DAO should save hold_change"
         assert "hold_float_ratio" in dao_cols, "DAO should save hold_float_ratio"

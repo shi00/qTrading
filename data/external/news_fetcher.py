@@ -82,24 +82,14 @@ class NewsFetcher:
                         # Known structure: [代码, 简称, 公告标题, 公告时间, 公告链接]
                         # We use name-based lookup with positional fallback.
                         cols = list(df_cninfo.columns)
-                        title_col = (
-                            "公告标题"
-                            if "公告标题" in cols
-                            else (cols[2] if len(cols) > 2 else None)
-                        )
-                        time_col = (
-                            "公告时间"
-                            if "公告时间" in cols
-                            else (cols[3] if len(cols) > 3 else None)
-                        )
+                        title_col = "公告标题" if "公告标题" in cols else (cols[2] if len(cols) > 2 else None)
+                        time_col = "公告时间" if "公告时间" in cols else (cols[3] if len(cols) > 3 else None)
 
                         if title_col:
                             news_list = []
                             for _, row in df_cninfo.head(limit).iterrows():
                                 title = str(row.get(title_col, "")).strip()
-                                pub_date = (
-                                    str(row.get(time_col, "")) if time_col else ""
-                                )
+                                pub_date = str(row.get(time_col, "")) if time_col else ""
                                 pub_time = f"{pub_date} 00:00:00" if pub_date else ""
 
                                 news_list.append(
@@ -163,7 +153,7 @@ class NewsFetcher:
             # to prevent hanging the AI pipeline if the APIs are slow/dead.
             future = ThreadPoolManager().run_async(TaskType.IO, _fetch)
             return await asyncio.wait_for(future, timeout=15.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"[News] Timeout fetching news for {ts_code}")
             return []
         except Exception as e:
@@ -236,8 +226,7 @@ class NewsFetcher:
 
                 news_list.append(
                     {
-                        "title": row.get("标题")
-                        or row.get("title", I18n.get("news_no_title")),
+                        "title": row.get("标题") or row.get("title", I18n.get("news_no_title")),
                         "content": row.get("内容") or row.get("content", ""),
                         "time": final_time,
                     },

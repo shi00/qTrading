@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 
 import flet as ft
@@ -79,9 +80,7 @@ class DataSourceTab(ft.Container):
         self.btn_check_health = ft.ElevatedButton(
             text=I18n.get("settings_check_health"),
             icon=ft.Icons.REFRESH,
-            on_click=lambda e: (
-                self.page.run_task(self.refresh_health_status, e) if self.page else None
-            ),
+            on_click=lambda e: self.page.run_task(self.refresh_health_status, e) if self.page else None,
             style=style_health,
             height=40,
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -211,9 +210,7 @@ class DataSourceTab(ft.Container):
         self.sync_button = ft.ElevatedButton(
             text=I18n.get("settings_init_data"),
             icon=ft.Icons.CLOUD_DOWNLOAD,
-            on_click=lambda e: (
-                self.page.run_task(self.init_historical_data, e) if self.page else None
-            ),
+            on_click=lambda e: self.page.run_task(self.init_historical_data, e) if self.page else None,
             tooltip=I18n.get("settings_init_desc"),
             style=style_init,
             height=40,
@@ -649,9 +646,7 @@ class DataSourceTab(ft.Container):
                     on_confirm_callback()
 
             btn_style = (
-                ft.ButtonStyle(color=AppColors.ERROR)
-                if is_destructive
-                else ft.ButtonStyle(color=AppColors.PRIMARY)
+                ft.ButtonStyle(color=AppColors.ERROR) if is_destructive else ft.ButtonStyle(color=AppColors.PRIMARY)
             )
 
             dialog = ft.AlertDialog(
@@ -756,11 +751,7 @@ class DataSourceTab(ft.Container):
             return
 
         tm = TaskManager()
-        running = [
-            t
-            for t in tm.get_all_tasks()
-            if t.status == TaskStatus.RUNNING and t.unique_key != "cache_clear"
-        ]
+        running = [t for t in tm.get_all_tasks() if t.status == TaskStatus.RUNNING and t.unique_key != "cache_clear"]
         if running:
             self.show_snack(
                 I18n.get(
@@ -783,9 +774,7 @@ class DataSourceTab(ft.Container):
                 from ui.i18n import classify_error
 
                 error_info = classify_error(ex, context="general")
-                self.show_snack(
-                    I18n.get("ds_clean_fail").format(error=error_info["message"])
-                )
+                self.show_snack(I18n.get("ds_clean_fail").format(error=error_info["message"]))
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -935,9 +924,7 @@ class DataSourceTab(ft.Container):
         import time
 
         now = time.time()
-        should_update = (current == total) or (
-            not hasattr(self, "_last_ui_update") or now - self._last_ui_update > 0.1
-        )
+        should_update = (current == total) or (not hasattr(self, "_last_ui_update") or now - self._last_ui_update > 0.1)
 
         if should_update:
             progress = current / total if total > 0 else 0
@@ -1007,10 +994,8 @@ class DataSourceTab(ft.Container):
 
         # Batch update via parent container to ensure consistency
         if self.page:
-            try:
+            with contextlib.suppress(Exception):
                 self.update()
-            except Exception:
-                pass
 
     async def show_health_report_dialog(self, e):
         """Show full health report dialog"""

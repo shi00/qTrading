@@ -54,9 +54,7 @@ class NewsSubscriptionService:
         # Observer Pattern: List of callbacks
         # Format: set of callables
         self._listeners = set()
-        self._alert_listeners = (
-            set()
-        )  # Special listeners for popups (controlled by config)
+        self._alert_listeners = set()  # Special listeners for popups (controlled by config)
 
         self._current_fetch_task = None
         self._processing_task = None
@@ -67,9 +65,7 @@ class NewsSubscriptionService:
 
         self._initialized = True
 
-    def add_listener(
-        self, callback: typing.Callable | None, is_alert: typing.Any = False
-    ):
+    def add_listener(self, callback: typing.Callable | None, is_alert: typing.Any = False):
         """
         Add a listener for news updates.
         Args:
@@ -84,9 +80,7 @@ class NewsSubscriptionService:
             self._listeners.add(callback)
             logger.info(f"[NewsService] Added news listener: {callback}")
 
-    def remove_listener(
-        self, callback: typing.Callable | None, is_alert: typing.Any = False
-    ):
+    def remove_listener(self, callback: typing.Callable | None, is_alert: typing.Any = False):
         """Remove a listener."""
         if is_alert:
             self._alert_listeners.discard(callback)
@@ -198,9 +192,7 @@ class NewsSubscriptionService:
 
                 # If key missing or matches fallback (English), use it, otherwise use original if not found
                 if localized_category == i18n_key:
-                    localized_category = (
-                        category  # Fallback to original if I18n key missing
-                    )
+                    localized_category = category  # Fallback to original if I18n key missing
 
                 tag = f"【{emoji} {localized_category}】"
                 return tag
@@ -208,19 +200,11 @@ class NewsSubscriptionService:
             logger.warning(f"[NewsService] AI Tagging failed: {e}")
 
         # Fallback to Rule-based
-        if any(
-            k in clean_content
-            for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]
-        ):
+        if any(k in clean_content for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]):
             tag = f"【🏛️ {I18n.get('tag_policy')}】"
-        elif any(
-            k in clean_content
-            for k in ["美联储", "欧佩克", "纳斯达克", "汇率", "外盘", "美元"]
-        ):
+        elif any(k in clean_content for k in ["美联储", "欧佩克", "纳斯达克", "汇率", "外盘", "美元"]):
             tag = f"【🌍 {I18n.get('tag_global')}】"
-        elif any(
-            k in clean_content for k in ["GDP", "CPI", "PPI", "PMI", "社融", "通胀"]
-        ):
+        elif any(k in clean_content for k in ["GDP", "CPI", "PPI", "PMI", "社融", "通胀"]):
             tag = f"【📈 {I18n.get('tag_macro')}】"
 
         return tag
@@ -239,7 +223,7 @@ class NewsSubscriptionService:
                         self.processing_queue.get(),  # type: ignore
                         timeout=1.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
                 # Process Item

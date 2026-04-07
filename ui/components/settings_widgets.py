@@ -1,3 +1,5 @@
+import contextlib
+
 import flet as ft
 
 from ui.theme import AppColors, AppStyles
@@ -16,9 +18,7 @@ class DashboardCard(ft.Container):
             padding=padding,
             expand=expand,
             border_radius=style["border_radius"],  # type: ignore
-            bgcolor=style[
-                "bgcolor"
-            ],  # ft.Colors.SURFACE — auto-resolves  # type: ignore
+            bgcolor=style["bgcolor"],  # ft.Colors.SURFACE — auto-resolves  # type: ignore
             border=style.get("border"),
             shadow=style.get("shadow"),
         )
@@ -82,9 +82,7 @@ class MetricCard(ft.Container):
     def _build_status_row(self):
         """Build status row controls (uses custom colors for UP/DOWN)."""
         controls = []
-        resolved_color = (
-            self.status_color_val if self.status_color_val else ft.Colors.PRIMARY
-        )
+        resolved_color = self.status_color_val if self.status_color_val else ft.Colors.PRIMARY
         if self.icon_name:
             controls.append(ft.Icon(self.icon_name, size=14, color=resolved_color))
 
@@ -206,10 +204,8 @@ class ActionChip(ft.Container):
             self.opacity = 1.0
 
         if self.page:
-            try:
+            with contextlib.suppress(Exception):
                 self.update()
-            except Exception:
-                pass
 
 
 class StatusBadge(ft.Container):

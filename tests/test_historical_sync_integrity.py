@@ -83,12 +83,8 @@ class TestHistoricalSyncIntegrity:
 
         场景：模拟同步过程中断，验证断点续传正确性
         """
-        mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(
-            return_value={"20240101"}
-        )
-        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(
-            return_value={"20240101": 90}
-        )
+        mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240101"})
+        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={"20240101": 90})
 
         result = SyncResult()
 
@@ -101,19 +97,11 @@ class TestHistoricalSyncIntegrity:
 
         场景：模拟低质量数据，验证重新同步逻辑
         """
-        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(
-            return_value={"20240101": 50}
-        )
+        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={"20240101": 50})
 
-        quality_scores = (
-            await mock_sync_strategy.context.cache.get_bulk_sync_quality_scores(
-                "20240101", "20240101"
-            )
-        )
+        quality_scores = await mock_sync_strategy.context.cache.get_bulk_sync_quality_scores("20240101", "20240101")
 
-        low_quality_dates = [
-            date for date, score in quality_scores.items() if score < 80
-        ]
+        low_quality_dates = [date for date, score in quality_scores.items() if score < 80]
 
         assert "20240101" in low_quality_dates
 
@@ -124,15 +112,9 @@ class TestHistoricalSyncIntegrity:
 
         场景：验证 2018 年数据不会被误判为低质量
         """
-        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(
-            return_value={"20180601": 85}
-        )
+        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={"20180601": 85})
 
-        quality_scores = (
-            await mock_sync_strategy.context.cache.get_bulk_sync_quality_scores(
-                "20180601", "20180601"
-            )
-        )
+        quality_scores = await mock_sync_strategy.context.cache.get_bulk_sync_quality_scores("20180601", "20180601")
 
         score = quality_scores.get("20180601", 0)
         assert score >= 80
@@ -156,9 +138,7 @@ class TestBulkQualityScoreOptimization:
             call_count += 1
             return pd.DataFrame({"trade_date": [], "expected_count": []})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls
-        ):
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls):
             await quote_dao.get_bulk_sync_quality_scores("20210101", "20231231")
 
             assert call_count <= 20, f"Expected <= 20 DB calls, got {call_count}"
@@ -210,13 +190,9 @@ class TestDelistDateHandling:
             quote_dao,
             "_read_db",
             new_callable=AsyncMock,
-            return_value=pd.DataFrame(
-                {"trade_date": ["20180601"], "expected_count": [2500]}
-            ),
+            return_value=pd.DataFrame({"trade_date": ["20180601"], "expected_count": [2500]}),
         ):
-            counts = await quote_dao.get_bulk_expected_stock_counts(
-                "20180601", "20180601"
-            )
+            counts = await quote_dao.get_bulk_expected_stock_counts("20180601", "20180601")
 
             assert isinstance(counts, dict)
 
@@ -225,9 +201,7 @@ class TestDelistDateHandling:
         """
         测试 delist_date SQL 查询逻辑
         """
-        mock_result = pd.DataFrame(
-            {"trade_date": ["20240101", "20240102"], "expected_count": [5200, 5200]}
-        )
+        mock_result = pd.DataFrame({"trade_date": ["20240101", "20240102"], "expected_count": [5200, 5200]})
 
         with patch.object(
             quote_dao,
@@ -235,9 +209,7 @@ class TestDelistDateHandling:
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
-            counts = await quote_dao.get_bulk_expected_stock_counts(
-                "20240101", "20240102"
-            )
+            counts = await quote_dao.get_bulk_expected_stock_counts("20240101", "20240102")
 
             assert len(counts) == 2
 
@@ -294,7 +266,7 @@ class TestSyncResultMerge:
         assert datetime.date(2024, 1, 1) in result1.quality_scores
         assert datetime.date(2024, 1, 2) in result1.quality_scores
         assert len(result1.quality_scores) == 2
-        assert all(isinstance(k, datetime.date) for k in result1.quality_scores.keys())
+        assert all(isinstance(k, datetime.date) for k in result1.quality_scores)
 
     def test_merge_status_priority(self):
         """
@@ -513,9 +485,7 @@ class TestLowFrequencyTableScoring:
             return pd.DataFrame()
 
         with (
-            patch.object(
-                quote_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db
-            ),
+            patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db),
             patch.object(
                 quote_dao,
                 "get_bulk_expected_stock_counts",
@@ -523,9 +493,7 @@ class TestLowFrequencyTableScoring:
                 return_value=mock_expected,
             ),
         ):
-            scores = await quote_dao.get_bulk_sync_quality_scores(
-                "20240101", "20240101"
-            )
+            scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
 
             if datetime.date(2024, 1, 1) in scores:
                 result = scores[datetime.date(2024, 1, 1)]
@@ -555,9 +523,7 @@ class TestBreakpointResumeCoreTables:
             "moneyflow_daily": set(),
         }
 
-        strategy.context.cache.get_cached_dates_for_table = AsyncMock(
-            side_effect=lambda t: cached_dates.get(t, set())
-        )
+        strategy.context.cache.get_cached_dates_for_table = AsyncMock(side_effect=lambda t: cached_dates.get(t, set()))
 
         assert hasattr(strategy, "CORE_RESUME_TABLES")
         assert "daily_quotes" in strategy.CORE_RESUME_TABLES
@@ -595,9 +561,7 @@ class TestIncompleteFinancialStocksDetection:
                 return mock_df
             return pd.DataFrame()
 
-        with patch.object(
-            financial_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db
-        ):
+        with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db):
             result = await financial_dao.get_incomplete_financial_stocks(min_periods=4)
 
             assert isinstance(result, set)
@@ -621,9 +585,7 @@ class TestIncompleteFinancialStocksDetection:
                 return mock_df
             return pd.DataFrame()
 
-        with patch.object(
-            financial_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db
-        ):
+        with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db):
             result = await financial_dao.get_incomplete_financial_stocks(min_periods=4)
 
             assert isinstance(result, set)
@@ -641,9 +603,7 @@ class TestDelistedStockLogic:
         """
         mock_df = pd.DataFrame({"is_trade_day": [1], "cnt": [5000]})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df
-        ):
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df):
             count = await quote_dao.get_expected_stock_count("20240101")
 
             assert count == 5000
@@ -661,17 +621,12 @@ class TestDelistedStockLogic:
             call_args.append(query)
             return pd.DataFrame({"cnt": [0]})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query
-        ):
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query):
             await quote_dao.get_expected_stock_count("20240101")
 
             query = call_args[0] if call_args else ""
             assert "list_status = 'L'" in query or "list_status='L'" in query
-            assert (
-                "delist_date IS NOT NULL" in query
-                or "delist_date is not null" in query.lower()
-            )
+            assert "delist_date IS NOT NULL" in query or "delist_date is not null" in query.lower()
 
 
 class TestQualityWeightsConfig:
@@ -741,9 +696,7 @@ class TestQualityWeightsConfig:
                 ),
             ),
         ):
-            scores = await quote_dao.get_bulk_sync_quality_scores(
-                "20240101", "20240101"
-            )
+            scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
 
             assert isinstance(scores, dict)
 
@@ -766,9 +719,7 @@ class TestFinancialDaoGhostTable:
                 return pd.DataFrame({"periods": [8]})
             return pd.DataFrame({"cnt": [1]})
 
-        with patch.object(
-            financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query
-        ):
+        with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query):
             await financial_dao.verify_stock_financial_integrity("000001.SZ")
 
             queries = " ".join(call_args)
@@ -789,9 +740,7 @@ class TestHistoricalLayerViolation:
         from data.sync.historical import HistoricalSyncStrategy
 
         strategy = HistoricalSyncStrategy(mock_context)
-        strategy.context.cache.get_bulk_table_counts = AsyncMock(
-            return_value={datetime.date(2024, 1, 1): 100}
-        )
+        strategy.context.cache.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 1, 1): 100})
 
         assert hasattr(strategy.context.cache, "get_bulk_table_counts")
 
@@ -827,12 +776,8 @@ class TestP0RedundantFallbackRemoved:
             call_count += 1
             return pd.DataFrame()
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls
-        ):
-            result = await quote_dao.get_bulk_expected_stock_counts(
-                "20240101", "20240131"
-            )
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls):
+            result = await quote_dao.get_bulk_expected_stock_counts("20240101", "20240131")
 
             assert call_count == 1, f"Expected 1 DB call, got {call_count}"
             assert result == {}
@@ -848,18 +793,12 @@ class TestP0DateKeyNormalization:
 
         场景：返回的字典 key 应统一为 datetime.date 类型
         """
-        mock_df = pd.DataFrame(
-            {"trade_date": ["20240101", "20240102"], "expected_count": [5000, 5100]}
-        )
+        mock_df = pd.DataFrame({"trade_date": ["20240101", "20240102"], "expected_count": [5000, 5100]})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df
-        ):
-            result = await quote_dao.get_bulk_expected_stock_counts(
-                "20240101", "20240102"
-            )
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df):
+            result = await quote_dao.get_bulk_expected_stock_counts("20240101", "20240102")
 
-            for key in result.keys():
+            for key in result:
                 assert isinstance(key, datetime.date), f"Key {key} is not datetime.date"
 
     @pytest.mark.asyncio
@@ -869,18 +808,12 @@ class TestP0DateKeyNormalization:
 
         场景：返回的字典 key 应统一为 datetime.date 类型
         """
-        mock_df = pd.DataFrame(
-            {"trade_date": ["20240101", "20240102"], "cnt": [5000, 5100]}
-        )
+        mock_df = pd.DataFrame({"trade_date": ["20240101", "20240102"], "cnt": [5000, 5100]})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df
-        ):
-            result = await quote_dao.get_bulk_table_counts(
-                "daily_quotes", "20240101", "20240102"
-            )
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df):
+            result = await quote_dao.get_bulk_table_counts("daily_quotes", "20240101", "20240102")
 
-            for key in result.keys():
+            for key in result:
                 assert isinstance(key, datetime.date), f"Key {key} is not datetime.date"
 
 
@@ -930,9 +863,7 @@ class TestP1TradingDayValidation:
         """
         mock_df = pd.DataFrame({"is_trade_day": [0], "cnt": [5000]})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df
-        ):
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df):
             count = await quote_dao.get_expected_stock_count("20240107")
 
             assert count == 0
@@ -946,9 +877,7 @@ class TestP1TradingDayValidation:
         """
         mock_df = pd.DataFrame({"is_trade_day": [1], "cnt": [5200]})
 
-        with patch.object(
-            quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df
-        ):
+        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, return_value=mock_df):
             count = await quote_dao.get_expected_stock_count("20240102")
 
             assert count == 5200
@@ -970,9 +899,7 @@ class TestP1SyncVersionParameterized:
             call_args.append((query, params))
             return pd.DataFrame()
 
-        with patch.object(
-            financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query
-        ):
+        with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query):
             await financial_dao.get_incomplete_financial_stocks()
 
             if call_args:
@@ -993,12 +920,8 @@ class TestP1SyncVersionParameterized:
             call_args.append((query, params))
             return pd.DataFrame()
 
-        with patch.object(
-            financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query
-        ):
-            await financial_dao.get_incomplete_financial_stocks(
-                min_periods=8, sync_version=2
-            )
+        with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query):
+            await financial_dao.get_incomplete_financial_stocks(min_periods=8, sync_version=2)
 
             if call_args:
                 query, params = call_args[0]
@@ -1023,7 +946,7 @@ class TestP2SyncResultMergeDateNormalization:
 
         result1.merge(result2)
 
-        for key in result1.quality_scores.keys():
+        for key in result1.quality_scores:
             assert isinstance(key, datetime.date), f"Key {key} is not datetime.date"
 
     def test_merge_normalizes_expected_bases_keys(self):
@@ -1040,7 +963,7 @@ class TestP2SyncResultMergeDateNormalization:
 
         result1.merge(result2)
 
-        for key in result1.expected_bases.keys():
+        for key in result1.expected_bases:
             assert isinstance(key, datetime.date), f"Key {key} is not datetime.date"
 
 
@@ -1343,9 +1266,7 @@ class TestCacheManagerGetIncompleteFinancialStocks:
         with patch("data.cache.cache_manager.CacheManager.__init__", return_value=None):
             cache = CacheManager()
             cache.financial_dao = MagicMock()
-            cache.financial_dao.get_incomplete_financial_stocks = AsyncMock(
-                return_value={"000001.SZ"}
-            )
+            cache.financial_dao.get_incomplete_financial_stocks = AsyncMock(return_value={"000001.SZ"})
             return cache
 
     @pytest.mark.asyncio
@@ -1358,9 +1279,7 @@ class TestCacheManagerGetIncompleteFinancialStocks:
         result = await cache_manager.get_incomplete_financial_stocks()
 
         assert result == {"000001.SZ"}
-        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(
-            4, 1
-        )
+        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(4, 1)
 
     @pytest.mark.asyncio
     async def test_get_incomplete_financial_stocks_custom_params(self, cache_manager):
@@ -1371,19 +1290,13 @@ class TestCacheManagerGetIncompleteFinancialStocks:
         """
         cache_manager.financial_dao.get_incomplete_financial_stocks.return_value = set()
 
-        result = await cache_manager.get_incomplete_financial_stocks(
-            min_periods=8, sync_version=2
-        )
+        result = await cache_manager.get_incomplete_financial_stocks(min_periods=8, sync_version=2)
 
         assert result == set()
-        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(
-            8, 2
-        )
+        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(8, 2)
 
     @pytest.mark.asyncio
-    async def test_get_incomplete_financial_stocks_only_min_periods(
-        self, cache_manager
-    ):
+    async def test_get_incomplete_financial_stocks_only_min_periods(self, cache_manager):
         """
         测试只传 min_periods 参数
 
@@ -1392,14 +1305,10 @@ class TestCacheManagerGetIncompleteFinancialStocks:
         result = await cache_manager.get_incomplete_financial_stocks(min_periods=6)
 
         assert result == {"000001.SZ"}
-        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(
-            6, 1
-        )
+        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(6, 1)
 
     @pytest.mark.asyncio
-    async def test_get_incomplete_financial_stocks_only_sync_version(
-        self, cache_manager
-    ):
+    async def test_get_incomplete_financial_stocks_only_sync_version(self, cache_manager):
         """
         测试只传 sync_version 参数
 
@@ -1408,6 +1317,4 @@ class TestCacheManagerGetIncompleteFinancialStocks:
         result = await cache_manager.get_incomplete_financial_stocks(sync_version=3)
 
         assert result == {"000001.SZ"}
-        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(
-            4, 3
-        )
+        cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(4, 3)

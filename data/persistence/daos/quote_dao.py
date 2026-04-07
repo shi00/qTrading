@@ -119,9 +119,7 @@ class QuoteDao(BaseDao):
             suppress_errors=suppress_errors,
         )
 
-    async def check_data_exists(
-        self, trade_date: datetime.date | str, tables: list | None = None
-    ) -> bool:
+    async def check_data_exists(self, trade_date: datetime.date | str, tables: list | None = None) -> bool:
         """
         Check if data exists for all synced tables on a given trade_date.
         This is used for reliable breakpoint resume - only skip a date if ALL
@@ -181,16 +179,16 @@ class QuoteDao(BaseDao):
                       AND exchange = 'SSE'
                 ),
                 stock_counts AS (
-                    SELECT COUNT(*) as cnt 
-                    FROM stock_basic 
-                    WHERE list_date <= $1 
+                    SELECT COUNT(*) as cnt
+                    FROM stock_basic
+                    WHERE list_date <= $1
                       AND (
                         (list_status = 'L' AND (delist_date IS NULL OR delist_date > $1))
-                        OR 
+                        OR
                         (list_status = 'D' AND delist_date IS NOT NULL AND delist_date > $1)
                       )
                 )
-                SELECT 
+                SELECT
                     COALESCE((SELECT is_trade_day FROM trade_day_check), 0) as is_trade_day,
                     (SELECT cnt FROM stock_counts) as cnt
                 """,
@@ -205,9 +203,7 @@ class QuoteDao(BaseDao):
                 return int(df["cnt"].iloc[0])
             return 0
         except Exception as e:
-            logger.warning(
-                f"[QuoteDao] Failed to get expected stock count for {trade_date}: {e}"
-            )
+            logger.warning(f"[QuoteDao] Failed to get expected stock count for {trade_date}: {e}")
             return 0
 
     async def get_daily_quotes(
@@ -330,9 +326,7 @@ class QuoteDao(BaseDao):
         Returns:
             tuple: (min_date, max_date) or (None, None)
         """
-        df = await self._read_db(
-            "SELECT MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM daily_quotes"
-        )
+        df = await self._read_db("SELECT MIN(trade_date) as min_date, MAX(trade_date) as max_date FROM daily_quotes")
         if df is None or df.empty:
             return None, None
         return df["min_date"].iloc[0], df["max_date"].iloc[0]
@@ -381,9 +375,7 @@ class QuoteDao(BaseDao):
             pk_columns=["ts_code", "trade_date"],
         )
 
-    async def get_index_daily(
-        self, ts_code: str | None = None, trade_date: str | None = None
-    ):
+    async def get_index_daily(self, ts_code: str | None = None, trade_date: str | None = None):
         sql = "SELECT * FROM index_daily WHERE 1=1"
         p = []
         idx = 1
@@ -573,9 +565,7 @@ class QuoteDao(BaseDao):
             pk_columns=["ts_code", "trade_date"],
         )
 
-    async def get_moneyflow(
-        self, trade_date: str | None = None, ts_code: str | None = None
-    ):
+    async def get_moneyflow(self, trade_date: str | None = None, ts_code: str | None = None):
         sql = "SELECT * FROM moneyflow_daily WHERE 1=1"
         p = []
         idx = 1
@@ -598,9 +588,7 @@ class QuoteDao(BaseDao):
             pk_columns=["ts_code", "trade_date"],
         )
 
-    async def get_northbound(
-        self, trade_date: str | None = None, ts_code: str | None = None
-    ):
+    async def get_northbound(self, trade_date: str | None = None, ts_code: str | None = None):
         sql = "SELECT * FROM northbound_holding WHERE 1=1"
         p = []
         idx = 1
@@ -617,10 +605,7 @@ class QuoteDao(BaseDao):
         df = await self._read_db(
             "SELECT MAX(trade_date) as max_td FROM northbound_holding",
         )
-        if df is not None and not df.empty:
-            td = df["max_td"].iloc[0]
-        else:
-            td = None
+        td = df["max_td"].iloc[0] if df is not None and not df.empty else None
         if not td:
             return pd.DataFrame()
         return await self.get_northbound(trade_date=td)
@@ -652,8 +637,8 @@ class QuoteDao(BaseDao):
         try:
             df = await self._read_db(
                 f"""
-                SELECT trade_date, COUNT(*) as cnt 
-                FROM {table_name} 
+                SELECT trade_date, COUNT(*) as cnt
+                FROM {table_name}
                 WHERE trade_date BETWEEN $1 AND $2
                 GROUP BY trade_date
                 """,
@@ -664,14 +649,12 @@ class QuoteDao(BaseDao):
                 return {}
 
             normalized_results = {}
-            for trade_date, count in zip(df["trade_date"], df["cnt"]):
+            for trade_date, count in zip(df["trade_date"], df["cnt"], strict=False):
                 normalized_results[_normalize_trade_date(trade_date)] = count
 
             return normalized_results
         except Exception as e:
-            logger.warning(
-                f"[QuoteDao] Failed to get bulk counts for {table_name}: {e}"
-            )
+            logger.warning(f"[QuoteDao] Failed to get bulk counts for {table_name}: {e}")
             return {}
 
     async def get_bulk_expected_stock_counts(
@@ -708,14 +691,14 @@ class QuoteDao(BaseDao):
                       AND exchange = 'SSE'
                 ),
                 stock_counts AS (
-                    SELECT 
+                    SELECT
                         t.trade_date,
                         COUNT(s.ts_code) as expected_count
                     FROM trading_days t
-                    LEFT JOIN stock_basic s ON s.list_date <= t.trade_date 
+                    LEFT JOIN stock_basic s ON s.list_date <= t.trade_date
                         AND (
                             (s.list_status = 'L' AND (s.delist_date IS NULL OR s.delist_date > t.trade_date))
-                            OR 
+                            OR
                             (s.list_status = 'D' AND s.delist_date IS NOT NULL AND s.delist_date > t.trade_date)
                         )
                     GROUP BY t.trade_date
@@ -727,13 +710,11 @@ class QuoteDao(BaseDao):
             )
 
             if df is None or df.empty:
-                logger.warning(
-                    f"[QuoteDao] No trading days found for range {start_date} to {end_date}"
-                )
+                logger.warning(f"[QuoteDao] No trading days found for range {start_date} to {end_date}")
                 return {}
 
             normalized_results = {}
-            for trade_date, count in zip(df["trade_date"], df["expected_count"]):
+            for trade_date, count in zip(df["trade_date"], df["expected_count"], strict=False):
                 normalized_results[_normalize_trade_date(trade_date)] = count
 
             return normalized_results
@@ -776,16 +757,12 @@ class QuoteDao(BaseDao):
         expected_bases = await self.get_bulk_expected_stock_counts(start_date, end_date)
 
         if not expected_bases:
-            logger.warning(
-                "[QuoteDao] Cannot determine expected bases for quality check"
-            )
+            logger.warning("[QuoteDao] Cannot determine expected bases for quality check")
             return {}
 
         table_counts = {}
         for table in tables:
-            table_counts[table] = await self.get_bulk_table_counts(
-                table, start_date, end_date
-            )
+            table_counts[table] = await self.get_bulk_table_counts(table, start_date, end_date)
 
         table_tolerance_map = {
             "daily_quotes": config["quotes_tolerance_ratio"],
@@ -829,9 +806,7 @@ class QuoteDao(BaseDao):
             }
 
             if not quotes_passed:
-                result["issues"].append(
-                    f"daily_quotes: {quotes_count}/{expected_base} ({quotes_ratio:.1%})"
-                )
+                result["issues"].append(f"daily_quotes: {quotes_count}/{expected_base} ({quotes_ratio:.1%})")
 
             reference_count = quotes_count if quotes_count > 0 else expected_base
 
@@ -839,11 +814,7 @@ class QuoteDao(BaseDao):
             valid_tables = 1
 
             LOW_FREQUENCY_THRESHOLD = 0.5
-            low_frequency_tables = {
-                t
-                for t, tol in table_tolerance_map.items()
-                if tol < LOW_FREQUENCY_THRESHOLD
-            }
+            low_frequency_tables = {t for t, tol in table_tolerance_map.items() if tol < LOW_FREQUENCY_THRESHOLD}
 
             for table in tables:
                 if table == "daily_quotes":
@@ -891,9 +862,7 @@ class QuoteDao(BaseDao):
                         total_weight += weight
 
                 if total_weight > 0:
-                    result["score"] = int(
-                        min(100, (weighted_score / total_weight) * 100)
-                    )
+                    result["score"] = int(min(100, (weighted_score / total_weight) * 100))
 
             results[trade_date] = result
 

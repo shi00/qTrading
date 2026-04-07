@@ -181,9 +181,7 @@ class TestMacroSyncStrategy:
         merged = strategy._merge_macro_data(None, None, None)
         assert merged is None
 
-        merged = strategy._merge_macro_data(
-            pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        )
+        merged = strategy._merge_macro_data(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
         assert merged is None or merged.empty
 
     def test_merge_macro_data_missing_period_column(self, strategy):
@@ -263,9 +261,7 @@ class TestMacroSyncStrategy:
     @pytest.mark.asyncio
     async def test_run_with_cancellation(self, strategy, mock_context):
         """测试取消操作"""
-        mock_context.api.get_macro_data = AsyncMock(
-            return_value=pd.DataFrame({"period": ["202401"], "m2": [1000]})
-        )
+        mock_context.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202401"], "m2": [1000]}))
         mock_context.cache.engine = MagicMock()
 
         await strategy.cancel()
@@ -284,14 +280,10 @@ class TestMacroSyncStrategy:
 
         with patch("data.sync.macro.MacroDao", return_value=mock_dao):
             mock_context.cache.market_dao = AsyncMock()
-            mock_context.cache.market_dao.get_latest_index_weight_date = AsyncMock(
-                return_value=None
-            )
+            mock_context.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
             mock_context.cache.update_sync_status = AsyncMock()
             mock_context.cache.save_index_weights = AsyncMock(return_value=0)
-            mock_context.processor.get_trade_dates = AsyncMock(
-                return_value=[datetime.date(2024, 1, 1)]
-            )
+            mock_context.processor.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 1)])
 
             strategy_with_dao = MacroSyncStrategy(mock_context)
             strategy_with_dao.dao = mock_dao
@@ -369,9 +361,7 @@ class TestHolderSyncStrategy:
     @pytest.mark.asyncio
     async def test_sync_one_table_api_error(self, strategy, mock_context):
         """测试单表同步 API 错误"""
-        mock_context.api.get_stk_holdernumber = AsyncMock(
-            side_effect=Exception("API Error")
-        )
+        mock_context.api.get_stk_holdernumber = AsyncMock(side_effect=Exception("API Error"))
 
         count = await strategy._sync_one_table(
             api_func=mock_context.api.get_stk_holdernumber,
@@ -385,9 +375,7 @@ class TestHolderSyncStrategy:
     @pytest.mark.asyncio
     async def test_sync_one_table_permission_denied(self, strategy, mock_context):
         """测试单表同步权限不足"""
-        mock_context.api.get_stk_holdernumber = AsyncMock(
-            side_effect=Exception("permission denied")
-        )
+        mock_context.api.get_stk_holdernumber = AsyncMock(side_effect=Exception("permission denied"))
 
         count = await strategy._sync_one_table(
             api_func=mock_context.api.get_stk_holdernumber,
@@ -425,12 +413,8 @@ class TestHolderSyncStrategy:
     @pytest.mark.asyncio
     async def test_run_circuit_breaker(self, strategy, mock_context):
         """测试熔断机制"""
-        mock_context.api.get_stk_holdernumber = AsyncMock(
-            side_effect=Exception("API Error")
-        )
-        mock_context.api.get_top10_holders = AsyncMock(
-            side_effect=Exception("API Error")
-        )
+        mock_context.api.get_stk_holdernumber = AsyncMock(side_effect=Exception("API Error"))
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=Exception("API Error"))
         mock_context.api.get_pledge_stat = AsyncMock(side_effect=Exception("API Error"))
 
         result = await strategy.run()
@@ -458,9 +442,7 @@ class TestHistoricalSyncStrategy:
     @pytest.mark.asyncio
     async def test_run_empty_trade_dates(self, strategy, mock_context):
         """测试无交易日数据"""
-        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(
-            return_value=[]
-        )
+        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[])
 
         result = await strategy.run(days=30)
 
@@ -470,9 +452,7 @@ class TestHistoricalSyncStrategy:
     @pytest.mark.asyncio
     async def test_run_with_cancellation(self, strategy, mock_context):
         """测试取消操作"""
-        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(
-            return_value=[datetime.date(2024, 1, 1)]
-        )
+        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 1)])
         mock_context.cache.get_cached_dates_for_table = AsyncMock(return_value=set())
 
         await strategy.cancel()
@@ -501,19 +481,13 @@ class TestHistoricalSyncStrategy:
         assert result.updated == 3
 
     @pytest.mark.asyncio
-    async def test_sync_daily_market_snapshot_critical_failure(
-        self, strategy, mock_context
-    ):
+    async def test_sync_daily_market_snapshot_critical_failure(self, strategy, mock_context):
         """测试关键数据获取失败"""
-        mock_context.api.get_daily_quotes = AsyncMock(
-            side_effect=Exception("Quotes API Error")
-        )
+        mock_context.api.get_daily_quotes = AsyncMock(side_effect=Exception("Quotes API Error"))
         mock_context.cache.check_data_exists = AsyncMock(return_value=False)
 
         with pytest.raises(Exception, match="Quotes API Error"):
-            await strategy.sync_daily_market_snapshot(
-                datetime.date(2024, 1, 1), force=True
-            )
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 1, 1), force=True)
 
     @pytest.mark.asyncio
     async def test_sync_daily_market_snapshot_success(self, strategy, mock_context):
@@ -563,9 +537,7 @@ class TestHistoricalSyncStrategy:
         mock_context.cache.save_daily_indicators.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_sync_daily_market_snapshot_missing_adj_factor(
-        self, strategy, mock_context
-    ):
+    async def test_sync_daily_market_snapshot_missing_adj_factor(self, strategy, mock_context):
         """测试缺少复权因子列的警告"""
         mock_quotes = pd.DataFrame(
             {
@@ -656,9 +628,7 @@ class TestFinancialSyncStrategy:
     @pytest.mark.asyncio
     async def test_run_incremental_sync(self, strategy, mock_context):
         """测试增量同步"""
-        mock_context.cache.get_sync_status = AsyncMock(
-            return_value={"last_sync_date": "2024-01-01 00:00:00"}
-        )
+        mock_context.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": "2024-01-01 00:00:00"})
         mock_context.api.get_disclosure_date = AsyncMock(return_value=pd.DataFrame())
 
         result = await strategy.run()
@@ -677,12 +647,8 @@ class TestFinancialSyncStrategy:
                 }
             )
         )
-        mock_context.cache.get_completed_step4_stocks = AsyncMock(
-            return_value={"000001.SZ"}
-        )
-        mock_context.processor.get_trade_dates = AsyncMock(
-            return_value=[datetime.date(2024, 1, 1)]
-        )
+        mock_context.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ"})
+        mock_context.processor.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 1)])
         mock_context.cache.clear_step4_sync_status = AsyncMock()
 
         mock_context.api.get_income = AsyncMock(return_value=pd.DataFrame())
@@ -698,9 +664,7 @@ class TestFinancialSyncStrategy:
         mock_context.cache.mark_stock_step4_completed = AsyncMock()
 
         with (
-            patch(
-                "utils.config_handler.ConfigHandler.get_max_batch_rows", return_value=10
-            ),
+            patch("utils.config_handler.ConfigHandler.get_max_batch_rows", return_value=10),
             patch(
                 "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
                 return_value=1,
@@ -752,9 +716,7 @@ class TestSyncContextDataCleaning:
             }
         )
 
-        df["trade_date"] = pd.to_datetime(
-            df["trade_date"], format="%Y%m%d", errors="coerce"
-        )
+        df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d", errors="coerce")
         df_valid = df.dropna(subset=["trade_date"])
 
         assert len(df_valid) == 2
@@ -806,12 +768,8 @@ class TestDateTypeConsistency:
 
     def test_api_layer_converts_date_to_string(self):
         source = inspect.getsource(TushareClient._handle_api_call)
-        assert "strftime" in source, (
-            "_handle_api_call should convert datetime.date to string for Tushare API"
-        )
-        assert "%Y%m%d" in source, (
-            "_handle_api_call should use YYYYMMDD format for Tushare API"
-        )
+        assert "strftime" in source, "_handle_api_call should convert datetime.date to string for Tushare API"
+        assert "%Y%m%d" in source, "_handle_api_call should use YYYYMMDD format for Tushare API"
 
     def test_health_mixin_date_comparison_type_safe(self):
         source = inspect.getsource(HealthCheckMixin.check_data_health)
@@ -823,27 +781,20 @@ class TestDateTypeConsistency:
         )
 
     def test_historical_sync_trade_dates_type(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy._run_historical_sync
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy._run_historical_sync)
         assert "trade_date_objs" in source or "datetime.date" in source, (
             "_run_historical_sync should work with datetime.date objects"
         )
         assert '[d.strftime("%Y%m%d") for d in' not in source, (
-            "_run_historical_sync should not convert dates to strings internally. "
-            "Let API layer handle conversion."
+            "_run_historical_sync should not convert dates to strings internally. Let API layer handle conversion."
         )
 
     def test_breakpoint_resume_date_comparison_type_safe(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy._run_historical_sync
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy._run_historical_sync)
         assert "existing" in source and "trade_dates" in source, (
             "Breakpoint resume should compare existing dates with trade_dates"
         )
-        assert "set.intersection" in source, (
-            "Breakpoint resume should use set.intersection for date comparison"
-        )
+        assert "set.intersection" in source, "Breakpoint resume should use set.intersection for date comparison"
 
     def test_sync_methods_accept_datetime_date(self):
         for method_name in [
@@ -869,18 +820,13 @@ class TestDateTypeConsistency:
                 if pattern in source:
                     if module.__name__ == "data.sync.historical":
                         continue
-                    assert False, (
-                        f"{module.__name__} should not convert dates to strings. "
-                        f"API layer handles this conversion."
+                    raise AssertionError(
+                        f"{module.__name__} should not convert dates to strings. API layer handles this conversion."
                     )
 
     def test_historical_sync_only_uses_strftime_for_display(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy._run_historical_sync
-        )
-        strftime_matches = [
-            line.strip() for line in source.split("\n") if 'strftime("%Y%m%d")' in line
-        ]
+        source = inspect.getsource(historical.HistoricalSyncStrategy._run_historical_sync)
+        strftime_matches = [line.strip() for line in source.split("\n") if 'strftime("%Y%m%d")' in line]
         for match in strftime_matches:
             assert "progress_callback" in match or "I18n.get" in match, (
                 f"strftime in historical should only be for display/progress, found: {match}"
@@ -888,15 +834,11 @@ class TestDateTypeConsistency:
 
     def test_get_cached_indicator_dates_returns_datetime_date(self):
         source = inspect.getsource(FinancialDao.get_cached_indicator_dates)
-        assert "strftime" not in source, (
-            "get_cached_indicator_dates should return datetime.date objects"
-        )
+        assert "strftime" not in source, "get_cached_indicator_dates should return datetime.date objects"
 
     def test_get_date_range_returns_datetime_date(self):
         source = inspect.getsource(QuoteDao.get_date_range)
-        assert "strftime" not in source, (
-            "get_date_range should return datetime.date objects"
-        )
+        assert "strftime" not in source, "get_date_range should return datetime.date objects"
 
 
 class TestHistoricalSyncCriticalTables:
@@ -928,9 +870,7 @@ class TestHistoricalSyncCriticalTables:
         assert not missing, f"SYNCED_TABLES missing tables: {missing}"
 
     def test_run_uses_synced_tables(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy._run_historical_sync
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy._run_historical_sync)
 
         assert "self.SYNCED_TABLES" in source, (
             "_run_historical_sync should use self.SYNCED_TABLES for breakpoint resume"
@@ -941,21 +881,15 @@ class TestFieldExistenceCheck:
     """Test that field existence checks are in place for critical data."""
 
     def test_quotes_field_check_in_historical_sync(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
-        assert "adj_factor" in source, (
-            "sync_daily_market_snapshot should check for adj_factor column"
-        )
+        assert "adj_factor" in source, "sync_daily_market_snapshot should check for adj_factor column"
         assert "required_quote_cols" in source or "missing_cols" in source, (
             "sync_daily_market_snapshot should check for required quote columns"
         )
 
     def test_basic_field_check_in_historical_sync(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         assert "required_basic_cols" in source or "df_basic" in source, (
             "sync_daily_market_snapshot should check for required basic/indicator columns"
@@ -966,46 +900,30 @@ class TestErrorHandlingConsistency:
     """Test that error handling is consistent across sync methods."""
 
     def test_critical_data_raises_on_failure(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
-        assert "critical=True" in source, (
-            "sync_daily_market_snapshot should mark quotes and basic as critical"
-        )
+        assert "critical=True" in source, "sync_daily_market_snapshot should mark quotes and basic as critical"
         assert "raise e" in source or "raise " in source, (
             "sync_daily_market_snapshot should raise exception for critical data failures"
         )
 
     def test_non_critical_data_logs_warning(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
-        assert "logger.warning" in source, (
-            "sync_daily_market_snapshot should log warnings for non-critical failures"
-        )
+        assert "logger.warning" in source, "sync_daily_market_snapshot should log warnings for non-critical failures"
 
 
 class TestSyncStatusUpdate:
     """Test that sync status is updated correctly."""
 
     def test_sync_status_updated_on_success(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
-        assert "update_sync_status" in source, (
-            "sync_daily_market_snapshot should call update_sync_status"
-        )
-        assert "safe_update_status" in source, (
-            "sync_daily_market_snapshot should have safe_update_status helper"
-        )
+        assert "update_sync_status" in source, "sync_daily_market_snapshot should call update_sync_status"
+        assert "safe_update_status" in source, "sync_daily_market_snapshot should have safe_update_status helper"
 
     def test_sync_status_skipped_on_failure(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         assert "Skipping sync_status" in source or "result is not None" in source, (
             "sync_daily_market_snapshot should skip sync_status update on failure"
@@ -1016,42 +934,29 @@ class TestSyncReturnValueConsistency:
     """Test that sync_daily_market_snapshot returns consistent values."""
 
     def test_sync_returns_true_on_success(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
-        assert "return True" in source, (
-            "sync_daily_market_snapshot should return True on successful sync"
-        )
+        assert "return True" in source, "sync_daily_market_snapshot should return True on successful sync"
 
     def test_sync_returns_true_on_cache_hit(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         lines = source.split("\n")
         cache_hit_return_true = False
         for i, line in enumerate(lines):
-            if (
-                "Cache hit" in line
-                or "check_all_critical_tables_exist" in lines[max(0, i - 2)]
-            ):
+            if "Cache hit" in line or "check_all_critical_tables_exist" in lines[max(0, i - 2)]:
                 for j in range(i, min(i + 5, len(lines))):
                     if "return True" in lines[j]:
                         cache_hit_return_true = True
                         break
-        assert cache_hit_return_true, (
-            "sync_daily_market_snapshot should return True when cache hit (skipping sync)"
-        )
+        assert cache_hit_return_true, "sync_daily_market_snapshot should return True when cache hit (skipping sync)"
 
 
 class TestRetryLogging:
     """Test that retry failures are properly logged."""
 
     def test_retry_logs_exception_details(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy._run_historical_sync
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy._run_historical_sync)
 
         retry_section = False
         has_exception_logging = False
@@ -1064,9 +969,7 @@ class TestRetryLogging:
                     if "logger.warning" in lines[j] or "logger.error" in lines[j]:
                         has_exception_logging = True
                         break
-        assert has_exception_logging, (
-            "retry_one should log exception details when retry fails"
-        )
+        assert has_exception_logging, "retry_one should log exception details when retry fails"
 
 
 class TestCheckDataExists:
@@ -1080,9 +983,7 @@ class TestCheckDataExists:
         )
 
     def test_check_data_exists_used_in_sync(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         assert "check_data_exists" in source, (
             "sync_daily_market_snapshot should use check_data_exists for cache checking"
@@ -1098,46 +999,36 @@ class TestCheckDataExists:
         dao_tables = set(_get_default_synced_tables())
         strategy_tables = set(historical.HistoricalSyncStrategy.SYNCED_TABLES)
 
-        assert dao_tables == strategy_tables, (
-            f"Table mismatch: DAO={dao_tables}, Strategy={strategy_tables}"
-        )
+        assert dao_tables == strategy_tables, f"Table mismatch: DAO={dao_tables}, Strategy={strategy_tables}"
 
 
 class TestDataIntegrityVerification:
     """Test that data integrity is verified after save."""
 
     def test_verify_data_integrity_function_exists(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         assert "verify_data_integrity" in source, (
             "sync_daily_market_snapshot should have verify_data_integrity function"
         )
 
     def test_verify_checks_fetched_vs_saved(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         assert "fetched" in source and "saved" in source, (
             "verify_data_integrity should compare fetched vs saved row counts"
         )
 
     def test_save_if_ok_returns_dict(self):
-        source = inspect.getsource(
-            historical.HistoricalSyncStrategy.sync_daily_market_snapshot
-        )
+        source = inspect.getsource(historical.HistoricalSyncStrategy.sync_daily_market_snapshot)
 
         save_if_ok_section = False
         has_dict_return = False
         lines = source.split("\n")
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             if "async def save_if_ok" in line:
                 save_if_ok_section = True
             if save_if_ok_section and ("saved" in line and "fetched" in line):
                 has_dict_return = True
                 break
-        assert has_dict_return, (
-            "save_if_ok should return a dict with 'saved' and 'fetched' keys"
-        )
+        assert has_dict_return, "save_if_ok should return a dict with 'saved' and 'fetched' keys"
