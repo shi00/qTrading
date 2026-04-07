@@ -6,8 +6,8 @@ indent-width = 4
 target-version = "py311"
 
 [tool.ruff.lint]
-# 默认开启 F(Pyflakes), E(pycodestyle errors), W(pycodestyle warnings), I(isort), UP(pyupgrade)
-select = ["F", "E", "W", "I", "UP", "B", "SIM"]
+# 默认开启 F(Pyflakes), E(pycodestyle errors), W(pycodestyle warnings), UP(pyupgrade)
+select = ["F", "E", "W", "UP", "B", "SIM"]
 # 忽略一些偶尔引发冲突和历史遗留报错的格式规则
 ignore = ["E501", "E402", "SIM102", "SIM105", "SIM108", "SIM117"]
 
