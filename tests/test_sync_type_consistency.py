@@ -1,10 +1,15 @@
 """
-Code Review V3 Tests
+Sync Type Consistency Tests
 
-Tests for issues identified in V3 code review report.
-These tests prevent regression of known issues.
+Tests for ensuring type consistency in data synchronization:
+- Date types: datetime.date vs string
+- Schema completeness: required columns exist
+- Cache method coverage: all critical tables supported
+- Breakpoint resume: core tables configuration
 
-Run: pytest tests/test_code_review_v3.py -v
+These tests prevent regression of known type-related issues.
+
+Run: pytest tests/test_sync_type_consistency.py -v
 """
 
 import inspect
@@ -16,8 +21,8 @@ from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 
 
-class TestV3CodeReviewIssues:
-    """Test cases for issues identified in V3 code review report."""
+class TestSyncTypeConsistency:
+    """Test cases for type consistency in data synchronization."""
 
     def test_financial_report_schema_cols_has_goodwill_and_audit_result(self):
         assert "goodwill" in FINANCIAL_REPORT_SCHEMA_COLS, (
