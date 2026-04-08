@@ -105,6 +105,7 @@ class TestAISelectionStrategy:
         mock_ai_service_cls,
         sample_screening_df,
         mock_data_processor,
+        test_engine,
     ):
         """Test: Strategy raises error when API key is missing"""
         mock_ai_service = MagicMock()
@@ -151,6 +152,7 @@ class TestAISelectionStrategy:
         self,
         mock_ai_service_cls,
         sample_screening_df,
+        test_engine,
     ):
         """Test: Strategy handles missing DataProcessor gracefully.
 
@@ -176,6 +178,7 @@ class TestAISelectionStrategy:
         mock_ai_service_cls,
         sample_screening_df,
         mock_data_processor,
+        test_engine,
     ):
         """Test: Pre-filter correctly removes stocks with negative PE"""
         mock_ai_service = MagicMock()
@@ -211,7 +214,7 @@ class TestReviewManager:
     """Tests for ReviewManager"""
 
     @pytest.mark.asyncio
-    async def test_save_results_handles_empty_df(self):
+    async def test_save_results_handles_empty_df(self, test_engine):
         """Test: save_results gracefully handles empty DataFrame"""
         rm = ReviewManager()
 
@@ -220,7 +223,7 @@ class TestReviewManager:
         await rm.save_results("TEST", None)
 
     @pytest.mark.asyncio
-    async def test_get_learning_context_returns_xml(self):
+    async def test_get_learning_context_returns_xml(self, test_engine):
         """Test: get_learning_context returns valid XML structure"""
         rm = ReviewManager()
 
