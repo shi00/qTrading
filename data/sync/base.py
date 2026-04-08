@@ -85,9 +85,11 @@ class SyncResult:
 
         if other.status == "cancelled" or self.status == "cancelled":
             self.status = "cancelled"
-        elif other.status == "failed" or self.status == "failed":
+        elif other.status == "failed" and self.status == "failed":
             self.status = "failed"
-        elif other.status == "partial" or self.status == "partial":
+        elif (
+            other.status == "failed" or self.status == "failed" or other.status == "partial" or self.status == "partial"
+        ):
             self.status = "partial"
 
     def to_summary(self) -> str:

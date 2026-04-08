@@ -81,13 +81,14 @@ class I18n:
         logger.info(f"[I18n] Initialized with locale: {cls._locale}")
 
     @classmethod
-    def get(cls, key: str, default: str | None = None, **kwargs) -> str:
+    def get(cls, key: str, default: str | None = None, locale: str | None = None, **kwargs) -> str:
         """
         Get translated string by key with optional formatting.
 
         Args:
             key: Translation key
             default: Optional fallback string if key is not found
+            locale: Optional locale to use instead of current locale
             **kwargs: Optional format arguments (e.g., error="...", count=5)
 
         Returns:
@@ -95,21 +96,24 @@ class I18n:
 
         Example:
             I18n.get("screener_done", count=10)  # Returns "筛选完成，共 10 只股票"
+            I18n.get("app_title", locale="en_US")  # Returns "A-Share Intelligent Screener"
         """
         if not cls._initialized:
             cls.initialize()
 
-        locale_map = cls._get_strings(cls._locale)
+        target_locale = locale if locale else cls._locale
+        normalized_locale = LOCALE_MAP.get(target_locale, target_locale)
+        locale_map = cls._get_strings(normalized_locale)
 
         if key not in locale_map:
             if key not in cls._missing_keys:
                 if default is not None:
                     logger.debug(
-                        f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {cls._locale})",
+                        f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {normalized_locale})",
                     )
                 else:
                     logger.warning(
-                        f"[I18n] Missing translation for key: '{key}' (Locale: {cls._locale})",
+                        f"[I18n] Missing translation for key: '{key}' (Locale: {normalized_locale})",
                     )
                 cls._missing_keys.add(key)
             return default if default is not None else key
