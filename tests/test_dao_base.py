@@ -105,16 +105,23 @@ async def financial_dao(test_engine: AsyncEngine):
     return FinancialDao(test_engine)
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(autouse=True)
 async def clean_db(test_engine: AsyncEngine):
-    """每个测试前清理数据库表"""
+    """每个测试前清理数据库表（容错处理表不存在）"""
+    import contextlib
+
+    tables = [
+        "daily_quotes",
+        "stock_basic",
+        "trade_cal",
+        "stock_concepts",
+        "financial_reports",
+        "daily_indicators",
+    ]
     async with test_engine.begin() as conn:
-        await conn.execute(text("DELETE FROM daily_quotes"))
-        await conn.execute(text("DELETE FROM stock_basic"))
-        await conn.execute(text("DELETE FROM trade_cal"))
-        await conn.execute(text("DELETE FROM stock_concepts"))
-        await conn.execute(text("DELETE FROM financial_reports"))
-        await conn.execute(text("DELETE FROM daily_indicators"))
+        for table in tables:
+            with contextlib.suppress(Exception):
+                await conn.execute(text(f"DELETE FROM {table}"))
     yield
 
 

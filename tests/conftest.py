@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from unittest.mock import MagicMock
 
 import asyncpg
 import pytest
@@ -10,6 +11,31 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+
+def _create_mock_keyring():
+    """Create a mock keyring module for CI environments."""
+    _password_store = {}
+
+    def get_password(service_name, username):
+        return _password_store.get(f"{service_name}:{username}")
+
+    def set_password(service_name, username, password):
+        _password_store[f"{service_name}:{username}"] = password
+
+    def delete_password(service_name, username):
+        _password_store.pop(f"{service_name}:{username}", None)
+
+    mock_kr = MagicMock()
+    mock_kr.get_password = get_password
+    mock_kr.set_password = set_password
+    mock_kr.delete_password = delete_password
+    mock_kr.errors = MagicMock()
+    mock_kr.errors.NoKeyringError = type("NoKeyringError", (Exception,), {})
+    return mock_kr
+
+
+sys.modules["keyring"] = _create_mock_keyring()
 
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))

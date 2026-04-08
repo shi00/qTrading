@@ -49,47 +49,52 @@ class TestAlembicMigrationAlignment:
     def setup(self):
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.migration_path = os.path.join(project_root, "alembic", "versions")
-        self.migration_file = None
+        self.migration_files = []
 
         versions_dir = self.migration_path
         if os.path.exists(versions_dir):
-            for f in os.listdir(versions_dir):
+            for f in sorted(os.listdir(versions_dir)):
                 if f.endswith(".py") and not f.startswith("__"):
-                    self.migration_file = os.path.join(versions_dir, f)
-                    break
+                    self.migration_files.append(os.path.join(versions_dir, f))
 
     def _extract_table_columns_from_migration(self, table_name: str) -> set | None:
-        """Extract column names for a table from Alembic migration script."""
-        if not self.migration_file:
+        """Extract column names for a table from Alembic migration scripts."""
+        if not self.migration_files:
             return None
 
-        with open(self.migration_file, encoding="utf-8") as f:
-            content = f.read()
+        all_columns: set = set()
 
-        pattern = rf'op\.create_table\(\s*"{table_name}"'
-        start_match = re.search(pattern, content)
-        if not start_match:
-            return None
+        for migration_file in self.migration_files:
+            with open(migration_file, encoding="utf-8") as f:
+                content = f.read()
 
-        start_pos = start_match.end()
+            pattern = rf'op\.create_table\(\s*"{table_name}"'
+            start_match = re.search(pattern, content)
+            if start_match:
+                start_pos = start_match.end()
 
-        brace_count = 1
-        end_pos = start_pos
-        for i, char in enumerate(content[start_pos:], start_pos):
-            if char == "(":
-                brace_count += 1
-            elif char == ")":
-                brace_count -= 1
-                if brace_count == 0:
-                    end_pos = i
-                    break
+                brace_count = 1
+                end_pos = start_pos
+                for i, char in enumerate(content[start_pos:], start_pos):
+                    if char == "(":
+                        brace_count += 1
+                    elif char == ")":
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_pos = i
+                            break
 
-        table_content = content[start_match.start() : end_pos + 1]
+                table_content = content[start_match.start() : end_pos + 1]
 
-        col_pattern = r'sa\.Column\("(\w+)"'
-        columns = set(re.findall(col_pattern, table_content))
+                col_pattern = r'sa\.Column\("(\w+)"'
+                columns = set(re.findall(col_pattern, table_content))
+                all_columns.update(columns)
 
-        return columns if columns else None
+            add_col_pattern = rf'op\.add_column\(\s*"{table_name}"\s*,\s*sa\.Column\("(\w+)"'
+            add_col_matches = re.findall(add_col_pattern, content)
+            all_columns.update(add_col_matches)
+
+        return all_columns if all_columns else None
 
     def test_top_list_alembic_alignment(self):
         model_cols = get_model_columns(TopList) - {"updated_at", "created_at"}

@@ -101,6 +101,8 @@ COMMON_COLUMNS = {
     "sell_elg_amount": "col_sell_elg_amount",
     "net_mf_amount": "col_net_mf_amount",
     "net_mf_vol": "col_net_mf_vol",
+    "n_cashflow_act": "col_n_cashflow_act",
+    "delist_date": "col_delist_date",
     # Others
     "area": "col_area",
     "industry": "col_industry",

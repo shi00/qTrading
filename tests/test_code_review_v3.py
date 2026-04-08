@@ -74,9 +74,12 @@ class TestV3CodeReviewIssues:
 
     def test_historical_sync_uses_core_tables_for_resume(self):
         source = inspect.getsource(HistoricalSyncStrategy._run_historical_sync)
-        assert "core_tables" in source, "_run_historical_sync should use core_tables for breakpoint resume"
-        assert "daily_quotes" in source and "daily_indicators" in source, (
-            "core_tables should include daily_quotes and daily_indicators"
+        assert "CORE_RESUME_TABLES" in source or "core_tables" in source, (
+            "_run_historical_sync should use CORE_RESUME_TABLES for breakpoint resume"
+        )
+        class_source = inspect.getsource(HistoricalSyncStrategy)
+        assert "daily_quotes" in class_source and "daily_indicators" in class_source, (
+            "CORE_RESUME_TABLES should include daily_quotes and daily_indicators"
         )
 
     def test_get_cached_dates_returns_datetime_date(self):

@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -22,67 +22,64 @@ from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.sync_dao import SyncDao
 
-TEST_DB_URL = "postgresql+asyncpg://postgres:123456@localhost:5432/test_astock"
 
+@pytest_asyncio.fixture(scope="function", autouse=True)
+async def clean_db(test_engine: AsyncEngine):
+    """每个测试前清理数据库（容错处理表不存在）"""
+    import contextlib
 
-@pytest_asyncio.fixture(scope="function")
-async def dao_engine():
-    """创建测试用数据库引擎"""
-    engine = create_async_engine(TEST_DB_URL, echo=False)
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture(scope="function")
-async def clean_db(dao_engine):
-    """每个测试前清理数据库"""
-    async with dao_engine.begin() as conn:
-        await conn.execute(text("DELETE FROM daily_indicators"))
-        await conn.execute(text("DELETE FROM daily_quotes"))
-        await conn.execute(text("DELETE FROM stock_basic"))
-        await conn.execute(text("DELETE FROM financial_reports"))
-        await conn.execute(text("DELETE FROM moneyflow_hsgt"))
-        await conn.execute(text("DELETE FROM index_weight"))
-        await conn.execute(text("DELETE FROM market_news"))
-        await conn.execute(text("DELETE FROM screening_history"))
-        await conn.execute(text("DELETE FROM stk_holdernumber"))
-        await conn.execute(text("DELETE FROM top10_holders"))
-        await conn.execute(text("DELETE FROM macro_economy"))
-        await conn.execute(text("DELETE FROM shibor_daily"))
-        await conn.execute(text("DELETE FROM sync_status"))
-        await conn.execute(text("DELETE FROM stock_sync_status"))
+    tables = [
+        "daily_indicators",
+        "daily_quotes",
+        "stock_basic",
+        "financial_reports",
+        "moneyflow_hsgt",
+        "index_weight",
+        "market_news",
+        "screening_history",
+        "stk_holdernumber",
+        "top10_holders",
+        "macro_economy",
+        "shibor_daily",
+        "sync_status",
+        "stock_sync_status",
+    ]
+    async with test_engine.begin() as conn:
+        for table in tables:
+            with contextlib.suppress(Exception):
+                await conn.execute(text(f"DELETE FROM {table}"))
     yield
 
 
 @pytest_asyncio.fixture
-async def market_dao(dao_engine):
-    return MarketDao(dao_engine)
+async def market_dao(test_engine: AsyncEngine):
+    return MarketDao(test_engine)
 
 
 @pytest_asyncio.fixture
-async def screener_dao(dao_engine):
-    return ScreenerDao(dao_engine)
+async def screener_dao(test_engine: AsyncEngine):
+    return ScreenerDao(test_engine)
 
 
 @pytest_asyncio.fixture
-async def holder_dao(dao_engine):
-    return HolderDao(dao_engine)
+async def holder_dao(test_engine: AsyncEngine):
+    return HolderDao(test_engine)
 
 
 @pytest_asyncio.fixture
-async def macro_dao(dao_engine):
-    return MacroDao(dao_engine)
+async def macro_dao(test_engine: AsyncEngine):
+    return MacroDao(test_engine)
 
 
 @pytest_asyncio.fixture
-async def sync_dao(dao_engine):
-    return SyncDao(dao_engine)
+async def sync_dao(test_engine: AsyncEngine):
+    return SyncDao(test_engine)
 
 
 @pytest_asyncio.fixture
-async def setup_stock_data(dao_engine):
+async def setup_stock_data(test_engine: AsyncEngine):
     """准备股票基础数据和日线数据用于复杂查询测试"""
-    async with dao_engine.begin() as conn:
+    async with test_engine.begin() as conn:
         await conn.execute(
             text(
                 "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status) "

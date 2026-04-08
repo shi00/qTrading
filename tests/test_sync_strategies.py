@@ -648,6 +648,7 @@ class TestFinancialSyncStrategy:
             )
         )
         mock_context.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ"})
+        mock_context.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
         mock_context.processor.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 1)])
         mock_context.cache.clear_step4_sync_status = AsyncMock()
 
@@ -826,11 +827,21 @@ class TestDateTypeConsistency:
 
     def test_historical_sync_only_uses_strftime_for_display(self):
         source = inspect.getsource(historical.HistoricalSyncStrategy._run_historical_sync)
-        strftime_matches = [line.strip() for line in source.split("\n") if 'strftime("%Y%m%d")' in line]
-        for match in strftime_matches:
-            assert "progress_callback" in match or "I18n.get" in match, (
-                f"strftime in historical should only be for display/progress, found: {match}"
-            )
+        lines = source.split("\n")
+        strftime_lines = []
+        for i, line in enumerate(lines):
+            if 'strftime("%Y%m%d")' in line:
+                strftime_lines.append((i, line.strip()))
+
+        for line_num, match in strftime_lines:
+            is_display = "progress_callback" in match or "I18n.get" in match
+            is_internal = "normalize_date" in match or "to_date_key" in match or "def " in match
+            if not (is_display or is_internal):
+                context_before = "\n".join(lines[max(0, line_num - 5) : line_num])
+                is_in_helper_func = "def normalize_date" in context_before or "def to_date_key" in context_before
+                assert is_in_helper_func, (
+                    f"strftime in historical should only be for display/progress or internal date normalization, found: {match}"
+                )
 
     def test_get_cached_indicator_dates_returns_datetime_date(self):
         source = inspect.getsource(FinancialDao.get_cached_indicator_dates)

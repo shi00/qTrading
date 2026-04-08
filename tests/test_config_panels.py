@@ -513,14 +513,19 @@ class TestTushareConfigPanel:
         def on_verify_success(token):
             success_tokens.append(token)
 
-        panel = TushareConfigPanel(on_verify_success=on_verify_success)
+        with patch("utils.config_handler.ConfigHandler.get_token", return_value="test_token_123"):
+            panel = TushareConfigPanel(on_verify_success=on_verify_success)
         panel._show_success = MagicMock()
         panel._set_loading_state = MagicMock()
+
+        mock_pro_api = MagicMock()
 
         with (
             patch("asyncio.to_thread", return_value=None),
             patch("utils.config_handler.ConfigHandler.save_token"),
             patch("data.external.tushare_client.TushareClient") as MockClient,
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", return_value=mock_pro_api),
         ):
             mock_client = MagicMock()
             MockClient.return_value = mock_client

@@ -569,9 +569,15 @@ class TestDataProcessor(unittest.TestCase):
     # --- sync_stock_basic ---
 
     async def async_test_sync_stock_basic(self):
-        """Test sync_stock_basic calls api.get_stock_list directly"""
-        mock_df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["PingAn"]})
-        self.mock_api.get_stock_list = AsyncMock(return_value=mock_df)
+        """Test sync_stock_basic calls api.get_stock_basic_all directly"""
+        mock_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["PingAn"],
+                "list_status": ["L"],
+            }
+        )
+        self.mock_api.get_stock_basic_all = AsyncMock(return_value=mock_df)
         self.mock_cache.save_stock_basic = AsyncMock(return_value=1)
 
         # Reset the sync lock flag
@@ -767,12 +773,12 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_trade_cal.return_value = mock_df
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
-        self.mock_cache.get_cached_trade_dates = AsyncMock(return_value=set())
-        self.mock_cache.get_cached_indicator_dates = AsyncMock(return_value=set())
+        self.mock_cache.get_cached_dates_for_table = AsyncMock(return_value=set())
+        self.mock_cache.get_bulk_sync_quality_scores = AsyncMock(return_value={})
 
         call_count = 0
 
-        async def side_effect(date):
+        async def side_effect(date, sync_result=None):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
