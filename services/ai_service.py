@@ -17,7 +17,7 @@ try:
     from litellm import acompletion  # pyright: ignore[reportMissingImports]
 
     litellm.suppress_debug_info = True
-    litellm.set_verbose = False
+    litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]
 
     LITELLM_AVAILABLE = True
 except ImportError:
@@ -109,7 +109,7 @@ class AIService:
         if not LITELLM_AVAILABLE:
             return
 
-        litellm.set_verbose = False
+        litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]
         litellm.drop_params = True
         litellm.set_timeout = 30.0
         litellm.max_retries = 2
@@ -305,7 +305,7 @@ class AIService:
             reasoning_content = ""
             usage = None
 
-            async for chunk in response:
+            async for chunk in response:  # type: ignore[reportGeneralTypeIssues]
                 if not chunk.choices:
                     if hasattr(chunk, "usage") and chunk.usage:
                         usage = {

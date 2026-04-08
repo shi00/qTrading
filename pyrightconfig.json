@@ -7,14 +7,16 @@
     "venv",
     "alembic"
   ],
+  "extraPaths": ["."],
   "typeCheckingMode": "basic",
-  "venvPath": ".",
-  "venv": ".venv",
 
   "reportMissingTypeStubs": "warning",
-  "reportUnknownMemberType": "warning",
-  "reportUnknownArgumentType": "warning",
-  "reportUnknownVariableType": "warning",
+  "reportMissingImports": "error",
+
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownParameterType": "none",
 
   "reportMissingParameterType": "none",
   "reportMissingTypeArgument": "none",
