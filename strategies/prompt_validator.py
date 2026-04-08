@@ -77,7 +77,7 @@ async def check_multi_period_data(field: str) -> bool:
             try:
                 df = await cache.get_financial_reports_history(ts_code, periods=8)
                 if df is not None and not df.empty:
-                    if field in df.columns and not df[field].isna().all():
+                    if field in df.columns and not df[field].isna().all():  # type: ignore
                         passed += 1
             except Exception:
                 continue

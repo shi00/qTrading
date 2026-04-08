@@ -23,8 +23,8 @@ class TestFinancialDaoIntegrity:
     """测试财务数据完整性检查方法"""
 
     @pytest.fixture
-    def financial_dao(self):
-        return FinancialDao()
+    def financial_dao(self, test_engine):
+        return FinancialDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_get_financial_reports_history(self, financial_dao):
@@ -108,8 +108,8 @@ class TestFinancialDaoBatchPerformance:
     """批量查询性能测试"""
 
     @pytest.fixture
-    def financial_dao(self):
-        return FinancialDao()
+    def financial_dao(self, test_engine):
+        return FinancialDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_batch_vs_individual_queries(self, financial_dao):
@@ -144,8 +144,8 @@ class TestFinancialDaoEdgeCases:
     """边界条件测试"""
 
     @pytest.fixture
-    def financial_dao(self):
-        return FinancialDao()
+    def financial_dao(self, test_engine):
+        return FinancialDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_db_error_handling(self, financial_dao):
@@ -200,8 +200,8 @@ class TestCashflowField:
     """n_cashflow_act 字段测试 (F1 修复)"""
 
     @pytest.fixture
-    def financial_dao(self):
-        return FinancialDao()
+    def financial_dao(self, test_engine):
+        return FinancialDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_cashflow_field_in_history(self, financial_dao):

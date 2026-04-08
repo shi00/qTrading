@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 LITELLM_AVAILABLE = True
 try:
-    import litellm
-    from litellm import acompletion
+    import litellm  # pyright: ignore[reportMissingImports]
+    from litellm import acompletion  # pyright: ignore[reportMissingImports]
 
     litellm.suppress_debug_info = True
     litellm.set_verbose = False

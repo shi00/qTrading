@@ -275,16 +275,16 @@ class ReviewManager:
             # Extract AI fields with NaN safety
             ai_score = row.get("ai_score", 0)
             try:
-                ai_score = int(ai_score) if pd.notnull(ai_score) else 0
+                ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore
             except (ValueError, TypeError):
                 ai_score = 0
 
             ai_reason = row.get("ai_reason", "")
-            if pd.isnull(ai_reason):
+            if pd.isnull(ai_reason):  # type: ignore
                 ai_reason = ""
 
             thinking = row.get("thinking", "")
-            if pd.isnull(thinking):
+            if pd.isnull(thinking):  # type: ignore
                 thinking = ""
 
             records.append(

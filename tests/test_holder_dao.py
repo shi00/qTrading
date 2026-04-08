@@ -22,8 +22,8 @@ class TestHolderDaoIntegrity:
     """测试股东数据完整性检查方法"""
 
     @pytest.fixture
-    def holder_dao(self):
-        return HolderDao()
+    def holder_dao(self, test_engine):
+        return HolderDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_get_top10_holders_batch(self, holder_dao):
@@ -74,8 +74,8 @@ class TestHolderDaoBatchPerformance:
     """批量查询性能测试"""
 
     @pytest.fixture
-    def holder_dao(self):
-        return HolderDao()
+    def holder_dao(self, test_engine):
+        return HolderDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_batch_vs_individual_queries(self, holder_dao):
@@ -108,8 +108,8 @@ class TestHolderDaoEdgeCases:
     """边界条件测试"""
 
     @pytest.fixture
-    def holder_dao(self):
-        return HolderDao()
+    def holder_dao(self, test_engine):
+        return HolderDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_db_error_handling(self, holder_dao):
@@ -164,8 +164,8 @@ class TestHolderDataQuality:
     """股东数据质量测试"""
 
     @pytest.fixture
-    def holder_dao(self):
-        return HolderDao()
+    def holder_dao(self, test_engine):
+        return HolderDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_holder_ratio_sum(self, holder_dao):

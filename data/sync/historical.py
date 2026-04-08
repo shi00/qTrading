@@ -274,7 +274,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     return
 
                 try:
-                    await self.sync_daily_market_snapshot(date, result=result)
+                    await self.sync_daily_market_snapshot(date, sync_result=result)
                     processed_count += 1
                     result.added += 1
                     if progress_callback:
@@ -332,7 +332,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
                     async with sem:
                         try:
-                            await self.sync_daily_market_snapshot(date, result=result)
+                            await self.sync_daily_market_snapshot(date, sync_result=result)
                             logger.debug(
                                 f"[HistoricalSync] Retry | ✅ Recovered {date}",
                             )
@@ -603,7 +603,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 return
             saved = result_data.get("saved")
             fetched = result_data.get("fetched")
-            if saved is not None and fetched > 0 and saved != fetched:
+            if saved is not None and fetched is not None and fetched > 0 and saved != fetched:
                 warning_msg = (
                     f"[HistoricalSync] DaySync | ⚠️ Data integrity issue for {key} on {trade_date}: "
                     f"fetched={fetched} rows but saved={saved} rows"

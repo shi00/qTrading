@@ -23,8 +23,8 @@ class TestMacroDaoIntegrity:
     """测试宏观经济数据完整性检查方法"""
 
     @pytest.fixture
-    def macro_dao(self):
-        return MacroDao()
+    def macro_dao(self, test_engine):
+        return MacroDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest(self, macro_dao):
@@ -69,8 +69,8 @@ class TestMacroDaoEdgeCases:
     """边界条件测试"""
 
     @pytest.fixture
-    def macro_dao(self):
-        return MacroDao()
+    def macro_dao(self, test_engine):
+        return MacroDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_db_error_handling(self, macro_dao):
@@ -125,8 +125,8 @@ class TestShiborDataQuality:
     """Shibor 利率数据质量测试"""
 
     @pytest.fixture
-    def macro_dao(self):
-        return MacroDao()
+    def macro_dao(self, test_engine):
+        return MacroDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_shibor_columns(self, macro_dao):
@@ -189,8 +189,8 @@ class TestMacroEconomyDataQuality:
     """宏观经济数据质量测试"""
 
     @pytest.fixture
-    def macro_dao(self):
-        return MacroDao()
+    def macro_dao(self, test_engine):
+        return MacroDao(test_engine)
 
     @pytest.mark.asyncio
     async def test_macro_columns(self, macro_dao):

@@ -52,7 +52,7 @@ class ScreenerDao(BaseDao):
         """
         return await self._read_db(
             sql,
-            (limit * 5, offset),
+            ((limit or 30) * 5, offset),
         )  # limit*5 to cover multiple strategies per date
 
     async def get_history_records(self, trade_date: str | None, strategy_name: str | None = None):

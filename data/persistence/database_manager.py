@@ -125,7 +125,7 @@ class DatabaseManager:
             logger.error(f"Error fetching schema for {table_name}: {e}")
             return []
 
-    def get_table_count(self, table_name: str, filters: dict | None = None):
+    def get_table_count(self, table_name: str, filters: list | None = None):
         """
         Get total row count for a table, optionally with filters.
 
@@ -158,9 +158,11 @@ class DatabaseManager:
             raise ValueError(f"Invalid table name: {table_name}")
 
     @staticmethod
-    def _apply_filters(stmt: typing.Any, filters: dict | None, schema_cols: typing.Any = None):
+    def _apply_filters(stmt: typing.Any, filters: list | None, schema_cols: typing.Any = None):
         """Apply WHERE filters using SQLAlchemy Core operators (zero f-string).
         schema_cols: optional set of valid column names for whitelist validation."""
+        if not filters:
+            return stmt
         for col_name, op, val in filters:
             # Whitelist validation: reject columns not in schema (mirrors sort_col check)
             if schema_cols and col_name not in schema_cols:
@@ -183,7 +185,7 @@ class DatabaseManager:
         table_name: str,
         page: typing.Any = 1,
         page_size: typing.Any = 50,
-        filters: dict | None = None,
+        filters: list | None = None,
         sort_col: typing.Any = None,
         sort_asc: typing.Any = True,
     ):

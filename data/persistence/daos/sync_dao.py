@@ -13,15 +13,17 @@ class SyncDao(BaseDao):
     async def update_sync_status(
         self,
         table_name: str,
-        last_data_date: str,
+        last_data_date: str | datetime | date,
         record_count: int,
         status: str = "success",
     ):
         if isinstance(last_data_date, str):
-            last_data_date = parse_date(last_data_date).date()
+            parsed_date = parse_date(last_data_date).date()
         elif isinstance(last_data_date, datetime):
-            last_data_date = last_data_date.date()
-        elif not isinstance(last_data_date, date):
+            parsed_date = last_data_date.date()
+        elif isinstance(last_data_date, date):
+            parsed_date = last_data_date
+        else:
             raise TypeError(f"last_data_date must be str, datetime, or date, got {type(last_data_date)}")
 
         now = get_now().replace(tzinfo=None)
@@ -32,7 +34,7 @@ class SyncDao(BaseDao):
                "record_count"=excluded."record_count","status"=excluded."status","updated_at"=excluded."updated_at"'''
         await self._write_db(
             sql,
-            (table_name, now, last_data_date, record_count, status, now),
+            (table_name, now, parsed_date, record_count, status, now),
         )
 
     async def get_sync_status(self, table_name: str | None = None):

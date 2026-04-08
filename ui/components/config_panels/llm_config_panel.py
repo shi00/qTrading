@@ -796,7 +796,7 @@ class LLMConfigPanel(ft.Container):
     def _get_current_base_url(self) -> str:
         if self._is_azure:
             return ""
-        return self.base_url_input.value
+        return self.base_url_input.value or ""
 
     def _on_save_click(self, e):
         if not self.page:

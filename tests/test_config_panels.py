@@ -614,16 +614,23 @@ class TestDatabaseConfigServiceMigrations:
 
     @pytest.mark.asyncio
     async def test_run_migrations_invalid_credentials(self):
-        """Test run_migrations returns False for invalid credentials"""
+        """Test run_migrations returns False when init_db raises an exception"""
+        from unittest.mock import AsyncMock, patch
+
         from data.persistence.db_config_service import DatabaseConfigService
 
-        success, msg = await DatabaseConfigService.run_migrations(
-            host="invalid_host",
-            port=5432,
-            user="invalid_user",
-            password="invalid_password",
-            database="invalid_db",
-        )
+        with patch(
+            "data.persistence.db_migrator.DatabaseMigrator.init_db",
+            new_callable=AsyncMock,
+            side_effect=Exception("Connection refused"),
+        ):
+            success, msg = await DatabaseConfigService.run_migrations(
+                host="invalid_host",
+                port=5432,
+                user="invalid_user",
+                password="invalid_password",
+                database="invalid_db",
+            )
 
         assert success is False
         assert "Failed" in msg or "失败" in msg or "error" in msg.lower()
@@ -813,8 +820,7 @@ class TestOnboardingWizardDatabaseValidation:
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
 
-        wizard = OnboardingWizard()
-        wizard.page = mock_page
+        wizard = OnboardingWizard(mock_page)
         wizard._show_loading_overlay = MagicMock()
         wizard._safe_update = MagicMock()
 
@@ -853,8 +859,7 @@ class TestOnboardingWizardDatabaseValidation:
         from data.persistence.db_config_service import DatabaseConfigService
         from ui.views.onboarding_wizard import OnboardingWizard
 
-        wizard = OnboardingWizard()
-        wizard.page = mock_page
+        wizard = OnboardingWizard(mock_page)
         wizard._show_loading_overlay = MagicMock()
         wizard._safe_update = MagicMock()
 
@@ -1067,8 +1072,8 @@ class TestLLMConfigPanelVerificationState:
         panel._safe_update = MagicMock()
         panel._set_loading_state = MagicMock()
 
-        with patch("services.ai_service.AIService.test_connection") as mock_test:
-            mock_test.return_value = AsyncMock(return_value={"success": True})()
+        with patch("services.ai_service.AIService.test_connection", new_callable=AsyncMock) as mock_test:
+            mock_test.return_value = {"success": True}
 
             result = await panel.async_verify_connection()
 
@@ -1096,8 +1101,8 @@ class TestLLMConfigPanelVerificationState:
         panel._safe_update = MagicMock()
         panel._set_loading_state = MagicMock()
 
-        with patch("services.ai_service.AIService.test_connection") as mock_test:
-            mock_test.return_value = AsyncMock(return_value={"success": False, "message": "Test error"})()
+        with patch("services.ai_service.AIService.test_connection", new_callable=AsyncMock) as mock_test:
+            mock_test.return_value = {"success": False, "message": "Test error"}
 
             result = await panel.async_verify_connection()
 

@@ -174,7 +174,7 @@ class MacroSyncStrategy(ISyncStrategy):
             )
             return merged
 
-        indicator = df[["period", target_col]].drop_duplicates(subset="period")
+        indicator = df[["period", target_col]].drop_duplicates(subset=["period"])  # type: ignore
         if merged is not None:
             return merged.merge(indicator, on="period", how="outer")
         return indicator

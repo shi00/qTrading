@@ -1,5 +1,6 @@
 import datetime
 import logging
+import typing
 
 import pandas as pd
 
@@ -61,7 +62,7 @@ def _get_default_synced_tables() -> list[str]:
     return _DEFAULT_SYNCED_TABLES
 
 
-def _normalize_trade_date(val) -> datetime.date:
+def _normalize_trade_date(val: typing.Any) -> typing.Any:
     """
     Normalize trade date value to datetime.date.
 

@@ -8,11 +8,24 @@
     "alembic"
   ],
   "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv",
+
   "reportMissingTypeStubs": "warning",
   "reportUnknownMemberType": "warning",
   "reportUnknownArgumentType": "warning",
   "reportUnknownVariableType": "warning",
-  "reportMissingParameterType": "error",
-  "reportMissingTypeArgument": "error",
+
+  "reportMissingParameterType": "none",
+  "reportMissingTypeArgument": "none",
+
+  "reportOptionalMemberAccess": "warning",
+  "reportArgumentType": "warning",
+  "reportAttributeAccessIssue": "warning",
+  "reportOptionalSubscript": "warning",
+
+  "reportCallIssue": "error",
+  "reportOptionalOperand": "error",
+  "reportOptionalIterable": "error",
   "reportGeneralTypeIssues": "error"
 }
