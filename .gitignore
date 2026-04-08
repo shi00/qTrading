@@ -78,7 +78,6 @@ logs/
 .secret.key.bak
 
 # 4. Data files (Quantitative/Cache prevention)
-data/cache/
 *.csv
 *.xlsx
 *.h5
