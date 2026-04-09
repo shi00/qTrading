@@ -59,11 +59,11 @@ class TestSyncResult:
         assert r1.status == "success"
 
     def test_merge_failed_status(self):
-        """合并失败状态"""
+        """合并失败状态：success + failed = partial"""
         r1 = SyncResult(added=10, status="success")
         r2 = SyncResult(added=5, status="failed")
         r1.merge(r2)
-        assert r1.status == "failed"
+        assert r1.status == "partial"
 
     def test_merge_cancelled_status(self):
         """合并取消状态"""

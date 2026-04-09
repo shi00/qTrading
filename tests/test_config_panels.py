@@ -11,6 +11,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -594,6 +595,16 @@ class TestTushareConfigPanel:
 class TestDatabaseConfigServiceMigrations:
     """Tests for DatabaseConfigService migration methods"""
 
+    @pytest_asyncio.fixture(autouse=True)
+    async def _restore_tables(self, test_engine):
+        """确保每个 DDL 测试后无条件恢复表结构（即使测试断言失败）"""
+        yield
+        from data.persistence.models import Base
+
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+
     @pytest.mark.asyncio
     async def test_run_migrations_creates_tables(self, test_engine):
         """Test run_migrations creates all required tables"""
@@ -613,9 +624,6 @@ class TestDatabaseConfigServiceMigrations:
 
         assert success is True
         assert "成功" in msg or "success" in msg.lower()
-
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
 
     @pytest.mark.asyncio
     async def test_run_migrations_invalid_credentials(self):
@@ -659,9 +667,6 @@ class TestDatabaseConfigServiceMigrations:
 
         assert success is True
 
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-
     @pytest.mark.asyncio
     async def test_ensure_tables_exist_existing_tables(self, test_engine):
         """Test ensure_tables_exist skips creation when tables exist"""
@@ -682,9 +687,6 @@ class TestDatabaseConfigServiceMigrations:
         assert success is True
         assert "exist" in msg.lower() or "存在" in msg
 
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-
     @pytest.mark.asyncio
     async def test_ensure_tables_exist_connection_failure(self):
         """Test ensure_tables_exist returns False on connection failure"""
@@ -703,6 +705,16 @@ class TestDatabaseConfigServiceMigrations:
 
 class TestDatabaseConfigPanelSaveConfig:
     """Tests for DatabaseConfigPanel.save_config with table creation"""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _restore_tables(self, test_engine):
+        """确保每个 DDL 测试后无条件恢复表结构"""
+        yield
+        from data.persistence.models import Base
+
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
 
     @pytest.mark.asyncio
     async def test_save_config_calls_ensure_tables_exist(self, mock_page, isolated_config, test_engine):
@@ -758,9 +770,6 @@ class TestDatabaseConfigPanelSaveConfig:
         assert result is True
         mock_ensure.assert_called_once()
 
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-
     @pytest.mark.asyncio
     async def test_save_config_handles_table_creation_failure(self, mock_page, isolated_config):
         """Test save_config returns False when table creation fails"""
@@ -815,6 +824,16 @@ class TestDatabaseConfigPanelSaveConfig:
 class TestOnboardingWizardDatabaseValidation:
     """Tests for OnboardingWizard._validate_and_save_database"""
 
+    @pytest_asyncio.fixture(autouse=True)
+    async def _restore_tables(self, test_engine):
+        """确保每个 DDL 测试后无条件恢复表结构"""
+        yield
+        from data.persistence.models import Base
+
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+
     @pytest.mark.asyncio
     async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, test_engine):
         """Test _validate_and_save_database calls ensure_tables_exist"""
@@ -854,9 +873,6 @@ class TestOnboardingWizardDatabaseValidation:
         assert result is True
         mock_ensure.assert_called_once()
         mock_save.assert_called_once()
-
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
 
     @pytest.mark.asyncio
     async def test_validate_and_save_database_handles_failure(self, mock_page, isolated_config):
