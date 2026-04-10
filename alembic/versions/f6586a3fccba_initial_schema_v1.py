@@ -270,6 +270,7 @@ def upgrade() -> None:
         sa.Column("netprofit_yoy", sa.Float(), nullable=True),
         sa.Column("goodwill", sa.Float(), nullable=True),
         sa.Column("audit_result", sa.String(), nullable=True),
+        sa.Column("n_cashflow_act", sa.Float(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -451,7 +452,7 @@ def upgrade() -> None:
         "market_news",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("content", sa.String(), nullable=True),
-        sa.Column("content_hash", sa.String(length=32), nullable=False),
+        sa.Column("content_hash", sa.String(length=64), nullable=False),
         sa.Column("tags", sa.String(), nullable=True),
         sa.Column("publish_time", sa.DateTime(), nullable=True),
         sa.Column("source", sa.String(), nullable=True),
@@ -727,6 +728,7 @@ def upgrade() -> None:
         sa.Column("market", sa.String(), nullable=True),
         sa.Column("list_date", sa.Date(), nullable=True),
         sa.Column("list_status", sa.String(), nullable=True),
+        sa.Column("delist_date", sa.Date(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -742,6 +744,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_basic")),
     )
     op.create_index(op.f("ix_stock_basic_list_date"), "stock_basic", ["list_date"], unique=False)
+    op.create_index("idx_stock_basic_delist_date", "stock_basic", ["delist_date"], unique=False)
+    op.create_index("idx_stock_basic_dates", "stock_basic", ["list_date", "delist_date"], unique=False)
+    op.create_index("idx_stock_basic_status", "stock_basic", ["list_status", "list_date"], unique=False)
     op.create_table(
         "stock_concepts",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -946,6 +951,9 @@ def downgrade() -> None:
     op.drop_table("stock_sync_status")
     op.drop_index(op.f("ix_stock_concepts_ts_code"), table_name="stock_concepts")
     op.drop_table("stock_concepts")
+    op.drop_index("idx_stock_basic_status", table_name="stock_basic")
+    op.drop_index("idx_stock_basic_dates", table_name="stock_basic")
+    op.drop_index("idx_stock_basic_delist_date", table_name="stock_basic")
     op.drop_index(op.f("ix_stock_basic_list_date"), table_name="stock_basic")
     op.drop_table("stock_basic")
     op.drop_index(op.f("ix_stk_holdernumber_end_date"), table_name="stk_holdernumber")
