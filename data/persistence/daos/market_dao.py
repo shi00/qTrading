@@ -16,7 +16,7 @@ class MarketDao(BaseDao):
     async def save_market_news(self, news_item: dict, wait: bool = False):
         """Save a single market news item."""
         content = news_item.get("content", "") or ""
-        content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         sql = """
               INSERT INTO market_news ("content","content_hash","tags","publish_time","source","created_at")

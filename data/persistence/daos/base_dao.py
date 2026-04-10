@@ -346,13 +346,8 @@ class BaseDao:
                 clean_val = val.strip()
                 if len(clean_val) == 8 and clean_val.isdigit():
                     return datetime.date(int(clean_val[:4]), int(clean_val[4:6]), int(clean_val[6:8]))
-                elif (
-                    len(clean_val) == 10
-                    and clean_val[4] == "-"
-                    and clean_val[7] == "-"
-                    or len(clean_val) == 10
-                    and clean_val[4] == "/"
-                    and clean_val[7] == "/"
+                elif (len(clean_val) == 10 and clean_val[4] == "-" and clean_val[7] == "-") or (
+                    len(clean_val) == 10 and clean_val[4] == "/" and clean_val[7] == "/"
                 ):
                     return datetime.date(int(clean_val[:4]), int(clean_val[5:7]), int(clean_val[8:10]))
                 elif "T" in clean_val:

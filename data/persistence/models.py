@@ -235,7 +235,6 @@ class BlockTrade(Base):
     amount = Column(Float)
     buyer = Column(String, primary_key=True)
     seller = Column(String, primary_key=True)
-    reason = Column(String)
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
@@ -244,7 +243,7 @@ class MarketNews(Base):
     __tablename__ = "market_news"
     id = Column(Integer, primary_key=True, autoincrement=True)
     content = Column(String)
-    content_hash = Column(String(32), nullable=False)
+    content_hash = Column(String(64), nullable=False)
     tags = Column(String)
     publish_time = Column(DateTime(timezone=False))
     source = Column(String)

@@ -254,7 +254,6 @@ TABLE_DEFINITIONS = {
             "price": "col_price",
             "buyer": "col_buyer",
             "seller": "col_seller",
-            "reason": "col_reason",
         },
     },
     "moneyflow_daily": {

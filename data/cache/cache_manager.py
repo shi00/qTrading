@@ -43,6 +43,13 @@ class CacheManager:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset singleton for testing only. NEVER call in production."""
+        with cls._lock:
+            cls._instance = None
+            cls._initialized = False
+
     def __init__(self):
         if self._initialized:
             return
@@ -1011,8 +1018,11 @@ class CacheManager:
             return False
 
         try:
-            df = await self.quote_dao._read_db(f"SELECT 1 FROM {table_name} LIMIT 1")
-            return df is not None and not df.empty
+            # 使用 SQLAlchemy Core 的 sa.table() 构建安全查询
+            tbl = sa.table(table_name)
+            async with self.engine.connect() as conn:
+                result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
+                return result.first() is not None
         except Exception as e:
             logger.warning(f"[CacheManager] check_table_has_data failed for {table_name}: {e}")
             return False

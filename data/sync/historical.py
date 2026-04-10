@@ -565,20 +565,27 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 df_north = df_north[df_north["ts_code"].astype(str).str.endswith((".SH", ".SZ"))]
                 filtered_count = original_count - len(df_north)
                 if filtered_count > 0:
-                    logger.debug(
-                        f"[HistoricalSync] DaySync | Filtered {filtered_count} non-A-share records from northbound data"
-                    )
+                    if len(df_north) == 0:
+                        sample_codes = data_map.get("north")["ts_code"].head(5).tolist()
+                        logger.warning(
+                            f"[HistoricalSync] DaySync | ALL {filtered_count} northbound records filtered out! "
+                            f"Sample ts_codes: {sample_codes}"
+                        )
+                    else:
+                        logger.debug(
+                            f"[HistoricalSync] DaySync | Filtered {filtered_count} non-A-share records from northbound data"
+                        )
                 if not df_north.empty:
                     north_rows = await cache.save_northbound(df_north)
                     north_result = {
                         "saved": north_rows if north_rows is not None else len(df_north),
-                        "fetched": original_count,
+                        "fetched": len(df_north),
                         "success": True,
                     }
                 else:
                     north_result = {
                         "saved": 0,
-                        "fetched": original_count,
+                        "fetched": 0,
                         "success": True,
                     }
             elif df_north is None and "north" in error_map:

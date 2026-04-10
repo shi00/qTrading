@@ -439,7 +439,6 @@ class QuoteDao(BaseDao):
             "amount",
             "buyer",
             "seller",
-            "reason",
         ]
         return await self._save_upsert(
             df,

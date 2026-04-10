@@ -57,8 +57,31 @@ class TestAlembicMigrationAlignment:
                 if f.endswith(".py") and not f.startswith("__"):
                     self.migration_files.append(os.path.join(versions_dir, f))
 
+    @staticmethod
+    def _extract_upgrade_content(content: str) -> str:
+        """Extract the body of the upgrade() function from migration content."""
+        match = re.search(r"def upgrade\(\)\s*->\s*[^:]*:", content)
+        if not match:
+            return ""
+        start = match.end()
+        indent_level = None
+        end = start
+        for _i, line in enumerate(content[start:].split("\n"), start):
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            current_indent = len(line) - len(stripped)
+            if indent_level is None:
+                indent_level = current_indent
+            elif current_indent < indent_level and stripped.startswith("def "):
+                end = content.index(line, start)
+                break
+        else:
+            end = len(content)
+        return content[start:end]
+
     def _extract_table_columns_from_migration(self, table_name: str) -> set | None:
-        """Extract column names for a table from Alembic migration scripts."""
+        """Extract column names for a table from Alembic migration upgrade functions."""
         if not self.migration_files:
             return None
 
@@ -68,14 +91,16 @@ class TestAlembicMigrationAlignment:
             with open(migration_file, encoding="utf-8") as f:
                 content = f.read()
 
+            upgrade_content = self._extract_upgrade_content(content)
+
             pattern = rf'op\.create_table\(\s*"{table_name}"'
-            start_match = re.search(pattern, content)
+            start_match = re.search(pattern, upgrade_content)
             if start_match:
                 start_pos = start_match.end()
 
                 brace_count = 1
                 end_pos = start_pos
-                for i, char in enumerate(content[start_pos:], start_pos):
+                for i, char in enumerate(upgrade_content[start_pos:], start_pos):
                     if char == "(":
                         brace_count += 1
                     elif char == ")":
@@ -84,15 +109,19 @@ class TestAlembicMigrationAlignment:
                             end_pos = i
                             break
 
-                table_content = content[start_match.start() : end_pos + 1]
+                table_content = upgrade_content[start_match.start() : end_pos + 1]
 
                 col_pattern = r'sa\.Column\("(\w+)"'
                 columns = set(re.findall(col_pattern, table_content))
                 all_columns.update(columns)
 
             add_col_pattern = rf'op\.add_column\(\s*"{table_name}"\s*,\s*sa\.Column\("(\w+)"'
-            add_col_matches = re.findall(add_col_pattern, content)
+            add_col_matches = re.findall(add_col_pattern, upgrade_content)
             all_columns.update(add_col_matches)
+
+            drop_col_pattern = rf'op\.drop_column\(\s*"{table_name}"\s*,\s*"(\w+)"'
+            drop_col_matches = re.findall(drop_col_pattern, upgrade_content)
+            all_columns -= set(drop_col_matches)
 
         return all_columns if all_columns else None
 

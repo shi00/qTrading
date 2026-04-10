@@ -49,7 +49,6 @@ def upgrade() -> None:
         sa.Column("amount", sa.Float(), nullable=True),
         sa.Column("buyer", sa.String(), nullable=False),
         sa.Column("seller", sa.String(), nullable=False),
-        sa.Column("reason", sa.String(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),

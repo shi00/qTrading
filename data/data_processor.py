@@ -42,6 +42,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     cls._instance = super().__new__(cls)
         return cls._instance
 
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset singleton for testing only. NEVER call in production."""
+        with cls._lock:
+            cls._instance = None
+            cls._is_initialized = False
+
     def __init__(self):
         # Double-check initialization state with lock to prevent race conditions
         if self.__class__._is_initialized:
@@ -429,11 +436,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             c_codes = df_c["code"].tolist()
 
-            # Use Semaphore to limit concurrency (Architecturally better than chunking)
-            # TushareClient has internal rate limiting, so we just limit concurrency to avoid
-            # overloading the ThreadPool or local resources.
-            concurrency = ConfigHandler.get_sync_concurrency_light()
-            sem = asyncio.Semaphore(concurrency or 20)
+            # concept_detail 有独立的严格速率限制（~20 req/min）
+            # 使用极低并发 + 主动延迟避免触发 backoff
+            CONCEPT_CONCURRENCY = 2
+            CONCEPT_DELAY = 3.0  # 每请求间隔秒数
+            sem = asyncio.Semaphore(CONCEPT_CONCURRENCY)
 
             async def fetch_one(c):
                 # Check cancellation before acquiring semaphore to fail fast
@@ -443,7 +450,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     # Double check inside semaphore
                     if self.is_cancelled():
                         return None
-                    return await self.api.get_concept_detail_by_id(c)
+                    result = await self.api.get_concept_detail_by_id(c)
+                    await asyncio.sleep(CONCEPT_DELAY)
+                    return result
 
             # Create tasks eagerly but execute with semaphore
             # This avoids "coroutine never awaited" because we wrap in create_task

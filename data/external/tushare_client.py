@@ -41,6 +41,14 @@ class TushareClient:
                     cls._instance._initialized = False
         return cls._instance
 
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset singleton for testing only. NEVER call in production."""
+        with cls._lock:
+            cls._instance = None
+            cls._trade_cal_cache = set()
+            cls._loaded_years = set()
+
     def __init__(self, token: str | None = None):
         # Double-check locking for initialization to prevent race conditions
         if self._initialized:
@@ -546,7 +554,7 @@ class TushareClient:
         return await self._handle_api_call(
             self.pro.block_trade,
             trade_date=trade_date,
-            fields="ts_code,trade_date,price,vol,amount,buyer,seller,reason",
+            fields="ts_code,trade_date,price,vol,amount,buyer,seller",
         )
 
     async def get_fina_indicator(

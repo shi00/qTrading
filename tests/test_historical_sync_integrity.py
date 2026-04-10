@@ -1194,7 +1194,24 @@ class TestH3SafeTableNames:
 
 
 class TestM6CacheManagerCheckTableHasData:
-    """M6 修复验证：CacheManager.check_table_has_data 封装方法"""
+    """M6 修复验证：CacheManager.check_table_has_data 封装方法（使用 SQLAlchemy Core）"""
+
+    @staticmethod
+    def _make_mock_engine(execute_return_value):
+        """构建 mock engine，模拟 async with engine.connect() as conn 路径"""
+        mock_result = MagicMock()
+        mock_result.first.return_value = execute_return_value
+
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+
+        mock_engine = MagicMock()
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect.return_value = mock_ctx
+
+        return mock_engine, mock_conn
 
     @pytest.fixture
     async def cache_manager(self):
@@ -1203,8 +1220,10 @@ class TestM6CacheManagerCheckTableHasData:
 
         with patch("data.cache.cache_manager.CacheManager.__init__", return_value=None):
             cache = CacheManager()
-            cache.quote_dao = MagicMock()
-            cache.quote_dao._read_db = AsyncMock(return_value=pd.DataFrame({"1": [1]}))
+            # 构建默认 mock engine（有数据场景）
+            engine, conn = self._make_mock_engine(execute_return_value=(1,))
+            cache.engine = engine
+            cache._mock_conn = conn  # 暴露给测试用例做断言
             cache._maintenance_mode = False
             cache._maintenance_cv = MagicMock()
             cache._maintenance_cv.wait = AsyncMock()
@@ -1215,29 +1234,29 @@ class TestM6CacheManagerCheckTableHasData:
         """
         测试允许的表名返回正确结果
         """
-        cache_manager.quote_dao._read_db.return_value = pd.DataFrame({"1": [1]})
-
         result = await cache_manager.check_table_has_data("fina_audit")
 
         assert result is True
-        cache_manager.quote_dao._read_db.assert_called_once()
+        cache_manager._mock_conn.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_check_table_has_data_blocked_table(self, cache_manager):
         """
-        测试不允许的表名返回 False
+        测试不允许的表名返回 False（白名单拦截，不触碰数据库）
         """
         result = await cache_manager.check_table_has_data("malicious_table")
 
         assert result is False
-        cache_manager.quote_dao._read_db.assert_not_called()
+        cache_manager.engine.connect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_check_table_has_data_empty_result(self, cache_manager):
         """
         测试空结果返回 False
         """
-        cache_manager.quote_dao._read_db.return_value = pd.DataFrame()
+        # 重新设置 engine，模拟 result.first() 返回 None
+        engine, conn = self._make_mock_engine(execute_return_value=None)
+        cache_manager.engine = engine
 
         result = await cache_manager.check_table_has_data("fina_audit")
 
@@ -1248,7 +1267,10 @@ class TestM6CacheManagerCheckTableHasData:
         """
         测试异常情况返回 False
         """
-        cache_manager.quote_dao._read_db.side_effect = Exception("DB Error")
+        # 重新设置 engine，模拟 conn.execute 抛异常
+        engine, conn = self._make_mock_engine(execute_return_value=None)
+        conn.execute.side_effect = Exception("DB Error")
+        cache_manager.engine = engine
 
         result = await cache_manager.check_table_has_data("fina_audit")
 

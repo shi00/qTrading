@@ -91,6 +91,8 @@ class SyncResult:
             other.status == "failed" or self.status == "failed" or other.status == "partial" or self.status == "partial"
         ):
             self.status = "partial"
+        else:
+            self.status = "success"
 
     def to_summary(self) -> str:
         """Generate a human-readable summary of the sync result."""
