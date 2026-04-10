@@ -2,8 +2,6 @@ import logging
 
 import pandas as pd
 
-from utils.thread_pool import TaskType, ThreadPoolManager
-
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -37,40 +35,12 @@ class FinancialDao(BaseDao):
             "n_cashflow_act",
         ]
 
-        sql = """
-            INSERT INTO financial_reports (
-                "ts_code","end_date","ann_date","report_type","total_revenue","revenue",
-                "n_income","n_income_attr_p","total_assets","total_liab",
-                "total_hldr_eqy_exc_min_int","roe","roe_dt","grossprofit_margin",
-                "netprofit_margin","debt_to_assets","or_yoy","netprofit_yoy","goodwill","audit_result","n_cashflow_act"
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
-            )
-            ON CONFLICT("ts_code","end_date") DO UPDATE SET
-                "ann_date" = COALESCE(excluded."ann_date", financial_reports."ann_date"),
-                "report_type" = COALESCE(excluded."report_type", financial_reports."report_type"),
-                "total_revenue" = COALESCE(excluded."total_revenue", financial_reports."total_revenue"),
-                "revenue" = COALESCE(excluded."revenue", financial_reports."revenue"),
-                "n_income" = COALESCE(excluded."n_income", financial_reports."n_income"),
-                "n_income_attr_p" = COALESCE(excluded."n_income_attr_p", financial_reports."n_income_attr_p"),
-                "total_assets" = COALESCE(excluded."total_assets", financial_reports."total_assets"),
-                "total_liab" = COALESCE(excluded."total_liab", financial_reports."total_liab"),
-                "total_hldr_eqy_exc_min_int" = COALESCE(excluded."total_hldr_eqy_exc_min_int", financial_reports."total_hldr_eqy_exc_min_int"),
-                "roe" = COALESCE(excluded."roe", financial_reports."roe"),
-                "roe_dt" = COALESCE(excluded."roe_dt", financial_reports."roe_dt"),
-                "grossprofit_margin" = COALESCE(excluded."grossprofit_margin", financial_reports."grossprofit_margin"),
-                "netprofit_margin" = COALESCE(excluded."netprofit_margin", financial_reports."netprofit_margin"),
-                "debt_to_assets" = COALESCE(excluded."debt_to_assets", financial_reports."debt_to_assets"),
-                "or_yoy" = COALESCE(excluded."or_yoy", financial_reports."or_yoy"),
-                "netprofit_yoy" = COALESCE(excluded."netprofit_yoy", financial_reports."netprofit_yoy"),
-                "goodwill" = COALESCE(excluded."goodwill", financial_reports."goodwill"),
-                "audit_result" = COALESCE(excluded."audit_result", financial_reports."audit_result"),
-                "n_cashflow_act" = COALESCE(excluded."n_cashflow_act", financial_reports."n_cashflow_act")
-        """
-        params = await ThreadPoolManager().run_async(
-            TaskType.CPU, self._prepare_data_params, df, cols, "financial_reports"
+        return await self._save_upsert(
+            df,
+            "financial_reports",
+            cols,
+            pk_columns=["ts_code", "end_date"],
         )
-        return await self._write_db(sql, params, is_many=True)
 
     async def get_cached_financial_records(self, period: str | None = None):
         if period:

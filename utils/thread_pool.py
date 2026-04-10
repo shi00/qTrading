@@ -165,7 +165,8 @@ class ThreadPoolManager:
         loop = asyncio.get_running_loop()
         executor = self.get_executor(task_type)
 
-        # run_in_executor does not support kwargs, so use lambda or functools.partial if needed by caller
+        # run_in_executor does not support kwargs, so wrap with functools.partial when needed.
+        # Positional args (*args) are passed through run_in_executor to the target function.
         if kwargs:
             func = functools.partial(func, **kwargs)
 

@@ -283,10 +283,33 @@ class DatabaseManager:
                     "error": f"Security Alert: Only SELECT statements are allowed. Found: {statement.get_type()}",
                 }
 
+        # 1.5. Defense-in-depth: Block dangerous keywords even if sqlparse misclassifies
+        upper_sql = sql_query.upper().strip()
+        DANGEROUS_KEYWORDS = [
+            "DROP ",
+            "DELETE ",
+            "INSERT ",
+            "UPDATE ",
+            "ALTER ",
+            "CREATE ",
+            "TRUNCATE ",
+            "EXECUTE ",
+            "GRANT ",
+            "REVOKE ",
+        ]
+        for kw in DANGEROUS_KEYWORDS:
+            if kw in upper_sql:
+                return {
+                    "success": False,
+                    "data": None,
+                    "error": f"Security Alert: Dangerous keyword '{kw.strip()}' detected in query.",
+                }
+
         # 2. Execute with strictly Read-Only connection and Memory Protection
         conn = None
         try:
             with self._engine.connect() as conn:
+                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
                 result = conn.execute(sa.text(sql_query))
 
                 # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)

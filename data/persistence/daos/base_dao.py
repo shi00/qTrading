@@ -175,7 +175,7 @@ class BaseDao:
             )
 
             if not suppress_errors:
-                raise e
+                raise
             return 0
 
     @staticmethod
@@ -321,7 +321,7 @@ class BaseDao:
                 exc_info=True,
             )
             if not suppress_errors:
-                raise e
+                raise
             return 0
 
     @staticmethod
