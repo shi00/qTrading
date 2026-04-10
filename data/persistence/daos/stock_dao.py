@@ -286,7 +286,7 @@ class StockDao(BaseDao):
 
             concepts = item.get("concepts", [])
             if not concepts:
-                dummy_id = f"AI_DOUBAO_{hashlib.md5(b'NONE').hexdigest()}"
+                dummy_id = f"AI_DOUBAO_{hashlib.sha256(b'NONE').hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,
@@ -297,7 +297,7 @@ class StockDao(BaseDao):
                 continue
 
             for concept in concepts:
-                concept_id = f"AI_DOUBAO_{hashlib.md5(concept.encode('utf-8')).hexdigest()}"
+                concept_id = f"AI_DOUBAO_{hashlib.sha256(concept.encode('utf-8')).hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,

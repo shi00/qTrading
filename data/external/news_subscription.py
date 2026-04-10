@@ -324,7 +324,7 @@ class NewsSubscriptionService:
                 # Combined hash of content and optionally time
                 content = item.get("content", "").strip()
                 time_str = item.get("time", "")
-                return hashlib.md5(f"{time_str}_{content}".encode()).hexdigest()
+                return hashlib.sha256(f"{time_str}_{content}".encode()).hexdigest()
 
             if not news_list:
                 return
