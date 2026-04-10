@@ -655,9 +655,18 @@ class TestDataProcessor(unittest.TestCase):
             },
         )
 
+        mock_cashflow = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "end_date": ["20230331"],
+                "n_cashflow_act": [800],
+            },
+        )
+
         self.mock_api.get_income.return_value = mock_income
         self.mock_api.get_balancesheet.return_value = mock_balance
         self.mock_api.get_fina_indicator.return_value = mock_indicator
+        self.mock_api.get_cashflow.return_value = mock_cashflow
 
         self.mock_cache.save_financial_reports = AsyncMock(return_value=1)
         self.mock_cache.update_sync_status = AsyncMock()
@@ -665,15 +674,18 @@ class TestDataProcessor(unittest.TestCase):
         count = await self.processor.sync_financial_reports(periods=periods)
 
         self.assertEqual(count, 1)
-        self.assertTrue(self.mock_cache.save_financial_reports.call_count >= 3)
+        # After fix: income/balance/cashflow/indicator are merged before saving (1 call, not 4)
+        self.assertTrue(self.mock_cache.save_financial_reports.call_count >= 1)
 
-        saved_dfs = [c[0][0] for c in self.mock_cache.save_financial_reports.call_args_list]
+        saved_df = self.mock_cache.save_financial_reports.call_args_list[0][0][0]
 
-        has_assets = any("total_assets" in df.columns and df.iloc[0]["total_assets"] == 10000 for df in saved_dfs)
-        has_roe = any("roe" in df.columns and df.iloc[0]["roe"] == 10.5 for df in saved_dfs)
-
-        self.assertTrue(has_assets, "total_assets not saved")
-        self.assertTrue(has_roe, "roe not saved")
+        # Merged DataFrame should contain fields from all 3 sources
+        self.assertIn("total_assets", saved_df.columns)
+        self.assertEqual(saved_df.iloc[0]["total_assets"], 10000)
+        self.assertIn("roe", saved_df.columns)
+        self.assertEqual(saved_df.iloc[0]["roe"], 10.5)
+        self.assertIn("n_cashflow_act", saved_df.columns)
+        self.assertEqual(saved_df.iloc[0]["n_cashflow_act"], 800)
 
     def test_financial_reports(self):
         asyncio.run(self.async_test_sync_financial_reports())

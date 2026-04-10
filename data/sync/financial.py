@@ -243,88 +243,33 @@ class FinancialSyncStrategy(ISyncStrategy):
                     processed = True
                     has_error = False
 
-                    # Fetch Helper
-                    async def fetch_safe(func, kwargs):
-                        nonlocal has_error
-                        try:
-                            # P0-4 Fix: directly await async API methods (they handle threading internally)
-                            return await func(**kwargs)
-                        except (AttributeError, NameError, TypeError, ImportError) as e:
-                            raise e  # Critical
-                        except Exception as e:
-                            has_error = True
-                            logger.warning(
-                                f"[FinancialSync] StockSync | ⚠️ Fetch {func.__name__} failed for {ts_code}: {e}",
+                    try:
+                        df_merged, aux_counts = await self._fetch_comprehensive_financial_data(
+                            ts_code,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+
+                        total_mainbz_rows += aux_counts["mainbz"]
+                        total_audit_rows += aux_counts["audit"]
+
+                        if df_merged is not None and not df_merged.empty:
+                            # 补齐缺失列后一次性写入
+                            for col in FINANCIAL_REPORT_SCHEMA_COLS:
+                                if col not in df_merged.columns:
+                                    df_merged[col] = None
+
+                            await self.context.cache.save_financial_reports(
+                                df_merged[FINANCIAL_REPORT_SCHEMA_COLS],
                             )
-                            return None
 
-                    # Task Specs
-                    # Args Type: 0=start+end, 1=end only, 2=start only
-                    task_specs = [
-                        (
-                            self.context.api.get_income,
-                            self.context.cache.save_financial_reports,
-                            0,
-                        ),
-                        (
-                            self.context.api.get_balancesheet,
-                            self.context.cache.save_financial_reports,
-                            0,
-                        ),
-                        (
-                            self.context.api.get_cashflow,
-                            self.context.cache.save_financial_reports,
-                            0,
-                        ),
-                        (
-                            self.context.api.get_fina_indicator,
-                            self.context.cache.save_financial_reports,
-                            0,
-                        ),
-                        (
-                            self.context.api.get_fina_audit,
-                            self.context.cache.save_fina_audit,
-                            0,
-                        ),
-                        (
-                            self.context.api.get_fina_mainbz,
-                            self.context.cache.save_fina_mainbz,
-                            0,
-                        ),
-                        # Note: Repurchase/Dividend removed from Stock Loop (moved to Batch Loop)
-                        # But wait, original code had them.
-                        # If we keep them here, it's redundant but safe (Double Coverage).
-                        # "Veteran" says: Remove redundancy to save API.
-                        # BUT: Older historic data might be missed by batch window if we only sync 30 days.
-                        # Full sync covers 3 years of dates, so batch handles it!
-                        # So we REMOVE Repurchase/Dividend from here.
-                    ]
-
-                    futures = []
-                    for fetch_func, _, arg_type in task_specs:
-                        kw = {"ts_code": ts_code}
-                        if arg_type == 0:
-                            kw.update(start_date=start_date, end_date=end_date)
-                        elif arg_type == 1:
-                            kw.update(end_date=end_date)
-                        elif arg_type == 2:
-                            kw.update(start_date=start_date)
-                        futures.append(fetch_safe(fetch_func, kw))
-
-                    results = await asyncio.gather(*futures)
-
-                    # Save Results
-                    for i, result_data in enumerate(results):
-                        if result_data is not None:
-                            save_func = task_specs[i][1]
-                            row_count = await save_func(result_data)
-
-                            # Accumulate for aux tables
-                            api_func = task_specs[i][0]
-                            if api_func == self.context.api.get_fina_mainbz:
-                                total_mainbz_rows += row_count if row_count is not None else len(result_data)
-                            elif api_func == self.context.api.get_fina_audit:
-                                total_audit_rows += row_count if row_count is not None else len(result_data)
+                    except (AttributeError, NameError, TypeError, ImportError):
+                        raise  # Critical errors must propagate
+                    except Exception as e:
+                        has_error = True
+                        logger.warning(
+                            f"[FinancialSync] StockSync | ⚠️ Failed for {ts_code}: {e}",
+                        )
 
                     if not has_error:
                         await self.context.cache.mark_stock_step4_completed(
@@ -646,7 +591,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         period=None,
     ) -> tuple:
         """
-        Helper: Fetch and merge Income, Balance Sheet, and Financial Indicators.
+        Helper: Fetch and merge Income, Balance Sheet, Cashflow, and Financial Indicators.
         Returns: (merged_df, aux_counts) where aux_counts = {"mainbz": 0, "audit": 0}
         """
         api = self.context.api
@@ -670,6 +615,14 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         async def fetch_indicator():
             return await api.get_fina_indicator(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                period=period,
+            )
+
+        async def fetch_cashflow():
+            return await api.get_cashflow(
                 ts_code=ts_code,
                 start_date=start_date,
                 end_date=end_date,
@@ -715,18 +668,19 @@ class FinancialSyncStrategy(ISyncStrategy):
                 fetch_income(),
                 fetch_balance(),
                 fetch_indicator(),
+                fetch_cashflow(),
                 *aux_tasks,
                 return_exceptions=True,
             )
 
             # Unpack Core Results
-            # results[0-2] are core, results[3-4] are aux (row_counts)
-            df_inc, df_bal, df_fina = results[0], results[1], results[2]
+            # results[0-3] are core, results[4-5] are aux (row_counts)
+            df_inc, df_bal, df_fina, df_cf = results[0], results[1], results[2], results[3]
 
             # Return aux counts as dict (for caller to accumulate)
             aux_counts = {
-                "mainbz": results[3] if isinstance(results[3], int) else 0,
-                "audit": results[4] if isinstance(results[4], int) else 0,
+                "mainbz": results[4] if isinstance(results[4], int) else 0,
+                "audit": results[5] if isinstance(results[5], int) else 0,
             }
 
             # 2. Proceed with Core Financial Merging (Income/Balance/Indicator)
@@ -752,6 +706,13 @@ class FinancialSyncStrategy(ISyncStrategy):
                         keep="last",
                     ),
                 )
+            if isinstance(df_cf, pd.DataFrame) and not df_cf.empty:
+                dfs.append(
+                    df_cf.sort_values("end_date").drop_duplicates(
+                        subset=["end_date"],
+                        keep="last",
+                    ),
+                )
 
             if not dfs:
                 return None, aux_counts
@@ -765,10 +726,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     how="outer",
                     suffixes=("", "_drop"),
                 )
-
-            for col in df_merged.columns:
-                if col.endswith("_drop"):
-                    df_merged.drop(columns=[col], inplace=True)
+                # Immediately remove _drop columns to prevent duplicate suffixes in subsequent merges
+                df_merged = df_merged[[c for c in df_merged.columns if not c.endswith("_drop")]]
 
             return df_merged, aux_counts
 
