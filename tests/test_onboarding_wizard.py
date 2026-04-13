@@ -846,6 +846,37 @@ class TestLocalModelManagerIntegration:
 
         assert hasattr(LocalModelManager, "get_instance")
 
+    def test_local_model_manager_has_reset_singleton(self):
+        """Test that LocalModelManager has _reset_singleton method for test isolation"""
+        from services.local_model_manager import LocalModelManager
+
+        assert hasattr(LocalModelManager, "_reset_singleton")
+        assert hasattr(LocalModelManager, "_initialized")
+        assert hasattr(LocalModelManager, "_lock")
+
+    def test_local_model_manager_singleton_reset_clears_instance(self):
+        """Test that _reset_singleton clears the singleton instance"""
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager._reset_singleton()
+        assert LocalModelManager._instance is None
+        assert LocalModelManager._initialized is False
+
+    def test_local_model_manager_singleton_reset_unloads_model(self):
+        """Test that _reset_singleton unloads LLM model to free memory"""
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager._reset_singleton()
+
+        LocalModelManager._instance = LocalModelManager.__new__(LocalModelManager)
+        LocalModelManager._instance._llm = "mock_llm_instance"
+        LocalModelManager._initialized = True
+
+        LocalModelManager._reset_singleton()
+
+        assert LocalModelManager._instance is None
+        assert LocalModelManager._initialized is False
+
 
 class TestWizardValidationMethods:
     """Tests for wizard validation methods"""
