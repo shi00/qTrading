@@ -42,13 +42,23 @@ class LocalModelManager:
     """
 
     _instance: Optional["LocalModelManager"] = None
+    _initialized: bool = False
+    _lock = threading.Lock()
     _llm: Optional["Llama"] = None
     _model_path: str = ""
-    _model_md5: str = ""  # MD5 hash of loaded model file
-    _model_stat: tuple = (0, 0)  # (mtime, size)
+    _model_md5: str = ""
+    _model_stat: tuple = (0, 0)
     _last_config: dict = {}
     _is_loading: bool = False
-    _load_lock = None  # Lazy init to avoid cross-event-loop binding
+
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset singleton for testing only. NEVER call in production."""
+        with cls._lock:
+            if cls._instance is not None and cls._instance._llm is not None:
+                cls._instance.unload_model()
+            cls._instance = None
+            cls._initialized = False
 
     @classmethod
     def _get_load_lock(cls):
@@ -61,11 +71,15 @@ class LocalModelManager:
 
     @classmethod
     async def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = LocalModelManager()
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = LocalModelManager()
+                cls._initialized = True
         return cls._instance
 
     def __init__(self):
+        if self._initialized:
+            return
         self._llm = None
         self._last_config = {}
 
