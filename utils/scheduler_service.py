@@ -41,6 +41,13 @@ class SchedulerService:
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
+            if cls._instance is not None and hasattr(cls._instance, "scheduler"):
+                try:
+                    if cls._instance.scheduler.running:
+                        cls._instance.scheduler.shutdown(wait=False)
+                        logger.info("[Scheduler] Shutdown completed during reset")
+                except Exception as e:
+                    logger.warning(f"[Scheduler] Error during shutdown: {e}")
             cls._instance = None
             cls._initialized = False
 
