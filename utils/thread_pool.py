@@ -41,6 +41,18 @@ class ThreadPoolManager:
                 cls._instance._initialized = False
             return cls._instance
 
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset singleton for testing only. NEVER call in production."""
+        with cls._lock:
+            if cls._instance is not None:
+                try:
+                    cls._instance.shutdown(wait=False)
+                except Exception:
+                    pass
+            cls._instance = None
+            cls._initialized = False
+
     def __init__(self):
         # Double-check locking optimization not needed for init if __new__ handles instance creation safely,
         # but standard singleton pattern usually locks on creation.

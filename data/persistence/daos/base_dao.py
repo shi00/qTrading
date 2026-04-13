@@ -10,31 +10,25 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
 
 class BaseDao:
-    # Maintenance gate: cleared during DDL (clear_cache), set otherwise.
-    # All _read_db/_write_db calls await this before executing SQL.
-    _maintenance_event = None  # Lazy init per event loop
+    _maintenance_event = None
 
     @classmethod
     def _get_maintenance_event(cls):
         import asyncio
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        def _factory():
             evt = asyncio.Event()
             evt.set()
             return evt
-        if not hasattr(loop, "_basedao_maint_event"):
-            evt = asyncio.Event()
-            evt.set()
-            loop._basedao_maint_event = evt  # type: ignore
-        return loop._basedao_maint_event  # type: ignore
+
+        return get_loop_local("basedao_maint_event", _factory)
 
     def __init__(self, engine: typing.Any):
         self.engine = engine
@@ -103,6 +97,11 @@ class BaseDao:
         suppress_errors: bool = True,
     ):
         """Generic Write using Driver SQL for '?' support"""
+        if self.engine is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
+            )
+
         if is_many and not params:
             return 0
 
@@ -195,6 +194,11 @@ class BaseDao:
         Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
         Leverages SQLAlchemy Core for robust type coercion from Pandas to asyncpg natively.
         """
+        if self.engine is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
+            )
+
         if df is None or df.empty:
             return 0
 
@@ -270,7 +274,31 @@ class BaseDao:
         if not update_cols:
             stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
         else:
-            update_dict = {c: getattr(stmt.excluded, c) for c in update_cols}
+            NULL_PROTECTED_COLUMNS = {
+                "n_cashflow_act",
+                "roe",
+                "roe_dt",
+                "grossprofit_margin",
+                "netprofit_margin",
+                "debt_to_assets",
+                "total_assets",
+                "total_liab",
+                "total_hldr_eqy_exc_min_int",
+                "total_revenue",
+                "revenue",
+                "n_income",
+                "n_income_attr_p",
+                "goodwill",
+                "or_yoy",
+                "netprofit_yoy",
+            }
+            update_dict = {}
+            for c in update_cols:
+                excluded_val = getattr(stmt.excluded, c)
+                if c in NULL_PROTECTED_COLUMNS:
+                    update_dict[c] = sa.func.coalesce(excluded_val, table.c[c])
+                else:
+                    update_dict[c] = excluded_val
             if has_updated_at:
                 update_dict["updated_at"] = sa.func.now()
             stmt = stmt.on_conflict_do_update(
@@ -365,6 +393,11 @@ class BaseDao:
 
     async def _read_db(self, sql: typing.Any, params: typing.Any = None):
         """Generic Read returning DataFrame (Offloaded CSV conversion)"""
+        if self.engine is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
+            )
+
         if params is not None and isinstance(params, list):
             params = tuple(params)
 

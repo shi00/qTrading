@@ -39,7 +39,7 @@ from data.persistence.models import (
     TradeCal,
 )
 
-from .helpers import get_model_columns
+from .helpers import get_model_columns, get_model_db_columns
 
 
 class TestAlembicMigrationAlignment:
@@ -362,3 +362,83 @@ class TestAlembicMigrationAlignment:
         extra_in_alembic = alembic_cols - model_cols - {"updated_at", "created_at"}
         assert not missing_in_alembic, f"Alembic missing columns for trade_cal: {missing_in_alembic}"
         assert not extra_in_alembic, f"Alembic has extra columns for trade_cal: {extra_in_alembic}"
+
+
+class TestOrmAlembicDaoConsistency:
+    """Test that ORM models, Alembic migrations, and DataDictionary stay in sync."""
+
+    ALL_MODELS = [
+        (StockBasic, "stock_basic"),
+        (DailyQuotes, "daily_quotes"),
+        (DailyIndicators, "daily_indicators"),
+        (FinancialReports, "financial_reports"),
+        (Dividend, "dividend"),
+        (MoneyflowDaily, "moneyflow_daily"),
+        (MoneyflowHsgt, "moneyflow_hsgt"),
+        (MarginDaily, "margin_daily"),
+        (NorthboundHolding, "northbound_holding"),
+        (IndexDaily, "index_daily"),
+        (IndexDailyBasic, "index_dailybasic"),
+        (IndexWeight, "index_weight"),
+        (BlockTrade, "block_trade"),
+        (TopList, "top_list"),
+        (LimitList, "limit_list"),
+        (SuspendD, "suspend_d"),
+        (FinaAudit, "fina_audit"),
+        (FinaForecast, "fina_forecast"),
+        (FinaMainbz, "fina_mainbz"),
+        (PledgeStat, "pledge_stat"),
+        (Repurchase, "repurchase"),
+        (ShiborDaily, "shibor_daily"),
+        (StkHoldernumber, "stk_holdernumber"),
+        (Top10Holders, "top10_holders"),
+        (TradeCal, "trade_cal"),
+    ]
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.migration_path = os.path.join(project_root, "alembic", "versions")
+        self.migration_files = []
+        if os.path.exists(self.migration_path):
+            for f in sorted(os.listdir(self.migration_path)):
+                if f.endswith(".py") and not f.startswith("__"):
+                    self.migration_files.append(os.path.join(self.migration_path, f))
+
+    def _extract_alembic_columns(self, table_name: str) -> set | None:
+        extractor = TestAlembicMigrationAlignment()
+        extractor.migration_path = self.migration_path
+        extractor.migration_files = self.migration_files
+        return extractor._extract_table_columns_from_migration(table_name)
+
+    @pytest.mark.parametrize("model_class,table_name", ALL_MODELS)
+    def test_orm_alembic_data_dict_consistency(self, model_class, table_name):
+        orm_db_cols = get_model_db_columns(model_class) - {"updated_at", "created_at"}
+        alembic_cols = self._extract_alembic_columns(table_name)
+
+        from data.data_dictionary import TABLE_DEFINITIONS
+
+        dd_entry = TABLE_DEFINITIONS.get(table_name, {})
+        dd_columns = set(dd_entry.get("columns", {}).keys())
+
+        errors = []
+
+        if alembic_cols is not None:
+            missing_in_alembic = orm_db_cols - alembic_cols
+            if missing_in_alembic:
+                errors.append(f"Alembic missing: {missing_in_alembic}")
+
+            extra_in_alembic = alembic_cols - orm_db_cols - {"updated_at", "created_at"}
+            if extra_in_alembic:
+                errors.append(f"Alembic extra: {extra_in_alembic}")
+
+        if dd_columns:
+            missing_in_dd = orm_db_cols - dd_columns
+            if missing_in_dd:
+                errors.append(f"DataDict missing: {missing_in_dd}")
+
+            extra_in_dd = dd_columns - orm_db_cols
+            if extra_in_dd:
+                errors.append(f"DataDict extra: {extra_in_dd}")
+
+        assert not errors, f"{table_name} inconsistencies: {'; '.join(errors)}"

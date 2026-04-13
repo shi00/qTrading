@@ -28,6 +28,22 @@ class SyncContext:
     api: Any  # TushareClient
     cache: Any  # CacheManager
     config: Any = None  # ConfigHandler (Optional)
+    _processor_ref: Any = None  # weakref.ref(DataProcessor)
+
+    @property
+    def processor(self):
+        if self._processor_ref is not None:
+            return self._processor_ref()
+        return None
+
+    @processor.setter
+    def processor(self, value):
+        if value is not None:
+            import weakref
+
+            self._processor_ref = weakref.ref(value)
+        else:
+            self._processor_ref = None
 
 
 @dataclass

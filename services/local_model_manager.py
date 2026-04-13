@@ -3,10 +3,10 @@ import hashlib
 import logging
 import os
 import threading
-import typing
 from typing import Any, Optional
 
 from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -53,26 +53,11 @@ class LocalModelManager:
     @classmethod
     def _get_load_lock(cls):
         """Get or create load lock dynamically per event loop to avoid cross-loop binding deadlocks."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning(
-                "[LocalModel] No running event loop for load lock. Using dummy lock.",
-            )
 
-            class DummyLock:
-                async def __aenter__(self):
-                    return
+        def _factory():
+            return asyncio.Lock()
 
-                async def __aexit__(self, *args: typing.Any):
-                    return
-
-            return DummyLock()
-
-        if not hasattr(current_loop, "_local_load_lock"):
-            current_loop._local_load_lock = asyncio.Lock()  # type: ignore
-
-        return current_loop._local_load_lock  # type: ignore
+        return get_loop_local("local_load_lock", _factory)
 
     @classmethod
     async def get_instance(cls):

@@ -86,6 +86,13 @@ class TaskManager:
                 cls._instance._initialized = False
         return cls._instance
 
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset singleton for testing only. NEVER call in production."""
+        with cls._lock:
+            cls._instance = None
+            cls._initialized = False
+
     def __init__(self):
         with self._lock:
             if getattr(self, "_initialized", False):

@@ -17,6 +17,7 @@ from data.constants import MAJOR_INDICES
 from data.sync.base import ISyncStrategy, SyncResult
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
@@ -57,15 +58,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
     @property
     def _shutdown_event(self):
         """Get or create shutdown event dynamically per event loop."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
+
+        def _factory():
             return asyncio.Event()
 
-        if not hasattr(current_loop, "_hist_shutdown_evt"):
-            current_loop._hist_shutdown_evt = asyncio.Event()  # type: ignore
-
-        return current_loop._hist_shutdown_evt  # type: ignore
+        return get_loop_local("hist_shutdown_evt", _factory)
 
     async def cancel(self):
         """Signal cancellation."""
@@ -668,6 +665,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         count,
                     )
                 return count
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(
+                f"[HistoricalSync] MoneyFlow | ❌ Network error: {e}",
+            )
+            raise
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed: {e}",
@@ -692,6 +694,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             count,
                         )
                     return count
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(
+                f"[HistoricalSync] Northbound | ❌ Network error: {e}",
+            )
+            raise
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] Northbound | ⚠️ Standalone sync failed: {e}",

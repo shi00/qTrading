@@ -100,13 +100,23 @@ async def main(page: ft.Page):
         except Exception as ex:
             logger.error(f"[Main] Error during cleanup: {ex}", exc_info=True)
 
-        logger.info("[Main] All resources released. Exiting process immediately.")
+        logger.info("[Main] All resources released. Exiting process.")
 
-        import os
-        import time
+        import sys
+        import threading
 
-        time.sleep(0.1)
-        os._exit(0)
+        def _force_exit():
+            import time
+
+            time.sleep(5)
+            import os
+
+            os._exit(1)
+
+        watchdog = threading.Thread(target=_force_exit, daemon=True)
+        watchdog.start()
+
+        sys.exit(0)
 
     page.on_disconnect = cleanup_resources
 
@@ -134,11 +144,43 @@ async def main(page: ft.Page):
 
     async def _init_services_and_start_app():
         """Initialize all services and start the app."""
-        await cache_manager.init_db()
+        try:
+            await cache_manager.init_db()
+        except Exception as e:
+            logger.error(f"[Main] Database initialization failed: {e}", exc_info=True)
+            show_toast(I18n.get("error_db_init_failed", default=f"数据库初始化失败: {e}"), "error")
+            page.add(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Icon(ft.icons.ERROR_OUTLINE, color=ft.colors.RED, size=48),
+                            ft.Text(
+                                I18n.get("error_db_init_failed", default="数据库初始化失败"),
+                                size=20,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Text(str(e)[:200], color=ft.colors.RED_400, size=14),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=10,
+                    ),
+                    expand=True,
+                    alignment=ft.alignment.center,
+                ),
+            )
+            return
+
+        if cache_manager.engine is None:
+            logger.error("[Main] Database engine not created after init_db().")
+            show_toast(I18n.get("error_db_engine_missing", default="数据库引擎未创建，请检查配置"), "error")
+            return
 
         from services.task_manager import TaskManager
 
-        await TaskManager().init_db()
+        try:
+            await TaskManager().init_db()
+        except Exception as e:
+            logger.error(f"[Main] TaskManager init failed: {e}", exc_info=True)
 
         scheduler.start()
 

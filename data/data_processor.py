@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import threading
+import weakref
 
 import pandas as pd
 
@@ -18,6 +19,7 @@ from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
@@ -33,7 +35,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     _instance = None
     _lock = threading.Lock()
-    _is_initialized = False
+    _initialized = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -47,11 +49,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
             cls._instance = None
-            cls._is_initialized = False
+            cls._initialized = False
 
     def __init__(self):
         # Double-check initialization state with lock to prevent race conditions
-        if self.__class__._is_initialized:
+        if self.__class__._initialized:
             # Check if token has changed since initialization
             current_token = ConfigHandler.get_token()
             if hasattr(self, "_current_token") and current_token != self._current_token:
@@ -59,7 +61,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return
 
         with self.__class__._lock:
-            if self.__class__._is_initialized:
+            if self.__class__._initialized:
                 return
 
             self._health_cache = {"time": 0, "data": None}
@@ -81,7 +83,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 cache=self.cache,
                 config=ConfigHandler,
             )
-            self.context.processor = self  # type: ignore
+            self.context._processor_ref = weakref.ref(self)
             self.strategies = {
                 "financial": FinancialSyncStrategy(self.context),
                 "historical": HistoricalSyncStrategy(self.context),
@@ -100,19 +102,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self._sync_lock = threading.Lock()
             self._is_syncing_basic = False
 
-            self.__class__._is_initialized = True
+            self.__class__._initialized = True
 
     def _get_cancel_event(self):
         """Get or create cancel event dynamically per event loop."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
+
+        def _factory():
             return asyncio.Event()
 
-        if not hasattr(current_loop, "_processor_cancel_evt"):
-            current_loop._processor_cancel_evt = asyncio.Event()  # type: ignore
-
-        return current_loop._processor_cancel_evt  # type: ignore
+        return get_loop_local("processor_cancel_evt", _factory)
 
     async def request_cancel(self):
         """

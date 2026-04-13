@@ -48,6 +48,7 @@ class TushareClient:
             cls._instance = None
             cls._trade_cal_cache = set()
             cls._loaded_years = set()
+            cls._initialized = False
 
     def __init__(self, token: str | None = None):
         # Double-check locking for initialization to prevent race conditions

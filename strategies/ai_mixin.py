@@ -600,9 +600,17 @@ class AIStrategyMixin:
             )
             return ai_result
 
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(
+                f"[AIStrategyMixin] Network error for {row.get('ts_code', '?')}: {e}",
+            )
+            raise
         except Exception as e:
             logger.error(
                 f"[AIStrategyMixin] Analysis failed for {row.get('ts_code', '?')}: {e}",
+                exc_info=True,
             )
             return None
 

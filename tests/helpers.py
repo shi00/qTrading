@@ -16,6 +16,21 @@ def get_model_columns(model_class: type) -> set:
     return columns
 
 
+def get_model_db_columns(model_class: type) -> set:
+    """Extract database column names from SQLAlchemy model class.
+
+    Unlike get_model_columns which returns Python attribute names,
+    this returns the actual database column names (which may differ
+    when using Column(name=...) parameter).
+    """
+    columns = set()
+    for _name, attr in inspect.getmembers(model_class):
+        if hasattr(attr, "property") and hasattr(attr.property, "columns"):
+            for col in attr.property.columns:
+                columns.add(col.name)
+    return columns
+
+
 def extract_cols_from_method(method) -> set | None:
     """Extract cols list from save method source code (static analysis)."""
     import re

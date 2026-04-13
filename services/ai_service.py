@@ -7,6 +7,7 @@ import httpx
 
 from services.local_model_manager import LocalModelManager
 from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ class AIService:
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
             cls._instance = None
+            cls._initialized = False
 
     def __init__(self):
         if self._initialized:
@@ -242,30 +244,13 @@ class AIService:
 
     async def _get_semaphore(self):
         """Get or create semaphore for current event loop"""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug(
-                "[AIService] Semaphore | No running event loop, using DummySemaphore.",
-            )
 
-            class DummySemaphore:
-                async def __aenter__(self):
-                    return
-
-                async def __aexit__(self, *args):
-                    return
-
-            return DummySemaphore()
-
-        # Create new semaphore if none exists on the current loop
-        if not hasattr(current_loop, "_ai_semaphore"):
-            # Enforce minimum concurrency of 1 to prevent deadlock
+        def _factory():
             raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
             concurrency = max(1, int(raw_val)) if raw_val else 5
-            current_loop._ai_semaphore = asyncio.Semaphore(concurrency)  # type: ignore
+            return asyncio.Semaphore(concurrency)
 
-        return current_loop._ai_semaphore  # type: ignore
+        return get_loop_local("ai_semaphore", _factory)
 
     def _safe_truncate(self, text: str, max_len: int) -> str:
         """Safely truncate text to avoid token overflow"""
@@ -680,26 +665,11 @@ class AIService:
 
     async def _get_setup_lock(self):
         """Lazy-initialize the async lock dynamically per event loop to avoid cross-loop binding deadlocks."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug(
-                "[AIService] SetupLock | No running event loop, using DummyLock.",
-            )
 
-            class DummyLock:
-                async def __aenter__(self):
-                    return
+        def _factory():
+            return asyncio.Lock()
 
-                async def __aexit__(self, *args):
-                    return
-
-            return DummyLock()
-
-        if not hasattr(current_loop, "_ai_setup_lock"):
-            current_loop._ai_setup_lock = asyncio.Lock()  # type: ignore
-
-        return current_loop._ai_setup_lock  # type: ignore
+        return get_loop_local("ai_setup_lock", _factory)
 
     async def _setup_local_model(self):
         """

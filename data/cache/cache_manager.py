@@ -26,6 +26,7 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.sync_dao import SyncDao
 from utils.config_handler import ConfigHandler
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -149,41 +150,22 @@ class CacheManager:
     @property
     def _maintenance_event(self):
         """Get or create maintenance event dynamically per event loop."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.Event()  # Dummy fallback if no loop
 
-        if not hasattr(current_loop, "_cache_maint_event"):
+        def _factory():
             evt = asyncio.Event()
-            evt.set()  # Default to Set (Not in maintenance)
-            current_loop._cache_maint_event = evt  # type: ignore
+            evt.set()
+            return evt
 
-        return current_loop._cache_maint_event  # type: ignore
+        return get_loop_local("cache_maint_event", _factory)
 
     @property
     def _init_lock(self):
         """Get or create initialization lock dynamically per event loop to avoid cross-loop binding deadlocks."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning(
-                "[CacheManager] Config | ⚠️ No running event loop for _init_lock. Using dummy.",
-            )
 
-            class DummyLock:
-                async def __aenter__(self):
-                    return
+        def _factory():
+            return asyncio.Lock()
 
-                async def __aexit__(self, *args: typing.Any):
-                    return
-
-            return DummyLock()
-
-        if not hasattr(current_loop, "_cache_init_lock"):
-            current_loop._cache_init_lock = asyncio.Lock()  # type: ignore
-
-        return current_loop._cache_init_lock  # type: ignore
+        return get_loop_local("cache_init_lock", _factory)
 
     async def close(self):
         """Dispose the engine"""
@@ -199,14 +181,8 @@ class CacheManager:
         await self.engine.dispose()
 
         # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
-        try:
-            current_loop = asyncio.get_running_loop()
-            if hasattr(current_loop, "_cache_maint_event"):
-                delattr(current_loop, "_cache_maint_event")
-            if hasattr(current_loop, "_cache_init_lock"):
-                delattr(current_loop, "_cache_init_lock")
-        except RuntimeError:
-            pass
+        del_loop_local("cache_maint_event")
+        del_loop_local("cache_init_lock")
 
     # --- Maintenance & Helpers ---
     async def wait_for_maintenance(self):
@@ -277,6 +253,7 @@ class CacheManager:
                     f"[CacheManager] Schema | Init failed critically: {e}",
                     exc_info=True,
                 )
+                raise
 
     async def hard_reset(self):
         """Hard reset by clearing all tables (dropping them) and reinitializing via Alembic."""

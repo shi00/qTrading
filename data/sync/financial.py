@@ -13,6 +13,7 @@ import pandas as pd
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS
 from data.sync.base import ISyncStrategy, SyncResult
 from ui.i18n import I18n
+from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
 from utils.time_utils import get_now
 
@@ -33,15 +34,11 @@ class FinancialSyncStrategy(ISyncStrategy):
     @property
     def _shutdown_event(self):
         """Get or create shutdown event dynamically per event loop."""
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
+
+        def _factory():
             return asyncio.Event()
 
-        if not hasattr(current_loop, "_fina_shutdown_evt"):
-            current_loop._fina_shutdown_evt = asyncio.Event()  # type: ignore
-
-        return current_loop._fina_shutdown_evt  # type: ignore
+        return get_loop_local("fina_shutdown_evt", _factory)
 
     async def cancel(self):
         """Signal cancellation."""

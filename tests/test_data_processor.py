@@ -51,7 +51,7 @@ class TestDataProcessor(unittest.TestCase):
 
         # Reset Singleton State
         DataProcessor._instance = None
-        DataProcessor._is_initialized = False  # Force re-init
+        DataProcessor._initialized = False  # Force re-init
 
         self.processor = DataProcessor()
         # Reset mocks
