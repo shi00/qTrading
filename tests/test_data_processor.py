@@ -73,6 +73,12 @@ class TestDataProcessor(unittest.TestCase):
             self.processor.context.cache = self.processor.cache
             self.processor.context.processor = self.processor  # type: ignore
 
+        # Add mock engine for context managers (async with self.context.cache.engine.begin())
+        self.mock_cache.engine = AsyncMock()
+        self.mock_cache.engine.begin = AsyncMock()
+        self.mock_cache.engine.begin.return_value.__aenter__ = AsyncMock()
+        self.mock_cache.engine.begin.return_value.__aexit__ = AsyncMock()
+
         # Reset strategies if needed or rely on context propagation
         # (Strategies hold reference to self.context object)
 

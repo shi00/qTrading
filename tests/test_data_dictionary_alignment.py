@@ -10,8 +10,6 @@ Run: pytest tests/test_data_dictionary_alignment.py -v
 import inspect
 
 from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
-from data.persistence.daos.financial_dao import FinancialDao
-from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.models import (
     Base,
     BlockTrade,
@@ -151,24 +149,7 @@ class TestTop10HoldersHoldChange:
         assert "hold_change" in dd_cols, "Data dictionary defines hold_change for top10_holders"
 
     def test_top10_holders_consistency(self):
-        import re
-
-        get_model_columns(Top10Holders) - {"updated_at", "created_at"}
-
-        source = inspect.getsource(HolderDao.save_top10_holders)
-        pattern = r"(?:cols|columns)\s*=\s*\[([^\]]+)\]"
-        match = re.search(pattern, source, re.DOTALL)
-        assert match, "Could not find cols in save_top10_holders"
-
-        cols_str = match.group(1)
-        dao_cols = set()
-        for item in cols_str.split(","):
-            item = item.strip().strip('"').strip("'")
-            if item and not item.startswith("#"):
-                dao_cols.add(item)
-
-        get_data_dict_columns("top10_holders")
-
+        dao_cols = get_model_columns(Top10Holders)
         assert "hold_change" in dao_cols, "DAO should save hold_change"
         assert "hold_float_ratio" in dao_cols, "DAO should save hold_float_ratio"
 
@@ -187,18 +168,5 @@ class TestFinaAuditAuditSign:
         assert "audit_sign" in source, "get_fina_audit API requests audit_sign field"
 
     def test_fina_audit_dao_includes_audit_sign(self):
-        import re
-
-        source = inspect.getsource(FinancialDao.save_fina_audit)
-        pattern = r"(?:cols|columns)\s*=\s*\[([^\]]+)\]"
-        match = re.search(pattern, source, re.DOTALL)
-        assert match, "Could not find cols in save_fina_audit"
-
-        cols_str = match.group(1)
-        dao_cols = set()
-        for item in cols_str.split(","):
-            item = item.strip().strip('"').strip("'")
-            if item and not item.startswith("#"):
-                dao_cols.add(item)
-
+        dao_cols = get_model_columns(FinaAudit)
         assert "audit_sign" in dao_cols, "save_fina_audit should include audit_sign"

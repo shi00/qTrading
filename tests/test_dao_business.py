@@ -712,14 +712,14 @@ class TestScreenerDaoDynamicCols:
         assert full_cols.endswith(", thinking")
 
     def test_sh_base_cols_matches_model(self):
-        """Verify SH_BASE_COLS count matches ScreeningHistory columns minus 'thinking'"""
+        """Verify SH_BASE_COLS count matches ScreeningHistory columns minus 'thinking' and 'created_at'"""
         from data.persistence.daos.screener_dao import ScreenerDao
         from data.persistence.models import ScreeningHistory
 
         dao = ScreenerDao.__new__(ScreenerDao)
         col_list = [c.strip() for c in dao.SH_BASE_COLS.split(",")]
 
-        expected_count = len(ScreeningHistory.__table__.columns) - 1
+        expected_count = len(ScreeningHistory.__table__.columns) - 2
         assert len(col_list) == expected_count
 
     def test_sh_base_cols_cached(self):

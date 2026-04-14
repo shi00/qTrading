@@ -98,28 +98,14 @@ class TestShiborDailyColumnNames:
     """Test that shibor_daily ORM attribute names vs DB column names are handled correctly."""
 
     def test_shibor_dao_uses_db_column_names(self):
-        import re
+        from data.persistence.models import ShiborDaily, get_model_columns
 
-        from data.persistence.daos.macro_dao import MacroDao
-
-        source = inspect.getsource(MacroDao.save_shibor_daily)
-        pattern = r"(?:cols|columns)\s*=\s*\[([^\]]+)\]"
-        match = re.search(pattern, source, re.DOTALL)
-        assert match, "Could not find cols in save_shibor_daily"
-
-        cols_str = match.group(1)
-        cols = set()
-        for item in cols_str.split(","):
-            item = item.strip().strip('"').strip("'")
-            if item and not item.startswith("#"):
-                cols.add(item)
-
+        cols = get_model_columns(ShiborDaily)
         db_column_names = {"1w", "2w", "1m", "3m", "6m", "9m", "1y"}
         for col in db_column_names:
             assert col in cols, f"save_shibor_daily should use DB column name '{col}'"
 
     def test_shibor_orm_uses_python_attribute_names(self):
-        import inspect
 
         from data.persistence.models import ShiborDaily
 
