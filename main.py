@@ -178,7 +178,7 @@ async def main(page: ft.Page):
             # 命令 Flet 销毁窗口（try/except 防止已损坏的 page 对象阻断退出）
             try:
                 page.window.prevent_close = False
-                await page.window.destroy()
+                page.window.destroy()
             except Exception:
                 pass
 
