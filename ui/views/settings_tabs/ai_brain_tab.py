@@ -141,7 +141,6 @@ class AIBrainTab(ft.Container):
         self.card_connection = DashboardCard(
             content=ft.Column(
                 [
-                    ft.Row([SectionHeader(I18n.get("settings_sec_cloud_ai"))]),
                     self.llm_config_panel,
                 ],
             ),
@@ -155,7 +154,6 @@ class AIBrainTab(ft.Container):
         self.card_local_ai = DashboardCard(
             content=ft.Column(
                 [
-                    ft.Row([SectionHeader(I18n.get("settings_sec_local_ai"))]),
                     self.local_model_panel,
                 ],
             ),

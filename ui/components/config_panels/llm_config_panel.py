@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.settings_widgets import SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
@@ -209,12 +210,8 @@ class LLMConfigPanel(ft.Container):
             alignment=ft.MainAxisAlignment.CENTER,
         )
 
-        header_text = ft.Text(
-            value=I18n.get("settings_sec_ai"),
-            size=16 if not self._compact else 14,
-            weight=ft.FontWeight.BOLD,
-            visible=not self._compact,
-        )
+        header_text = SectionHeader(I18n.get("settings_sec_ai"))
+        header_text.visible = not self._compact
 
         form_content = ft.Column(
             controls=[
