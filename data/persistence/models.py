@@ -625,3 +625,12 @@ DATETIME_COLUMNS = {
     "index_weight": ["updated_at", "created_at"],
     "moneyflow_hsgt": ["updated_at", "created_at"],
 }
+
+
+def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
+    exclude = exclude or {"updated_at", "created_at"}
+    return [c.name for c in model_class.__table__.columns if c.name not in exclude]
+
+
+def get_model_pk_columns(model_class: type) -> list[str]:
+    return [c.name for c in model_class.__table__.primary_key.columns]

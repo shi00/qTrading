@@ -1,5 +1,12 @@
 import logging
 
+from data.persistence.models import (
+    StockBasic,
+    StockConcepts,
+    TradeCal,
+    get_model_columns,
+    get_model_pk_columns,
+)
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
@@ -9,23 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 class StockDao(BaseDao):
-    # --- Stock Basic ---
     async def save_stock_basic(self, df, priority=None):
         if df is None or df.empty:
             return 0
-        cols = [
-            "ts_code",
-            "symbol",
-            "name",
-            "area",
-            "industry",
-            "market",
-            "list_date",
-            "delist_date",
-            "list_status",
-        ]
+        cols = get_model_columns(StockBasic)
+        pk_columns = get_model_pk_columns(StockBasic)
 
-        return await self._save_upsert(df, "stock_basic", cols, pk_columns=["ts_code"])
+        return await self._save_upsert(df, "stock_basic", cols, pk_columns=pk_columns)
 
     async def get_stock_basic(self):
         return await self._read_db("SELECT * FROM stock_basic")
@@ -41,13 +38,14 @@ class StockDao(BaseDao):
 
     # --- Trade Calendar ---
     async def save_trade_cal(self, df):
-        cols = ["cal_date", "exchange", "is_open", "pretrade_date"]
+        cols = get_model_columns(TradeCal)
+        pk_columns = get_model_pk_columns(TradeCal)
         # Fix is_open type
         df = df.copy()
         if "is_open" in df.columns:
             df["is_open"] = df["is_open"].astype(int)
 
-        return await self._save_upsert(df, "trade_cal", cols, pk_columns=["cal_date"])
+        return await self._save_upsert(df, "trade_cal", cols, pk_columns=pk_columns)
 
     async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
         sql = "SELECT * FROM trade_cal WHERE 1=1"
@@ -145,13 +143,14 @@ class StockDao(BaseDao):
     async def save_concepts(self, df):
         if df is None or df.empty:
             return 0
-        cols = ["ts_code", "concept_name", "concept_id"]
+        cols = get_model_columns(StockConcepts)
+        pk_columns = get_model_pk_columns(StockConcepts)
 
         return await self._save_upsert(
             df,
             "stock_concepts",
             cols,
-            pk_columns=["ts_code", "concept_id"],
+            pk_columns=pk_columns,
         )
 
     async def overwrite_concepts(self, df):
@@ -162,7 +161,7 @@ class StockDao(BaseDao):
         if df is None or df.empty:
             return 0
 
-        cols = ["ts_code", "concept_name", "concept_id", "updated_at"]
+        cols = get_model_columns(StockConcepts, exclude=set())
         df = df.copy()
         df["updated_at"] = get_now().replace(tzinfo=None)
 
@@ -310,11 +309,12 @@ class StockDao(BaseDao):
             return 0
 
         df = pd.DataFrame(records)
-        cols = ["ts_code", "concept_name", "concept_id"]
+        cols = get_model_columns(StockConcepts)
+        pk_columns = get_model_pk_columns(StockConcepts)
 
         return await self._save_upsert(
             df,
             "stock_concepts",
             cols,
-            pk_columns=["ts_code", "concept_id"],
+            pk_columns=pk_columns,
         )

@@ -2,6 +2,18 @@ import logging
 
 import pandas as pd
 
+from data.persistence.models import (
+    FinaAudit,
+    FinaForecast,
+    FinaMainbz,
+    FinancialReports,
+    PledgeStat,
+    Repurchase,
+    Dividend,
+    get_model_columns,
+    get_model_pk_columns,
+)
+
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -11,35 +23,14 @@ class FinancialDao(BaseDao):
     async def save_financial_reports(self, df: pd.DataFrame, conn=None):
         if df is None or df.empty:
             return 0
-        cols = [
-            "ts_code",
-            "end_date",
-            "ann_date",
-            "report_type",
-            "total_revenue",
-            "revenue",
-            "n_income",
-            "n_income_attr_p",
-            "total_assets",
-            "total_liab",
-            "total_hldr_eqy_exc_min_int",
-            "roe",
-            "roe_dt",
-            "grossprofit_margin",
-            "netprofit_margin",
-            "debt_to_assets",
-            "or_yoy",
-            "netprofit_yoy",
-            "goodwill",
-            "audit_result",
-            "n_cashflow_act",
-        ]
+        cols = get_model_columns(FinancialReports)
+        pk_columns = get_model_pk_columns(FinancialReports)
 
         return await self._save_upsert(
             df,
             "financial_reports",
             cols,
-            pk_columns=["ts_code", "end_date"],
+            pk_columns=pk_columns,
             conn=conn,
         )
 
@@ -83,113 +74,63 @@ class FinancialDao(BaseDao):
 
     # --- Extra Savers (Boilerplate) ---
     async def save_fina_forecast(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "end_date",
-            "ann_date",
-            "type",
-            "p_change_min",
-            "p_change_max",
-            "net_profit_min",
-            "net_profit_max",
-        ]
+        cols = get_model_columns(FinaForecast)
+        pk_columns = get_model_pk_columns(FinaForecast)
         return await self._save_upsert(
             df,
             "fina_forecast",
             cols,
-            pk_columns=["ts_code", "end_date", "ann_date"],
+            pk_columns=pk_columns,
         )
 
     async def save_fina_mainbz(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "end_date",
-            "bz_item",
-            "bz_sales",
-            "bz_profit",
-            "bz_cost",
-            "curr_type",
-            "update_flag",
-        ]
+        cols = get_model_columns(FinaMainbz)
+        pk_columns = get_model_pk_columns(FinaMainbz)
         return await self._save_upsert(
             df,
             "fina_mainbz",
             cols,
-            pk_columns=["ts_code", "end_date", "bz_item"],
+            pk_columns=pk_columns,
         )
 
     async def save_fina_audit(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "end_date",
-            "ann_date",
-            "audit_result",
-            "audit_sign",
-            "audit_fees",
-            "audit_agency",
-        ]
+        cols = get_model_columns(FinaAudit)
+        pk_columns = get_model_pk_columns(FinaAudit)
         return await self._save_upsert(
             df,
             "fina_audit",
             cols,
-            pk_columns=["ts_code", "end_date"],
+            pk_columns=pk_columns,
         )
 
     async def save_pledge_stat(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "end_date",
-            "pledge_count",
-            "unrest_pledge",
-            "rest_pledge",
-            "total_share",
-            "pledge_ratio",
-        ]
+        cols = get_model_columns(PledgeStat)
+        pk_columns = get_model_pk_columns(PledgeStat)
         return await self._save_upsert(
             df,
             "pledge_stat",
             cols,
-            pk_columns=["ts_code", "end_date"],
+            pk_columns=pk_columns,
         )
 
     async def save_repurchase(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "ann_date",
-            "end_date",
-            "proc",
-            "exp_date",
-            "vol",
-            "amount",
-            "high_limit",
-            "low_limit",
-        ]
+        cols = get_model_columns(Repurchase)
+        pk_columns = get_model_pk_columns(Repurchase)
         return await self._save_upsert(
             df,
             "repurchase",
             cols,
-            pk_columns=["ts_code", "ann_date"],
+            pk_columns=pk_columns,
         )
 
     async def save_dividend(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "end_date",
-            "ann_date",
-            "div_proc",
-            "stk_div",
-            "stk_bo_rate",
-            "stk_co_rate",
-            "cash_div",
-            "cash_div_tax",
-            "record_date",
-            "ex_date",
-        ]
+        cols = get_model_columns(Dividend)
+        pk_columns = get_model_pk_columns(Dividend)
         return await self._save_upsert(
             df,
             "dividend",
             cols,
-            pk_columns=["ts_code", "end_date", "ann_date"],
+            pk_columns=pk_columns,
         )
 
     async def get_financial_reports_history(self, ts_code: str, periods: int = 8) -> pd.DataFrame:

@@ -2,7 +2,9 @@ import logging
 
 import pandas as pd
 
-from data.persistence.daos.base_dao import BaseDao
+from data.persistence.models import StkHoldernumber, Top10Holders, get_model_columns, get_model_pk_columns
+
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -14,41 +16,26 @@ class HolderDao(BaseDao):
         """Save Stock Holder Number. Table: stk_holdernumber"""
         if df is None or df.empty:
             return 0
-        columns = [
-            "ts_code",
-            "end_date",
-            "ann_date",
-            "holder_num",
-            "holder_num_change",
-            "holder_num_ratio",
-        ]
+        cols = get_model_columns(StkHoldernumber)
+        pk_columns = get_model_pk_columns(StkHoldernumber)
         return await self._save_upsert(
             df,
             "stk_holdernumber",
-            columns,
-            pk_columns=["ts_code", "end_date"],
+            cols,
+            pk_columns=pk_columns,
         )
 
     async def save_top10_holders(self, df: pd.DataFrame):
         """Save Top 10 Holders. Table: top10_holders"""
         if df is None or df.empty:
             return 0
-        columns = [
-            "ts_code",
-            "end_date",
-            "ann_date",
-            "holder_name",
-            "hold_amount",
-            "hold_ratio",
-            "hold_float_ratio",
-            "hold_change",
-            "holder_type",
-        ]
+        cols = get_model_columns(Top10Holders)
+        pk_columns = get_model_pk_columns(Top10Holders)
         return await self._save_upsert(
             df,
             "top10_holders",
-            columns,
-            pk_columns=["ts_code", "end_date", "holder_name"],
+            cols,
+            pk_columns=pk_columns,
         )
 
     async def get_top10_holders(self, ts_code: str) -> pd.DataFrame:

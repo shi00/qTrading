@@ -2,7 +2,9 @@ import logging
 
 import pandas as pd
 
-from data.persistence.daos.base_dao import BaseDao
+from data.persistence.models import MacroEconomy, ShiborDaily, get_model_columns, get_model_pk_columns
+
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -19,23 +21,14 @@ class MacroDao(BaseDao):
         if df is None or df.empty:
             return 0
 
-        columns = [
-            "period",
-            "m2",
-            "m2_yoy",
-            "m1",
-            "m1_yoy",
-            "m0",
-            "m0_yoy",
-            "cpi",
-            "ppi",
-        ]
+        cols = get_model_columns(MacroEconomy)
+        pk_columns = get_model_pk_columns(MacroEconomy)
 
         return await self._save_upsert(
             df,
             "macro_economy",
-            columns,
-            pk_columns=["period"],
+            cols,
+            pk_columns=pk_columns,
         )
 
     async def save_shibor_daily(self, df: pd.DataFrame):
@@ -47,14 +40,14 @@ class MacroDao(BaseDao):
         if df is None or df.empty:
             return 0
 
-        # Tushare shibor API columns (schema must match exactly)
-        columns = ["date", "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y"]
-        available = [c for c in columns if c in df.columns]
+        cols = get_model_columns(ShiborDaily)
+        pk_columns = get_model_pk_columns(ShiborDaily)
+        available = [c for c in cols if c in df.columns]
         return await self._save_upsert(
             df,
             "shibor_daily",
             available,
-            pk_columns=["date"],
+            pk_columns=pk_columns,
         )
 
     async def get_macro_latest_date(self):

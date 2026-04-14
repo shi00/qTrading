@@ -4,6 +4,14 @@ import typing
 
 import pandas as pd
 
+from data.persistence.models import (
+    DailyIndicators,
+    IndexWeight,
+    MoneyflowHsgt,
+    get_model_columns,
+    get_model_pk_columns,
+)
+
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -58,31 +66,14 @@ class MarketDao(BaseDao):
         """
         if df is None or df.empty:
             return 0
-        columns = [
-            "ts_code",
-            "trade_date",
-            "pe",
-            "pe_ttm",
-            "pb",
-            "ps",
-            "ps_ttm",
-            "dv_ratio",
-            "dv_ttm",
-            "total_mv",
-            "circ_mv",
-            "total_share",
-            "float_share",
-            "free_share",
-            "turnover_rate",
-            "turnover_rate_f",
-            "volume_ratio",
-        ]
+        columns = get_model_columns(DailyIndicators)
+        pk_columns = get_model_pk_columns(DailyIndicators)
 
         return await self._save_upsert(
             df,
             "daily_indicators",
             columns,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
             suppress_errors=suppress_errors,
         )
 
@@ -181,12 +172,13 @@ class MarketDao(BaseDao):
         """Save Index Component Weights. Table: index_weight"""
         if df is None or df.empty:
             return 0
-        columns = ["index_code", "con_code", "trade_date", "weight"]
+        columns = get_model_columns(IndexWeight)
+        pk_columns = get_model_pk_columns(IndexWeight)
         return await self._save_upsert(
             df,
             "index_weight",
             columns,
-            pk_columns=["index_code", "con_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     async def get_index_weights(self, index_code: str | None, trade_date: str | None):
@@ -205,21 +197,14 @@ class MarketDao(BaseDao):
         """Save Northbound (HSGT) Moneyflow. Table: moneyflow_hsgt"""
         if df is None or df.empty:
             return 0
-        columns = [
-            "trade_date",
-            "ggt_ss",
-            "ggt_sz",
-            "hgt",
-            "sgt",
-            "north_money",
-            "south_money",
-        ]
+        columns = get_model_columns(MoneyflowHsgt)
+        pk_columns = get_model_pk_columns(MoneyflowHsgt)
 
         # Tushare returns moneyflow_hsgt numeric fields as strings!
         # Postgres asyncpg is strictly typed (FLOAT). We must forcibly coerce them.
         import pandas as pd
 
-        for col in columns[1:]:  # skip trade_date
+        for col in columns[1:]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -227,7 +212,7 @@ class MarketDao(BaseDao):
             df,
             "moneyflow_hsgt",
             columns,
-            pk_columns=["trade_date"],
+            pk_columns=pk_columns,
         )
 
     async def get_moneyflow_hsgt(self, trade_date: str | None = None, limit: int | None = None):

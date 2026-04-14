@@ -32,7 +32,12 @@ def get_model_db_columns(model_class: type) -> set:
 
 
 def extract_cols_from_method(method) -> set | None:
-    """Extract cols list from save method source code (static analysis)."""
+    """Extract cols list from save method source code (static analysis).
+
+    Supports two patterns:
+    1. Static list: cols = ["col1", "col2", ...]
+    2. Dynamic call: cols = get_model_columns(ModelClass)
+    """
     import re
 
     source = inspect.getsource(method)
@@ -40,18 +45,30 @@ def extract_cols_from_method(method) -> set | None:
     pattern = r"(?:cols|columns)\s*=\s*\[([^\]]+)\]"
     match = re.search(pattern, source, re.DOTALL)
 
-    if not match:
-        return None
+    if match:
+        cols_str = match.group(1)
+        cols = set()
 
-    cols_str = match.group(1)
-    cols = set()
+        for item in cols_str.split(","):
+            item = item.strip().strip('"').strip("'")
+            if item and not item.startswith("#"):
+                cols.add(item)
 
-    for item in cols_str.split(","):
-        item = item.strip().strip('"').strip("'")
-        if item and not item.startswith("#"):
-            cols.add(item)
+        return cols if cols else None
 
-    return cols if cols else None
+    pattern = r"(?:cols|columns)\s*=\s*get_model_columns\s*\(\s*(\w+)\s*\)"
+    match = re.search(pattern, source)
+
+    if match:
+        model_name = match.group(1)
+        from data.persistence.models import get_model_columns as gmc
+        import data.persistence.models as models
+
+        model_class = getattr(models, model_name, None)
+        if model_class:
+            return set(gmc(model_class))
+
+    return None
 
 
 def extract_fields_from_api_method(method) -> set:

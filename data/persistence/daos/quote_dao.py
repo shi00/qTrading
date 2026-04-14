@@ -4,6 +4,21 @@ import typing
 
 import pandas as pd
 
+from data.persistence.models import (
+    BlockTrade,
+    DailyQuotes,
+    IndexDaily,
+    IndexDailyBasic,
+    LimitList,
+    MarginDaily,
+    MoneyflowDaily,
+    NorthboundHolding,
+    SuspendD,
+    TopList,
+    get_model_columns,
+    get_model_pk_columns,
+)
+
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -94,29 +109,13 @@ class QuoteDao(BaseDao):
             for col in ["open", "high", "low", "close"]:
                 if col in df.columns:
                     df[f"qfq_{col}"] = df[col] * df["adj_factor"]
-        cols = [
-            "ts_code",
-            "trade_date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "pre_close",
-            "change",
-            "pct_chg",
-            "vol",
-            "amount",
-            "adj_factor",
-            "qfq_open",
-            "qfq_high",
-            "qfq_low",
-            "qfq_close",
-        ]
+        cols = get_model_columns(DailyQuotes)
+        pk_columns = get_model_pk_columns(DailyQuotes)
         return await self._save_upsert(
             df,
             "daily_quotes",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
             suppress_errors=suppress_errors,
         )
 
@@ -334,46 +333,23 @@ class QuoteDao(BaseDao):
 
     # --- Index Data ---
     async def save_index_daily(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "trade_date",
-            "close",
-            "open",
-            "high",
-            "low",
-            "pre_close",
-            "change",
-            "pct_chg",
-            "vol",
-            "amount",
-        ]
+        cols = get_model_columns(IndexDaily)
+        pk_columns = get_model_pk_columns(IndexDaily)
         return await self._save_upsert(
             df,
             "index_daily",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     async def save_index_dailybasic(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "trade_date",
-            "total_mv",
-            "float_mv",
-            "total_share",
-            "float_share",
-            "free_share",
-            "turnover_rate",
-            "turnover_rate_f",
-            "pe",
-            "pe_ttm",
-            "pb",
-        ]
+        cols = get_model_columns(IndexDailyBasic)
+        pk_columns = get_model_pk_columns(IndexDailyBasic)
         return await self._save_upsert(
             df,
             "index_dailybasic",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     async def get_index_daily(self, ts_code: str | None = None, trade_date: str | None = None):
@@ -431,20 +407,13 @@ class QuoteDao(BaseDao):
 
     # --- Block Trade ---
     async def save_block_trade(self, df: pd.DataFrame):
-        cols = [
-            "trade_date",
-            "ts_code",
-            "price",
-            "vol",
-            "amount",
-            "buyer",
-            "seller",
-        ]
+        cols = get_model_columns(BlockTrade)
+        pk_columns = get_model_pk_columns(BlockTrade)
         return await self._save_upsert(
             df,
             "block_trade",
             cols,
-            pk_columns=["ts_code", "trade_date", "buyer", "seller"],
+            pk_columns=pk_columns,
         )
 
     async def get_block_trade(self, trade_date: str | None = None):
@@ -457,53 +426,24 @@ class QuoteDao(BaseDao):
 
     # --- Limit List ---
     async def save_limit_list(self, df: pd.DataFrame):
-        cols = [
-            "trade_date",
-            "ts_code",
-            "name",
-            "close",
-            "pct_chg",
-            "amp",
-            "fc_ratio",
-            "fl_ratio",
-            "fd_amount",
-            "first_time",
-            "last_time",
-            "open_times",
-            "strth",
-            "limit",
-        ]
+        cols = get_model_columns(LimitList)
+        pk_columns = get_model_pk_columns(LimitList)
         return await self._save_upsert(
             df,
             "limit_list",
             cols,
-            pk_columns=["trade_date", "ts_code"],
+            pk_columns=pk_columns,
         )
 
     # --- Top List ---
     async def save_top_list(self, df: pd.DataFrame):
-        cols = [
-            "trade_date",
-            "ts_code",
-            "name",
-            "close",
-            "pct_change",
-            "turnover_rate",
-            "amount",
-            "l_sell",
-            "l_buy",
-            "l_amount",
-            "net_amount",
-            "net_rate",
-            "amount_rate",
-            "float_values",
-            "reason",
-        ]
+        cols = get_model_columns(TopList)
+        pk_columns = get_model_pk_columns(TopList)
         return await self._save_upsert(
             df,
             "top_list",
             cols,
-            pk_columns=["trade_date", "ts_code"],
+            pk_columns=pk_columns,
         )
 
     async def get_top_list(self, trade_date: str | None = None):
@@ -516,53 +456,35 @@ class QuoteDao(BaseDao):
 
     # --- Margin ---
     async def save_margin_daily(self, df: pd.DataFrame):
-        cols = ["ts_code", "trade_date", "rzye", "rqye", "rzmre", "rqyl", "rzrqye"]
+        cols = get_model_columns(MarginDaily)
+        pk_columns = get_model_pk_columns(MarginDaily)
         return await self._save_upsert(
             df,
             "margin_daily",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     # --- Suspend ---
     async def save_suspend_d(self, df: pd.DataFrame):
-        cols = ["ts_code", "trade_date", "suspend_timing", "suspend_type"]
+        cols = get_model_columns(SuspendD)
+        pk_columns = get_model_pk_columns(SuspendD)
         return await self._save_upsert(
             df,
             "suspend_d",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     # --- Moneyflow ---
     async def save_moneyflow(self, df: pd.DataFrame):
-        cols = [
-            "ts_code",
-            "trade_date",
-            "buy_sm_vol",
-            "buy_sm_amount",
-            "sell_sm_vol",
-            "sell_sm_amount",
-            "buy_md_vol",
-            "buy_md_amount",
-            "sell_md_vol",
-            "sell_md_amount",
-            "buy_lg_vol",
-            "buy_lg_amount",
-            "sell_lg_vol",
-            "sell_lg_amount",
-            "buy_elg_vol",
-            "buy_elg_amount",
-            "sell_elg_vol",
-            "sell_elg_amount",
-            "net_mf_vol",
-            "net_mf_amount",
-        ]
+        cols = get_model_columns(MoneyflowDaily)
+        pk_columns = get_model_pk_columns(MoneyflowDaily)
         return await self._save_upsert(
             df,
             "moneyflow_daily",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     async def get_moneyflow(self, trade_date: str | None = None, ts_code: str | None = None):
@@ -580,12 +502,13 @@ class QuoteDao(BaseDao):
 
     # --- Northbound ---
     async def save_northbound(self, df: pd.DataFrame):
-        cols = ["ts_code", "trade_date", "name", "vol", "ratio", "exchange"]
+        cols = get_model_columns(NorthboundHolding)
+        pk_columns = get_model_pk_columns(NorthboundHolding)
         return await self._save_upsert(
             df,
             "northbound_holding",
             cols,
-            pk_columns=["ts_code", "trade_date"],
+            pk_columns=pk_columns,
         )
 
     async def get_northbound(self, trade_date: str | None = None, ts_code: str | None = None):

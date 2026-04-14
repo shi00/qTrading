@@ -3,7 +3,7 @@ import logging
 
 import pandas as pd
 
-from data.persistence.models import ScreeningHistory
+from data.persistence.models import ScreeningHistory, get_model_columns
 
 from .base_dao import BaseDao
 
@@ -14,8 +14,7 @@ class ScreenerDao(BaseDao):
     @functools.cached_property
     def SH_BASE_COLS(self):
         """Dynamically generate base columns excluding heavy fields like 'thinking'."""
-        # Reflection using SQLAlchemy Core Table columns (runs once, cached per instance)
-        cols = [c.name for c in ScreeningHistory.__table__.columns if c.name != "thinking"]
+        cols = get_model_columns(ScreeningHistory, exclude={"updated_at", "created_at", "thinking"})
         return ", ".join(cols)
 
     @functools.cached_property
