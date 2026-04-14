@@ -132,6 +132,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
         total_mainbz_rows = 0
         total_audit_rows = 0
+        _counter_lock = asyncio.Lock()
 
         # Force Logic: Reset sync status for resume
         if force:
@@ -247,18 +248,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                             end_date=end_date,
                         )
 
-                        total_mainbz_rows += aux_counts["mainbz"]
-                        total_audit_rows += aux_counts["audit"]
+                        async with _counter_lock:
+                            total_mainbz_rows += aux_counts["mainbz"]
+                            total_audit_rows += aux_counts["audit"]
 
                         if df_merged is not None and not df_merged.empty:
-                            # 补齐缺失列后一次性写入
                             for col in FINANCIAL_REPORT_SCHEMA_COLS:
                                 if col not in df_merged.columns:
                                     df_merged[col] = None
-
-                            await self.context.cache.save_financial_reports(
-                                df_merged[FINANCIAL_REPORT_SCHEMA_COLS],
-                            )
 
                     except (AttributeError, NameError, TypeError, ImportError):
                         raise  # Critical errors must propagate
@@ -269,10 +266,18 @@ class FinancialSyncStrategy(ISyncStrategy):
                         )
 
                     if not has_error:
-                        await self.context.cache.mark_stock_step4_completed(
-                            ts_code,
-                            sync_version=1,
-                        )
+                        async with self.context.cache.engine.begin() as tx_conn:
+                            await self.context.cache.save_financial_reports(
+                                df_merged[FINANCIAL_REPORT_SCHEMA_COLS]
+                                if df_merged is not None and not df_merged.empty
+                                else pd.DataFrame(),
+                                conn=tx_conn,
+                            )
+                            await self.context.cache.mark_stock_step4_completed(
+                                ts_code,
+                                sync_version=1,
+                                conn=tx_conn,
+                            )
                         result_accumulator.added += 1
                     else:
                         logger.debug(
@@ -287,7 +292,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
             # Per-stock progress update (advance progress bar for processed stocks)
             if processed:
-                completed_count += 1
+                async with _counter_lock:
+                    completed_count += 1
                 if progress_callback and completed_count % 5 == 0:
                     # Stock phase occupies 0→80% of Step 4 progress
                     pct = int(completed_count / total_stocks * 80)
@@ -377,8 +383,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     "%Y-%m-%d %H:%M:%S",
                 )
             start_date_dt = last_sync_dt + datetime.timedelta(days=1)
-        except Exception:
-            # Fallback
+        except Exception as e:
+            logger.warning(f"[FinancialSync] Date parse | ⚠️ Failed to parse last_sync_date, using 30-day fallback: {e}")
             start_date_dt = get_now() - datetime.timedelta(days=30)
 
         today_dt = get_now()
@@ -756,11 +762,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         semaphore = asyncio.Semaphore(1)
         total_saved = 0
+        _repair_counter_lock = asyncio.Lock()
 
-        # BUG FIX: Define repair_one OUTSIDE the for loop and pass period/period_idx as
-        # default-argument parameters. Python closures capture variable names, not values,
-        # so defining async def inside the loop causes every task to see the last iteration's
-        # period once all tasks are scheduled and asyncio.gather begins executing them.
         async def repair_one(ts_code: str, idx: int, period: str, p_idx: int):
             nonlocal total_saved
             async with semaphore:
@@ -772,7 +775,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                         ts_code,
                         period=period,
                     )
-                    total_saved += 1
+                    async with _repair_counter_lock:
+                        total_saved += 1
 
                     if progress_callback and idx % 10 == 0:
                         progress_callback(

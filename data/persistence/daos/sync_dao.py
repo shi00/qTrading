@@ -61,13 +61,13 @@ class SyncDao(BaseDao):
         except Exception:
             return set()
 
-    async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1):
+    async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):
         now = get_now().replace(tzinfo=None)
         sql = '''INSERT INTO stock_sync_status ("ts_code","step4_completed_at","sync_version")
                VALUES ($1, $2, $3)
                ON CONFLICT("ts_code") DO UPDATE SET
                "step4_completed_at"=excluded."step4_completed_at","sync_version"=excluded."sync_version"'''
-        await self._write_db(sql, [(ts_code, now, sync_version)], is_many=True)
+        await self._write_db(sql, [(ts_code, now, sync_version)], is_many=True, conn=conn)
 
     async def clear_step4_sync_status(self):
         await self._write_db("DELETE FROM stock_sync_status")

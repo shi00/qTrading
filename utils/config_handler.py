@@ -270,7 +270,8 @@ class ConfigHandler:
                     with open(CONFIG_FILE, encoding="utf-8") as f:
                         ConfigHandler._config_cache = json.load(f)
                         return ConfigHandler._config_cache.copy()
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"[ConfigHandler] Failed to load config file: {e}")
                     return {}
             return {}
 
@@ -934,13 +935,34 @@ class ConfigHandler:
     # === Thread Pool Configuration ===
     @staticmethod
     def get_max_io_workers():
-        """Get max IO threads from config."""
+        """Get max IO threads from config, capped by DB connection pool capacity."""
         config = ConfigHandler.load_config()
         val = config.get("max_io_workers", os.cpu_count())
         try:
-            return int(val)
+            io_workers = int(val)
         except (ValueError, TypeError):
             return 0
+
+        if io_workers <= 0:
+            io_workers = os.cpu_count() or 4
+
+        try:
+            db_pool_size = int(config.get("db_connection_pool_size", 10))
+        except (ValueError, TypeError):
+            db_pool_size = 10
+        try:
+            db_max_overflow = int(config.get("db_max_overflow", 5))
+        except (ValueError, TypeError):
+            db_max_overflow = 5
+        db_capacity = db_pool_size + db_max_overflow
+
+        if io_workers > db_capacity:
+            logger.warning(
+                f"[Config] IO workers ({io_workers}) exceeds DB connection capacity ({db_capacity}). Capping to {db_capacity}.",
+            )
+            io_workers = db_capacity
+
+        return io_workers
 
     @staticmethod
     def set_max_io_workers(count):

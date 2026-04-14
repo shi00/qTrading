@@ -176,8 +176,8 @@ class CacheManager:
             from data.persistence.daos.base_dao import BaseDao
 
             BaseDao._get_maintenance_event().set()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[CacheManager] Maintenance event set failed during dispose: {e}")
         await self.engine.dispose()
 
         # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
@@ -274,7 +274,6 @@ class CacheManager:
 
         BaseDao._get_maintenance_event().clear()
         try:
-            # Dynamically query all user tables from PostgreSQL catalog
             async with self.engine.begin() as conn:
                 r = await conn.exec_driver_sql(
                     "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'",
@@ -415,8 +414,8 @@ class CacheManager:
         return await self.financial_dao.get_cached_indicator_dates()
 
     # --- Financial Reports ---
-    async def save_financial_reports(self, df: pd.DataFrame):
-        return await self.financial_dao.save_financial_reports(df)
+    async def save_financial_reports(self, df: pd.DataFrame, conn=None):
+        return await self.financial_dao.save_financial_reports(df, conn=conn)
 
     async def get_cached_financial_records(self, period: str | None = None):
         return await self.financial_dao.get_cached_financial_records(period)
@@ -750,8 +749,8 @@ class CacheManager:
     async def get_completed_step4_stocks(self, sync_version: int = 1):
         return await self.sync_dao.get_completed_step4_stocks(sync_version)
 
-    async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1):
-        return await self.sync_dao.mark_stock_step4_completed(ts_code, sync_version)
+    async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):
+        return await self.sync_dao.mark_stock_step4_completed(ts_code, sync_version, conn=conn)
 
     async def clear_step4_sync_status(self):
         return await self.sync_dao.clear_step4_sync_status()

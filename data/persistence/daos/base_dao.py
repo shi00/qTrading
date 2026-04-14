@@ -95,6 +95,7 @@ class BaseDao:
         params: typing.Any = None,
         is_many: typing.Any = False,
         suppress_errors: bool = True,
+        conn: typing.Any = None,
     ):
         """Generic Write using Driver SQL for '?' support"""
         if self.engine is None:
@@ -130,8 +131,11 @@ class BaseDao:
 
         start_time = time.perf_counter()
         try:
-            async with self.engine.begin() as conn:
+            if conn is not None:
                 await conn.exec_driver_sql(sql, params)
+            else:
+                async with self.engine.begin() as conn:
+                    await conn.exec_driver_sql(sql, params)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > 2000:
@@ -148,9 +152,7 @@ class BaseDao:
             logger.warning(
                 f"[{self.__class__.__name__}] Write cancelled during shutdown.",
             )
-            if not suppress_errors:
-                raise
-            return 0
+            raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
             # Suppress "no active connection" errors during shutdown
@@ -168,10 +170,15 @@ class BaseDao:
                 )
                 return 0
 
-            logger.error(
-                f"[{self.__class__.__name__}] Write Error ({elapsed:.1f}ms): {e}\nSQL: {sql[:200]}...",
-                exc_info=True,
-            )
+            if suppress_errors:
+                logger.warning(
+                    f"[{self.__class__.__name__}] Write Error ({elapsed:.1f}ms, suppressed): {e}",
+                )
+            else:
+                logger.error(
+                    f"[{self.__class__.__name__}] Write Error ({elapsed:.1f}ms): {e}\nSQL: {sql[:200]}...",
+                    exc_info=True,
+                )
 
             if not suppress_errors:
                 raise
@@ -189,6 +196,7 @@ class BaseDao:
         columns: typing.Any,
         pk_columns: typing.Any,
         suppress_errors: bool = True,
+        conn: typing.Any = None,
     ):
         """
         Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
@@ -219,6 +227,12 @@ class BaseDao:
 
         missing_cols = [col for col in columns if col not in df.columns]
         if missing_cols:
+            pk_missing = [col for col in missing_cols if col in pk_columns]
+            if pk_missing:
+                logger.error(
+                    f"[{self.__class__.__name__}] Insert '{table_name}': PK columns missing in dataframe, aborting: {pk_missing}",
+                )
+                return 0
             logger.warning(
                 f"[{self.__class__.__name__}] Insert '{table_name}': Missing columns in dataframe, filling with None: {missing_cols}",
             )
@@ -308,8 +322,11 @@ class BaseDao:
 
         start_time = time.perf_counter()
         try:
-            async with self.engine.begin() as conn:
+            if conn is not None:
                 await conn.execute(stmt, records)
+            else:
+                async with self.engine.begin() as conn:
+                    await conn.execute(stmt, records)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > 2000:
@@ -344,10 +361,15 @@ class BaseDao:
                 )
                 return 0
 
-            logger.error(
-                f"[{self.__class__.__name__}] UPSERT Error ({elapsed:.1f}ms) on {table_name}: {e}",
-                exc_info=True,
-            )
+            if suppress_errors:
+                logger.warning(
+                    f"[{self.__class__.__name__}] UPSERT Error ({elapsed:.1f}ms, suppressed) on {table_name}: {e}",
+                )
+            else:
+                logger.error(
+                    f"[{self.__class__.__name__}] UPSERT Error ({elapsed:.1f}ms) on {table_name}: {e}",
+                    exc_info=True,
+                )
             if not suppress_errors:
                 raise
             return 0
@@ -457,8 +479,7 @@ class BaseDao:
                 )
                 return pd.DataFrame()
 
-            logger.error(
-                f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}\nSQL: {sql[:200]}...",
-                exc_info=True,
+            logger.warning(
+                f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
             )
             return pd.DataFrame()

@@ -128,7 +128,8 @@ class TaskManager:
             if limit <= 0:
                 try:
                     limit = ThreadPoolManager().cpu_pool._max_workers
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"[TaskManager] Failed to read cpu_pool max_workers, using default: {e}")
                     limit = 5
             self._semaphore_instance = asyncio.Semaphore(limit)
             logger.info(f"[TaskManager] Concurrency semaphore initialized: max={limit}")
@@ -531,14 +532,16 @@ class TaskManager:
         await self._persist_snapshot(params)
 
     async def _clear_finished_db(self, task_ids: list):
-        """Delete specific tasks from DB using parameterized query."""
+        """Delete specific tasks from DB using SQLAlchemy Core."""
+        if not task_ids:
+            return
         try:
             from data.cache.cache_manager import CacheManager
+            from data.persistence.models import TaskHistory
 
-            placeholders = ",".join([f"${i + 1}" for i in range(len(task_ids))])
-            await CacheManager()._write_db(
-                f"DELETE FROM task_history WHERE id IN ({placeholders})",
-                tuple(task_ids),
-            )
+            cm = CacheManager()
+            stmt = TaskHistory.__table__.delete().where(TaskHistory.__table__.c.id.in_(task_ids))
+            async with cm.engine.begin() as conn:
+                await conn.execute(stmt)
         except Exception as e:
             logger.debug(f"[TaskManager] DB clear failed (non-critical): {e}")

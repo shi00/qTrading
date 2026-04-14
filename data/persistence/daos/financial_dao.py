@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class FinancialDao(BaseDao):
-    async def save_financial_reports(self, df: pd.DataFrame):
+    async def save_financial_reports(self, df: pd.DataFrame, conn=None):
         if df is None or df.empty:
             return 0
         cols = [
@@ -40,6 +40,7 @@ class FinancialDao(BaseDao):
             "financial_reports",
             cols,
             pk_columns=["ts_code", "end_date"],
+            conn=conn,
         )
 
     async def get_cached_financial_records(self, period: str | None = None):

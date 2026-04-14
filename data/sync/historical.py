@@ -163,7 +163,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         try:
             sync_integrity_config = ConfigHandler.get_sync_integrity_config()
             QUALITY_THRESHOLD = sync_integrity_config.get("quality_threshold", 80)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults: {e}")
             QUALITY_THRESHOLD = 80
 
         try:

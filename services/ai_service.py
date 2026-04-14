@@ -13,6 +13,38 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 logger = logging.getLogger(__name__)
 
 LITELLM_AVAILABLE = True
+
+VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
+
+
+def validate_ai_analysis_response(response: dict) -> dict:
+    if not isinstance(response, dict):
+        return {"error": "Invalid response type", "score": 0}
+
+    score = response.get("score")
+    if score is not None:
+        try:
+            score = float(score)
+            if not (0 <= score <= 100):
+                logger.warning(f"[AIService] Output validation: score out of range [0,100]: {score}")
+                score = max(0, min(100, score))
+            response["score"] = score
+        except (ValueError, TypeError):
+            logger.warning(f"[AIService] Output validation: invalid score type: {score}")
+            response["score"] = 0
+
+    recommendation = response.get("recommendation")
+    if recommendation is not None:
+        rec_lower = str(recommendation).lower().strip()
+        if rec_lower not in VALID_RECOMMENDATIONS:
+            logger.warning(f"[AIService] Output validation: unexpected recommendation: {recommendation}")
+            response["recommendation"] = "neutral"
+        else:
+            response["recommendation"] = rec_lower
+
+    return response
+
+
 try:
     import litellm  # pyright: ignore[reportMissingImports]
     from litellm import acompletion  # pyright: ignore[reportMissingImports]
@@ -33,6 +65,7 @@ def _check_reasoning_support(model: str) -> bool:
     try:
         return litellm.utils.supports_reasoning(model=model)
     except Exception:
+        logger.debug(f"[AIService] supports_reasoning check failed for {model}, using fallback list")
         reasoning_models = {
             "deepseek-reasoner",
             "deepseek-r1",
@@ -443,8 +476,8 @@ class AIService:
                         return json.loads(json_str)
                     except json.JSONDecodeError:
                         pass
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[AIService] JSON heuristic extraction failed: {e}")
 
             raise ValueError(f"Invalid JSON response: {response_content[:100]}...")
 
@@ -648,7 +681,7 @@ class AIService:
                 json_mode=True,
                 on_chunk=on_chunk,
             )
-            return res
+            return validate_ai_analysis_response(res)
 
         except TimeoutError:
             logger.error(
