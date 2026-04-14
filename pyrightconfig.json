@@ -1,5 +1,7 @@
 {
-  "include": ["."],
+  "include": [
+    "."
+  ],
   "exclude": [
     "**/__pycache__",
     "**/.pytest_cache",
@@ -7,25 +9,22 @@
     "venv",
     "alembic"
   ],
-  "extraPaths": ["."],
+  "extraPaths": [
+    "."
+  ],
   "typeCheckingMode": "basic",
-
   "reportMissingTypeStubs": "warning",
   "reportMissingImports": "error",
-
   "reportUnknownMemberType": "none",
   "reportUnknownArgumentType": "none",
   "reportUnknownVariableType": "none",
   "reportUnknownParameterType": "none",
-
   "reportMissingParameterType": "none",
   "reportMissingTypeArgument": "none",
-
   "reportOptionalMemberAccess": "warning",
   "reportArgumentType": "warning",
   "reportAttributeAccessIssue": "warning",
   "reportOptionalSubscript": "warning",
-
   "reportCallIssue": "error",
   "reportOptionalOperand": "error",
   "reportOptionalIterable": "error",

@@ -9,6 +9,7 @@ datas = [
     (str(project_root / "assets"), "assets"),
     (str(project_root / "alembic"), "alembic"),
     (str(project_root / "alembic.ini"), "."),
+    (str(project_root / "data" / "tiktoken_cache"), os.path.join("data", "tiktoken_cache")),
 ]
 
 hiddenimports = [

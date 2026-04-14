@@ -16,6 +16,14 @@ else:
     # Running from source
     APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# Pre-configure tiktoken cache directory BEFORE litellm/tiktoken is imported.
+# This ensures the bundled encoding files (cl100k_base, o200k_base) are used
+# instead of downloading from openaipublic.blob.core.windows.net at runtime,
+# which fails in mainland China due to SSL/GFW issues.
+_tiktoken_cache = os.path.join(APP_ROOT, "data", "tiktoken_cache")
+if os.path.isdir(_tiktoken_cache):
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", _tiktoken_cache)
+
 # PostgreSQL connection URL (async driver for CacheManager / DAOs)
 # SECURITY: DATABASE_URL should be set via environment variable or .env file.
 # Example: DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/astock
