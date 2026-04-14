@@ -5,7 +5,6 @@ Exit Strategy (v4):
 - Watchdog fallback: os._exit(0) after timeout (daemon thread)
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
@@ -173,8 +172,6 @@ async def test_normal_window_close_path(mock_singletons):
 @pytest.mark.asyncio
 async def test_external_disconnect_fallback(mock_singletons):
     """Scenario B: Disconnect triggered without window close event"""
-    mock_page = create_mock_page()
-
     _cleanup_done = False
     _watchdog_started = False
     sys_exit_called = False
@@ -244,7 +241,7 @@ async def test_safe_skip_empty_singletons():
     scheduler.scheduler.running = False
 
     try:
-        mock_page = create_mock_page()
+        create_mock_page()
 
         _cleanup_done = False
         _watchdog_started = False
@@ -288,7 +285,7 @@ async def test_safe_skip_empty_singletons():
 @pytest.mark.asyncio
 async def test_double_close_idempotency(mock_singletons):
     """Scenario D: Verify that _cleanup_done flag prevents duplicate clears"""
-    mock_page = create_mock_page()
+    create_mock_page()
 
     _cleanup_done = False
     cleanup_count = 0
@@ -324,7 +321,7 @@ async def test_double_close_idempotency(mock_singletons):
 @pytest.mark.asyncio
 async def test_watchdog_timeout_forces_exit(mock_singletons):
     """Scenario E: Watchdog timeout forces os._exit(0) when cleanup hangs"""
-    mock_page = create_mock_page()
+    create_mock_page()
 
     _cleanup_done = False
     _watchdog_started = False
@@ -365,7 +362,7 @@ async def test_watchdog_timeout_forces_exit(mock_singletons):
 @pytest.mark.asyncio
 async def test_disconnect_after_window_close_skips_exit(mock_singletons):
     """Scenario F: Disconnect after window close should not call sys.exit again"""
-    mock_page = create_mock_page()
+    create_mock_page()
 
     _cleanup_done = False
     _watchdog_started = False
@@ -408,7 +405,7 @@ async def test_disconnect_after_window_close_skips_exit(mock_singletons):
 @pytest.mark.asyncio
 async def test_watchdog_started_only_once(mock_singletons):
     """Scenario G: Watchdog should only be started once even with multiple triggers"""
-    mock_page = create_mock_page()
+    create_mock_page()
 
     _cleanup_done = False
     _watchdog_started = False
