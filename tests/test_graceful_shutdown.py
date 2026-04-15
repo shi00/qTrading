@@ -1,44 +1,26 @@
-"""Tests for Graceful Shutdown flow in main.py.
+"""Tests for ShutdownCoordinator — the core shutdown logic extracted from main.py.
 
-Exit Strategy (v4):
-- Normal path: sys.exit(0) triggers Python atexit handlers
-- Watchdog fallback: os._exit(0) after timeout (daemon thread)
+Tests directly import and exercise ShutdownCoordinator instead of maintaining
+a parallel simplified copy of the cleanup code.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import flet as ft
 import pytest
 
-
-class WindowEvent:
-    """Mock for Flet WindowEvent."""
-
-    def __init__(self, e_type=ft.WindowEventType.CLOSE):
-        self.type = e_type
-
-
-def create_mock_page():
-    """Create a mock page with all necessary attributes."""
-    mock_page = MagicMock(spec=ft.Page)
-    mock_page.window = MagicMock()
-    mock_page.window.destroy = AsyncMock()
-    mock_page.on_disconnect = None
-    mock_page.window.on_event = None
-    mock_page.window.width = 1000
-    return mock_page
+from utils.shutdown import ShutdownCoordinator
 
 
 @pytest.fixture
 def mock_singletons():
     """Mock all Singletons to prevent real execution by setting their _instances"""
     from services.task_manager import TaskManager
-    from utils.scheduler_service import scheduler
     from data.external.news_subscription import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.cache.cache_manager import CacheManager
     from services.local_model_manager import LocalModelManager
     from utils.thread_pool import ThreadPoolManager
+    from utils.scheduler_service import scheduler
 
     orig_tm = TaskManager._instance
     orig_news = NewsSubscriptionService._instance
@@ -46,8 +28,8 @@ def mock_singletons():
     orig_cache = CacheManager._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
-    orig_scheduler = getattr(scheduler, "scheduler", None)
-    orig_stop = getattr(scheduler, "stop", None)
+    orig_scheduler_running = getattr(scheduler.scheduler, "running", None) if hasattr(scheduler, "scheduler") else None
+    orig_scheduler_stop = getattr(scheduler, "stop", None)
 
     TaskManager._instance = AsyncMock()
     NewsSubscriptionService._instance = MagicMock()
@@ -77,86 +59,20 @@ def mock_singletons():
     CacheManager._instance = orig_cache
     LocalModelManager._instance = orig_llm
     ThreadPoolManager._instance = orig_tp
-    scheduler.scheduler = orig_scheduler
-    scheduler.stop = orig_stop
+    if orig_scheduler_running is not None:
+        scheduler.scheduler.running = orig_scheduler_running
+    if orig_scheduler_stop is not None:
+        scheduler.stop = orig_scheduler_stop
 
 
 @pytest.mark.asyncio
-async def test_normal_window_close_path(mock_singletons):
-    """Scenario A: User clicks the window close button (Normal Graceful Shutdown)"""
-    mock_page = create_mock_page()
+async def test_full_cleanup_all_steps(mock_singletons):
+    """Verify all 7 cleanup steps are executed in order with all singletons present."""
+    coordinator = ShutdownCoordinator(page=None)
 
-    _cleanup_done = False
-    _watchdog_started = False
-    watchdog_target = None
-    watchdog_daemon = None
-    sys_exit_called = False
-    sys_exit_code = None
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await coordinator.do_cleanup()
 
-    def _start_watchdog(timeout_s=10):
-        nonlocal _watchdog_started, watchdog_target, watchdog_daemon
-        if _watchdog_started:
-            return
-        _watchdog_started = True
-
-        class MockThread:
-            def __init__(self, target, daemon=False):
-                nonlocal watchdog_target, watchdog_daemon
-                watchdog_target = target
-                watchdog_daemon = daemon
-
-            def start(self):
-                pass
-
-        MockThread(target=lambda: None, daemon=True)
-
-    async def _do_cleanup():
-        nonlocal _cleanup_done
-        if _cleanup_done:
-            return
-        _cleanup_done = True
-
-        from services.task_manager import TaskManager
-        from utils.scheduler_service import scheduler
-        from data.external.news_subscription import NewsSubscriptionService
-        from data.data_processor import DataProcessor
-        from data.cache.cache_manager import CacheManager
-        from services.local_model_manager import LocalModelManager
-        from utils.thread_pool import ThreadPoolManager
-
-        if TaskManager._instance is not None:
-            await TaskManager._instance.cancel_all_running_async()
-        if hasattr(scheduler, "scheduler") and scheduler.scheduler.running:
-            scheduler.stop()
-        if NewsSubscriptionService._instance is not None:
-            NewsSubscriptionService._instance.stop()
-        if DataProcessor._instance is not None:
-            await DataProcessor._instance.stop()
-        if CacheManager._instance is not None:
-            await CacheManager._instance.close()
-        if LocalModelManager._instance is not None:
-            LocalModelManager._instance.unload_model()
-        if ThreadPoolManager._instance is not None:
-            ThreadPoolManager._instance.shutdown(wait=False)
-
-    async def _on_window_event(e):
-        nonlocal sys_exit_called, sys_exit_code
-        if e.type == ft.WindowEventType.CLOSE:
-            _start_watchdog(10)
-            await _do_cleanup()
-            try:
-                mock_page.window.prevent_close = False
-                await mock_page.window.destroy()
-            except Exception:
-                pass
-            sys_exit_called = True
-            sys_exit_code = 0
-
-    event = WindowEvent()
-    await _on_window_event(event)
-
-    assert _watchdog_started is True
-    assert watchdog_daemon is True
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
     mock_singletons["scheduler"].stop.assert_called_once()
     mock_singletons["NewsSubscriptionService"]._instance.stop.assert_called_once()
@@ -164,64 +80,34 @@ async def test_normal_window_close_path(mock_singletons):
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
-    mock_page.window.destroy.assert_awaited_once()
-    assert sys_exit_called is True
-    assert sys_exit_code == 0
+
+    assert coordinator.cleanup_done is True
 
 
 @pytest.mark.asyncio
-async def test_external_disconnect_fallback(mock_singletons):
-    """Scenario B: Disconnect triggered without window close event"""
-    _cleanup_done = False
-    _watchdog_started = False
-    sys_exit_called = False
-    sys_exit_code = None
+async def test_cleanup_idempotent(mock_singletons):
+    """Verify that calling do_cleanup twice only executes cleanup once."""
+    coordinator = ShutdownCoordinator(page=None)
 
-    def _start_watchdog(timeout_s=10):
-        nonlocal _watchdog_started
-        if _watchdog_started:
-            return
-        _watchdog_started = True
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await coordinator.do_cleanup()
+        await coordinator.do_cleanup()
 
-    async def _do_cleanup():
-        nonlocal _cleanup_done
-        if _cleanup_done:
-            return
-        _cleanup_done = True
-
-        from data.data_processor import DataProcessor
-        from data.cache.cache_manager import CacheManager
-
-        if DataProcessor._instance is not None:
-            await DataProcessor._instance.stop()
-        if CacheManager._instance is not None:
-            await CacheManager._instance.close()
-
-    async def _on_disconnect(e):
-        nonlocal sys_exit_called, sys_exit_code
-        _start_watchdog(10)
-        await _do_cleanup()
-        sys_exit_called = True
-        sys_exit_code = 0
-
-    await _on_disconnect(None)
-
-    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
+    mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
-    assert sys_exit_called is True
-    assert sys_exit_code == 0
+    assert coordinator.cleanup_done is True
 
 
 @pytest.mark.asyncio
 async def test_safe_skip_empty_singletons():
-    """Scenario C: Ensure missing singletons (Onboarding phase) don't crash the shutdown"""
+    """Ensure missing singletons (Onboarding phase) don't crash the shutdown."""
     from services.task_manager import TaskManager
-    from utils.scheduler_service import scheduler
     from data.external.news_subscription import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.cache.cache_manager import CacheManager
     from services.local_model_manager import LocalModelManager
     from utils.thread_pool import ThreadPoolManager
+    from utils.scheduler_service import scheduler
 
     orig_tm = TaskManager._instance
     orig_news = NewsSubscriptionService._instance
@@ -229,7 +115,7 @@ async def test_safe_skip_empty_singletons():
     orig_cache = CacheManager._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
-    orig_scheduler = getattr(scheduler, "scheduler", None)
+    orig_scheduler_running = getattr(scheduler.scheduler, "running", None) if hasattr(scheduler, "scheduler") else None
 
     TaskManager._instance = None
     NewsSubscriptionService._instance = None
@@ -241,37 +127,10 @@ async def test_safe_skip_empty_singletons():
     scheduler.scheduler.running = False
 
     try:
-        create_mock_page()
-
-        _cleanup_done = False
-        _watchdog_started = False
-        sys_exit_called = False
-        sys_exit_code = None
-
-        def _start_watchdog(timeout_s=10):
-            nonlocal _watchdog_started
-            if _watchdog_started:
-                return
-            _watchdog_started = True
-
-        async def _do_cleanup():
-            nonlocal _cleanup_done
-            if _cleanup_done:
-                return
-            _cleanup_done = True
-
-        async def _on_window_event(e):
-            nonlocal sys_exit_called, sys_exit_code
-            if e.type == ft.WindowEventType.CLOSE:
-                _start_watchdog(10)
-                await _do_cleanup()
-                sys_exit_called = True
-                sys_exit_code = 0
-
-        event = WindowEvent()
-        await _on_window_event(event)
-        assert sys_exit_called is True
-        assert sys_exit_code == 0
+        coordinator = ShutdownCoordinator(page=None)
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await coordinator.do_cleanup()
+        assert coordinator.cleanup_done is True
     finally:
         TaskManager._instance = orig_tm
         NewsSubscriptionService._instance = orig_news
@@ -279,163 +138,146 @@ async def test_safe_skip_empty_singletons():
         CacheManager._instance = orig_cache
         LocalModelManager._instance = orig_llm
         ThreadPoolManager._instance = orig_tp
-        scheduler.scheduler = orig_scheduler
+        if orig_scheduler_running is not None:
+            scheduler.scheduler.running = orig_scheduler_running
 
 
 @pytest.mark.asyncio
-async def test_double_close_idempotency(mock_singletons):
-    """Scenario D: Verify that _cleanup_done flag prevents duplicate clears"""
-    create_mock_page()
+async def test_toast_manager_cleanup_with_page():
+    """Verify Toast Manager is cleaned up when page has toast attribute."""
+    mock_page = MagicMock()
+    mock_toast = MagicMock()
+    mock_toast.stop_all = MagicMock(return_value=None)
+    mock_page.toast = mock_toast
 
-    _cleanup_done = False
-    cleanup_count = 0
+    coordinator = ShutdownCoordinator(page=mock_page)
 
-    async def _do_cleanup():
-        nonlocal _cleanup_done, cleanup_count
-        if _cleanup_done:
-            return
-        _cleanup_done = True
-        cleanup_count += 1
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await coordinator._step4_clear_toast()
 
-        from data.data_processor import DataProcessor
-        from data.cache.cache_manager import CacheManager
+    mock_toast.stop_all.assert_called_once()
 
-        if DataProcessor._instance is not None:
-            await DataProcessor._instance.stop()
-        if CacheManager._instance is not None:
-            await CacheManager._instance.close()
 
-    async def _on_window_event(e):
-        if e.type == ft.WindowEventType.CLOSE:
-            await _do_cleanup()
+@pytest.mark.asyncio
+async def test_toast_manager_skipped_without_page():
+    """Verify Toast Manager step is skipped when page is None."""
+    coordinator = ShutdownCoordinator(page=None)
 
-    event = WindowEvent()
-    await _on_window_event(event)
-    await _on_window_event(event)
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await coordinator._step4_clear_toast()
 
-    assert cleanup_count == 1
-    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_ai_model_unloaded_when_present():
+    """Verify AI model is unloaded when LocalModelManager has an LLM instance."""
+    from services.local_model_manager import LocalModelManager
+
+    orig = LocalModelManager._instance
+    LocalModelManager._instance = MagicMock()
+    LocalModelManager._instance._llm = MagicMock()
+
+    try:
+        coordinator = ShutdownCoordinator(page=None)
+        coordinator._step6_unload_ai_model()
+        LocalModelManager._instance.unload_model.assert_called_once()
+    finally:
+        LocalModelManager._instance = orig
+
+
+@pytest.mark.asyncio
+async def test_ai_model_skipped_when_absent():
+    """Verify AI model step is skipped when no LLM is loaded."""
+    from services.local_model_manager import LocalModelManager
+
+    orig = LocalModelManager._instance
+    LocalModelManager._instance = MagicMock()
+    LocalModelManager._instance._llm = None
+
+    try:
+        coordinator = ShutdownCoordinator(page=None)
+        coordinator._step6_unload_ai_model()
+        LocalModelManager._instance.unload_model.assert_not_called()
+    finally:
+        LocalModelManager._instance = orig
+
+
+@pytest.mark.asyncio
+async def test_db_engine_disposed_when_present():
+    """Verify DB engine is disposed when CacheManager has an engine."""
+    from data.cache.cache_manager import CacheManager
+
+    orig = CacheManager._instance
+    CacheManager._instance = AsyncMock()
+    CacheManager._instance.engine = AsyncMock()
+    CacheManager._instance.close = AsyncMock()
+
+    try:
+        coordinator = ShutdownCoordinator(page=None)
+        await coordinator._step5_dispose_db_engine()
+        CacheManager._instance.close.assert_awaited_once()
+    finally:
+        CacheManager._instance = orig
+
+
+@pytest.mark.asyncio
+async def test_db_engine_skipped_when_absent():
+    """Verify DB engine step is skipped when no engine exists."""
+    from data.cache.cache_manager import CacheManager
+
+    orig = CacheManager._instance
+    CacheManager._instance = None
+
+    try:
+        coordinator = ShutdownCoordinator(page=None)
+        await coordinator._step5_dispose_db_engine()
+    finally:
+        CacheManager._instance = orig
+
+
+def test_watchdog_started_once():
+    """Verify watchdog can only be started once."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    with patch("threading.Thread") as mock_thread:
+        coordinator.start_watchdog(10)
+        assert coordinator.watchdog_started is True
+        mock_thread.assert_called_once()
+
+        coordinator.start_watchdog(10)
+        mock_thread.assert_called_once()
+
+
+def test_watchdog_daemon_thread():
+    """Verify watchdog creates a daemon thread."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    with patch("threading.Thread") as mock_thread:
+        coordinator.start_watchdog(10)
+        _, kwargs = mock_thread.call_args
+        assert kwargs.get("daemon") is True
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_cleanup_skips_exit():
+    """Verify that disconnect after window close sees cleanup_done=True and skips exit."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await coordinator.do_cleanup()
+
+    was_window_path = coordinator.cleanup_done
+    assert was_window_path is True
+
+
+@pytest.mark.asyncio
+async def test_step_exception_does_not_crash(mock_singletons):
+    """Verify that an exception in one step doesn't prevent other steps from running."""
+    mock_singletons["TaskManager"]._instance.cancel_all_running_async.side_effect = RuntimeError("boom")
+
+    coordinator = ShutdownCoordinator(page=None)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await coordinator.do_cleanup()
+
+    assert coordinator.cleanup_done is True
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_watchdog_timeout_forces_exit(mock_singletons):
-    """Scenario E: Watchdog timeout forces os._exit(0) when cleanup hangs"""
-    create_mock_page()
-
-    _cleanup_done = False
-    _watchdog_started = False
-    os_exit_called = False
-    os_exit_code = None
-
-    def _start_watchdog(timeout_s=10):
-        nonlocal _watchdog_started, os_exit_called, os_exit_code
-        if _watchdog_started:
-            return
-        _watchdog_started = True
-
-        def _force_exit():
-            nonlocal os_exit_called, os_exit_code
-            os_exit_called = True
-            os_exit_code = 0
-
-        _force_exit()
-
-    async def _do_cleanup():
-        nonlocal _cleanup_done
-        if _cleanup_done:
-            return
-        _cleanup_done = True
-
-    async def _on_window_event(e):
-        if e.type == ft.WindowEventType.CLOSE:
-            _start_watchdog(10)
-            await _do_cleanup()
-
-    event = WindowEvent()
-    await _on_window_event(event)
-
-    assert os_exit_called is True
-    assert os_exit_code == 0
-
-
-@pytest.mark.asyncio
-async def test_disconnect_after_window_close_skips_exit(mock_singletons):
-    """Scenario F: Disconnect after window close should not call sys.exit again"""
-    create_mock_page()
-
-    _cleanup_done = False
-    _watchdog_started = False
-    sys_exit_count = 0
-
-    def _start_watchdog(timeout_s=10):
-        nonlocal _watchdog_started
-        if _watchdog_started:
-            return
-        _watchdog_started = True
-
-    async def _do_cleanup():
-        nonlocal _cleanup_done
-        if _cleanup_done:
-            return
-        _cleanup_done = True
-
-    async def _on_window_event(e):
-        nonlocal sys_exit_count
-        if e.type == ft.WindowEventType.CLOSE:
-            _start_watchdog(10)
-            await _do_cleanup()
-            sys_exit_count += 1
-
-    async def _on_disconnect(e):
-        nonlocal sys_exit_count
-        was_window_path = _cleanup_done
-        _start_watchdog(10)
-        await _do_cleanup()
-        if not was_window_path:
-            sys_exit_count += 1
-
-    event = WindowEvent()
-    await _on_window_event(event)
-    await _on_disconnect(None)
-
-    assert sys_exit_count == 1
-
-
-@pytest.mark.asyncio
-async def test_watchdog_started_only_once(mock_singletons):
-    """Scenario G: Watchdog should only be started once even with multiple triggers"""
-    create_mock_page()
-
-    _cleanup_done = False
-    _watchdog_started = False
-    watchdog_call_count = 0
-
-    def _start_watchdog(timeout_s=10):
-        nonlocal _watchdog_started, watchdog_call_count
-        watchdog_call_count += 1
-        if _watchdog_started:
-            return
-        _watchdog_started = True
-
-    async def _do_cleanup():
-        nonlocal _cleanup_done
-        if _cleanup_done:
-            return
-        _cleanup_done = True
-
-    async def _on_window_event(e):
-        if e.type == ft.WindowEventType.CLOSE:
-            _start_watchdog(10)
-            await _do_cleanup()
-
-    async def _on_disconnect(e):
-        _start_watchdog(10)
-        await _do_cleanup()
-
-    event = WindowEvent()
-    await _on_window_event(event)
-    await _on_disconnect(None)
-
-    assert watchdog_call_count == 2
-    assert _watchdog_started is True

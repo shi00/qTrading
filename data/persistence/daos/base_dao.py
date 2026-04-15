@@ -103,6 +103,12 @@ class BaseDao:
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
             )
 
+        from data.cache.cache_manager import CacheManager
+
+        if CacheManager._instance is not None and CacheManager._instance._disposed:
+            logger.warning(f"[{self.__class__.__name__}] Engine disposed, skipping write.")
+            return 0
+
         if is_many and not params:
             return 0
 
@@ -419,6 +425,12 @@ class BaseDao:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
             )
+
+        from data.cache.cache_manager import CacheManager
+
+        if CacheManager._instance is not None and CacheManager._instance._disposed:
+            logger.warning(f"[{self.__class__.__name__}] Engine disposed, skipping read.")
+            return pd.DataFrame()
 
         if params is not None and isinstance(params, list):
             params = tuple(params)

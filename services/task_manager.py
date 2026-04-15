@@ -299,6 +299,7 @@ class TaskManager:
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes."""
         active_ids = [tid for tid, t in self._tasks.items() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)]
+        persist_coros = []
         for tid in active_ids:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
@@ -308,7 +309,9 @@ class TaskManager:
                 task._cancel_event.set()
             if task._asyncio_task and not task._asyncio_task.done():
                 task._asyncio_task.cancel()
-            await self._persist_task_async(task)
+            persist_coros.append(self._persist_task_async(task))
+        if persist_coros:
+            await asyncio.gather(*persist_coros, return_exceptions=True)
         if active_ids:
             logger.info(
                 f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).",
@@ -500,6 +503,10 @@ class TaskManager:
         try:
             from data.cache.cache_manager import CacheManager
 
+            cache = CacheManager._instance
+            if cache is None:
+                logger.debug("[TaskManager] Persist skipped: CacheManager not initialized.")
+                return
             sql = (
                 "INSERT INTO task_history "
                 "(id, name, task_type, status, progress, description, error, result, "
@@ -510,7 +517,7 @@ class TaskManager:
                 "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
                 "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at"
             )
-            await CacheManager()._write_db(sql, params)
+            await cache._write_db(sql, params)
         except Exception as e:
             logger.debug(f"[TaskManager] Persist failed (non-critical): {e}")
 

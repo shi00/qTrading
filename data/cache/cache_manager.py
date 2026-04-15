@@ -61,6 +61,7 @@ class CacheManager:
         self._init_lock_lazy = None
 
         self.engine = None
+        self._disposed = False
 
         self.stock_dao = StockDao(self.engine)
         self.quote_dao = QuoteDao(self.engine)
@@ -170,15 +171,15 @@ class CacheManager:
     async def close(self):
         """Dispose the engine"""
         logger.debug("[CacheManager] State | Disposing engine...")
-        # Unblock any coroutines waiting on maintenance before disposing
-        self._maintenance_event.set()
+        self._disposed = True
+        await self.engine.dispose()
         try:
             from data.persistence.daos.base_dao import BaseDao
 
             BaseDao._get_maintenance_event().set()
         except Exception as e:
             logger.debug(f"[CacheManager] Maintenance event set failed during dispose: {e}")
-        await self.engine.dispose()
+        self._maintenance_event.set()
 
         # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
         del_loop_local("cache_maint_event")
