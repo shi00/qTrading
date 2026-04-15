@@ -32,8 +32,12 @@ class TestBaseDaoCancelledError:
         dao.engine = mock_engine
 
         with patch.object(StockDao, "_get_maintenance_event", return_value=evt):
-            with pytest.raises(asyncio.CancelledError):
+            raised = False
+            try:
                 await dao._read_db("SELECT 1")
+            except asyncio.CancelledError:
+                raised = True
+            assert raised, "CancelledError should have been raised"
 
     async def test_write_db_propagates_cancelled_error(self):
         """_write_db should re-raise CancelledError, not swallow it."""
@@ -47,5 +51,9 @@ class TestBaseDaoCancelledError:
         dao.engine = mock_engine
 
         with patch.object(StockDao, "_get_maintenance_event", return_value=evt):
-            with pytest.raises(asyncio.CancelledError):
+            raised = False
+            try:
                 await dao._write_db("INSERT INTO t VALUES (1)")
+            except asyncio.CancelledError:
+                raised = True
+            assert raised, "CancelledError should have been raised"
