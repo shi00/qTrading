@@ -1,10 +1,19 @@
 import asyncio
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from data.persistence.daos.stock_dao import StockDao
+
+
+class _CancelledContextManager:
+    """Async context manager that raises CancelledError on __aenter__."""
+
+    async def __aenter__(self):
+        raise asyncio.CancelledError()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return False
 
 
 @pytest.mark.asyncio
@@ -18,13 +27,8 @@ class TestBaseDaoCancelledError:
         evt = asyncio.Event()
         evt.set()
 
-        @asynccontextmanager
-        async def mock_connect():
-            raise asyncio.CancelledError()
-            yield
-
-        mock_engine = AsyncMock()
-        mock_engine.connect = mock_connect
+        mock_engine = MagicMock()
+        mock_engine.connect = MagicMock(return_value=_CancelledContextManager())
         dao.engine = mock_engine
 
         with patch.object(StockDao, "_get_maintenance_event", return_value=evt):
@@ -38,13 +42,8 @@ class TestBaseDaoCancelledError:
         evt = asyncio.Event()
         evt.set()
 
-        @asynccontextmanager
-        async def mock_begin():
-            raise asyncio.CancelledError()
-            yield
-
-        mock_engine = AsyncMock()
-        mock_engine.begin = mock_begin
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(return_value=_CancelledContextManager())
         dao.engine = mock_engine
 
         with patch.object(StockDao, "_get_maintenance_event", return_value=evt):
