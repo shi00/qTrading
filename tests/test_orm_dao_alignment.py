@@ -14,6 +14,7 @@ from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.quote_dao import QuoteDao
+from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.models import (
     BlockTrade,
@@ -35,6 +36,7 @@ from data.persistence.models import (
     NorthboundHolding,
     PledgeStat,
     Repurchase,
+    ScreeningHistory,
     ShiborDaily,
     StkHoldernumber,
     StockBasic,
@@ -273,6 +275,15 @@ class TestOrmDaoAlignment:
         expected = model_cols - {"created_at"}
         missing = expected - dao_cols
         assert not missing, f"save_macro_economy missing: {missing}"
+
+    def test_screening_history_alignment(self):
+        model_cols = get_model_columns(ScreeningHistory)
+        dao_cols = extract_cols_from_method(ScreenerDao.save_screening_results)
+        assert dao_cols is not None
+        excluded = {"id", "updated_at", "created_at", "t1_price", "t1_pct", "t5_price", "t5_pct", "prediction_result"}
+        expected = model_cols - excluded
+        missing = expected - dao_cols
+        assert not missing, f"save_screening_results missing: {missing}"
 
 
 class TestQfqCalculation:

@@ -34,15 +34,16 @@ def get_model_db_columns(model_class: type) -> set:
 def extract_cols_from_method(method) -> set | None:
     """Extract cols list from save method source code (static analysis).
 
-    Supports two patterns:
+    Supports three patterns:
     1. Static list: cols = ["col1", "col2", ...]
     2. Dynamic call: cols = get_model_columns(ModelClass)
+    3. Dynamic call with exclude: all_cols = get_model_columns(ModelClass, exclude={...})
     """
     import re
 
     source = inspect.getsource(method)
 
-    pattern = r"(?:cols|columns)\s*=\s*\[([^\]]+)\]"
+    pattern = r"(?:cols|columns|all_cols)\s*=\s*\[([^\]]+)\]"
     match = re.search(pattern, source, re.DOTALL)
 
     if match:
@@ -56,17 +57,26 @@ def extract_cols_from_method(method) -> set | None:
 
         return cols if cols else None
 
-    pattern = r"(?:cols|columns)\s*=\s*get_model_columns\s*\(\s*(\w+)\s*\)"
+    pattern = (
+        r"(?:cols|columns|all_cols)\s*=\s*get_model_columns\s*\(\s*(\w+)\s*(?:,\s*exclude\s*=\s*\{([^}]*)\})?\s*\)"
+    )
     match = re.search(pattern, source)
 
     if match:
         model_name = match.group(1)
+        exclude_str = match.group(2)
         from data.persistence.models import get_model_columns as gmc
         import data.persistence.models as models
 
         model_class = getattr(models, model_name, None)
         if model_class:
-            return set(gmc(model_class))
+            exclude = set()
+            if exclude_str:
+                for item in exclude_str.split(","):
+                    item = item.strip().strip('"').strip("'")
+                    if item:
+                        exclude.add(item)
+            return set(gmc(model_class, exclude=exclude or None))
 
     return None
 

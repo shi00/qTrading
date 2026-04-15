@@ -526,6 +526,81 @@ class TestScreenerDao:
         assert result["pe_ttm"].iloc[0] == 5.0
         assert result["roe"].iloc[0] == 12.0
 
+    async def test_save_screening_results_column_order(self, screener_dao, clean_db):
+        """验证动态列推导与 tuple 顺序一致，防止列错位"""
+        from data.persistence.models import ScreeningHistory, get_model_columns
+
+        all_cols = get_model_columns(
+            ScreeningHistory,
+            exclude={"id", "updated_at", "created_at", "t1_price", "t1_pct", "t5_price", "t5_pct", "prediction_result"},
+        )
+        expected_order = [
+            "trade_date",
+            "strategy_name",
+            "ts_code",
+            "name",
+            "close",
+            "pct_chg",
+            "industry",
+            "vol",
+            "amount",
+            "turnover_rate",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ttm",
+            "total_mv",
+            "circ_mv",
+            "roe",
+            "grossprofit_margin",
+            "debt_to_assets",
+            "or_yoy",
+            "netprofit_yoy",
+            "ai_score",
+            "ai_reason",
+            "thinking",
+        ]
+        assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
+
+        records = [
+            (
+                "2024-03-21",
+                "oversold",
+                "000001.SZ",
+                "平安银行",
+                10.0,
+                2.0,
+                "银行",
+                1000000,
+                10000000,
+                1.5,
+                5.0,
+                0.5,
+                1.0,
+                2.0,
+                1000000000.0,
+                500000000.0,
+                12.0,
+                30.0,
+                80.0,
+                5.0,
+                8.0,
+                85,
+                "AI推荐理由",
+                "思考过程",
+            ),
+        ]
+        await screener_dao.save_screening_results(records)
+
+        result = await screener_dao.get_screening_history(strategy_name="oversold")
+        assert not result.empty
+        assert result["name"].iloc[0] == "平安银行"
+        assert result["close"].iloc[0] == 10.0
+        assert result["industry"].iloc[0] == "银行"
+        assert result["ai_score"].iloc[0] == 85
+        assert result["ai_reason"].iloc[0] == "AI推荐理由"
+        assert result["thinking"].iloc[0] == "思考过程"
+
 
 @pytest.mark.asyncio
 class TestHolderDao:

@@ -313,6 +313,24 @@ class TestCacheManager(TestDatabaseBase):
         status = await self.cache.get_sync_status("test")
         self.assertIsNone(status)
 
+    async def test_clear_cache_drops_alembic_version(self):
+        """Verify clear_all_cache also drops alembic_version so init_db can rebuild from scratch."""
+        import sqlalchemy as sa
+
+        async with self.cache.engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('test_rev')"))
+
+        async with self.cache.engine.connect() as conn:
+            result = await conn.execute(sa.text("SELECT count(*) FROM alembic_version"))
+            self.assertEqual(result.scalar(), 1)
+
+        await self.cache.clear_all_cache()
+
+        async with self.cache.engine.connect() as conn:
+            tables = await conn.run_sync(lambda c: sa.inspect(c).get_table_names())
+        self.assertNotIn("alembic_version", tables)
+
     async def test_top_list(self):
         """Test Top List (LHB)"""
         df = pd.DataFrame(
