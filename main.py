@@ -116,6 +116,7 @@ async def main(page: ft.Page):
             await asyncio.sleep(1.0)
 
             # ── Step 4: 清除 Toast Manager UI 残留 ──
+            logger.info("[Main] Step 4: Clearing Toast Manager...")
             if hasattr(page, "toast") and getattr(page, "toast", None):
                 try:
                     import inspect
@@ -124,8 +125,11 @@ async def main(page: ft.Page):
                         res = page.toast.stop_all()  # type: ignore
                         if inspect.isawaitable(res):
                             await res
-                except Exception:
-                    pass
+                        logger.info("[Main]   - Toast Manager stopped.")
+                except Exception as e:
+                    logger.debug(f"[Main]   - Toast Manager cleanup skipped: {e}")
+            else:
+                logger.info("[Main]   - Toast Manager not initialized, skipping.")
 
             # ── Step 5: 销毁异步数据库连接池 ──
             logger.info("[Main] Step 5: Disposing async DB engine...")
@@ -143,8 +147,10 @@ async def main(page: ft.Page):
                 if LocalModelManager._instance is not None and LocalModelManager._instance._llm is not None:
                     LocalModelManager._instance.unload_model()
                     logger.info("[Main]   - Llama.cpp model evicted.")
-            except Exception:
-                pass
+                else:
+                    logger.info("[Main]   - AI model not loaded, skipping.")
+            except Exception as e:
+                logger.debug(f"[Main]   - AI model unload skipped: {e}")
 
             # ── Step 7: 关闭线程池（最后执行，前面步骤可能依赖它） ──
             logger.info("[Main] Step 7: Shutting down Thread Pools...")
@@ -152,6 +158,8 @@ async def main(page: ft.Page):
 
             if ThreadPoolManager._instance is not None:
                 ThreadPoolManager._instance.shutdown(wait=False)
+            else:
+                logger.info("[Main]   - Thread pools not initialized, skipping.")
 
         except Exception as ex:
             logger.error(f"[Main] Error during shutdown: {ex}", exc_info=True)
@@ -283,7 +291,7 @@ async def main(page: ft.Page):
 
         def on_news_alert(msg):
             if hasattr(page, "toast") and page.toast:  # type: ignore
-                page.toast.show(f"📰 {msg}", type="info")  # type: ignore
+                page.toast.show(f"📰 {msg}", toast_type="info")  # type: ignore
 
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
 
