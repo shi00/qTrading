@@ -314,11 +314,14 @@ class TestCacheManager(TestDatabaseBase):
         self.assertIsNone(status)
 
     async def test_clear_cache_drops_alembic_version(self):
-        """Verify clear_all_cache also drops alembic_version so init_db can rebuild from scratch."""
+        """Verify clear_all_cache resets alembic_version so init_db can rebuild from scratch."""
         import sqlalchemy as sa
 
         async with self.cache.engine.begin() as conn:
-            await conn.execute(sa.text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await conn.execute(
+                sa.text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+            )
+            await conn.execute(sa.text("DELETE FROM alembic_version"))
             await conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('test_rev')"))
 
         async with self.cache.engine.connect() as conn:
@@ -328,8 +331,10 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.clear_all_cache()
 
         async with self.cache.engine.connect() as conn:
-            tables = await conn.run_sync(lambda c: sa.inspect(c).get_table_names())
-        self.assertNotIn("alembic_version", tables)
+            result = await conn.execute(sa.text("SELECT version_num FROM alembic_version"))
+            version = result.scalar()
+        self.assertIsNotNone(version)
+        self.assertNotEqual(version, "test_rev", "alembic_version should be reset to actual migration version")
 
     async def test_top_list(self):
         """Test Top List (LHB)"""

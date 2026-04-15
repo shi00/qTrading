@@ -592,7 +592,10 @@ class TestScreenerDao:
         ]
         await screener_dao.save_screening_results(records)
 
-        result = await screener_dao.get_screening_history(strategy_name="oversold")
+        cols_str = ", ".join(all_cols)
+        result = await screener_dao._read_db(
+            f"SELECT {cols_str} FROM screening_history WHERE strategy_name=$1", ["oversold"]
+        )
         assert not result.empty
         assert result["name"].iloc[0] == "平安银行"
         assert result["close"].iloc[0] == 10.0

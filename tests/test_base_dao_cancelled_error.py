@@ -25,10 +25,9 @@ class TestBaseDaoCancelledError:
 
         mock_engine = AsyncMock()
         mock_engine.connect = mock_connect
+        dao.engine = mock_engine
 
-        with patch.object(dao, "_get_maintenance_event", return_value=evt):
-            dao.engine = mock_engine
-
+        with patch.object(StockDao, "_get_maintenance_event", return_value=evt):
             with pytest.raises(asyncio.CancelledError):
                 await dao._read_db("SELECT 1")
 
@@ -46,9 +45,8 @@ class TestBaseDaoCancelledError:
 
         mock_engine = AsyncMock()
         mock_engine.begin = mock_begin
+        dao.engine = mock_engine
 
-        with patch.object(dao, "_get_maintenance_event", return_value=evt):
-            dao.engine = mock_engine
-
+        with patch.object(StockDao, "_get_maintenance_event", return_value=evt):
             with pytest.raises(asyncio.CancelledError):
                 await dao._write_db("INSERT INTO t VALUES (1)")
