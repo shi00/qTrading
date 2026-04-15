@@ -80,9 +80,10 @@ class SchedulerService:
         self._schedule_jobs()
 
         # Add listener for missed jobs
-        from apscheduler.events import EVENT_JOB_MISSED
+        from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
         self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
+        self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
 
         try:
             self.scheduler.start()
@@ -107,6 +108,19 @@ class SchedulerService:
         logger.warning(
             f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})",
         )
+
+    def _on_job_error(self, event):
+        """Handle job error events, suppressing CancelledError during shutdown"""
+        import asyncio
+
+        if event.exception and isinstance(event.exception, asyncio.CancelledError):
+            logger.info(
+                f"[Scheduler] Job '{event.job_id}' cancelled during shutdown (expected)",
+            )
+        else:
+            logger.error(
+                f"[Scheduler] Job '{event.job_id}' raised an exception: {event.exception}",
+            )
 
     def stop(self):
         """Stop the scheduler"""

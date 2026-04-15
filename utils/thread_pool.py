@@ -191,10 +191,12 @@ class ThreadPoolManager:
         For GUI apps on exit, we might want to wait briefly then force kill?
         For now, we trust the executor's shutdown mechanism.
         """
+        shutdown_performed = False
         if hasattr(self, "_io_pool") and self._io_pool:
             logger.info("Shutting down IO Pool...")
             self._io_pool.shutdown(wait=wait)
             self._io_pool = None
+            shutdown_performed = True
 
         if hasattr(self, "_cpu_pool") and self._cpu_pool:
             logger.info("Shutting down CPU Pool...")
@@ -202,7 +204,10 @@ class ThreadPoolManager:
             # Since threads are daemon, we can set wait=False to let the OS cleanup.
             self._cpu_pool.shutdown(wait=False)
             self._cpu_pool = None
-        logger.info("Thread Pools shut down.")
+            shutdown_performed = True
+
+        if shutdown_performed:
+            logger.info("Thread Pools shut down.")
 
 
 # Global Accessor
