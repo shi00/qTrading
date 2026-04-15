@@ -460,7 +460,7 @@ class BaseDao:
             logger.warning(
                 f"[{self.__class__.__name__}] Read cancelled during shutdown.",
             )
-            return pd.DataFrame()
+            raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
 

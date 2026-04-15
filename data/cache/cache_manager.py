@@ -268,26 +268,17 @@ class CacheManager:
             raise
 
     async def clear_all_cache(self):
-        """Drop all user tables and re-initialize schema."""
+        """Drop all user tables using SQLAlchemy DDL API and re-initialize schema."""
         self._maintenance_event.clear()
         from data.persistence.daos.base_dao import BaseDao
+        from data.persistence.models import metadata
 
         BaseDao._get_maintenance_event().clear()
         try:
             async with self.engine.begin() as conn:
-                r = await conn.exec_driver_sql(
-                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'",
-                )
-                tables = [row[0] for row in r.fetchall()]
-
-                for t in tables:
-                    if not re.match(r"^[a-zA-Z0-9_]+$", t):
-                        logger.warning(
-                            f"[CacheManager] Wipe | ⚠️ Malformed table name skipped: {t}",
-                        )
-                        continue
-                    await conn.execute(sa.text(f'DROP TABLE IF EXISTS "{t}"'))
-                logger.debug(f"[CacheManager] Wipe | Dropped {len(tables)} tables.")
+                await conn.run_sync(metadata.drop_all)
+                await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+                logger.debug("[CacheManager] Wipe | Dropped all tables via SQLAlchemy DDL API.")
 
             self._schema_initialized = False
             await self.init_db(force=True)

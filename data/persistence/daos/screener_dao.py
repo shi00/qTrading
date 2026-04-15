@@ -185,47 +185,22 @@ class ScreenerDao(BaseDao):
     async def save_screening_results(self, records: list):
         """
         Save screening results to history using BaseDao UPSERT.
-        Replaces manual 24-column SQL string.
+        Columns are derived dynamically from the ScreeningHistory ORM model.
         """
         if not records:
             return
 
-        # Determine cols based on the raw record length mapped from ReviewManager
-        # The tuple has 24 items aligning with SH_FULL_COLS minus id + t1/t5/result/created_at
-        cols = [
-            "trade_date",
-            "strategy_name",
-            "ts_code",
-            "name",
-            "close",
-            "pct_chg",
-            "industry",
-            "vol",
-            "amount",
-            "turnover_rate",
-            "pe_ttm",
-            "pb",
-            "ps_ttm",
-            "dv_ttm",
-            "total_mv",
-            "circ_mv",
-            "roe",
-            "grossprofit_margin",
-            "debt_to_assets",
-            "or_yoy",
-            "netprofit_yoy",
-            "ai_score",
-            "ai_reason",
-            "thinking",
-        ]
+        all_cols = get_model_columns(
+            ScreeningHistory,
+            exclude={"id", "updated_at", "created_at", "t1_price", "t1_pct", "t5_price", "t5_pct", "prediction_result"},
+        )
 
-        # Convert list of tuples to list of dicts for _save_upsert
-        dict_records = [dict(zip(cols, r, strict=True)) for r in records]
+        dict_records = [dict(zip(all_cols, r, strict=True)) for r in records]
         df = pd.DataFrame(dict_records)
 
         await self._save_upsert(
             df=df,
             table_name="screening_history",
-            columns=cols,
+            columns=all_cols,
             pk_columns=["trade_date", "strategy_name", "ts_code"],
         )
