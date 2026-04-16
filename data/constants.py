@@ -21,8 +21,6 @@ def get_health_depth_full_trade_days() -> int:
     return ConfigHandler.get_init_history_years() * 250
 
 
-# Safety multiplier: require 2x the max strategy history requirement to account for warm-up
-HEALTH_DEPTH_SAFETY_MULTIPLIER = 2
 # Breadth: expected_rows already excludes IPO gaps; residual gap is suspension (~0.3%) + API blind spots (~1-3%)
 HEALTH_THRESHOLD_BREADTH = 0.90
 # UI color warning threshold for depth display (below this, show orange)

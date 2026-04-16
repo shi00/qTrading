@@ -353,7 +353,8 @@ class DataSourceTab(ft.Container):
             )
 
     async def refresh_health_status(self, e):
-        UILogger.log_action("DataSourceTab", "Click", "btn_check_health")
+        if e is not None:
+            UILogger.log_action("DataSourceTab", "Click", "btn_check_health")
         if not self.page:
             return
 
@@ -560,6 +561,7 @@ class DataSourceTab(ft.Container):
             task_type=I18n.get("task_type_sys_check"),
             coroutine_factory=_run_health_check,
             cancellable=True,
+            unique_key="sys_health_check",
         )
 
     async def full_daily_sync(self, e):

@@ -642,7 +642,7 @@ class CacheManager:
                         "type": meta.get("type", "stock"),
                     }
 
-        return {"total_stocks": total_stocks, "tables": results}
+        return {"total_stocks": total_stocks, "tables": results, "global_trade_days": global_trade_days}
 
     async def get_concept_count(self):
         """Get total count of stock concept mappings."""

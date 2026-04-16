@@ -14,13 +14,11 @@ import time
 from typing import TYPE_CHECKING
 
 from data.constants import (
-    HEALTH_DEPTH_SAFETY_MULTIPLIER,
     HEALTH_THRESHOLD_BREADTH,
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
     TIER_FINANCIAL_FRESHNESS_DAYS,
     TIER_QUOTE_FRESHNESS_DAYS,
-    get_health_depth_full_trade_days,
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
@@ -297,38 +295,24 @@ class HealthCheckMixin:
             max_required = 0
             for cls in _STRATEGY_REGISTRY.values():
                 try:
-                    # Strategy classes may use @property, requiring instantiation to evaluate
                     obj = cls()
                     days = obj.required_history_days
                     if not isinstance(days, property) and isinstance(days, (int, float)):
                         max_required = max(max_required, int(days))
                 except Exception as e:
                     logger.debug(f"Unable to read required_history_days from {cls.__name__}: {e}")
-            depth_threshold = (
-                min(
-                    1.0,
-                    (max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER) / get_health_depth_full_trade_days(),
-                )
-                if max_required > 0
-                else 0
-            )
-            pass  # 调试记录删除
 
             missing_depth = []
-            if depth_threshold > 0:
-                missing_depth = [
-                    t
-                    for t in critical_tables
-                    if tables.get(t, {}).get("depth_ratio") is not None
-                    and tables.get(t, {}).get("depth_ratio", 1.0) < depth_threshold
-                ]
+            actual_trade_days = deep_health.get("global_trade_days", 0)
+            if max_required > 0 and actual_trade_days < max_required:
+                missing_depth = [t for t in critical_tables if tables.get(t, {}).get("depth_ratio") is not None]
                 if missing_depth:
                     if data_status == "green":
                         data_status = "yellow"
                     reasons.append(
                         I18n.get("health_depth_warning").format(
                             count=len(missing_depth),
-                            required=max_required * HEALTH_DEPTH_SAFETY_MULTIPLIER,
+                            required=max_required,
                         ),
                     )
 
