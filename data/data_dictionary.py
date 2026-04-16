@@ -173,7 +173,7 @@ TABLE_DEFINITIONS = {
             "date_col": "ann_date",
             "keys": ["ts_code", "end_date", "ann_date"],
         },
-        "quality_config": {"tier": 1, "monitor": True},
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "ts_code": "col_ts_code",
             "end_date": "col_end_date",
@@ -235,7 +235,7 @@ TABLE_DEFINITIONS = {
             "date_col": "ann_date",
             "keys": ["ts_code", "ann_date"],
         },
-        "quality_config": {"tier": 1, "monitor": True},
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "ts_code": "col_ts_code",
             "end_date": "col_end_date",
@@ -350,7 +350,7 @@ TABLE_DEFINITIONS = {
             "date_col": "ann_date",
             "keys": ["ts_code", "ann_date"],
         },
-        "quality_config": {"tier": 1, "monitor": True},
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "ts_code": "col_ts_code",
             "ann_date": "col_ann_date",

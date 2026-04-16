@@ -605,7 +605,12 @@ class CacheManager:
                     }
 
                     if ratio < 0.1:
-                        if is_stock_table:
+                        is_sparse = meta.get("quality_config", {}).get("sparse", False)
+                        if is_sparse:
+                            logger.debug(
+                                f"[CacheManager] Health | Table {table} (sparse): {cnt}/{total_stocks} ({ratio:.1%})",
+                            )
+                        elif is_stock_table:
                             logger.warning(
                                 f"[CacheManager] Health | ⚠️ Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})",
                             )

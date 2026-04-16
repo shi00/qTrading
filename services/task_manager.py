@@ -203,9 +203,14 @@ class TaskManager:
         task.unique_key = unique_key
         task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
 
+        # Register placeholder immediately to close call_soon_threadsafe delay window
+        self._tasks[task.id] = task
+
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._register_and_run, task)
         else:
+            # Rollback placeholder
+            self._tasks.pop(task.id, None)
             logger.error(
                 f"[TaskManager] Cannot submit task '{name}': no event loop captured.",
             )
@@ -213,10 +218,10 @@ class TaskManager:
         return task.id
 
     def _register_and_run(self, task: AppTask):
-        """Register task in dict, persist, notify, and launch runner.
+        """Finalize task registration and launch runner.
+        Task is already in self._tasks (set by submit_task for dedup safety).
         Always runs on the event loop thread (guaranteed by call_soon_threadsafe)."""
         task._cancel_event = asyncio.Event()
-        self._tasks[task.id] = task
         self._persist_task(task)
         self._notify_subscribers()
         logger.info(f"[TaskManager] Queued task: [{task.id}] {task.name}")

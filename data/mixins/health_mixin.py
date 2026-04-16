@@ -22,7 +22,6 @@ from data.constants import (
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
-from strategies.base_strategy import _STRATEGY_REGISTRY
 from ui.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
@@ -291,16 +290,11 @@ class HealthCheckMixin:
                     ),
                 )
 
-            # --- Depth & Breadth: Strategy-driven evaluation ---
-            max_required = 0
-            for cls in _STRATEGY_REGISTRY.values():
-                try:
-                    obj = cls()
-                    days = obj.required_history_days
-                    if not isinstance(days, property) and isinstance(days, (int, float)):
-                        max_required = max(max_required, int(days))
-                except Exception as e:
-                    logger.debug(f"Unable to read required_history_days from {cls.__name__}: {e}")
+            # --- Depth & Breadth: Config-driven evaluation ---
+            from utils.config_handler import ConfigHandler
+
+            config_years = ConfigHandler.get_init_history_years()
+            max_required = config_years * 250
 
             missing_depth = []
             actual_trade_days = deep_health.get("global_trade_days", 0)

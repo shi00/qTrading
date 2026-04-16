@@ -358,6 +358,9 @@ class DataSourceTab(ft.Container):
         if not self.page:
             return
 
+        if self.btn_check_health.disabled:
+            return
+
         # Disable button to indicate processing
         self.btn_check_health.disabled = True
 
