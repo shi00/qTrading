@@ -13,7 +13,9 @@ import inspect
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar, cast
+
+F = TypeVar("F", bound=Callable)
 
 from utils.sanitizers import DataSanitizer
 
@@ -64,7 +66,7 @@ def log_ui_action(
     UI 动作强制埋点装饰器 (适用于绑定在类方法的 Event Handler)
     """
 
-    def decorator(func: Callable):
+    def decorator(func: F) -> F:
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             UILogger.log_action(component_name, action_type, target_name)
@@ -75,7 +77,7 @@ def log_ui_action(
             UILogger.log_action(component_name, action_type, target_name)
             return await func(*args, **kwargs)
 
-        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+        return cast(F, async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper)
 
     return decorator
 
@@ -114,7 +116,7 @@ def log_async_operation(
             ...
     """
 
-    def decorator(func: Callable):
+    def decorator(func: F) -> F:
         # 确定操作名称
         op_name = operation_name or func.__name__
 
@@ -134,7 +136,6 @@ def log_async_operation(
 
             logger.log(log_level, f"[{op_name}] started")
 
-            result = None
             try:
                 # 执行原函数
                 result = await func(*args, **kwargs)
@@ -181,7 +182,7 @@ def log_async_operation(
                 # 重新抛出异常
                 raise
 
-        return wrapper
+        return cast(F, wrapper)
 
     return decorator
 
@@ -207,7 +208,7 @@ def track_performance(
             ...
     """
 
-    def decorator(func: Callable):
+    def decorator(func: F) -> F:
         op_name = operation_name or func.__name__
         level = getattr(logging, alert_level.upper(), logging.WARNING)
 
@@ -228,7 +229,7 @@ def track_performance(
 
                 return result
 
-            return async_wrapper
+            return cast(F, async_wrapper)
 
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
@@ -245,7 +246,7 @@ def track_performance(
 
             return result
 
-        return sync_wrapper
+        return cast(F, sync_wrapper)
 
     return decorator
 
