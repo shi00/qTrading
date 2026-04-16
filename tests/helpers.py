@@ -43,7 +43,7 @@ def extract_cols_from_method(method) -> set | None:
 
     source = inspect.getsource(method)
 
-    pattern = r"(?:cols|columns|all_cols)\s*=\s*\[([^\]]+)\]"
+    pattern = r"(?<![a-zA-Z_])(?:cols|columns|all_cols)\s*=\s*\[([^\]]+)\]"
     match = re.search(pattern, source, re.DOTALL)
 
     if match:
@@ -58,9 +58,9 @@ def extract_cols_from_method(method) -> set | None:
         return cols if cols else None
 
     pattern = (
-        r"(?:cols|columns|all_cols)\s*=\s*get_model_columns\s*\(\s*(\w+)\s*(?:,\s*exclude\s*=\s*\{([^}]*)\})?\s*\)"
+        r"(?:cols|columns|all_cols)\s*=\s*get_model_columns\s*\(\s*(\w+)\s*(?:,\s*exclude\s*=\s*\{([^}]*)\}\s*,?)?\s*\)"
     )
-    match = re.search(pattern, source)
+    match = re.search(pattern, source, re.DOTALL)
 
     if match:
         model_name = match.group(1)
