@@ -18,6 +18,7 @@ def mock_singletons():
     from data.external.news_subscription import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.cache.cache_manager import CacheManager
+    from data.domain_services.market_data_service import MarketDataService
     from services.local_model_manager import LocalModelManager
     from utils.thread_pool import ThreadPoolManager
     from utils.scheduler_service import scheduler
@@ -26,6 +27,7 @@ def mock_singletons():
     orig_news = NewsSubscriptionService._instance
     orig_dp = DataProcessor._instance
     orig_cache = CacheManager._instance
+    orig_mds = MarketDataService._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
     orig_scheduler_running = getattr(scheduler.scheduler, "running", None) if hasattr(scheduler, "scheduler") else None
@@ -36,6 +38,7 @@ def mock_singletons():
     DataProcessor._instance = AsyncMock()
     CacheManager._instance = AsyncMock()
     CacheManager._instance.engine = AsyncMock()
+    MarketDataService._instance = MagicMock()
     LocalModelManager._instance = MagicMock()
     LocalModelManager._instance._llm = MagicMock()
     ThreadPoolManager._instance = MagicMock()
@@ -49,6 +52,7 @@ def mock_singletons():
         "NewsSubscriptionService": NewsSubscriptionService,
         "DataProcessor": DataProcessor,
         "CacheManager": CacheManager,
+        "MarketDataService": MarketDataService,
         "LocalModelManager": LocalModelManager,
         "ThreadPoolManager": ThreadPoolManager,
     }
@@ -57,6 +61,7 @@ def mock_singletons():
     NewsSubscriptionService._instance = orig_news
     DataProcessor._instance = orig_dp
     CacheManager._instance = orig_cache
+    MarketDataService._instance = orig_mds
     LocalModelManager._instance = orig_llm
     ThreadPoolManager._instance = orig_tp
     if orig_scheduler_running is not None:
@@ -76,6 +81,7 @@ async def test_full_cleanup_all_steps(mock_singletons):
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
     mock_singletons["scheduler"].stop.assert_called_once()
     mock_singletons["NewsSubscriptionService"]._instance.stop.assert_called_once()
+    mock_singletons["MarketDataService"]._instance.stop.assert_called_once()
     mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
@@ -105,6 +111,7 @@ async def test_safe_skip_empty_singletons():
     from data.external.news_subscription import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.cache.cache_manager import CacheManager
+    from data.domain_services.market_data_service import MarketDataService
     from services.local_model_manager import LocalModelManager
     from utils.thread_pool import ThreadPoolManager
     from utils.scheduler_service import scheduler
@@ -113,6 +120,7 @@ async def test_safe_skip_empty_singletons():
     orig_news = NewsSubscriptionService._instance
     orig_dp = DataProcessor._instance
     orig_cache = CacheManager._instance
+    orig_mds = MarketDataService._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
     orig_scheduler_running = getattr(scheduler.scheduler, "running", None) if hasattr(scheduler, "scheduler") else None
@@ -121,6 +129,7 @@ async def test_safe_skip_empty_singletons():
     NewsSubscriptionService._instance = None
     DataProcessor._instance = None
     CacheManager._instance = None
+    MarketDataService._instance = None
     LocalModelManager._instance = None
     ThreadPoolManager._instance = None
     scheduler.scheduler = MagicMock()
@@ -136,6 +145,7 @@ async def test_safe_skip_empty_singletons():
         NewsSubscriptionService._instance = orig_news
         DataProcessor._instance = orig_dp
         CacheManager._instance = orig_cache
+        MarketDataService._instance = orig_mds
         LocalModelManager._instance = orig_llm
         ThreadPoolManager._instance = orig_tp
         if orig_scheduler_running is not None:
@@ -280,4 +290,8 @@ async def test_step_exception_does_not_crash(mock_singletons):
         await coordinator.do_cleanup()
 
     assert coordinator.cleanup_done is True
+    mock_singletons["scheduler"].stop.assert_called_once()
+    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
+    mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
+    mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)

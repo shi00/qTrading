@@ -51,6 +51,7 @@ class ShutdownCoordinator:
         Safety rules:
         - Never call singleton factories (e.g. DataProcessor()), only access Class._instance
         - No exit statements (sys.exit / os._exit), caller decides how to exit
+        - Each step is independently wrapped so one failure does not skip remaining steps
         """
         if self._cleanup_done:
             logger.info("[Shutdown] Cleanup already completed, skipping.")
@@ -60,17 +61,29 @@ class ShutdownCoordinator:
         logging.getLogger("asyncio").setLevel(logging.ERROR)
         logger.info("[Shutdown] ========== Graceful Shutdown Initiated ==========")
 
-        try:
-            await self._step0_cancel_tasks()
-            await self._step1_stop_services()
-            await self._step2_stop_processor()
-            await self._step3_flush_db_writes()
-            await self._step4_clear_toast()
-            await self._step5_dispose_db_engine()
-            self._step6_unload_ai_model()
-            self._step7_shutdown_thread_pools()
-        except Exception as ex:
-            logger.error(f"[Shutdown] Error during shutdown: {ex}", exc_info=True)
+        steps = [
+            ("Step 0", self._step0_cancel_tasks),
+            ("Step 1", self._step1_stop_services),
+            ("Step 2", self._step2_stop_processor),
+            ("Step 3", self._step3_flush_db_writes),
+            ("Step 4", self._step4_clear_toast),
+            ("Step 5", self._step5_dispose_db_engine),
+        ]
+
+        for name, step in steps:
+            try:
+                await step()
+            except Exception as ex:
+                logger.error(f"[Shutdown] {name} failed: {ex}", exc_info=True)
+
+        for name, step in [
+            ("Step 6", self._step6_unload_ai_model),
+            ("Step 7", self._step7_shutdown_thread_pools),
+        ]:
+            try:
+                step()
+            except Exception as ex:
+                logger.error(f"[Shutdown] {name} failed: {ex}", exc_info=True)
 
         logger.info("[Shutdown] ========== Shutdown Sequence Complete ==========")
 
