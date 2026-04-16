@@ -291,8 +291,6 @@ class HealthCheckMixin:
                 )
 
             # --- Depth & Breadth: Config-driven evaluation ---
-            from utils.config_handler import ConfigHandler
-
             config_years = ConfigHandler.get_init_history_years()
             max_required = config_years * 250
 

@@ -221,6 +221,10 @@ class TaskManager:
         """Finalize task registration and launch runner.
         Task is already in self._tasks (set by submit_task for dedup safety).
         Always runs on the event loop thread (guaranteed by call_soon_threadsafe)."""
+        if task.status == TaskStatus.CANCELLED:
+            logger.debug(f"[TaskManager] Task [{task.id}] already cancelled, skipping launch")
+            return
+
         task._cancel_event = asyncio.Event()
         self._persist_task(task)
         self._notify_subscribers()

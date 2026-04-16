@@ -126,6 +126,7 @@ class TestDataProcessor(unittest.TestCase):
         # daily_quotes, financial_reports, daily_indicators, moneyflow_daily
         self.mock_cache.check_comprehensive_health = AsyncMock(
             return_value={
+                "global_trade_days": 750,
                 "tables": {
                     "daily_quotes": {"ratio": 1.0, "type": "stock"},
                     "daily_indicators": {"ratio": 1.0, "type": "stock"},
@@ -476,6 +477,7 @@ class TestDataProcessor(unittest.TestCase):
         # Scenario 3: Missing Critical Tables (Red)
         self.mock_cache.check_comprehensive_health = AsyncMock(
             return_value={
+                "global_trade_days": 0,
                 "tables": {
                     "daily_quotes": {"ratio": 0.0, "type": "stock"},
                     "daily_indicators": {"ratio": 0.0, "type": "stock"},
