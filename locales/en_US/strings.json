@@ -528,7 +528,7 @@
     "health_freshness": "Fresh: {ratio}",
     "health_depth": "Depth: {ratio}",
     "health_breadth": "Breadth: {ratio}",
-    "health_depth_warning": "{count} tables lack depth ({required}+ days required)",
+    "health_depth_warning": "{count} tables lack depth (actual {actual}d / required {required}d)",
     "health_breadth_warning": "{count} tables have continuity gaps",
     "health_status_ok_short": "OK",
     "health_status_lag_short": "Lag {days}d",

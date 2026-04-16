@@ -304,7 +304,7 @@ class HealthCheckMixin:
 
             missing_depth = []
             actual_trade_days = deep_health.get("global_trade_days", 0)
-            if max_required > 0 and actual_trade_days < max_required:
+            if max_required > 0 and actual_trade_days < max_required * 0.95:
                 missing_depth = [t for t in critical_tables if tables.get(t, {}).get("depth_ratio") is not None]
                 if missing_depth:
                     if data_status == "green":
@@ -313,6 +313,7 @@ class HealthCheckMixin:
                         I18n.get("health_depth_warning").format(
                             count=len(missing_depth),
                             required=max_required,
+                            actual=actual_trade_days,
                         ),
                     )
 

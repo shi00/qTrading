@@ -737,7 +737,7 @@
   "health_freshness": "新鲜度: {ratio}",
   "health_depth": "深度: {ratio}",
   "health_breadth": "广度: {ratio}",
-  "health_depth_warning": "{count}个核心表历史深度不足（策略要求至少{required}天）",
+  "health_depth_warning": "{count}个核心表历史深度不足（实际{actual}天/要求{required}天）",
   "health_breadth_warning": "{count}个核心表数据连续性异常",
   "health_status_ok_short": "正常",
   "health_status_lag_short": "滞后 {days} 天",
