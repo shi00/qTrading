@@ -559,13 +559,17 @@ class DataSourceTab(ft.Container):
                 except Exception:
                     pass  # View may have been unmounted
 
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=I18n.get("task_name_health_check"),
             task_type=I18n.get("task_type_sys_check"),
             coroutine_factory=_run_health_check,
             cancellable=True,
             unique_key="sys_health_check",
         )
+
+        if task_id is None:
+            self.btn_check_health.disabled = False
+            self._safe_update()
 
     async def full_daily_sync(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_full_sync")
