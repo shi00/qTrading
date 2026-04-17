@@ -147,6 +147,61 @@ class TradeCalendarService:
             logger.warning(f"[TradeCalendarService] API fetch failed for {start_date} - {end_date}: {e}")
             return None
 
+    async def ensure_calendar_range(self, start_date, end_date) -> bool:
+        """
+        确保 trade_cal 表覆盖 [start_date, end_date] 的完整日历。
+
+        此方法用于初始化阶段的批量同步，不同于按需懒加载。
+        - 检查 DB 已有覆盖范围
+        - 对缺失范围调 API 批量拉取（完整日历，含非交易日）
+        - 幂等设计：重复调用不会重复写入（upsert）
+
+        Args:
+            start_date: 需要覆盖的起始日期
+            end_date: 需要覆盖的截止日期
+
+        Returns:
+            bool: 是否成功确保覆盖
+        """
+        start_obj = self._to_date(start_date)
+        end_obj = self._to_date(end_date)
+        if start_obj is None or end_obj is None:
+            return False
+
+        try:
+            # 1. 检查 DB 已有覆盖范围
+            existing_range = await self._cache.get_trade_cal_range()
+            db_min, db_max = existing_range
+
+            if db_min and db_max:
+                db_min = self._to_date(db_min)
+                db_max = self._to_date(db_max)
+                if db_min <= start_obj and db_max >= end_obj:
+                    # 简单的范围检查：如果边界覆盖了就认为完整
+                    # 更精确的方式是 count 日期数，但作为初始化快速路径这已足够
+                    logger.debug(
+                        f"[TradeCalendarService] Calendar range already covers "
+                        f"{start_obj} to {end_obj} (DB: {db_min} to {db_max})"
+                    )
+                    return True
+
+            # 2. 调 API 批量拉取完整日历（不带 is_open 过滤）
+            df = await self._api.get_trade_cal(start_date=start_obj, end_date=end_obj)
+            if df is not None and not df.empty:
+                await self._ensure_data_persisted(df)
+                logger.info(f"[TradeCalendarService] Bulk synced {len(df)} calendar records ({start_obj} to {end_obj})")
+                return True
+
+            logger.warning(f"[TradeCalendarService] API returned empty for {start_obj} to {end_obj}")
+            return False
+
+        except Exception as e:
+            logger.error(
+                f"[TradeCalendarService] ensure_calendar_range failed: {e}",
+                exc_info=True,
+            )
+            return False
+
     async def is_trading_day(self, date) -> bool:
         """
         判断是否为交易日。
@@ -224,8 +279,20 @@ class TradeCalendarService:
         try:
             df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open=1)
             if df is not None and not df.empty:
-                dates = pd.to_datetime(df["cal_date"]).dt.date.tolist()
-                return sorted(dates)
+                # 数据完整性快速校验：日期跨度 vs 记录数
+                # 3年约730个交易日，如果记录数远低于预期跨度的交易日密度，说明数据不完整
+                span_days = (end_obj - start_obj).days
+                expected_min = max(1, int(span_days * 0.6))  # 保守估计：60% 是交易日
+                if span_days > 30 and len(df) < expected_min * 0.5:
+                    # 数据明显不完整，回退到 API 补充
+                    logger.warning(
+                        f"[TradeCalendarService] DB data incomplete: {len(df)} records "
+                        f"for {span_days} day span (expected >= {expected_min}), "
+                        f"falling back to API"
+                    )
+                else:
+                    dates = pd.to_datetime(df["cal_date"]).dt.date.tolist()
+                    return sorted(dates)
 
             df = await self._fetch_from_api_and_persist(start_obj, end_obj)
             if df is not None and not df.empty:

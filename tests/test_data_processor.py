@@ -48,7 +48,7 @@ class TestDataProcessor(unittest.TestCase):
         self.patcher_config = patch("data.data_processor.ConfigHandler")
         self.mock_config = self.patcher_config.start()
         self.mock_config.get_sync_max_concurrent_heavy.return_value = 5
-        self.patcher_config_mixin = patch("data.mixins.health_mixin.ConfigHandler", self.mock_config)
+        self.patcher_config_mixin = patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=3)
         self.patcher_config_mixin.start()
 
         # Reset Singleton State
@@ -301,8 +301,10 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_get_latest_trade_date_ttl_cache(self):
         """Test that TTL cache returns cached value within 5 min"""
+        import time
+
         self.processor.trade_calendar._latest_trade_date_cache = {
-            "ts": __import__("time").time(),  # just now
+            "ts": time.time(),  # just now
             "val": datetime.date(2023, 1, 1),
         }
         result = await self.processor.get_latest_trade_date()
@@ -420,10 +422,8 @@ class TestDataProcessor(unittest.TestCase):
     def test_assign_basic_tier_bronze(self):
         asyncio.run(self.async_test_assign_basic_tier_bronze())
 
-    async def async_test_check_data_health(self):
-        """Test health check logic"""
-        # Scenario 1: Healthy (Green)
-        # Mock trade dates matching local cache exactly
+    async def async_test_check_data_health_green(self):
+        """Test health check logic - Healthy (Green)"""
         mock_trade_dates = ["20230101", "20230102", "20230103"]
         mock_cal_df = pd.DataFrame({"cal_date": mock_trade_dates, "is_open": [1, 1, 1]})
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_cal_df)
@@ -448,7 +448,11 @@ class TestDataProcessor(unittest.TestCase):
             res = await self.processor.check_data_health()
             self.assertEqual(res["status"], "green")
 
-        # Scenario 2: Lagging (Yellow)
+    def test_check_data_health_green(self):
+        asyncio.run(self.async_test_check_data_health_green())
+
+    async def async_test_check_data_health_yellow(self):
+        """Test health check logic - Lagging (Yellow)"""
         mock_trade_dates_2 = ["20230101", "20230102", "20230103", "20230104"]
         mock_cal_df_2 = pd.DataFrame(
             {"cal_date": mock_trade_dates_2, "is_open": [1] * 4},
@@ -478,7 +482,11 @@ class TestDataProcessor(unittest.TestCase):
             res = await self.processor.check_data_health()
             self.assertEqual(res["status"], "yellow")
 
-        # Scenario 3: Missing Critical Tables (Red)
+    def test_check_data_health_yellow(self):
+        asyncio.run(self.async_test_check_data_health_yellow())
+
+    async def async_test_check_data_health_red(self):
+        """Test health check logic - Missing Critical Tables (Red)"""
         self.mock_cache.check_comprehensive_health = AsyncMock(
             return_value={
                 "global_trade_days": 0,
@@ -515,8 +523,8 @@ class TestDataProcessor(unittest.TestCase):
             res = await self.processor.check_data_health()
             self.assertEqual(res["status"], "red")
 
-    def test_check_data_health(self):
-        asyncio.run(self.async_test_check_data_health())
+    def test_check_data_health_red(self):
+        asyncio.run(self.async_test_check_data_health_red())
 
     async def async_test_check_data_health_depth_insufficient(self):
         """Test depth check triggers yellow when actual trade days < 95% of required"""
@@ -619,6 +627,7 @@ class TestDataProcessor(unittest.TestCase):
         trade_date = datetime.date(2023, 10, 25)
 
         # Mock Cache existence
+        self.processor.cache.check_data_exists = AsyncMock(return_value=True)
         self.processor.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame({"close": [10]}),
         )
@@ -632,7 +641,7 @@ class TestDataProcessor(unittest.TestCase):
         """Test cache miss fetches from API and saves"""
         target_date = datetime.date(2023, 10, 25)
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20200101")
-        self.mock_cache.check_data_exists = AsyncMock(return_value=False)
+        self.processor.cache.check_data_exists = AsyncMock(return_value=False)
 
         mock_quotes = pd.DataFrame(
             {"ts_code": ["000001.SZ"], "trade_date": ["20231025"]},
@@ -654,12 +663,19 @@ class TestDataProcessor(unittest.TestCase):
         df = await self.processor.sync_daily_market_snapshot(target_date)
 
         self.assertIsNotNone(df)
+        self.assertIn("ts_code", df.columns)
         self.assertIn("pe", df.columns)
-        self.mock_cache.save_daily_quotes.assert_called()
-        self.mock_cache.save_daily_indicators.assert_called()
+        self.assertEqual(df.iloc[0]["ts_code"], "000001.SZ")
+        self.mock_cache.get_screening_data.assert_called_with(target_date)
 
-    def test_sync_daily_market_snapshot(self):
+        # Verify save methods were called by Strategy
+        self.assertEqual(self.mock_cache.save_daily_quotes.call_count, 1)
+        self.assertEqual(self.mock_cache.save_daily_indicators.call_count, 1)
+
+    def test_sync_daily_market_snapshot_hit(self):
         asyncio.run(self.async_test_sync_daily_market_cache_hit())
+
+    def test_sync_daily_market_snapshot_miss(self):
         asyncio.run(self.async_test_sync_daily_market_cache_miss())
 
     # --- sync_stock_basic ---
@@ -1052,7 +1068,7 @@ class TestDataProcessor(unittest.TestCase):
         asyncio.run(self.async_test_assign_basic_tier_silver())
 
     # ==========================================================
-    # Section 8: ensure_trade_cal tests removed - now a no-op facade
+    # Section 8: TradeCalendar Service Facade Tests
     # ==========================================================
 
     # ==========================================================

@@ -1246,5 +1246,125 @@ class TestTradeCalendarServiceIntegration(TestDatabaseBase):
         self.assertIsInstance(result, pd.DataFrame)
 
 
+class TestEnsureCalendarRange(TestDatabaseBase):
+    """Test TradeCalendarService.ensure_calendar_range and related behavior."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.mock_api = MagicMock()
+        self.mock_api.get_trade_cal = AsyncMock()
+        self.service = TradeCalendarService(self.cache, self.mock_api)
+
+    async def asyncTearDown(self):
+        await super().asyncTearDown()
+
+    async def _seed_trade_calendar(self, start_date, end_date):
+        """Seed the database with mixed trade calendar data."""
+        dates = []
+        current = start_date
+        while current <= end_date:
+            dates.append(
+                {
+                    "cal_date": current.strftime("%Y%m%d"),
+                    "is_open": 0 if current.weekday() >= 5 else 1,
+                    "exchange": "SSE",
+                }
+            )
+            current += datetime.timedelta(days=1)
+        df = pd.DataFrame(dates)
+        await self.cache.save_trade_cal(df)
+
+    async def test_ensure_calendar_range_bulk_sync(self):
+        """ensure_calendar_range 应一次性写入交易日和非交易日。"""
+        start = datetime.date(2024, 3, 1)
+        end = datetime.date(2024, 3, 31)
+
+        api_dates = []
+        current = start
+        while current <= end:
+            api_dates.append(
+                {
+                    "cal_date": current.strftime("%Y%m%d"),
+                    "is_open": 0 if current.weekday() >= 5 else 1,
+                    "exchange": "SSE",
+                }
+            )
+            current += datetime.timedelta(days=1)
+        self.mock_api.get_trade_cal.return_value = pd.DataFrame(api_dates)
+
+        result = await self.service.ensure_calendar_range(start, end)
+        self.assertTrue(result)
+
+        all_df = await self.cache.get_trade_cal(start, end)
+        self.assertEqual(len(all_df), 31)
+
+        trading_df = await self.cache.get_trade_cal(start, end, is_open=1)
+        non_trading_df = await self.cache.get_trade_cal(start, end, is_open=0)
+        self.assertGreater(len(trading_df), 0)
+        self.assertGreater(len(non_trading_df), 0)
+        self.assertEqual(len(trading_df) + len(non_trading_df), 31)
+
+    async def test_ensure_calendar_range_idempotent(self):
+        """已覆盖范围时不应重复调用 API。"""
+        start = datetime.date(2024, 3, 1)
+        end = datetime.date(2024, 3, 31)
+        await self._seed_trade_calendar(start, end)
+
+        result = await self.service.ensure_calendar_range(start, end)
+        self.assertTrue(result)
+        self.mock_api.get_trade_cal.assert_not_called()
+
+    async def test_ensure_calendar_range_api_no_is_open_filter(self):
+        """ensure_calendar_range 调 API 时不应传 is_open 参数。"""
+        self.mock_api.get_trade_cal.return_value = pd.DataFrame(
+            {"cal_date": ["20240301"], "is_open": [1], "exchange": ["SSE"]}
+        )
+
+        await self.service.ensure_calendar_range(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
+
+        call_kwargs = self.mock_api.get_trade_cal.call_args
+        self.assertIsNotNone(call_kwargs, "API 应被调用")
+        self.assertNotIn("is_open", call_kwargs.kwargs)
+
+    async def test_non_trading_days_dont_affect_count(self):
+        """DB 包含非交易日时 count_trade_days() 仍只计算交易日。"""
+        start = datetime.date(2024, 3, 18)
+        end = datetime.date(2024, 3, 24)
+        await self._seed_trade_calendar(start, end)
+
+        result = await self.service.count_trade_days(start, end)
+        self.assertEqual(result, 5)
+
+    async def test_is_trading_day_weekend_db_hit(self):
+        """带 is_open=0 记录后，周末判断应直接 DB 命中，不调 API。"""
+        start = datetime.date(2024, 3, 18)
+        end = datetime.date(2024, 3, 24)
+        await self._seed_trade_calendar(start, end)
+
+        result = await self.service.is_trading_day(datetime.date(2024, 3, 23))
+        self.assertFalse(result)
+        self.mock_api.get_trade_cal.assert_not_called()
+
+    async def test_calendar_mixin_delegates_to_ensure_calendar_range(self):
+        """CalendarMixin.ensure_trade_cal 应正确委托给 ensure_calendar_range。"""
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = self.service
+        mock_dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+
+        from data.mixins.calendar_mixin import CalendarMixin
+
+        mixin = CalendarMixin.__new__(CalendarMixin)
+        mixin.trade_calendar = mock_dp.trade_calendar
+
+        result = await mixin.ensure_trade_cal(
+            datetime.date(2024, 12, 31), required_start_date=datetime.date(2024, 1, 1)
+        )
+
+        self.assertTrue(result)
+        mock_dp.trade_calendar.ensure_calendar_range.assert_called_once_with(
+            datetime.date(2024, 1, 1), datetime.date(2024, 12, 31)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -63,14 +63,6 @@ class CalendarMixin:
     async def ensure_trade_cal(self, end_date, required_start_date=None):
         """
         Ensure trade calendar covers [required_start_date, end_date].
-
-        .. deprecated::
-            This method is no longer needed. TradeCalendarService handles
-            data synchronization automatically.
         """
-        warnings.warn(
-            "ensure_trade_cal is deprecated. TradeCalendarService handles sync automatically.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return True
+        start = required_start_date if required_start_date else end_date
+        return await self.trade_calendar.ensure_calendar_range(start, end_date)

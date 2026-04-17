@@ -357,18 +357,20 @@ class TushareClient:
     # Whitelist of allowed macro API names to prevent arbitrary API injection
     _MACRO_API_WHITELIST = {"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"}
 
-    async def get_trade_cal(self, start_date: str | None, end_date: str | None, exchange: str = "SSE"):
+    async def get_trade_cal(
+        self, start_date: str | None, end_date: str | None, exchange: str = "SSE", is_open: int | None = None
+    ):
         """
         Get trade calendar.
         Note: This is the raw API wrapper. For is_trading_day checks, use is_trading_day()
         which implements optimized year-based caching.  # type: ignore
         """
+        kwargs = dict(exchange=exchange, start_date=start_date, end_date=end_date)
+        if is_open is not None:
+            kwargs["is_open"] = str(is_open)
         return await self._handle_api_call(
             self.pro.trade_cal,
-            exchange=exchange,
-            start_date=start_date,
-            end_date=end_date,
-            is_open="1",
+            **kwargs,
         )
 
     async def get_stock_basic(self, list_status: str = "L"):

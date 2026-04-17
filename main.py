@@ -56,9 +56,9 @@ async def main(page: ft.Page):
                 pass
 
             await asyncio.sleep(0.5)
-            import sys
+            import os
 
-            sys.exit(0)
+            os._exit(0)
 
     page.window.on_event = _on_window_event
 
@@ -72,9 +72,9 @@ async def main(page: ft.Page):
         if not was_window_path:
             logger.info("[Main] External disconnect — exiting after cleanup.")
             await asyncio.sleep(0.5)
-            import sys
+            import os
 
-            sys.exit(0)
+            os._exit(0)
 
     page.on_disconnect = _on_disconnect
 
