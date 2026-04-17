@@ -44,10 +44,12 @@ class TestDataProcessor(unittest.TestCase):
         )
         self.patcher_api.start()
 
-        # Patch ConfigHandler
+        # Patch ConfigHandler (both DataProcessor and HealthCheckMixin import paths)
         self.patcher_config = patch("data.data_processor.ConfigHandler")
         self.mock_config = self.patcher_config.start()
-        self.mock_config.get_sync_max_concurrent_heavy.return_value = 5  # Configure ConfigHandler return value
+        self.mock_config.get_sync_max_concurrent_heavy.return_value = 5
+        self.patcher_config_mixin = patch("data.mixins.health_mixin.ConfigHandler", self.mock_config)
+        self.patcher_config_mixin.start()
 
         # Reset Singleton State
         DataProcessor._instance = None
@@ -119,7 +121,8 @@ class TestDataProcessor(unittest.TestCase):
 
         # Configure ConfigHandler return value
         self.mock_config.get_sync_max_concurrent_heavy.return_value = 5
-        self.mock_config.get_sync_request_delay.return_value = 0  # Zero delay for tests
+        self.mock_config.get_sync_request_delay.return_value = 0
+        self.mock_config.get_init_history_years.return_value = 3
 
         # Configure check_comprehensive_health default for mocks
         # CRITICAL: Must include ALL tables marked 'critical' in TABLE_DEFINITIONS:
@@ -140,6 +143,7 @@ class TestDataProcessor(unittest.TestCase):
     def tearDown(self):
         self.patcher_tpm.stop()
         self.patcher_api.stop()
+        self.patcher_config_mixin.stop()
         self.patcher_config.stop()
 
     # ==========================================================
@@ -354,7 +358,7 @@ class TestDataProcessor(unittest.TestCase):
         asyncio.run(self.async_test_get_trade_dates_fallback())
 
     async def async_test_ensure_trade_cal_memory_cache(self):
-        """Test ensure_trade_cal is now a no-op (delegated to TradeCalendarService)"""
+        """Test ensure_trade_cal correctly delegates to TradeCalendarService"""
         result = await self.processor.ensure_trade_cal("20230101")
         self.assertTrue(result)
 
@@ -513,6 +517,89 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_check_data_health(self):
         asyncio.run(self.async_test_check_data_health())
+
+    async def async_test_check_data_health_depth_insufficient(self):
+        """Test depth check triggers yellow when actual trade days < 95% of required"""
+        self.mock_cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "global_trade_days": 500,
+                "tables": {
+                    "daily_quotes": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.67},
+                    "daily_indicators": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.67},
+                    "financial_reports": {"ratio": 0.95, "type": "stock"},
+                    "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
+                    "stock_basic": {"ratio": 1.0, "type": "global"},
+                },
+            },
+        )
+        mock_trade_dates = ["20230101", "20230102", "20230103"]
+        self.mock_cache.get_cached_trade_dates = AsyncMock(
+            return_value={"20230101", "20230102", "20230103"},
+        )
+
+        with (
+            patch.object(
+                self.processor,
+                "get_latest_trade_date",
+                new_callable=AsyncMock,
+                return_value="20230103",
+            ),
+            patch.object(
+                self.processor,
+                "get_trade_dates",
+                new_callable=AsyncMock,
+                return_value=mock_trade_dates,
+            ),
+        ):
+            self.processor._health_cache = {"time": 0, "data": None}
+            res = await self.processor.check_data_health()
+            self.assertEqual(res["status"], "yellow")
+            self.assertTrue(any("深度不足" in r or "depth" in r.lower() for r in res.get("reasons", [])))
+            self.assertEqual(res["details"]["missing_depth"], 2)
+
+    def test_check_data_health_depth_insufficient(self):
+        asyncio.run(self.async_test_check_data_health_depth_insufficient())
+
+    async def async_test_check_data_health_depth_sufficient(self):
+        """Test depth check passes when actual trade days >= 95% of required"""
+        self.mock_cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "global_trade_days": 730,
+                "tables": {
+                    "daily_quotes": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.97},
+                    "daily_indicators": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.97},
+                    "financial_reports": {"ratio": 0.95, "type": "stock"},
+                    "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
+                    "stock_basic": {"ratio": 1.0, "type": "global"},
+                },
+            },
+        )
+        mock_trade_dates = ["20230101", "20230102", "20230103"]
+        self.mock_cache.get_cached_trade_dates = AsyncMock(
+            return_value={"20230101", "20230102", "20230103"},
+        )
+
+        with (
+            patch.object(
+                self.processor,
+                "get_latest_trade_date",
+                new_callable=AsyncMock,
+                return_value="20230103",
+            ),
+            patch.object(
+                self.processor,
+                "get_trade_dates",
+                new_callable=AsyncMock,
+                return_value=mock_trade_dates,
+            ),
+        ):
+            self.processor._health_cache = {"time": 0, "data": None}
+            res = await self.processor.check_data_health()
+            self.assertEqual(res["status"], "green")
+            self.assertEqual(res["details"]["missing_depth"], 0)
+
+    def test_check_data_health_depth_sufficient(self):
+        asyncio.run(self.async_test_check_data_health_depth_sufficient())
 
     # ==========================================================
     # Section 4: DataProcessor Core Methods

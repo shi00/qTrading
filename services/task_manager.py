@@ -214,6 +214,7 @@ class TaskManager:
             logger.error(
                 f"[TaskManager] Cannot submit task '{name}': no event loop captured.",
             )
+            return None
 
         return task.id
 

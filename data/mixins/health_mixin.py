@@ -271,8 +271,12 @@ class HealthCheckMixin:
             ]
             missing_critical = [t for t in critical_tables if tables.get(t, {}).get("ratio", 0) < 0.1]
 
-            # Count all missing stock tables
-            all_missing = [t for t, v in tables.items() if v.get("type") != "global" and v.get("ratio", 0) < 0.1]
+            # Count all missing stock tables (exclude sparse tables — low coverage is expected)
+            all_missing = [
+                t
+                for t, v in tables.items()
+                if v.get("type") != "global" and v.get("ratio", 0) < 0.1 and not v.get("sparse", False)
+            ]
 
             # Determine Data Status
             data_status = "green"

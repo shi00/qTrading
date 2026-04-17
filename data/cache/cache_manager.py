@@ -595,6 +595,7 @@ class CacheManager:
                             )
 
                     table_type = "stock" if is_stock_table else "global"
+                    is_sparse = meta.get("quality_config", {}).get("sparse", False)
                     results[table] = {
                         "covered": cnt,
                         "ratio": ratio,
@@ -602,10 +603,10 @@ class CacheManager:
                         "depth_ratio": depth_ratio,
                         "breadth_ratio": breadth_ratio,
                         "type": table_type,
+                        "sparse": is_sparse,
                     }
 
                     if ratio < 0.1:
-                        is_sparse = meta.get("quality_config", {}).get("sparse", False)
                         if is_sparse:
                             logger.debug(
                                 f"[CacheManager] Health | Table {table} (sparse): {cnt}/{total_stocks} ({ratio:.1%})",
