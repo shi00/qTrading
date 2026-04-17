@@ -615,12 +615,15 @@ class DataSourceTab(ft.Container):
             finally:
                 self._set_sync_busy(False)
 
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=I18n.get("task_name_daily_sync"),
             task_type=I18n.get("sched_task_type_daily"),
             coroutine_factory=_daily_logic,
             unique_key="daily_sync",
         )
+
+        if task_id is None:
+            self._set_sync_busy(False)
 
     async def _show_confirm_dialog(
         self,
@@ -730,13 +733,16 @@ class DataSourceTab(ft.Container):
             finally:
                 self._set_sync_busy(False)
 
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=I18n.get("task_name_doubao_rebuild", "AI概念重建"),
             task_type="AI打标",
             coroutine_factory=_doubao_logic,
             cancellable=True,
             unique_key="doubao_sync",
         )
+
+        if task_id is None:
+            self._set_sync_busy(False)
 
     async def confirm_clear_cache(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
@@ -788,13 +794,16 @@ class DataSourceTab(ft.Container):
             finally:
                 self._set_sync_busy(False)
 
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=I18n.get("task_name_clear_cache"),
             task_type="系统维护",
             coroutine_factory=_clear_logic,
             cancellable=False,
             unique_key="cache_clear",
         )
+
+        if task_id is None:
+            self._set_sync_busy(False)
 
     async def init_historical_data(self, e):
         if self.is_syncing and getattr(self.sync_button, "text", "").startswith(
@@ -917,13 +926,19 @@ class DataSourceTab(ft.Container):
 
                 raise RuntimeError(msg) from e
 
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=I18n.get("task_name_init_sync"),
             task_type=I18n.get("task_type_data_sync"),
             coroutine_factory=_run_initial_sync,
             cancellable=True,
             unique_key="system_init_sync",
         )
+
+        if task_id is None:
+            self.sync_button.text = I18n.get("settings_init_data")
+            self.sync_button.style = AppStyles.primary_button()
+            self.sync_button.disabled = False
+            self._set_sync_busy(False)
 
     def update_progress(self, current, total, message):
         if not self.page:

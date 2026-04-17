@@ -276,12 +276,18 @@ class ScreenerViewModel:
             )
 
         # Dispatch to TaskManager!
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=f"{TASK_NAME_PREFIX}: {strategy.name}",
             task_type=I18n.get("task_type_ai_screening"),
             coroutine_factory=_execute_screening,
             cancellable=True,
         )
+
+        if task_id is None:
+            if self.on_progress:
+                self.on_progress(False)
+            if self.on_status:
+                self.on_status(I18n.get("screener_task_rejected"), "orange")
 
     # --- Sorting & Pagination ---
 

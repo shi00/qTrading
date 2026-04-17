@@ -203,6 +203,7 @@
     "screener_saved": "(Saved)",
     "screener_exec_error": "Execution Error: {error}",
     "screener_cancelled": "Strategy execution cancelled by user",
+    "screener_task_rejected": "Task submission rejected, please retry later",
     "screener_blocked": "Blocked: {reason}",
     "screener_internal_error": "Internal system error, check logs for details.",
     "screener_score": "Score",
@@ -1130,5 +1131,5 @@
     "tushare_verify_failed": "Token verification failed",
     "tushare_no_token": "No Token yet?",
     "tushare_register": "Register",
-    "tushare_token_required": "Please enter Token"
+    "tushare_token_required": "Please enter Token",
 }
