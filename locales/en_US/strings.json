@@ -1131,5 +1131,5 @@
     "tushare_verify_failed": "Token verification failed",
     "tushare_no_token": "No Token yet?",
     "tushare_register": "Register",
-    "tushare_token_required": "Please enter Token",
+    "tushare_token_required": "Please enter Token"
 }

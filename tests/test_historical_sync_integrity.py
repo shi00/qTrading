@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
+import pytest_asyncio
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -1213,7 +1214,7 @@ class TestM6CacheManagerCheckTableHasData:
 
         return mock_engine, mock_conn
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def cache_manager(self):
         """创建 CacheManager 实例"""
         from data.cache.cache_manager import CacheManager
@@ -1280,7 +1281,7 @@ class TestM6CacheManagerCheckTableHasData:
 class TestCacheManagerGetIncompleteFinancialStocks:
     """C-NEW-2 修复验证：CacheManager.get_incomplete_financial_stocks 参数传递"""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def cache_manager(self):
         """创建 CacheManager 实例"""
         from data.cache.cache_manager import CacheManager

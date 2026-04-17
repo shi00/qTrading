@@ -176,14 +176,13 @@ class TradeCalendarService:
             if db_min and db_max:
                 db_min = self._to_date(db_min)
                 db_max = self._to_date(db_max)
-                if db_min is not None and db_max is not None:
-                    if db_min <= start_obj and db_max >= end_obj:
-                        # 简单的范围检查：如果边界覆盖了就认为完整
-                        # 更精确的方式是 count 日期数，但作为初始化快速路径这已足够
-                        logger.debug(
-                            f"[TradeCalendarService] Calendar range already covers "
-                            f"{start_obj} to {end_obj} (DB: {db_min} to {db_max})"
-                        )
+                if db_min <= start_obj and db_max >= end_obj:
+                    # 简单的范围检查：如果边界覆盖了就认为完整
+                    # 更精确的方式是 count 日期数，但作为初始化快速路径这已足够
+                    logger.debug(
+                        f"[TradeCalendarService] Calendar range already covers "
+                        f"{start_obj} to {end_obj} (DB: {db_min} to {db_max})"
+                    )
                     return True
 
             # 2. 调 API 批量拉取完整日历（不带 is_open 过滤）

@@ -1131,5 +1131,5 @@
     "tushare_verify_failed": "Token 验证失败",
     "tushare_no_token": "还没有 Token?",
     "tushare_register": "前往注册",
-    "tushare_token_required": "请输入 Token",
+    "tushare_token_required": "请输入 Token"
 }
