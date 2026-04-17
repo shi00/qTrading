@@ -1317,10 +1317,10 @@ class TestEnsureCalendarRange(TestDatabaseBase):
     async def test_ensure_calendar_range_api_no_is_open_filter(self):
         """ensure_calendar_range 调 API 时不应传 is_open 参数。"""
         self.mock_api.get_trade_cal.return_value = pd.DataFrame(
-            {"cal_date": ["20240301"], "is_open": [1], "exchange": ["SSE"]}
+            {"cal_date": ["20250301"], "is_open": [1], "exchange": ["SSE"]}
         )
 
-        await self.service.ensure_calendar_range(datetime.date(2024, 3, 1), datetime.date(2024, 3, 31))
+        await self.service.ensure_calendar_range(datetime.date(2025, 3, 1), datetime.date(2025, 3, 31))
 
         call_kwargs = self.mock_api.get_trade_cal.call_args
         self.assertIsNotNone(call_kwargs, "API 应被调用")
