@@ -624,6 +624,16 @@ class DataSourceTab(ft.Container):
                     ft.Icons.CANCEL_OUTLINED,
                     AppColors.WARNING,
                 )
+                self.metric_storage.set_value(
+                    I18n.get("ds_health_cancelled", "已取消"),
+                    ft.Icons.CANCEL_OUTLINED,
+                    AppColors.WARNING,
+                )
+                self.health_summary_container.content = ft.Text(
+                    I18n.get("ds_health_cancelled", "已取消"),
+                    size=12,
+                    color=AppColors.WARNING,
+                )
                 raise
             except Exception as e:
                 logger.error(
@@ -631,6 +641,11 @@ class DataSourceTab(ft.Container):
                     exc_info=True,
                 )
                 self.metric_health.set_value(
+                    I18n.get("common_check_fail").format(error=""),
+                    ft.Icons.ERROR,
+                    AppColors.ERROR,
+                )
+                self.metric_storage.set_value(
                     I18n.get("common_check_fail").format(error=""),
                     ft.Icons.ERROR,
                     AppColors.ERROR,
