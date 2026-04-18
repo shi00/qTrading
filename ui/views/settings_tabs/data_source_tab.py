@@ -302,7 +302,9 @@ class DataSourceTab(ft.Container):
         self._tm.unsubscribe(self._on_task_update)
 
     def _on_task_update(self, current_tasks: list[AppTask]):
-        if not self.page or not self.is_syncing:
+        if not self.page:
+            return
+        if not self.is_syncing and not self._active_task_ids:
             return
         try:
             self.page.run_task(self._handle_task_state_change, current_tasks)
@@ -310,8 +312,6 @@ class DataSourceTab(ft.Container):
             logger.debug(f"[DataSourceTab] Task update scheduling failed: {e}")
 
     async def _handle_task_state_change(self, current_tasks: list[AppTask]):
-        if not self.is_syncing:
-            return
         active_ids = set(self._active_task_ids.values())
         for t in current_tasks:
             if t.id in active_ids and t.status in (
@@ -327,7 +327,7 @@ class DataSourceTab(ft.Container):
                 self._active_task_ids = {k: v for k, v in self._active_task_ids.items() if v != t.id}
                 if unique_key:
                     self._active_btn_map.pop(unique_key, None)
-                if not self._active_task_ids:
+                if not self._active_task_ids and self.is_syncing:
                     self._recover_ui_after_task_terminated(unique_key, t.status)
                 break
 
