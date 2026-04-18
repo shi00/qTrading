@@ -6,7 +6,7 @@ import flet as ft
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from services.task_manager import TaskManager
+from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.components.settings_widgets import (
     ActionChip,
@@ -29,6 +29,11 @@ class DataSourceTab(ft.Container):
         self.show_snack = show_snack_callback
         self.expand = True
         self.is_syncing = False
+
+        self._active_task_ids: dict[str, str] = {}
+        self._active_btn_map: dict[str, ft.Control] = {}
+
+        self._tm = TaskManager()
 
         # Singleton instances (avoid redundant instantiation)
         self._processor = DataProcessor()
@@ -290,9 +295,87 @@ class DataSourceTab(ft.Container):
     def _on_mount(self):
         I18n.subscribe(self.refresh_locale)
         self.tushare_panel.reload_config()
+        self._tm.subscribe(self._on_task_update)
 
     def _on_unmount(self):
         I18n.unsubscribe(self.refresh_locale)
+        self._tm.unsubscribe(self._on_task_update)
+
+    def _on_task_update(self, current_tasks: list[AppTask]):
+        if not self.page or not self.is_syncing:
+            return
+        try:
+            self.page.run_task(self._handle_task_state_change, current_tasks)
+        except Exception as e:
+            logger.debug(f"[DataSourceTab] Task update scheduling failed: {e}")
+
+    async def _handle_task_state_change(self, current_tasks: list[AppTask]):
+        if not self.is_syncing:
+            return
+        active_ids = set(self._active_task_ids.values())
+        for t in current_tasks:
+            if t.id in active_ids and t.status in (
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.INTERRUPTED,
+            ):
+                unique_key = next(
+                    (k for k, v in self._active_task_ids.items() if v == t.id),
+                    None,
+                )
+                self._active_task_ids = {k: v for k, v in self._active_task_ids.items() if v != t.id}
+                if unique_key:
+                    self._active_btn_map.pop(unique_key, None)
+                if not self._active_task_ids:
+                    self._recover_ui_after_task_terminated(unique_key, t.status)
+                break
+
+    def _recover_ui_after_task_terminated(
+        self,
+        unique_key: str | None,
+        final_status: TaskStatus,
+    ):
+        if not self.is_syncing:
+            return
+        if unique_key == "system_init_sync":
+            self._reset_init_sync_ui(final_status)
+        else:
+            self._set_sync_busy(False)
+            if final_status == TaskStatus.CANCELLED:
+                self.show_snack(
+                    I18n.get("settings_msg_sync_cancelled"),
+                    color=AppColors.WARNING,
+                )
+            elif final_status == TaskStatus.FAILED:
+                self.show_snack(
+                    I18n.get("ds_init_fail_generic"),
+                    color=AppColors.ERROR,
+                )
+
+    def _reset_init_sync_ui(self, final_status: TaskStatus = TaskStatus.COMPLETED):
+        if not self.is_syncing:
+            return
+        self.sync_button.text = I18n.get("settings_init_data")
+        self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
+        self.sync_button.style = AppStyles.primary_button()
+        self.sync_button.disabled = False
+        self.progress_bar.visible = False
+        if final_status == TaskStatus.CANCELLED:
+            self.progress_text.value = I18n.get(
+                "ds_progress_cancelled_fmt",
+                msg=I18n.get("settings_msg_sync_cancelled"),
+            )
+        elif final_status == TaskStatus.FAILED:
+            self.progress_text.value = I18n.get("ds_init_fail_generic")
+        else:
+            self.progress_text.value = ""
+        self._set_sync_busy(False)
+        self._safe_update()
+        if final_status == TaskStatus.CANCELLED:
+            self.show_snack(I18n.get("settings_msg_sync_cancelled"), color=AppColors.WARNING)
+        elif final_status == TaskStatus.FAILED:
+            self.show_snack(I18n.get("ds_init_fail_generic"), color=AppColors.ERROR)
 
     def _safe_update(self):
         try:
@@ -586,8 +669,6 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_full_daily_sync(self):
-        from services.task_manager import TaskManager
-
         self._set_sync_busy(True, self.action_full_sync)
 
         async def _daily_logic(task_id: str, **kwargs):
@@ -603,6 +684,13 @@ class DataSourceTab(ft.Container):
                     color=AppColors.SUCCESS,
                 )
                 return "日更完成"
+            except asyncio.CancelledError:
+                if self.is_syncing:
+                    self.show_snack(
+                        I18n.get("settings_msg_sync_cancelled"),
+                        color=AppColors.WARNING,
+                    )
+                raise
             except Exception as ex:
                 from ui.i18n import classify_error
 
@@ -619,11 +707,15 @@ class DataSourceTab(ft.Container):
             name=I18n.get("task_name_daily_sync"),
             task_type=I18n.get("sched_task_type_daily"),
             coroutine_factory=_daily_logic,
+            cancellable=True,
             unique_key="daily_sync",
         )
 
         if task_id is None:
             self._set_sync_busy(False)
+        else:
+            self._active_task_ids["daily_sync"] = task_id
+            self._active_btn_map["daily_sync"] = self.action_full_sync
 
     async def _show_confirm_dialog(
         self,
@@ -702,8 +794,6 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_doubao_rebuild(self):
-        from services.task_manager import TaskManager
-
         self._set_sync_busy(True, self.action_doubao_rebuild)
 
         async def _doubao_logic(task_id: str, **kwargs):
@@ -721,6 +811,13 @@ class DataSourceTab(ft.Container):
                     color=AppColors.SUCCESS,
                 )
                 return "重建完成"
+            except asyncio.CancelledError:
+                if self.is_syncing:
+                    self.show_snack(
+                        I18n.get("settings_msg_sync_cancelled"),
+                        color=AppColors.WARNING,
+                    )
+                raise
             except Exception as ex:
                 from ui.i18n import classify_error
 
@@ -743,6 +840,9 @@ class DataSourceTab(ft.Container):
 
         if task_id is None:
             self._set_sync_busy(False)
+        else:
+            self._active_task_ids["doubao_sync"] = task_id
+            self._active_btn_map["doubao_sync"] = self.action_doubao_rebuild
 
     async def confirm_clear_cache(self, e):
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
@@ -759,8 +859,6 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_clear_cache(self):
-        from services.task_manager import TaskManager, TaskStatus
-
         if self.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
@@ -804,14 +902,19 @@ class DataSourceTab(ft.Container):
 
         if task_id is None:
             self._set_sync_busy(False)
+        else:
+            self._active_task_ids["cache_clear"] = task_id
+            self._active_btn_map["cache_clear"] = self.action_clear_cache
 
     async def init_historical_data(self, e):
         if self.is_syncing and getattr(self.sync_button, "text", "").startswith(
             I18n.get("common_cancel"),
         ):
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
-            # Request cancellation via DataProcessor
             self.page.run_task(self._processor.request_cancel)  # type: ignore
+            task_id = self._active_task_ids.get("system_init_sync")
+            if task_id:
+                self._tm.cancel_task(task_id)
             self.sync_button.text = I18n.get("sys_init_cancel_wait")
             self.sync_button.disabled = True
             self.update()
@@ -872,14 +975,8 @@ class DataSourceTab(ft.Container):
 
                 self.progress_text.value = f"✅ {I18n.get('sys_init_success')}"
                 self.progress_bar.value = 1
+                self._reset_init_sync_ui(TaskStatus.COMPLETED)
                 self.show_snack(I18n.get("settings_init_done"), color=AppColors.SUCCESS)
-
-                # Back to original button state
-                self.sync_button.text = I18n.get("settings_init_data")
-                self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
-                self.sync_button.style = AppStyles.primary_button()
-                self._set_sync_busy(False)
-                self._safe_update()
 
                 if isinstance(report, dict):
                     await self.refresh_health_status(None)
@@ -887,19 +984,7 @@ class DataSourceTab(ft.Container):
                 return I18n.get("sys_init_success")
 
             except asyncio.CancelledError:
-                msg = I18n.get("settings_msg_sync_cancelled")
-                self.show_snack(msg, color=AppColors.WARNING)
-                self.progress_text.value = I18n.get(
-                    "ds_progress_cancelled_fmt",
-                    msg=msg,
-                )
-
-                # Revert UI on cancel
-                self.sync_button.text = I18n.get("settings_init_data")
-                self.sync_button.style = AppStyles.primary_button()
-                self.sync_button.disabled = False
-                self._set_sync_busy(False)
-
+                self._reset_init_sync_ui(TaskStatus.CANCELLED)
                 raise
             except Exception as e:
                 error_str = str(e)
@@ -910,19 +995,12 @@ class DataSourceTab(ft.Container):
                         "ds_init_fail_fmt",
                         error="内部系统错误，请检查系统日志。",
                     )
-
-                self.show_snack(msg, color=AppColors.ERROR)
-                self.progress_text.value = I18n.get("ds_progress_failed_fmt", msg=msg)
                 logger.error(
                     f"[DataSourceTab] Sync | ❌ Init sync failed: {e}",
                     exc_info=True,
                 )
-
-                # Revert UI
-                self.sync_button.text = I18n.get("settings_init_data")
-                self.sync_button.style = AppStyles.primary_button()
-                self.sync_button.disabled = False
-                self._set_sync_busy(False)
+                self._reset_init_sync_ui(TaskStatus.FAILED)
+                self.show_snack(msg, color=AppColors.ERROR)
 
                 raise RuntimeError(msg) from e
 
@@ -939,6 +1017,9 @@ class DataSourceTab(ft.Container):
             self.sync_button.style = AppStyles.primary_button()
             self.sync_button.disabled = False
             self._set_sync_busy(False)
+        else:
+            self._active_task_ids["system_init_sync"] = task_id
+            self._active_btn_map["system_init_sync"] = self.sync_button
 
     def update_progress(self, current, total, message):
         if not self.page:
