@@ -783,6 +783,7 @@
     "ds_health_lag": "数据滞后",
     "ds_health_error": "数据异常/缺失",
     "ds_health_ok": "数据健康",
+    "ds_health_cancelled": "已取消",
     "ds_never_sync": "从未同步",
     "ds_repair_start": "开始针对性修复...",
     "ds_repair_progress": "正在修复... 请勿关闭",

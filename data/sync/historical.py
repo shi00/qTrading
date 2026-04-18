@@ -565,8 +565,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if filtered_count > 0:
                     if len(df_north) == 0:
                         sample_codes = data_map.get("north")["ts_code"].head(5).tolist()
-                        logger.warning(
-                            f"[HistoricalSync] DaySync | ALL {filtered_count} northbound records filtered out! "
+                        logger.debug(
+                            f"[HistoricalSync] DaySync | {filtered_count} records filtered (southbound HK stocks, not northbound A-shares). "
                             f"Sample ts_codes: {sample_codes}"
                         )
                     else:

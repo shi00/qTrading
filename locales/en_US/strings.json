@@ -831,6 +831,7 @@
     "ds_health_lag": "Lagging",
     "ds_health_error": "Error/Missing",
     "ds_health_ok": "Healthy",
+    "ds_health_cancelled": "Cancelled",
     "ds_never_sync": "Never Synced",
     "ds_repair_start": "Starting Repair...",
     "ds_repair_progress": "Repairing... Do not close",

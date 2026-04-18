@@ -618,6 +618,13 @@ class DataSourceTab(ft.Container):
 
                 return I18n.get("task_result_health_done")
 
+            except asyncio.CancelledError:
+                self.metric_health.set_value(
+                    I18n.get("ds_health_cancelled", "已取消"),
+                    ft.Icons.CANCEL_OUTLINED,
+                    AppColors.WARNING,
+                )
+                raise
             except Exception as e:
                 logger.error(
                     f"[DataSourceTab] Health | ❌ Check failed: {e}",
