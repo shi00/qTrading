@@ -230,6 +230,7 @@
     "data_total_rows": "共 {count} 条记录",
     "data_sql_label": "SQL 查询语句",
     "data_sql_hint": "输入 SELECT 查询 (例如: SELECT * FROM stock_basic LIMIT 10)",
+    "data_sql_empty_hint": "请输入 SQL 语句并执行查询",
     "data_sql_execute": "执行 (Ctrl+Enter)",
     "data_sql_result": "查询结果",
     "data_sql_ready": "就绪",

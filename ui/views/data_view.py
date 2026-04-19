@@ -854,6 +854,25 @@ class SQLConsoleTab(ft.Container):
             heading_row_color=AppColors.TABLE_HEADER_BG,
             border=ft.border.all(1, AppColors.TABLE_BORDER),
             column_spacing=20,
+            visible=False,
+        )
+
+        self.empty_state = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Container(height=40),
+                    ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),
+                    ft.Text(
+                        I18n.get("data_sql_empty_hint", default="请输入 SQL 语句并执行查询"),
+                        color=AppColors.TEXT_HINT,
+                        size=14,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            alignment=ft.alignment.center,
+            visible=True,
         )
 
         self.status_text = ft.Text(
@@ -905,7 +924,7 @@ class SQLConsoleTab(ft.Container):
                 ),
                 ft.Container(
                     content=ft.Column(
-                        [ft.Row([self.result_table], scroll=ft.ScrollMode.ALWAYS)],
+                        [self.empty_state, ft.Row([self.result_table], scroll=ft.ScrollMode.ALWAYS)],
                         scroll=ft.ScrollMode.AUTO,
                     ),
                     expand=True,
@@ -919,6 +938,7 @@ class SQLConsoleTab(ft.Container):
             ],
             expand=True,
             spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
     def _set_sql(self, sql):
@@ -934,7 +954,11 @@ class SQLConsoleTab(ft.Container):
         self.progress_ring.visible = True
         self.status_text.value = I18n.get("data_status_executing")
         self.status_text.color = ft.Colors.BLUE
+        self.result_table.visible = False
+        self.empty_state.visible = False
         self.update()
+
+        has_data = False
 
         try:
             start_time = time.time()
@@ -1005,6 +1029,8 @@ class SQLConsoleTab(ft.Container):
                         ft.DataRow(cells=cells, color=row_color),
                     )
 
+                has_data = True
+
             else:
                 self.status_text.value = I18n.get("data_sql_error").format(
                     error=result["error"],
@@ -1018,8 +1044,11 @@ class SQLConsoleTab(ft.Container):
                 error="内部数据库执行错误",
             )
             self.status_text.color = AppColors.ERROR
+            self.result_table.rows = []
             logger.error(f"SQL Execution error: {e}", exc_info=True)
         finally:
+            self.result_table.visible = has_data
+            self.empty_state.visible = not has_data
             self.btn_run.disabled = False
             self.progress_ring.visible = False
             self.update()
@@ -1057,6 +1086,12 @@ class SQLConsoleTab(ft.Container):
             for cell in row.cells:
                 if isinstance(cell.content, ft.Text):
                     cell.content.color = AppColors.TABLE_CELL_TEXT
+
+        # Empty State
+        if isinstance(self.empty_state.content, ft.Column):
+            for ctrl in self.empty_state.content.controls:
+                if isinstance(ctrl, ft.Icon | ft.Text):
+                    ctrl.color = AppColors.TEXT_HINT
 
         if self.page:
             self.update()

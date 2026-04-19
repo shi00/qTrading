@@ -273,6 +273,7 @@
     "data_total_rows": "Total {count} rows",
     "data_sql_label": "SQL Query",
     "data_sql_hint": "Enter SELECT query (e.g. SELECT * FROM stock_basic LIMIT 10)",
+    "data_sql_empty_hint": "Please enter a SQL query and execute",
     "data_sql_execute": "Execute (Ctrl+Enter)",
     "data_sql_result": "Results",
     "data_sql_ready": "Ready",

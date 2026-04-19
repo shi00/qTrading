@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 
 import flet as ft
 
@@ -29,6 +30,7 @@ class DataSourceTab(ft.Container):
         self.show_snack = show_snack_callback
         self.expand = True
         self.is_syncing = False
+        self._init_sync_cancellable = False
 
         self._active_task_ids: dict[str, str] = {}
         self._active_btn_map: dict[str, ft.Control] = {}
@@ -296,10 +298,31 @@ class DataSourceTab(ft.Container):
         I18n.subscribe(self.refresh_locale)
         self.tushare_panel.reload_config()
         self._tm.subscribe(self._on_task_update)
+        self._recover_stale_state()
 
     def _on_unmount(self):
         I18n.unsubscribe(self.refresh_locale)
         self._tm.unsubscribe(self._on_task_update)
+
+    def _recover_stale_state(self):
+        if not self.is_syncing and not self._active_task_ids:
+            return
+        tm = TaskManager()
+        stale_keys = []
+        for key, task_id in list(self._active_task_ids.items()):
+            task = tm.get_task(task_id)
+            if task is None or task.status in (
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.INTERRUPTED,
+            ):
+                stale_keys.append(key)
+        for key in stale_keys:
+            self._active_task_ids.pop(key, None)
+            self._active_btn_map.pop(key, None)
+        if not self._active_task_ids and self.is_syncing:
+            self._set_sync_busy(False)
 
     def _on_task_update(self, current_tasks: list[AppTask]):
         if not self.page:
@@ -313,6 +336,7 @@ class DataSourceTab(ft.Container):
 
     async def _handle_task_state_change(self, current_tasks: list[AppTask]):
         active_ids = set(self._active_task_ids.values())
+        recovered = False
         for t in current_tasks:
             if t.id in active_ids and t.status in (
                 TaskStatus.COMPLETED,
@@ -327,9 +351,9 @@ class DataSourceTab(ft.Container):
                 self._active_task_ids = {k: v for k, v in self._active_task_ids.items() if v != t.id}
                 if unique_key:
                     self._active_btn_map.pop(unique_key, None)
-                if not self._active_task_ids and self.is_syncing:
+                if not self._active_task_ids and self.is_syncing and not recovered:
                     self._recover_ui_after_task_terminated(unique_key, t.status)
-                break
+                    recovered = True
 
     def _recover_ui_after_task_terminated(
         self,
@@ -356,6 +380,7 @@ class DataSourceTab(ft.Container):
     def _reset_init_sync_ui(self, final_status: TaskStatus = TaskStatus.COMPLETED):
         if not self.is_syncing:
             return
+        self._init_sync_cancellable = False
         self.sync_button.text = I18n.get("settings_init_data")
         self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
         self.sync_button.style = AppStyles.primary_button()
@@ -462,7 +487,7 @@ class DataSourceTab(ft.Container):
             size=12,
             color=AppColors.TEXT_SECONDARY,
         )
-        self.update()
+        self._safe_update()
 
         async def _run_health_check(task_id: str, **kwargs):
             try:
@@ -722,8 +747,6 @@ class DataSourceTab(ft.Container):
                     color=AppColors.ERROR,
                 )
                 raise
-            finally:
-                self._set_sync_busy(False)
 
         task_id = TaskManager().submit_task(
             name=I18n.get("task_name_daily_sync"),
@@ -761,13 +784,16 @@ class DataSourceTab(ft.Container):
 
             def close_dialog(e):
                 self._dialog_open = False
-                self.page.close(dialog)  # type: ignore
+                if self.page:
+                    self.page.close(dialog)
 
             def confirm_action(e):
                 self._dialog_open = False
-                self.page.close(dialog)  # type: ignore
+                if not self.page:
+                    return
+                self.page.close(dialog)
                 if asyncio.iscoroutinefunction(on_confirm_callback):
-                    self.page.run_task(on_confirm_callback)  # type: ignore
+                    self.page.run_task(on_confirm_callback)
                 else:
                     on_confirm_callback()
 
@@ -821,7 +847,7 @@ class DataSourceTab(ft.Container):
         async def _doubao_logic(task_id: str, **kwargs):
             tm = TaskManager()
             task = tm.get_task(task_id)
-            cancel_event = task._cancel_event if task else None
+            cancel_event = getattr(task, "_cancel_event", None) if task else None
             try:
                 tm.update_progress(task_id, 0.05, "重启 Playwright 流水线并清空词库...")
                 await self._processor.run_doubao_tagging(
@@ -849,8 +875,6 @@ class DataSourceTab(ft.Container):
                     color=AppColors.ERROR,
                 )
                 raise
-            finally:
-                self._set_sync_busy(False)
 
         task_id = TaskManager().submit_task(
             name=I18n.get("task_name_doubao_rebuild", "AI概念重建"),
@@ -903,7 +927,8 @@ class DataSourceTab(ft.Container):
             try:
                 await self._cache.clear_all_cache()
                 self.show_snack(I18n.get("ds_cache_cleared"))
-                self.page.pubsub.send_all("cache_cleared")  # type: ignore
+                if self.page:
+                    self.page.pubsub.send_all("cache_cleared")
                 return "缓存已清空"
             except Exception as ex:
                 from ui.i18n import classify_error
@@ -929,9 +954,7 @@ class DataSourceTab(ft.Container):
             self._active_btn_map["cache_clear"] = self.action_clear_cache
 
     async def init_historical_data(self, e):
-        if self.is_syncing and getattr(self.sync_button, "text", "").startswith(
-            I18n.get("common_cancel"),
-        ):
+        if self.is_syncing and self._init_sync_cancellable:
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
             self.page.run_task(self._processor.request_cancel)  # type: ignore
             task_id = self._active_task_ids.get("system_init_sync")
@@ -939,7 +962,7 @@ class DataSourceTab(ft.Container):
                 self._tm.cancel_task(task_id)
             self.sync_button.text = I18n.get("sys_init_cancel_wait")
             self.sync_button.disabled = True
-            self.update()
+            self._safe_update()
             return
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
@@ -957,6 +980,7 @@ class DataSourceTab(ft.Container):
 
     def _do_init_historical_data(self):
         self._set_sync_busy(True, self.sync_button)
+        self._init_sync_cancellable = True
 
         # Change button to cancel
         self.sync_button.text = I18n.get("settings_cancel_sync")
@@ -969,7 +993,7 @@ class DataSourceTab(ft.Container):
 
         self.progress_bar.visible = True
         self.progress_bar.value = 0
-        self.update()
+        self._safe_update()
 
         async def _run_initial_sync(task_id: str, **kwargs):
             try:
@@ -1035,6 +1059,7 @@ class DataSourceTab(ft.Container):
         )
 
         if task_id is None:
+            self._init_sync_cancellable = False
             self.sync_button.text = I18n.get("settings_init_data")
             self.sync_button.style = AppStyles.primary_button()
             self.sync_button.disabled = False
@@ -1047,9 +1072,6 @@ class DataSourceTab(ft.Container):
         if not self.page:
             return
 
-        # Throttle updates to prevent freezing UI
-        import time
-
         now = time.time()
         should_update = (current == total) or (not hasattr(self, "_last_ui_update") or now - self._last_ui_update > 0.1)
 
@@ -1061,10 +1083,6 @@ class DataSourceTab(ft.Container):
             self._last_ui_update = now
 
     def on_history_years_change(self, e):
-        """Handle history year dropdown selection"""
-        from ui.theme import AppColors
-        from utils.config_handler import ConfigHandler
-
         try:
             val = int(e.control.value)
             ConfigHandler.set_init_history_years(val)
@@ -1076,7 +1094,7 @@ class DataSourceTab(ft.Container):
                 f"[DataSourceTab] HistoryRange | ❌ Failed to set config: {ex}",
             )
 
-    def _set_sync_busy(self, is_busy: bool, active_btn: ft.Control = None):  # type: ignore
+    def _set_sync_busy(self, is_busy: bool, active_btn: ft.Control | None = None):
         self.is_syncing = is_busy
 
         controls = [
@@ -1137,10 +1155,13 @@ class DataSourceTab(ft.Container):
 
             report = await self._processor.check_data_health()
 
+            if not self.page:
+                return
+
             from ui.components.health_report_dialog import HealthReportDialog
 
             dlg = HealthReportDialog(self.page, report)
-            self.page.open(dlg)  # type: ignore
+            self.page.open(dlg)
 
         except Exception as ex:
             from ui.i18n import classify_error
