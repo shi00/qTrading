@@ -614,14 +614,11 @@ class TableViewerTab(ft.Container):
             self.btn_next.disabled = self.current_page >= total_pages
 
             # Update DataTable Sort State (Show sort arrow)
-            # Update DataTable Sort State (Show sort arrow)
             # Use SNAPSHOT to ensure consistency with the data displayed
             if isinstance(current_sort_index, int):
                 self.data_table.sort_column_index = current_sort_index
             else:
                 self.data_table.sort_column_index = None
-
-            self.data_table.sort_ascending = current_sort_asc
 
             self.data_table.sort_ascending = current_sort_asc
 
@@ -1006,7 +1003,10 @@ class SQLConsoleTab(ft.Container):
                     cells = []
                     for idx, val in enumerate(row):
                         col_name = display_df.columns[idx]
-                        str_val = str(val)
+                        if val is None or __import__("pandas").isna(val):
+                            str_val = "-"
+                        else:
+                            str_val = str(val)
                         if "date" in col_name.lower():
                             import datetime
 
@@ -1051,7 +1051,8 @@ class SQLConsoleTab(ft.Container):
             self.empty_state.visible = not has_data
             self.btn_run.disabled = False
             self.progress_ring.visible = False
-            self.update()
+            if self.page:
+                self.update()
 
     def update_theme(self):
         """Update styles on theme change"""
