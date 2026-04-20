@@ -194,12 +194,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         operation_name="sync_historical",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def sync_historical_data(self, days=365, progress_callback=None):
-        """Delegated to HistoricalSyncStrategy"""
+    async def sync_historical_data(self, days=250, progress_callback=None):
+        """Delegated to HistoricalSyncStrategy. `days` is trading days (250 ≈ 1 year)."""
         result = await self.strategies["historical"].run(
             days=days,
             progress_callback=progress_callback,
         )
+        self._quality_tier = None
         return result
 
     @log_async_operation(
@@ -218,6 +219,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             force=force,
             progress_callback=progress_callback,
         )
+        self._quality_tier = None
         return result.added
 
     async def sync_comprehensive_fundamentals(
@@ -234,6 +236,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             force=force,
             progress_callback=progress_callback,
         )
+        self._quality_tier = None
         return result
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):
@@ -252,6 +255,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             trade_date,
             force=force,
         )
+
+        self._quality_tier = None
 
         # Clear caches to ensure fresh data visibility
         if hasattr(self, "_trade_date_cache"):

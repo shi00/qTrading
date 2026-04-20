@@ -79,7 +79,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     )
     async def run(
         self,
-        days: int = 365,
+        days: int = 250,
         progress_callback: typing.Callable | None = None,
         **kwargs: typing.Any,
     ) -> SyncResult:
@@ -95,7 +95,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if result.status in ["success", "partial"]:
                 end_date = get_now().date()
-                start_date = (get_now() - datetime.timedelta(days=days)).date()
+                calendar_days = int(days * 365 / 250) + 30
+                start_date = (get_now() - datetime.timedelta(days=calendar_days)).date()
                 try:
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=start_date,
@@ -136,10 +137,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
         result: SyncResult,
     ):
         """
-        Sync historical data for the last N days.
+        Sync historical data for the last N trading days.
+        `days` is interpreted as trading days (250 ≈ 1 year).
+        We convert to calendar days using a ~1.46x multiplier (365/250)
+        to ensure the date range covers enough trading days.
         """
         end_date = get_now().date()
-        start_date = (get_now() - datetime.timedelta(days=days)).date()
+        calendar_days = int(days * 365 / 250) + 30
+        start_date = (get_now() - datetime.timedelta(days=calendar_days)).date()
 
         try:
             trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore

@@ -330,7 +330,7 @@ TABLE_DEFINITIONS = {
             "date_col": "end_date",
             "keys": ["ts_code", "end_date"],
         },
-        "quality_config": {"tier": 1, "monitor": True},
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "ts_code": "col_ts_code",
             "end_date": "col_end_date",

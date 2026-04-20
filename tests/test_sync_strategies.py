@@ -398,9 +398,10 @@ class TestHolderSyncStrategy:
         mock_context.api.get_pledge_stat = AsyncMock(return_value=mock_df)
         mock_context.cache.save_pledge_stat = AsyncMock()
 
-        count = await strategy._sync_pledge_stat()
+        count, actual_date = await strategy._sync_pledge_stat()
 
         assert count == 1
+        assert actual_date is not None
 
     @pytest.mark.asyncio
     async def test_run_with_cancellation(self, strategy, mock_context):

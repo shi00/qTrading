@@ -737,6 +737,69 @@ class TestSyncDao:
         result = await sync_dao.get_sync_status(table_name="daily_quotes")
         assert result["record_count"] == 5000
 
+    async def test_sync_status_monotonic_date_protection(self, sync_dao, clean_db):
+        """last_data_date 单调递增保护：旧日期不应覆盖新日期"""
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5000,
+            status="success",
+        )
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 15),
+            record_count=3000,
+            status="success",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_data_date"] == datetime.date(2024, 3, 21)
+        assert result["record_count"] == 5000
+
+    async def test_sync_status_same_date_updates_count(self, sync_dao, clean_db):
+        """同日重跑：last_data_date 不变，record_count 应更新"""
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5000,
+            status="success",
+        )
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5500,
+            status="success",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_data_date"] == datetime.date(2024, 3, 21)
+        assert result["record_count"] == 5500
+
+    async def test_sync_status_null_recovery(self, sync_dao, clean_db):
+        """last_data_date 为 NULL 时，新日期应能正常写入（COALESCE 保护）"""
+        await sync_dao._write_db(
+            'INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") '
+            "VALUES ($1, $2, NULL, NULL, 'error', $3)",
+            ("daily_quotes", datetime.date(2024, 3, 20), datetime.datetime(2024, 3, 20)),
+        )
+
+        result_before = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result_before["last_data_date"] is pd.NaT or result_before["last_data_date"] is None
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5000,
+            status="success",
+        )
+
+        result_after = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result_after["last_data_date"] == datetime.date(2024, 3, 21)
+        assert result_after["record_count"] == 5000
+        assert result_after["status"] == "success"
+
     async def test_get_all_sync_status(self, sync_dao, clean_db):
         """获取所有同步状态"""
         await sync_dao.update_sync_status("daily_quotes", datetime.date(2024, 3, 21), 5000)

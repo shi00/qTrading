@@ -2,6 +2,8 @@ import datetime
 import logging
 import typing
 
+import pandas as pd
+
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
@@ -18,15 +20,12 @@ class HolderSyncStrategy(ISyncStrategy):
     Strategy for syncing Shareholder & Pledge data using O(Quarter) approach.
 
     These tables (stk_holdernumber, top10_holders, pledge_stat) contain
-    quarterly-disclosure data. Fetching by end_date (quarter-end snapshot)
-    returns the entire market in a single paginated API call, making it
-    vastly more efficient than per-stock iteration.
+    quarterly-disclosure data.
 
-    Typical API call counts per sync:
-      - stk_holdernumber: ~2 calls (5500 rows, paginated)
-      - top10_holders:    ~9 calls (54000 rows, paginated at 6000/page)
-      - pledge_stat:      ~2 calls (4100 rows, paginated at 3000/page)
-      Total: ~13 API calls for 100% market coverage
+    API call patterns:
+      - stk_holdernumber: full-market by enddate, ~2 paginated calls
+      - top10_holders: per-stock iteration (ts_code required), ~5000 calls
+      - pledge_stat: full-market by end_date, ~2 paginated calls
     """
 
     def __init__(self, context: typing.Any):
@@ -60,43 +59,37 @@ class HolderSyncStrategy(ISyncStrategy):
                     break
 
                 # --- stk_holdernumber ---
-                count = await self._sync_one_table(
-                    api_func=self.context.api.get_stk_holdernumber,
-                    save_func=self.context.cache.save_holder_number,
-                    table_name="stk_holdernumber",
-                    end_date=qe,
-                )
+                # Note: Tushare uses 'enddate' (not 'end_date') for 截止日期/报告期
+                count = await self._sync_stk_holdernumber(qe)
                 if count < 0:
                     errors += 1
                 else:
                     result.added += count
-                    qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
-                    await self.context.cache.update_sync_status(
-                        "stk_holdernumber",
-                        qe_date,
-                        count,
-                    )
+                    if not self._cancelled:
+                        qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
+                        await self.context.cache.update_sync_status(
+                            "stk_holdernumber",
+                            qe_date,
+                            count,
+                        )
 
                 if errors >= _MAX_ERRORS or self._cancelled:
                     break
 
                 # --- top10_holders ---
-                count = await self._sync_one_table(
-                    api_func=self.context.api.get_top10_holders,
-                    save_func=self.context.cache.save_top10_holders,
-                    table_name="top10_holders",
-                    end_date=qe,
-                )
+                # Note: ts_code is required by Tushare API, must iterate per stock
+                count = await self._sync_top10_holders(qe)
                 if count < 0:
                     errors += 1
                 else:
                     result.added += count
-                    qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
-                    await self.context.cache.update_sync_status(
-                        "top10_holders",
-                        qe_date,
-                        count,
-                    )
+                    if not self._cancelled:
+                        qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
+                        await self.context.cache.update_sync_status(
+                            "top10_holders",
+                            qe_date,
+                            count,
+                        )
 
                 if errors >= _MAX_ERRORS or self._cancelled:
                     break
@@ -105,15 +98,14 @@ class HolderSyncStrategy(ISyncStrategy):
             # pledge_stat uses weekly trading dates, not quarter-ends.
             # We sync it once per run, outside the quarterly loop.
             if errors < _MAX_ERRORS and not self._cancelled:
-                count = await self._sync_pledge_stat()
+                count, actual_date = await self._sync_pledge_stat()
                 if count < 0:
                     errors += 1
-                else:
+                elif count > 0:
                     result.added += count
-                    today = get_now().date()
                     await self.context.cache.update_sync_status(
                         "pledge_stat",
-                        today,
+                        actual_date or get_now().date(),
                         count,
                     )
 
@@ -131,6 +123,105 @@ class HolderSyncStrategy(ISyncStrategy):
             result.errors.append(str(e))
 
         return result
+
+    async def _sync_stk_holdernumber(self, enddate: str):
+        """
+        Fetch full-market stk_holdernumber snapshot by enddate (截止日期/报告期).
+        Tushare uses 'enddate' parameter (not 'end_date') for the reporting period.
+        Returns row count on success, -1 on error.
+        """
+        try:
+            df = await self.context.api.get_stk_holdernumber(enddate=enddate)
+            if df is not None and not df.empty:
+                await self.context.cache.save_holder_number(df)
+                logger.debug(
+                    f"[HolderSync] Table | stk_holdernumber enddate={enddate}: {len(df)} records",
+                )
+                return len(df)
+            logger.debug(
+                f"[HolderSync] Table | stk_holdernumber enddate={enddate}: no data",
+            )
+            return 0
+        except Exception as e:
+            self._log_sync_error("stk_holdernumber", enddate, e)
+            return -1
+
+    async def _sync_top10_holders(self, period: str):
+        """
+        Fetch top10_holders for all stocks by iterating per-stock.
+        Tushare requires ts_code as a mandatory parameter for this API.
+        Uses 'period' parameter for the reporting period (YYYYMMDD).
+        Returns total row count on success, -1 on error.
+        """
+        try:
+            stock_df = await self.context.cache.get_stock_basic()
+            if stock_df is None or stock_df.empty:
+                logger.warning("[HolderSync] No stock list available for top10_holders sync")
+                return -1
+
+            ts_codes = stock_df["ts_code"].tolist()
+            total = len(ts_codes)
+            all_dfs = []
+            stock_errors = 0
+            consecutive_errors = 0
+
+            for i, ts_code in enumerate(ts_codes):
+                if self._cancelled:
+                    logger.debug("[HolderSync] Stop | Cancelled during top10_holders iteration.")
+                    break
+
+                try:
+                    df = await self.context.api.get_top10_holders(
+                        ts_code=ts_code,
+                        period=period,
+                    )
+                    if df is not None and not df.empty:
+                        all_dfs.append(df)
+                    consecutive_errors = 0
+                except Exception as e:
+                    stock_errors += 1
+                    consecutive_errors += 1
+                    if stock_errors <= 3:
+                        logger.debug(
+                            f"[HolderSync] top10_holders | Skip {ts_code} period={period}: {e}",
+                        )
+                    if consecutive_errors >= _MAX_ERRORS:
+                        logger.warning(
+                            f"[HolderSync] top10_holders | {consecutive_errors} consecutive errors, aborting",
+                        )
+                        return -1
+
+                if (i + 1) % 500 == 0:
+                    logger.debug(
+                        f"[HolderSync] top10_holders | Progress: {i + 1}/{total} stocks, errors={stock_errors}",
+                    )
+
+            if all_dfs:
+                combined = pd.concat(all_dfs, ignore_index=True)
+                await self.context.cache.save_top10_holders(combined)
+                logger.debug(
+                    f"[HolderSync] Table | top10_holders period={period}: {len(combined)} records from {len(all_dfs)} stocks",
+                )
+                return len(combined)
+
+            logger.debug(
+                f"[HolderSync] Table | top10_holders period={period}: no data",
+            )
+            return 0
+        except Exception as e:
+            self._log_sync_error("top10_holders", period, e)
+            return -1
+
+    def _log_sync_error(self, table_name: str, date_str: str, e: Exception):
+        err_str = str(e).lower()
+        if "permission" in err_str or "积分" in err_str:
+            logger.warning(
+                f"[HolderSync] ⛔ Permission denied for {table_name}: {e}",
+            )
+        else:
+            logger.warning(
+                f"[HolderSync] Table | ⚠️ Error syncing {table_name} date={date_str}: {e}",
+            )
 
     async def _sync_one_table(
         self,
@@ -170,28 +261,61 @@ class HolderSyncStrategy(ISyncStrategy):
     async def _sync_pledge_stat(self):
         """
         Fetch the latest full-market pledge_stat snapshot.
-        pledge_stat snapshots are keyed by trading dates (typically weekly Fridays).
-        We pass the most recent Friday as end_date to get a single snapshot,
-        avoiding infinite pagination over all historical data.
-        Returns row count on success, -1 on error.
+        pledge_stat snapshots are keyed by end_date (typically weekly Fridays).
+
+        Strategy: Try the most recent 4 Fridays as end_date to find a valid snapshot.
+        This avoids pulling all historical data by calling without end_date.
+        Returns (row_count, actual_end_date) on success, (-1, None) on error.
         """
         try:
             today = get_now().date()
             days_since_friday = (today.weekday() - 4) % 7
             last_friday = today - datetime.timedelta(days=days_since_friday)
-            end_date = last_friday.strftime("%Y%m%d")
 
-            df = await self.context.api.get_pledge_stat(end_date=end_date)
+            df = None
+            actual_end_date = None
+            all_api_failed = True
+            for attempt in range(4):
+                if self._cancelled:
+                    logger.debug("[HolderSync] pledge_stat | Cancelled during retry loop.")
+                    return -1, None
+
+                candidate = last_friday - datetime.timedelta(weeks=attempt)
+                end_date = candidate.strftime("%Y%m%d")
+                try:
+                    df = await self.context.api.get_pledge_stat(end_date=end_date)
+                    all_api_failed = False
+                except Exception as api_err:
+                    logger.debug(
+                        f"[HolderSync] pledge_stat | API error for end_date={end_date}: {api_err}",
+                    )
+                    continue
+
+                if df is not None and not df.empty:
+                    actual_end_date = candidate
+                    logger.debug(
+                        f"[HolderSync] pledge_stat | Got data for end_date={end_date}",
+                    )
+                    break
+                logger.debug(
+                    f"[HolderSync] pledge_stat | No data for end_date={end_date}",
+                )
+
             if df is not None and not df.empty:
                 await self.context.cache.save_pledge_stat(df)
                 logger.debug(
-                    f"[HolderSync] Table | pledge_stat end_date={end_date}: {len(df)} records",
+                    f"[HolderSync] Table | pledge_stat: {len(df)} records",
                 )
-                return len(df)
+                return len(df), actual_end_date
+
+            if all_api_failed:
+                logger.warning("[HolderSync] Table | ⚠️ pledge_stat: all API calls failed")
+                return -1, None
+
             logger.debug(
-                f"[HolderSync] Table | pledge_stat end_date={end_date}: no data",
+                "[HolderSync] Table | pledge_stat: no data",
             )
-            return 0
+            return 0, None
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
@@ -200,7 +324,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
             else:
                 logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")
-            return -1
+            return -1, None
 
     @staticmethod
     def _get_recent_quarter_ends(count: typing.Any = 2):

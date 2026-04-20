@@ -158,6 +158,13 @@ class TushareClient:
                 import random
 
                 error_msg = str(e).lower()
+                is_permission_error = (
+                    "权限" in error_msg
+                    or "积分" in error_msg
+                    or "permission" in error_msg
+                    or "无权" in error_msg
+                    or "没有权限" in error_msg
+                )
                 is_rate_limit = (
                     "每分钟最多访问" in error_msg
                     or "抱歉" in error_msg
@@ -172,6 +179,12 @@ class TushareClient:
                     or "connection" in error_msg.lower()
                     or "timed out" in error_msg.lower()
                 )
+
+                if is_permission_error:
+                    logger.error(
+                        f"[tushare_api] PERMISSION_DENIED ({api_name}): {error_msg}",
+                    )
+                    raise e
 
                 if is_rate_limit:
                     sleep_time = (2**i) * 60 + random.uniform(0, 10)
@@ -819,14 +832,21 @@ class TushareClient:
     async def get_top10_holders(
         self,
         ts_code: str | None = None,
+        period: str | None = None,
         end_date: str | None = None,
         start_date: str | None = None,
         ann_date: str | None = None,
     ):  # type: ignore
-        """Get Top 10 Holders"""
-        return await self._handle_api_call_paginated(
+        """Get Top 10 Holders
+
+        Args:
+            ts_code: TS代码 (required by Tushare API for per-stock queries)
+            period: 报告期 (e.g. '20251231'), typically the quarter-end date
+        """
+        return await self._handle_api_call(
             self.pro.top10_holders,
             ts_code=ts_code,
+            period=period,
             ann_date=ann_date,
             start_date=start_date,
             end_date=end_date,
@@ -853,15 +873,21 @@ class TushareClient:
     async def get_stk_holdernumber(
         self,
         ts_code: str | None = None,
+        enddate: str | None = None,
         end_date: str | None = None,
         start_date: str | None = None,
         ann_date: str | None = None,
     ):  # type: ignore
-        """Get Stock Holder Number (Chip Concentration)"""
+        """Get Stock Holder Number (Chip Concentration)
+
+        Args:
+            enddate: 截止日期/报告期 (e.g. '20251231'), distinct from end_date which is 公告结束日期
+        """
         return await self._handle_api_call_paginated(
             self.pro.stk_holdernumber,
             ts_code=ts_code,
             ann_date=ann_date,
+            enddate=enddate,
             end_date=end_date,
             start_date=start_date,
             fields="ts_code,end_date,ann_date,holder_num,holder_num_change,holder_num_ratio",
