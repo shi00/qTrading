@@ -46,21 +46,23 @@ class BaseDao:
                 df[col] = None
 
         if table_name:
-            from data.persistence.models import DATE_COLUMNS, DATETIME_COLUMNS
+            from data.persistence.models import Base
+            from sqlalchemy import Date, DateTime
 
-            target_date_cols = DATE_COLUMNS.get(table_name, [])
-            target_datetime_cols = DATETIME_COLUMNS.get(table_name, [])
-            for col in target_date_cols:
-                if col in df.columns:
-                    try:
-                        # Attempt to parse strictly with coerce, avoiding setting slice on copy
-                        df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce").dt.date
-                    except Exception:
-                        pass
-            for col in target_datetime_cols:
-                if col in df.columns:
-                    with contextlib.suppress(Exception):
-                        df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce")
+            table = Base.metadata.tables.get(table_name)
+            if table is not None:
+                target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
+                target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
+                for col in target_date_cols:
+                    if col in df.columns:
+                        try:
+                            df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce").dt.date
+                        except Exception:
+                            pass
+                for col in target_datetime_cols:
+                    if col in df.columns:
+                        with contextlib.suppress(Exception):
+                            df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce")
 
         df_clean = df[cols]
 
@@ -246,10 +248,10 @@ class BaseDao:
 
         df_slice = df[columns]
 
-        from data.persistence.models import DATE_COLUMNS, DATETIME_COLUMNS
+        from sqlalchemy import Date, DateTime
 
-        target_date_cols = DATE_COLUMNS.get(table_name, [])
-        target_datetime_cols = DATETIME_COLUMNS.get(table_name, [])
+        target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
+        target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 
         # Extracting out the CPU intensive conversion to allow async offloading
         def _prepare_records(df_slice: typing.Any):

@@ -560,7 +560,10 @@ class ScreenerViewModel:
         else:
             self._full_results = pd.DataFrame()
         self.page_no = 1
-        self.sort_column = "ai_score"
+        if df is not None and not df.empty and "ai_score" in df.columns:
+            self.sort_column = "ai_score"
+        else:
+            self.sort_column = None
         self.sort_ascending = False
         self._update_pagination()
         if self.on_update:

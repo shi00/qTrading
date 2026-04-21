@@ -2,6 +2,7 @@ import polars as pl
 
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
+from strategies.utils import fmt_val
 
 
 @register_strategy("value")
@@ -48,6 +49,21 @@ class ValueStrategy(PolarsBaseStrategy):
                 "step": 0.5,
             },
         ]
+
+    def get_ai_context(self, row: dict) -> str:
+        fv = fmt_val
+        pe = fv(row.get("pe_ttm"))
+        pb = fv(row.get("pb"))
+        dv = fv(row.get("dv_ttm"))
+        roe = fv(row.get("roe"))
+        debt = fv(row.get("debt_to_assets"))
+        return (
+            f"该股票由价值投资策略筛选，满足低估值+高分红条件。\n"
+            f"PE(TTM)={pe}, PB={pb}, 股息率(TTM)={dv}%, ROE={roe}%, 资产负债率={debt}%\n"
+            f"请通过 ROE 水平代理评估护城河厚度；通过资产负债率结合 PB 评估是否存在高杠杆换取的虚假繁荣。\n"
+            f"如果 ROE 方差较大但当前 PE 极低，请定性为'周期股'而非'价值股'；\n"
+            f"如果不仅高股息且 PB<1，研判是否存在'价值陷阱'的财务特征（如经营现金流/净利润 < 1）。"
+        )
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
@@ -100,6 +116,21 @@ class GrowthStrategy(PolarsBaseStrategy):
             },
         ]
 
+    def get_ai_context(self, row: dict) -> str:
+        fv = fmt_val
+        or_yoy = fv(row.get("or_yoy"))
+        np_yoy = fv(row.get("netprofit_yoy"))
+        roe = fv(row.get("roe"))
+        gpm = fv(row.get("grossprofit_margin"))
+        pe = fv(row.get("pe_ttm"))
+        return (
+            f"该股票由高成长策略筛选，满足高增长+高盈利条件。\n"
+            f"营收YOY={or_yoy}%, 净利润YOY={np_yoy}%, ROE={roe}%, 毛利率={gpm}%, PE(TTM)={pe}\n"
+            f"请严格比对营收YOY和净利润YOY：如果利润增速远高于营收增速，且毛利率并未显著提升，\n"
+            f"强烈质疑其非经常性损益或降本增效带来的不可持续性增长。\n"
+            f"如果此时 PE 极高(>60)，提示右侧杀跌的戴维斯双杀风险。"
+        )
+
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
         rev = p.get("revenue_growth_min", 20)
@@ -131,6 +162,20 @@ class DividendStrategy(PolarsBaseStrategy):
                 "step": 0.5,
             },
         ]
+
+    def get_ai_context(self, row: dict) -> str:
+        fv = fmt_val
+        dv = fv(row.get("dv_ttm"))
+        pe = fv(row.get("pe_ttm"))
+        or_yoy = fv(row.get("or_yoy"))
+        roe = fv(row.get("roe"))
+        return (
+            f"该股票由高股息策略筛选，以持续高分红为核心筛选条件。\n"
+            f"股息率(TTM)={dv}%, PE(TTM)={pe}, 营收YOY={or_yoy}%, ROE={roe}%\n"
+            f"请判断分红的底气（自由现金流vs变卖资产）和分红的意愿（历史稳定性）。\n"
+            f"严查'假高息'：如果当前超高股息率是由近一年股价暴跌被动造成的，\n"
+            f"且最新财报显示 ROE 和营收增速均恶化，请直接判定为雷区并 reject。"
+        )
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
@@ -164,6 +209,17 @@ class CashFlowStrategy(PolarsBaseStrategy):
                 "step": 1,
             },
         ]
+
+    def get_ai_context(self, row: dict) -> str:
+        fv = fmt_val
+        debt = fv(row.get("debt_to_assets"))
+        roe = fv(row.get("roe"))
+        return (
+            f"该股票由现金流优质策略筛选，满足低负债+高盈利条件。\n"
+            f"资产负债率={debt}%, ROE={roe}%\n"
+            f"请评估资产负债表的铁甲程度、产业链话语权、抗寒冬能力，\n"
+            f"以及是否存在资金链断裂隐患。一旦发现资金链存在断裂风险，请直接 reject。"
+        )
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
@@ -204,9 +260,26 @@ class LargePEStrategy(PolarsBaseStrategy):
             },
         ]
 
+    def get_ai_context(self, row: dict) -> str:
+        fv = fmt_val
+        total_mv = row.get("total_mv", 0)
+        mv_yi = (
+            round(total_mv / 10000, 1)
+            if total_mv and not (isinstance(total_mv, float) and total_mv != total_mv)
+            else "N/A"
+        )
+        pe = fv(row.get("pe_ttm"))
+        pb = fv(row.get("pb"))
+        dv = fv(row.get("dv_ttm"))
+        return (
+            f"该股票由大盘低估策略筛选，满足大市值+低估值条件。\n"
+            f"总市值={mv_yi}亿, PE(TTM)={pe}, PB={pb}, 股息率(TTM)={dv}%\n"
+            f"请判断低估值的成因：是周期性底部（可逆）还是基本面永久恶化（不可逆）？\n"
+            f"是否存在明确的估值修复催化剂？即使估值不修复，当前股息率能否提供足够安全垫？"
+        )
+
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
-        # UI shows 亿, DB total_mv is 万元 → multiply by 10000
         cap_min = p.get("market_cap_min", 500) * 10000
         pe_max = p.get("pe_max", 15)
         return (

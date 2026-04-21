@@ -2,6 +2,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+from strategies.utils import StrategyContext
 from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
@@ -86,11 +87,10 @@ class BaseStrategy(ABC):
         return []
 
     @abstractmethod
-    async def filter(self, context: dict):
+    async def filter(self, context: StrategyContext):
         """
         Execute strategy logic.
-        :param context: Dict containing 'screening_data' DataFrame,
-                        'data_processor', 'params' (user-defined parameters), etc.
+        :param context: StrategyContext dict (see strategies.utils.StrategyContext)
         :return: Filtered DataFrame
         """
         pass

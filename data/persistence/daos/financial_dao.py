@@ -200,7 +200,7 @@ class FinancialDao(BaseDao):
                 ORDER BY ts_code, end_date DESC
             """
             df = await self._read_db(sql, ts_codes + [periods])
-            if df is not None and not df.empty:
+            if df is not None and not df.empty and "rn" in df.columns:
                 df = df.drop(columns=["rn"])
             return df if df is not None else pd.DataFrame()
         except Exception as e:
@@ -352,7 +352,7 @@ class FinancialDao(BaseDao):
                 ORDER BY ts_code, bz_sales DESC
             """
             df = await self._read_db(sql, ts_codes)
-            if df is not None and not df.empty:
+            if df is not None and not df.empty and "dr" in df.columns:
                 df = df.drop(columns=["dr"])
             return df if df is not None else pd.DataFrame()
         except Exception as e:

@@ -1,11 +1,11 @@
 import logging
-import typing
 
 import pandas as pd
 
 from data.persistence.quality_gate import QualityTier, require_quality
 from services.ai_service import AIService
 from strategies.ai_mixin import AIStrategyMixin
+from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from utils.config_handler import ConfigHandler
 
@@ -25,7 +25,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         self.limit = ConfigHandler.get_ai_max_candidates()
 
     @require_quality(QualityTier.SILVER)
-    async def filter(self, context: typing.Any):
+    async def filter(self, context: StrategyContext):
         if context is None:
             return pd.DataFrame()
 

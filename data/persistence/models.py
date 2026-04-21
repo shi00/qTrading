@@ -558,9 +558,12 @@ class TaskHistory(Base):
 
 
 # --- Date Column Metadata Mapping ---
-# 自动通过基类注入的原生日历对象
+# DEPRECATED: These dictionaries are no longer used by the codebase.
+# Date/DateTime columns are now automatically extracted from SQLAlchemy model metadata.
+# See base_dao.py for the implementation.
+# Kept here for documentation/reference purposes only.
 DATE_COLUMNS = {
-    "stock_basic": ["list_date"],
+    "stock_basic": ["list_date", "delist_date"],
     "daily_quotes": ["trade_date"],
     "daily_indicators": ["trade_date"],
     "moneyflow_daily": ["trade_date"],

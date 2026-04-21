@@ -73,7 +73,7 @@ class MacroDao(BaseDao):
         """
         try:
             df = await self._read_db(
-                'SELECT date, on, "1w", "2w", "1m", "3m", "6m", "9m", "1y" FROM shibor_daily ORDER BY date DESC LIMIT 1'
+                'SELECT date, "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y" FROM shibor_daily ORDER BY date DESC LIMIT 1'
             )
             return df if df is not None else pd.DataFrame()
         except Exception as e:

@@ -31,15 +31,13 @@ class SyncDao(BaseDao):
                VALUES ($1, $2, $3, $4, $5, $6)
                ON CONFLICT("table_name") DO UPDATE SET
                "last_sync_date"=excluded."last_sync_date",
-               "last_data_date"=CASE WHEN excluded."last_data_date" > COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+               "last_data_date"=CASE WHEN excluded."status"='success' AND excluded."last_data_date" > COALESCE(sync_status."last_data_date",'1900-01-01'::date)
                                      THEN excluded."last_data_date"
-                                     ELSE COALESCE(sync_status."last_data_date",excluded."last_data_date") END,
-               "record_count"=CASE WHEN excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+                                     ELSE sync_status."last_data_date" END,
+               "record_count"=CASE WHEN excluded."status"='success' AND excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
                                    THEN excluded."record_count"
-                                   ELSE COALESCE(sync_status."record_count",excluded."record_count") END,
-               "status"=CASE WHEN excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
-                             THEN excluded."status"
-                             ELSE COALESCE(sync_status."status",excluded."status") END,
+                                   ELSE sync_status."record_count" END,
+               "status"=excluded."status",
                "updated_at"=excluded."updated_at"'''
         await self._write_db(
             sql,

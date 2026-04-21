@@ -800,6 +800,46 @@ class TestSyncDao:
         assert result_after["record_count"] == 5000
         assert result_after["status"] == "success"
 
+    async def test_sync_status_error_does_not_overwrite_success(self, sync_dao, clean_db):
+        """失败状态写入时，last_data_date 和 record_count 应保留上次成功的值"""
+        await sync_dao.update_sync_status(
+            table_name="daily_indicators",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5000,
+            status="success",
+        )
+
+        await sync_dao.update_sync_status(
+            table_name="daily_indicators",
+            last_data_date=datetime.date(2024, 3, 22),
+            record_count=0,
+            status="permission_denied",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_indicators")
+        assert result["last_data_date"] == datetime.date(2024, 3, 21)
+        assert result["record_count"] == 5000
+        assert result["status"] == "permission_denied"
+
+    async def test_sync_status_error_on_null_keeps_null_date(self, sync_dao, clean_db):
+        """DB 中 last_data_date 为 NULL 时，失败状态不应推进日期"""
+        await sync_dao._write_db(
+            'INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") '
+            "VALUES ($1, $2, NULL, NULL, 'error', $3)",
+            ("moneyflow_daily", datetime.date(2024, 3, 20), datetime.datetime(2024, 3, 20)),
+        )
+
+        await sync_dao.update_sync_status(
+            table_name="moneyflow_daily",
+            last_data_date=datetime.date(2024, 3, 22),
+            record_count=0,
+            status="permission_denied",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="moneyflow_daily")
+        assert result["last_data_date"] is pd.NaT or result["last_data_date"] is None
+        assert result["status"] == "permission_denied"
+
     async def test_get_all_sync_status(self, sync_dao, clean_db):
         """获取所有同步状态"""
         await sync_dao.update_sync_status("daily_quotes", datetime.date(2024, 3, 21), 5000)

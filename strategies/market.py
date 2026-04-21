@@ -2,6 +2,7 @@ import logging
 
 import polars as pl
 
+from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
 
@@ -10,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 @register_strategy("tech_breakout")
 class TechnicalBreakoutStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.SILVER
+    enable_ai_analysis = False
+
     def __init__(self):
         super().__init__("strategy_tech_breakout_name", "strategy_tech_breakout_desc")
 
@@ -59,6 +63,8 @@ class TechnicalBreakoutStrategy(PolarsBaseStrategy):
 
 @register_strategy("northbound")
 class NorthboundStrategy(PolarsBaseStrategy):
+    enable_ai_analysis = False
+
     def __init__(self):
         super().__init__("strategy_northbound_name", "strategy_northbound_desc")
 
@@ -107,6 +113,8 @@ class NorthboundStrategy(PolarsBaseStrategy):
 
 @register_strategy("institutional")
 class InstitutionalStrategy(PolarsBaseStrategy):
+    enable_ai_analysis = False
+
     def __init__(self):
         super().__init__("strategy_institutional_name", "strategy_institutional_desc")
 
@@ -154,6 +162,8 @@ class InstitutionalStrategy(PolarsBaseStrategy):
 
 @register_strategy("block_trade")
 class BlockTradeStrategy(PolarsBaseStrategy):
+    enable_ai_analysis = False
+
     def __init__(self):
         super().__init__("strategy_block_trade_name", "strategy_block_trade_desc")
 

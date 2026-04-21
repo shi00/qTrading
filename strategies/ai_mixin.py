@@ -18,7 +18,6 @@ The Mixin handles:
 
 import asyncio
 import logging
-import math
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ import pandas as pd
 
 from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
+from strategies.utils import fmt_val, safe_float
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
@@ -84,10 +84,13 @@ class AIStrategyMixin:
                 return f"RSI({row.get('_rsi_period', 14)})={row.get('rsi_14', 'N/A')} — oversold candidate"
 
     Attributes:
+        enable_ai_analysis: Class-level flag; set False to skip Phase 2 AI analysis.
         _context_builders: Dict of registered context builder functions.
             Key: context block name (e.g., "turnover", "sector")
             Value: Callable[[row: dict, prefetched: PreFetchedContext], str]
     """
+
+    enable_ai_analysis: bool = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -103,6 +106,19 @@ class AIStrategyMixin:
         """
         self._context_builders[name] = builder
         logger.debug(f"[AIStrategyMixin] Registered context builder: {name}")
+
+    def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Ensure candidates are sorted by relevance before AI analysis truncation.
+        Subclasses should override if the default sort order is not
+        the best proxy for "most promising candidate first".
+
+        The default implementation preserves the order from Phase 1 filtering
+        (which already sorts by the strategy's primary metric).
+        """
+        if len(df) > 1:
+            logger.debug(f"[{self.__class__.__name__}] Using default sort order for AI analysis ({len(df)} candidates)")
+        return df
 
     def get_context_blocks(self) -> list[str]:
         """Get list of context block names to build for this strategy."""
@@ -173,6 +189,13 @@ class AIStrategyMixin:
                     0,
                     I18n.get("ai_not_configured", "AI 服务未配置，仅展示数学筛选结果"),
                 )
+            return candidates_df
+
+        # --- Guard: DataProcessor Available? ---
+        if dp is None:
+            logger.warning(
+                "[AIStrategyMixin] DataProcessor missing from context — returning math-only results",
+            )
             return candidates_df
 
         # --- Guard: Empty Input ---
@@ -451,6 +474,15 @@ class AIStrategyMixin:
             return candidates_df  # Fallback: return math-only results
 
         result_df = pd.DataFrame(final_rows)
+
+        # Log partial analysis: if some stocks were skipped due to errors,
+        # record it in logs so downstream consumers (UI, CSV, DB) are not polluted.
+        error_count = total_tasks - len(final_rows)
+        if error_count > 0:
+            logger.info(
+                f"[AIStrategyMixin] Partial analysis: {error_count}/{total_tasks} stocks skipped or failed",
+            )
+
         return result_df.sort_values("ai_score", ascending=False)
 
     async def _mixin_analyze_single(
@@ -505,7 +537,8 @@ class AIStrategyMixin:
             # 2c. RSI Oversold Features (for oversold strategy enhancement)
             if history_df is not None and not history_df.empty and len(history_df) >= 30:
                 df_sorted = history_df.sort_values("trade_date", ascending=True)
-                rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(df_sorted["close"], period=14)
+                rsi_period = row.get("_rsi_period", 14)
+                rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(df_sorted["close"], period=rsi_period)
                 row["_rsi_feature_text"] = rsi_features.get("feature_text", "")
                 row["_rsi_consecutive_days"] = rsi_features.get("consecutive_oversold_days", 0)
                 row["_rsi_days_since_healthy"] = rsi_features.get("days_since_healthy", 99)
@@ -868,22 +901,11 @@ class AIStrategyMixin:
             return "提取价格行为特征时出错。"
 
     @staticmethod
-    def _safe_float(val, default=0.0):
-        """Safely convert a value to float, handling None, NaN, and non-numeric."""
-        if val is None:
-            return default
-        try:
-            fval = float(val)
-            return default if math.isnan(fval) else fval
-        except (ValueError, TypeError):
-            return default
-
-    @staticmethod
     def _build_capital_flow_text(ts_code: str, prefetched: dict) -> str:
         """
         Build a human-readable capital flow summary from pre-fetched batch DataFrames.
         """
-        sf = AIStrategyMixin._safe_float
+        sf = safe_float
         parts = []
 
         # 1. Moneyflow (主力资金)
@@ -1197,34 +1219,25 @@ class AIStrategyMixin:
         Build a human-readable financials summary from the stock_info data.
         The screening data already contains key financial metrics from the join.
         """
-        sf = AIStrategyMixin._safe_float
         parts = []
 
-        def fmt(val, suffix="", fmt_spec=".2f"):
-            """Format a value using _safe_float for NaN safety."""
-            f = sf(val, default=None)  # type: ignore
-            if f is None:
-                return "N/A"
-            return f"{f:{fmt_spec}}{suffix}"
+        parts.append(f"PE(TTM): {fmt_val(row.get('pe_ttm'))}")
+        parts.append(f"PB: {fmt_val(row.get('pb'))}")
+        parts.append(f"ROE: {fmt_val(row.get('roe'), suffix='%')}")
+        parts.append(f"毛利率: {fmt_val(row.get('grossprofit_margin'), suffix='%')}")
+        parts.append(f"资产负债率: {fmt_val(row.get('debt_to_assets'), suffix='%')}")
+        parts.append(f"营收同比增长: {fmt_val(row.get('or_yoy'), suffix='%')}")
+        parts.append(f"净利润同比增长: {fmt_val(row.get('netprofit_yoy'), suffix='%')}")
 
-        parts.append(f"PE(TTM): {fmt(row.get('pe_ttm'))}")
-        parts.append(f"PB: {fmt(row.get('pb'))}")
-        parts.append(f"ROE: {fmt(row.get('roe'), '%')}")
-        parts.append(f"毛利率: {fmt(row.get('grossprofit_margin'), '%')}")
-        parts.append(f"资产负债率: {fmt(row.get('debt_to_assets'), '%')}")
-        parts.append(f"营收同比增长: {fmt(row.get('or_yoy'), '%')}")
-        parts.append(f"净利润同比增长: {fmt(row.get('netprofit_yoy'), '%')}")
-
-        tmv = sf(row.get("total_mv"), default=None)  # type: ignore
+        tmv = safe_float(row.get("total_mv"), default=None)  # type: ignore
         parts.append(
             f"总市值: {f'{tmv / 10000:.2f}亿元' if tmv is not None else 'N/A'}",
         )
 
-        parts.append(f"股息率(TTM): {fmt(row.get('dv_ttm'), '%')}")
+        parts.append(f"股息率(TTM): {fmt_val(row.get('dv_ttm'), suffix='%')}")
 
-        # PEG calculation
-        pe_val = sf(row.get("pe_ttm"), default=None)  # type: ignore
-        growth_val = sf(row.get("netprofit_yoy"), default=None)  # type: ignore
+        pe_val = safe_float(row.get("pe_ttm"), default=None)  # type: ignore
+        growth_val = safe_float(row.get("netprofit_yoy"), default=None)  # type: ignore
         if pe_val is not None and growth_val is not None and growth_val > 0:
             peg = pe_val / growth_val
             parts.append(f"PEG: {peg:.2f} (PE/净利润增速)")

@@ -150,7 +150,7 @@ class HolderDao(BaseDao):
             """
 
             df = await self._read_db(sql, ts_codes)
-            if df is not None and not df.empty:
+            if df is not None and not df.empty and "rn" in df.columns:
                 df = df.drop(columns=["rn"])
             return df if df is not None else pd.DataFrame()
         except Exception as e:

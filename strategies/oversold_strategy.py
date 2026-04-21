@@ -7,6 +7,7 @@ import polars as pl
 
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
+from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
@@ -108,7 +109,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     # Main Filter Logic
     # ============================================================
     @require_quality(QualityTier.SILVER)
-    async def filter(self, context: typing.Any):
+    async def filter(self, context: StrategyContext):
         """
         Two-phase filtering:
         Phase 1: RSI math filter (Polars) → top N oversold candidates
@@ -134,6 +135,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         )
 
         # --- Phase 2: AI Analysis (via Mixin) ---
+        candidates = self._sort_for_ai(candidates)
         return await self.run_ai_analysis(candidates, context)
 
     async def _math_filter(self, context: typing.Any, rsi_period: typing.Any, rsi_threshold: typing.Any):
@@ -197,8 +199,12 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             # because the underlying SQL query (get_daily_quotes) does not guarantee ORDER BY.
             df_lazy = df.lazy().sort(["ts_code", "trade_date"])
 
-            # Convert end_date_obj to string format for comparison with trade_date column
-            end_date_str = end_date_obj.strftime("%Y%m%d")
+            if df["trade_date"].dtype == pl.Date:
+                end_date_value = end_date_obj
+            elif df["trade_date"].dtype == pl.Datetime:
+                end_date_value = datetime.datetime.combine(end_date_obj, datetime.time())
+            else:
+                end_date_value = end_date_obj.strftime("%Y%m%d")
 
             # Calculate QFQ Close (前复权收盘价)
             if "adj_factor" in df.columns:
@@ -224,7 +230,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         pl.col("close").count().over("ts_code").alias("day_count"),
                     ],
                 )
-                .filter(pl.col("trade_date") == end_date_str)
+                .filter(pl.col("trade_date") == end_date_value)
                 .filter(pl.col("day_count") >= rsi_period * 2)
                 .filter(pl.col(rsi_col_name) < rsi_threshold)
                 .collect()

@@ -1,34 +1,61 @@
 import logging
-import typing
 from abc import abstractmethod
 
 import pandas as pd
 import polars as pl
 
-from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
+from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
+from strategies.utils import StrategyContext
 
 logger = logging.getLogger(__name__)
 
 
-class PolarsBaseStrategy(BaseStrategy):
+class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     """
     Base class for strategies that use Polars for efficient filtering.
     Handles the boilerplate of:
     1. Input validation (DataFrame empty check)
     2. Conversion to LazyFrame
     3. Error handling
-    4. collecting back to Pandas
+    4. Collecting back to Pandas
+    5. Phase 2: AI analysis (via AIStrategyMixin) — graceful degradation when AI is not configured
+
+    Subclasses can override `required_quality_tier` to raise the data quality bar.
+    Default is BRONZE (availability check only). Strategies that depend on
+    historical continuity (e.g. technical indicators) should set SILVER.
+
+    Subclasses can set `enable_ai_analysis = False` (inherited from AIStrategyMixin)
+    to skip Phase 2 AI analysis entirely.
+
+    AI Context Design:
+    - Subclasses MUST override `get_ai_context(row)` to inject strategy-specific context.
+    - Subclasses MAY register custom context builders via `register_context_builder()`
+      in __init__ for richer AI prompts (see OversoldStrategy for reference).
+    - Subclasses MAY override `_prefetch_strategy_specific()` for batch data pre-fetching.
+    - Subclasses MAY override `_sort_for_ai()` to customize pre-AI sort order.
+    - Strategies without custom context builders will use the base AI context from
+      AIStrategyMixin (history, tech indicators, news, capital flow, financials).
     """
 
-    @require_quality(QualityTier.BRONZE)
-    async def filter(self, context: typing.Any):
+    required_quality_tier: QualityTier = QualityTier.BRONZE
+
+    async def filter(self, context: StrategyContext):
         """
         Template method that handles boilerplates.
         Subclasses should implement `_filter_logic(lazy_frame, context) -> LazyFrame`.
+
+        Phase 1: Math filtering (Polars)
+        Phase 2: AI analysis (via AIStrategyMixin.run_ai_analysis) — skipped if enable_ai_analysis=False
         """
+        _check_tier(
+            context.get("data_processor"),
+            self.required_quality_tier,
+            f"{self.__class__.__name__}.filter",
+        )
+
         df = context.get("screening_data")
-        # Fallback for legacy contexts
         if df is None:
             df = context.get("data")
 
@@ -36,30 +63,31 @@ class PolarsBaseStrategy(BaseStrategy):
             return pd.DataFrame()
 
         try:
-            # Convert to LazyFrame for optimization
             lf = pl.from_pandas(df).lazy()
-
-            # Execute specific strategy logic
             result_lf = self._filter_logic(lf, context)
-
-            # Collect result
-            return result_lf.collect().to_pandas()
-
-        except QualityGateError as e:
-            # Handle Quality Gate rejection (graceful exit)
-            logger.warning(f"[Strategy] {self.name} Blocked: {e}")
-            # Raising it up allows UI to show specific error
-            raise e
+            candidates_df = result_lf.collect().to_pandas()
+        except QualityGateError:
+            raise
         except Exception as e:
             logger.error(f"[Strategy] {self.name} failed: {e}", exc_info=True)
             raise RuntimeError(f"Strategy {self.name} execution failed: {e}") from e
 
+        if candidates_df is None or candidates_df.empty:
+            return pd.DataFrame()
+
+        if not self.enable_ai_analysis:
+            return candidates_df
+
+        candidates_df = self._sort_for_ai(candidates_df)
+
+        return await self.run_ai_analysis(candidates_df, context)
+
     @abstractmethod
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         """
         Implement the specific filtering logic here.
         :param lf: Input LazyFrame containing merged data
-        :param context: Full context dict (for accessing other data like 'block_trade')
+        :param context: StrategyContext dict (see strategies.utils.StrategyContext)
         :return: Filtered/Sorted LazyFrame
         """
         pass

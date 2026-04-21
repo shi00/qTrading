@@ -22,6 +22,7 @@ import pytest
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
+from strategies.utils import safe_float
 
 
 class MockStrategy(AIStrategyMixin):
@@ -588,25 +589,25 @@ class TestSafeFloat:
 
     def test_valid_number(self):
         """有效数字"""
-        assert AIStrategyMixin._safe_float(10.5) == 10.5
-        assert AIStrategyMixin._safe_float(10) == 10.0
+        assert safe_float(10.5) == 10.5
+        assert safe_float(10) == 10.0
 
     def test_none_value(self):
         """None 值"""
-        assert AIStrategyMixin._safe_float(None) == 0.0
+        assert safe_float(None) == 0.0
 
     def test_nan_value(self):
         """NaN 值"""
-        assert AIStrategyMixin._safe_float(float("nan")) == 0.0
+        assert safe_float(float("nan")) == 0.0
 
     def test_string_value(self):
         """字符串值"""
-        assert AIStrategyMixin._safe_float("10.5") == 10.5
-        assert AIStrategyMixin._safe_float("invalid") == 0.0
+        assert safe_float("10.5") == 10.5
+        assert safe_float("invalid") == 0.0
 
     def test_custom_default(self):
         """自定义默认值"""
-        assert AIStrategyMixin._safe_float(None, default=-1.0) == -1.0
+        assert safe_float(None, default=-1.0) == -1.0
 
 
 class TestMultiPeriodFinancials:
