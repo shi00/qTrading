@@ -890,7 +890,7 @@ class TushareClient:
             enddate=enddate,
             end_date=end_date,
             start_date=start_date,
-            fields="ts_code,end_date,ann_date,holder_num,holder_num_change,holder_num_ratio",
+            fields="ts_code,end_date,ann_date,holder_num",
         )
 
     async def get_macro_data(self, api_name: str, start_m: str | None = None, end_m: str | None = None):
