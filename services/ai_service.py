@@ -633,7 +633,7 @@ class AIService:
         ]
 
         # [FEATURE] Dump the exact constructed prompt to a dedicated markdown file
-        if logger.isEnabledFor(logging.DEBUG):
+        if logger.isEnabledFor(logging.INFO):
             try:
                 import os
                 import re
