@@ -646,6 +646,32 @@ class TestHolderDao:
         saved = await holder_dao.save_top10_holders(df)
         assert saved == 1
 
+    async def test_holder_number_change_calculation(self, holder_dao, clean_db):
+        """测试股东户数变化计算逻辑"""
+        df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
+                {"ts_code": "000001.SZ", "end_date": "20231231", "ann_date": "20240330", "holder_num": 95000},
+                {"ts_code": "000001.SZ", "end_date": "20240331", "ann_date": "20240425", "holder_num": 90000},
+            ]
+        )
+
+        saved = await holder_dao.save_holder_number(df)
+        assert saved == 3
+
+        result = await holder_dao.get_stk_holdernumber("000001.SZ")
+        assert len(result) == 3
+
+        result = result.sort_values("end_date")
+
+        assert result["holder_num_change"].iloc[0] is None or pd.isna(result["holder_num_change"].iloc[0])
+        assert result["holder_num_change"].iloc[1] == -5000
+        assert result["holder_num_change"].iloc[2] == -5000
+
+        assert result["holder_num_ratio"].iloc[0] is None or pd.isna(result["holder_num_ratio"].iloc[0])
+        assert abs(result["holder_num_ratio"].iloc[1] - (-5.0)) < 0.01
+        assert abs(result["holder_num_ratio"].iloc[2] - (-5.26)) < 0.1
+
 
 @pytest.mark.asyncio
 class TestMacroDao:

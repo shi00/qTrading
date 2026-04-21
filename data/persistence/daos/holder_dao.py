@@ -18,12 +18,60 @@ class HolderDao(BaseDao):
             return 0
         cols = get_model_columns(StkHoldernumber)
         pk_columns = get_model_pk_columns(StkHoldernumber)
-        return await self._save_upsert(
+        rows = await self._save_upsert(
             df,
             "stk_holdernumber",
             cols,
             pk_columns=pk_columns,
         )
+        await self._calculate_holder_changes(df["ts_code"].unique().tolist() if "ts_code" in df.columns else [])
+        return rows
+
+    async def _calculate_holder_changes(self, ts_codes: list[str]):
+        """
+        Calculate holder_num_change and holder_num_ratio for the given stocks.
+        Uses SQL window functions to compute changes relative to previous period.
+
+        holder_num_change = current holder_num - previous holder_num
+        holder_num_ratio = (current - previous) / previous * 100
+        """
+        if not ts_codes:
+            return
+
+        try:
+            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
+            sql = f"""
+                UPDATE stk_holdernumber h
+                SET holder_num_change = sub.holder_num_change,
+                    holder_num_ratio = sub.holder_num_ratio
+                FROM (
+                    SELECT ts_code, end_date,
+                        holder_num - LAG(holder_num) OVER (
+                            PARTITION BY ts_code ORDER BY end_date
+                        ) as holder_num_change,
+                        CASE
+                            WHEN LAG(holder_num) OVER (
+                                PARTITION BY ts_code ORDER BY end_date
+                            ) > 0 THEN
+                                ROUND(
+                                    (holder_num - LAG(holder_num) OVER (
+                                        PARTITION BY ts_code ORDER BY end_date
+                                    ))::numeric / LAG(holder_num) OVER (
+                                        PARTITION BY ts_code ORDER BY end_date
+                                    ) * 100,
+                                    2
+                                )
+                            ELSE NULL
+                        END as holder_num_ratio
+                    FROM stk_holdernumber
+                    WHERE ts_code IN ({placeholders})
+                ) sub
+                WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
+            """
+            await self._write_db(sql, ts_codes)
+            logger.debug(f"[HolderDao] Calculated holder changes for {len(ts_codes)} stocks")
+        except Exception as e:
+            logger.warning(f"[HolderDao] Failed to calculate holder changes: {e}")
 
     async def save_top10_holders(self, df: pd.DataFrame):
         """Save Top 10 Holders. Table: top10_holders"""
