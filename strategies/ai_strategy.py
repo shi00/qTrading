@@ -51,7 +51,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         candidates = df[mask].copy()
 
         # Sort by turnover_rate desc (Most active), cap at limit
-        candidates = candidates.sort_values("turnover_rate", ascending=False).head(
+        candidates = candidates.sort_values(by="turnover_rate", ascending=False).head(
             self.limit,
         )
 
