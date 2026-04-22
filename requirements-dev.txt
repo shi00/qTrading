@@ -4,3 +4,6 @@ pytest-asyncio>=0.23.5
 
 # === Code Quality & Linting ===
 ruff>=0.1.0
+
+# === Type Checking ===
+pandas-stubs>=2.2.0
