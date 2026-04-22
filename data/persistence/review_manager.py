@@ -79,11 +79,11 @@ class ReviewManager:
                 t0_idx = df_quotes.index.get_loc(t0_row.index[0])
 
                 # Check T+1
-                t1_pct = None
+                t1_pct: float | None = None
                 if len(df_quotes) > t0_idx + 1:  # type: ignore
                     t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
                     t1_row["close"]
-                    t1_pct = t1_row["pct_chg"]
+                    t1_pct = float(t1_row["pct_chg"])
 
                 # Check T+5 (optional, simpler logic here just for T+1 focus first)
 
@@ -103,11 +103,11 @@ class ReviewManager:
 
                     index_pct = 0.0
                     try:
-                        # P0-4 Fix: directly await async API method
+                        trade_date = str(t1_row["trade_date"])
                         df_idx = await self.api.get_index_daily(
                             ts_code=index_code,
-                            start_date=t1_row["trade_date"],
-                            end_date=t1_row["trade_date"],
+                            start_date=trade_date,
+                            end_date=trade_date,
                         )
                         if df_idx is not None and not df_idx.empty:
                             index_pct = float(df_idx.iloc[0]["pct_chg"])

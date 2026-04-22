@@ -330,7 +330,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         try:
             status = await self.cache.get_sync_status("financial_reports")
-            if status is None or not status.get("last_sync_date"):
+            if status is None or not isinstance(status, dict) or not status.get("last_sync_date"):
                 return True, I18n.get("status_never_synced")
 
             last_sync = status.get("last_sync_date")

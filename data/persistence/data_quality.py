@@ -128,7 +128,7 @@ class DataQualityService:
         total = len(df)
 
         ratios = (null_counts / total).to_dict()
-        return ratios
+        return {str(k): float(v) for k, v in ratios.items()}
 
     @staticmethod
     def check_cross_validation(df: pd.DataFrame, rules: list[tuple[str, str, float]]) -> list[str]:
@@ -160,7 +160,7 @@ class DataQualityService:
                 # Check absolute difference against tolerance
                 # Using fillna(0) to handle potential NaNs in calculation safely
                 failures = diff.abs().fillna(0) > tolerance
-                fail_count = failures.sum()
+                fail_count = int(failures.sum())  # type: ignore
 
                 if fail_count > 0:
                     sample = df[failures].index[0]
