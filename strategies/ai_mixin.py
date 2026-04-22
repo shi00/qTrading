@@ -1130,20 +1130,21 @@ class AIStrategyMixin:
             else:
                 holder_num = await cache.get_stk_holdernumber(ts_code)
             if holder_num is not None and not holder_num.empty:
-                recent_num = holder_num.head(2)
-                if len(recent_num) >= 2:
-                    curr_num = recent_num.iloc[0].get("holder_num", 0)
-                    prev_num = recent_num.iloc[1].get("holder_num", 0)
-                    if prev_num > 0:
-                        change_pct = (curr_num - prev_num) / prev_num * 100
+                latest = holder_num.iloc[0]
+                curr_num = latest.get("holder_num", 0)
+                change_pct = latest.get("holder_num_ratio")
+                if curr_num:
+                    if change_pct is not None and not pd.isna(change_pct):
                         if change_pct < -5:
                             trend = "↓ 筹码集中"
                         elif change_pct > 5:
                             trend = "↑ 筹码分散"
                         else:
                             trend = "→ 基本稳定"
-                        lines.append(f"- 股东人数: {curr_num:,}户 ({trend} {change_pct:+.1f}%)")
-                        has_data = True
+                        lines.append(f"- 股东人数: {int(curr_num):,}户 ({trend} {change_pct:+.1f}%)")
+                    else:
+                        lines.append(f"- 股东人数: {int(curr_num):,}户")
+                    has_data = True
 
         except Exception as e:
             logger.warning(f"[AIMixin] Failed to build auxiliary data for {ts_code}: {e}")

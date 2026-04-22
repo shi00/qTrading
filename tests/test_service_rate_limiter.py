@@ -213,5 +213,109 @@ class TestTokenBucketEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(bucket.tokens, 3.0, places=1)
 
 
+class TestTokenBucketAdaptiveRate(unittest.TestCase):
+    """测试自适应速率控制"""
+
+    def test_reduce_rate_halves(self):
+        """reduce_rate(0.5) 将速率减半"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.rate, 2.5, places=2)
+
+    def test_reduce_rate_respects_min_rate(self):
+        """reduce_rate 不低于 min_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0, min_rate=2.0)
+        bucket.reduce_rate(0.1)
+        bucket.reduce_rate(0.1)
+        bucket.reduce_rate(0.1)
+        self.assertGreaterEqual(bucket.rate, 2.0)
+
+    def test_reduce_rate_resets_consecutive_successes(self):
+        """reduce_rate 重置连续成功计数"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        for _ in range(15):
+            bucket.on_success()
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.rate, 2.5, places=2)
+
+    def test_on_success_no_recovery_below_threshold(self):
+        """on_success 在连续成功 < 10 时不恢复速率"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reduce_rate(0.5)
+        for _ in range(9):
+            bucket.on_success()
+        self.assertAlmostEqual(bucket.rate, 2.5, places=2)
+
+    def test_on_success_recovers_after_threshold(self):
+        """on_success 在连续成功 >= 10 后逐步恢复速率"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.rate, 2.5, places=2)
+
+        bucket._last_recovery_time = 0
+        for _ in range(10):
+            bucket.on_success()
+        self.assertGreater(bucket.rate, 2.5)
+        self.assertLessEqual(bucket.rate, 5.0)
+
+    def test_on_success_never_exceeds_original_rate(self):
+        """on_success 恢复速率不超过 original_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket._last_recovery_time = 0
+        for _ in range(200):
+            bucket.on_success()
+        self.assertAlmostEqual(bucket.rate, 5.0, places=2)
+
+    def test_current_rate_per_min(self):
+        """current_rate_per_min 属性"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        self.assertAlmostEqual(bucket.current_rate_per_min, 300.0, places=1)
+
+    def test_original_rate_per_min(self):
+        """original_rate_per_min 属性"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.original_rate_per_min, 300.0, places=1)
+
+    def test_reconfigure_rate(self):
+        """reconfigure 更新速率并重置自适应状态"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.rate, 2.5, places=2)
+
+        bucket.reconfigure(rate=10.0)
+        self.assertAlmostEqual(bucket.rate, 10.0, places=2)
+        self.assertAlmostEqual(bucket.original_rate, 10.0, places=2)
+
+    def test_reconfigure_capacity(self):
+        """reconfigure 更新容量并裁剪 tokens"""
+        bucket = TokenBucket(start_tokens=15, capacity=20, rate=5.0)
+        bucket.reconfigure(capacity=10)
+        self.assertAlmostEqual(bucket.capacity, 10.0, places=1)
+        self.assertAlmostEqual(bucket.tokens, 10.0, places=1)
+
+    def test_reconfigure_rejects_zero_rate(self):
+        """reconfigure 拒绝零速率，自动修正为 1"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reconfigure(rate=0)
+        self.assertAlmostEqual(bucket.rate, 1.0, places=2)
+
+    def test_reconfigure_rejects_zero_capacity(self):
+        """reconfigure 拒绝零容量，自动修正为 1"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        bucket.reconfigure(capacity=0)
+        self.assertAlmostEqual(bucket.capacity, 1.0, places=1)
+
+    def test_min_rate_default(self):
+        """默认 min_rate 为 rate 的 10%"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        self.assertAlmostEqual(bucket.min_rate, 0.5, places=2)
+
+    def test_min_rate_custom(self):
+        """自定义 min_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0, min_rate=2.0)
+        self.assertAlmostEqual(bucket.min_rate, 2.0, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

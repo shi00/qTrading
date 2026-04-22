@@ -68,7 +68,7 @@ class HolderDao(BaseDao):
                 ) sub
                 WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
             """
-            await self._write_db(sql, ts_codes)
+            await self._write_db(sql, tuple(ts_codes))
             logger.debug(f"[HolderDao] Calculated holder changes for {len(ts_codes)} stocks")
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to calculate holder changes: {e}")

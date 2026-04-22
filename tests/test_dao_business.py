@@ -610,7 +610,7 @@ class TestHolderDao:
     """测试 HolderDao 业务方法"""
 
     async def test_save_holder_number(self, holder_dao, clean_db):
-        """保存股东人数"""
+        """保存股东人数（仅一条记录时change/ratio为NULL）"""
         df = pd.DataFrame(
             [
                 {
@@ -618,14 +618,17 @@ class TestHolderDao:
                     "end_date": "20231231",
                     "ann_date": "20240330",
                     "holder_num": 100000,
-                    "holder_num_change": 5000,
-                    "holder_num_ratio": 5.0,
                 }
             ]
         )
 
         saved = await holder_dao.save_holder_number(df)
         assert saved == 1
+
+        result = await holder_dao.get_stk_holdernumber("000001.SZ")
+        assert len(result) == 1
+        assert pd.isna(result["holder_num_change"].iloc[0])
+        assert pd.isna(result["holder_num_ratio"].iloc[0])
 
     async def test_save_top10_holders(self, holder_dao, clean_db):
         """保存前十大股东"""
@@ -671,6 +674,58 @@ class TestHolderDao:
         assert result["holder_num_ratio"].iloc[0] is None or pd.isna(result["holder_num_ratio"].iloc[0])
         assert abs(result["holder_num_ratio"].iloc[1] - (-5.0)) < 0.01
         assert abs(result["holder_num_ratio"].iloc[2] - (-5.26)) < 0.1
+
+    async def test_holder_number_change_multi_stock(self, holder_dao, clean_db):
+        """测试多股票股东户数变化计算互不干扰"""
+        df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
+                {"ts_code": "000001.SZ", "end_date": "20231231", "ann_date": "20240330", "holder_num": 90000},
+                {"ts_code": "000002.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 50000},
+                {"ts_code": "000002.SZ", "end_date": "20231231", "ann_date": "20240330", "holder_num": 60000},
+            ]
+        )
+
+        saved = await holder_dao.save_holder_number(df)
+        assert saved == 4
+
+        result_1 = await holder_dao.get_stk_holdernumber("000001.SZ")
+        result_1 = result_1.sort_values("end_date")
+        assert result_1["holder_num_change"].iloc[1] == -10000
+        assert abs(result_1["holder_num_ratio"].iloc[1] - (-10.0)) < 0.01
+
+        result_2 = await holder_dao.get_stk_holdernumber("000002.SZ")
+        result_2 = result_2.sort_values("end_date")
+        assert result_2["holder_num_change"].iloc[1] == 10000
+        assert abs(result_2["holder_num_ratio"].iloc[1] - 20.0) < 0.01
+
+    async def test_holder_number_change_incremental_update(self, holder_dao, clean_db):
+        """测试增量更新时历史数据的变化率被正确重算"""
+        df1 = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
+            ]
+        )
+        await holder_dao.save_holder_number(df1)
+
+        result = await holder_dao.get_stk_holdernumber("000001.SZ")
+        assert len(result) == 1
+        assert pd.isna(result["holder_num_change"].iloc[0])
+        assert pd.isna(result["holder_num_ratio"].iloc[0])
+
+        df2 = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "end_date": "20231231", "ann_date": "20240330", "holder_num": 90000},
+            ]
+        )
+        await holder_dao.save_holder_number(df2)
+
+        result = await holder_dao.get_stk_holdernumber("000001.SZ")
+        result = result.sort_values("end_date")
+        assert len(result) == 2
+        assert pd.isna(result["holder_num_change"].iloc[0])
+        assert result["holder_num_change"].iloc[1] == -10000
+        assert abs(result["holder_num_ratio"].iloc[1] - (-10.0)) < 0.01
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,11 @@ class TushareClient:
         "cn_m": {"month": "period"},
     }
 
+    _SLOW_API_OVERRIDES = {
+        "top10_holders": 0.5,
+        "concept_detail": 0.3,
+    }
+
     def __new__(cls, token: str | None = None):
         if cls._instance is None:
             with cls._lock:
@@ -71,7 +76,6 @@ class TushareClient:
 
             if limit_per_min and limit_per_min > 0:
                 rate_per_sec = limit_per_min / 60.0
-                # Capacity allows for small bursts (e.g. 5 seconds worth or fixed 10)
                 capacity = max(10, rate_per_sec * 5)
                 self._rate_limiter = TokenBucket(
                     start_tokens=capacity,
@@ -81,8 +85,22 @@ class TushareClient:
                 logger.info(
                     f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
                 )
+
+                self._slow_api_limiters: dict[str, TokenBucket] = {}
+                for api_name, factor in self._SLOW_API_OVERRIDES.items():
+                    slow_rate = rate_per_sec * factor
+                    slow_capacity = max(5, slow_rate * 5)
+                    self._slow_api_limiters[api_name] = TokenBucket(
+                        start_tokens=slow_capacity,
+                        capacity=slow_capacity,
+                        rate=slow_rate,
+                    )
+                    logger.info(
+                        f"[API] Slow API limiter for '{api_name}': {slow_rate * 60:.0f} req/min (factor={factor})",
+                    )
             else:
                 self._rate_limiter = None
+                self._slow_api_limiters = {}
                 logger.info("[API] Rate Limiter disabled (No limit set)")
 
             if self.token:
@@ -100,29 +118,59 @@ class TushareClient:
     def set_token(self, token: str | None):
         self.token = token
         ts.set_token(token)
-        # Re-initialize with timeout
         self.pro = ts.pro_api(timeout=self.timeout)
-        logger.info(
-            f"[API] Token updated. Client re-initialized with timeout={self.timeout}s",
-        )
+
+        limit_per_min = ConfigHandler.get_tushare_api_limit()
+        if limit_per_min and limit_per_min > 0:
+            rate_per_sec = limit_per_min / 60.0
+            capacity = max(10, rate_per_sec * 5)
+            if self._rate_limiter:
+                self._rate_limiter.reconfigure(rate=rate_per_sec, capacity=capacity)
+                logger.info(f"[API] Rate Limiter updated: {limit_per_min} req/min")
+            else:
+                self._rate_limiter = TokenBucket(
+                    start_tokens=capacity,
+                    capacity=capacity,
+                    rate=rate_per_sec,
+                )
+                logger.info(f"[API] Rate Limiter created: {limit_per_min} req/min")
+
+            self._slow_api_limiters = {}
+            for api_name, factor in self._SLOW_API_OVERRIDES.items():
+                slow_rate = rate_per_sec * factor
+                slow_capacity = max(5, slow_rate * 5)
+                self._slow_api_limiters[api_name] = TokenBucket(
+                    start_tokens=slow_capacity,
+                    capacity=slow_capacity,
+                    rate=slow_rate,
+                )
+        else:
+            self._rate_limiter = None
+            self._slow_api_limiters = {}
+
+        logger.info(f"[API] Token updated. Client re-initialized with timeout={self.timeout}s")
 
     async def _handle_api_call(self, func: typing.Callable, **kwargs: typing.Any):
-        """Async wrapper that yields to event loop during rate limit / backoff"""
+        """Async wrapper that yields to event loop during rate limit / backoff
+
+        Adaptive Rate Limiting:
+        - Per-API slow limiters for known throttled APIs (top10_holders, etc.)
+        - On rate-limit error: reduce_rate() on the bucket (permanent slowdown)
+        - On success: on_success() for gradual rate recovery
+        - Shorter backoff (5-15s) instead of 60-240s exponential
+        """
         import asyncio
         import functools
 
-        # Tushare SDK wraps API methods as functools.partial(DataApi.query, 'api_name').
-        # Standard __name__ doesn't exist on partial objects, so extract from partial.args[0].
         import functools as _functools
 
         from utils.thread_pool import ThreadPoolManager
 
         if isinstance(func, _functools.partial) and func.args:
-            api_name = func.args[0]
+            api_name = str(func.args[0])
         else:
             api_name = getattr(func, "__name__", str(func))
 
-        # Core Boundary Fix: format any native date/datetime arguments to Tushare string format YYYYMMDD
         formatted_kwargs = {}
         for k, v in kwargs.items():
             if isinstance(v, (datetime.date, datetime.datetime)):
@@ -131,8 +179,16 @@ class TushareClient:
                 formatted_kwargs[k] = v
         kwargs = formatted_kwargs
 
+        slow_limiter = getattr(self, "_slow_api_limiters", {}).get(api_name)
+        if slow_limiter and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"[tushare_api] api_name='{api_name}' -> slow_limiter active ({slow_limiter.rate * 60:.0f}/min)"
+            )
+
         for i in range(self.max_retries):
-            if self._rate_limiter:
+            if slow_limiter:
+                await slow_limiter.consume_async(1)
+            elif self._rate_limiter:
                 await self._rate_limiter.consume_async(1)
 
             try:
@@ -142,16 +198,18 @@ class TushareClient:
                     )
 
                 loop = asyncio.get_running_loop()
-                # Run the actual synchronous HTTP call in the IO thread pool
                 result = await loop.run_in_executor(
                     ThreadPoolManager().io_pool,
                     functools.partial(func, **kwargs),
                 )
 
-                # Apply unified column renaming if this API needs it
-                # Note: rename is safe even on empty DataFrames (it only affects column labels, not data)
                 if result is not None and api_name in self._COLUMN_RENAMES:
                     result = result.rename(columns=self._COLUMN_RENAMES[api_name])
+
+                if slow_limiter:
+                    slow_limiter.on_success()
+                elif self._rate_limiter:
+                    self._rate_limiter.on_success()
 
                 return result
             except Exception as e:
@@ -187,9 +245,16 @@ class TushareClient:
                     raise e
 
                 if is_rate_limit:
-                    sleep_time = (2**i) * 60 + random.uniform(0, 10)
+                    active_limiter = slow_limiter or self._rate_limiter
+                    if active_limiter:
+                        active_limiter.reduce_rate(factor=0.5)
+
+                    sleep_time = 5 + random.uniform(0, 5) + i * 5
+                    current_rpm = active_limiter.current_rate_per_min if active_limiter else 0
                     logger.warning(
-                        f"[tushare_api] RATE_LIMITED ({api_name}): backoff={sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})",
+                        f"[tushare_api] RATE_LIMITED ({api_name}): "
+                        f"adaptive slowdown -> {current_rpm:.0f}/min, "
+                        f"backoff={sleep_time:.1f}s (attempt {i + 1}/{self.max_retries})",
                     )
                     await asyncio.sleep(sleep_time)
                     continue

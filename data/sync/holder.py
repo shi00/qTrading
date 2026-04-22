@@ -11,8 +11,9 @@ from .base import ISyncStrategy, SyncResult
 
 logger = logging.getLogger(__name__)
 
-# Circuit breaker: abort after this many consecutive errors
 _MAX_ERRORS = 5
+
+_PROGRESS_LOG_INTERVAL = 200
 
 
 class HolderSyncStrategy(ISyncStrategy):
@@ -26,6 +27,11 @@ class HolderSyncStrategy(ISyncStrategy):
       - stk_holdernumber: full-market by enddate, ~2 paginated calls
       - top10_holders: per-stock iteration (ts_code required), ~5000 calls
       - pledge_stat: full-market by end_date, ~2 paginated calls
+
+    Rate Limiting:
+      top10_holders uses a dedicated slow-API rate limiter in TushareClient
+      (configured via _SLOW_API_OVERRIDES). This ensures it runs at a
+      sustainable pace without triggering server-side 429 errors.
     """
 
     def __init__(self, context: typing.Any):
@@ -47,9 +53,8 @@ class HolderSyncStrategy(ISyncStrategy):
         errors = 0
 
         try:
-            # Determine the latest 2 quarter-end dates to ensure coverage
             quarter_ends = self._get_recent_quarter_ends(count=2)
-            logger.debug(
+            logger.info(
                 f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}",
             )
 
@@ -58,8 +63,6 @@ class HolderSyncStrategy(ISyncStrategy):
                     logger.debug("[HolderSync] Stop | Cancelled by user.")
                     break
 
-                # --- stk_holdernumber ---
-                # Note: Tushare uses 'enddate' (not 'end_date') for 截止日期/报告期
                 count = await self._sync_stk_holdernumber(qe)
                 if count < 0:
                     errors += 1
@@ -76,8 +79,6 @@ class HolderSyncStrategy(ISyncStrategy):
                 if errors >= _MAX_ERRORS or self._cancelled:
                     break
 
-                # --- top10_holders ---
-                # Note: ts_code is required by Tushare API, must iterate per stock
                 count = await self._sync_top10_holders(qe)
                 if count < 0:
                     errors += 1
@@ -94,9 +95,6 @@ class HolderSyncStrategy(ISyncStrategy):
                 if errors >= _MAX_ERRORS or self._cancelled:
                     break
 
-            # --- pledge_stat (independent of quarter-ends) ---
-            # pledge_stat uses weekly trading dates, not quarter-ends.
-            # We sync it once per run, outside the quarterly loop.
             if errors < _MAX_ERRORS and not self._cancelled:
                 count, actual_date = await self._sync_pledge_stat()
                 if count < 0:
@@ -126,8 +124,7 @@ class HolderSyncStrategy(ISyncStrategy):
 
     async def _sync_stk_holdernumber(self, enddate: str):
         """
-        Fetch full-market stk_holdernumber snapshot by enddate (截止日期/报告期).
-        Tushare uses 'enddate' parameter (not 'end_date') for the reporting period.
+        Fetch full-market stk_holdernumber snapshot by enddate.
         Returns row count on success, -1 on error.
         """
         try:
@@ -150,7 +147,10 @@ class HolderSyncStrategy(ISyncStrategy):
         """
         Fetch top10_holders for all stocks by iterating per-stock.
         Tushare requires ts_code as a mandatory parameter for this API.
-        Uses 'period' parameter for the reporting period (YYYYMMDD).
+
+        This is the most API-intensive operation (~5500 calls per quarter).
+        The dedicated slow-API rate limiter in TushareClient handles pacing.
+
         Returns total row count on success, -1 on error.
         """
         try:
@@ -164,6 +164,11 @@ class HolderSyncStrategy(ISyncStrategy):
             all_dfs = []
             stock_errors = 0
             consecutive_errors = 0
+            rate_limit_hits = 0
+
+            logger.info(
+                f"[HolderSync] top10_holders | Starting per-stock sync: {total} stocks, period={period}",
+            )
 
             for i, ts_code in enumerate(ts_codes):
                 if self._cancelled:
@@ -181,7 +186,14 @@ class HolderSyncStrategy(ISyncStrategy):
                 except Exception as e:
                     stock_errors += 1
                     consecutive_errors += 1
-                    if stock_errors <= 3:
+                    err_str = str(e).lower()
+                    is_rate_limit = (
+                        "每分钟最多访问" in err_str or "抱歉" in err_str or "频次超限" in err_str or "429" in err_str
+                    )
+                    if is_rate_limit:
+                        rate_limit_hits += 1
+
+                    if stock_errors <= 3 or is_rate_limit:
                         logger.debug(
                             f"[HolderSync] top10_holders | Skip {ts_code} period={period}: {e}",
                         )
@@ -191,16 +203,27 @@ class HolderSyncStrategy(ISyncStrategy):
                         )
                         return -1
 
-                if (i + 1) % 500 == 0:
-                    logger.debug(
-                        f"[HolderSync] top10_holders | Progress: {i + 1}/{total} stocks, errors={stock_errors}",
+                if (i + 1) % _PROGRESS_LOG_INTERVAL == 0:
+                    elapsed_info = ""
+                    api_client = getattr(self.context, "api", None)
+                    if api_client:
+                        slow_limiter = getattr(api_client, "_slow_api_limiters", {}).get("top10_holders")
+                        if slow_limiter:
+                            elapsed_info = f", rate={slow_limiter.current_rate_per_min:.0f}/min"
+
+                    logger.info(
+                        f"[HolderSync] top10_holders | Progress: {i + 1}/{total} "
+                        f"({(i + 1) * 100 // total}%), "
+                        f"errors={stock_errors}, rate_limits={rate_limit_hits}{elapsed_info}",
                     )
 
             if all_dfs:
                 combined = pd.concat(all_dfs, ignore_index=True)
                 await self.context.cache.save_top10_holders(combined)
-                logger.debug(
-                    f"[HolderSync] Table | top10_holders period={period}: {len(combined)} records from {len(all_dfs)} stocks",
+                logger.info(
+                    f"[HolderSync] Table | top10_holders period={period}: "
+                    f"{len(combined)} records from {len(all_dfs)}/{total} stocks, "
+                    f"errors={stock_errors}, rate_limits={rate_limit_hits}",
                 )
                 return len(combined)
 
@@ -264,7 +287,6 @@ class HolderSyncStrategy(ISyncStrategy):
         pledge_stat snapshots are keyed by end_date (typically weekly Fridays).
 
         Strategy: Try the most recent 4 Fridays as end_date to find a valid snapshot.
-        This avoids pulling all historical data by calling without end_date.
         Returns (row_count, actual_end_date) on success, (-1, None) on error.
         """
         try:
@@ -335,7 +357,6 @@ class HolderSyncStrategy(ISyncStrategy):
         """
         today = get_now().date()
         quarter_ends = []
-        # Walk backwards from current year
         for year in range(today.year, today.year - 2, -1):
             for month, day in [(12, 31), (9, 30), (6, 30), (3, 31)]:
                 qe = datetime.date(year, month, day)

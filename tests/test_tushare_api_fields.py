@@ -86,6 +86,10 @@ class TestApiFieldsExplicit:
 class TestApiFieldsMatchDaoCols:
     """Test that API fields parameter covers all DAO cols (field-level consistency)."""
 
+    _COMPUTED_COLS: dict[str, set[str]] = {
+        "save_holder_number": {"holder_num_change", "holder_num_ratio"},
+    }
+
     API_DAO_MAPPINGS = [
         ("get_moneyflow", "save_moneyflow"),
         ("get_top_list", "save_top_list"),
@@ -136,6 +140,7 @@ class TestApiFieldsMatchDaoCols:
                         continue
 
                     expected = dao_cols - {"updated_at", "created_at"}
+                    expected -= self._COMPUTED_COLS.get(dao_name, set())
                     missing = expected - api_fields
 
                     if missing:

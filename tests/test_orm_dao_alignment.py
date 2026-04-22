@@ -264,7 +264,8 @@ class TestOrmDaoAlignment:
         model_cols = get_model_columns(StkHoldernumber)
         dao_cols = extract_cols_from_method(HolderDao.save_holder_number)
         assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
+        computed = {"holder_num_change", "holder_num_ratio"}
+        expected = model_cols - {"updated_at", "created_at"} - computed
         missing = expected - dao_cols
         assert not missing, f"save_holder_number missing: {missing}"
 

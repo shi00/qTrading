@@ -707,6 +707,8 @@ class TestAuxiliaryDataText:
                 {
                     "end_date": ["20231231", "20230930"],
                     "holder_num": [500000, 520000],
+                    "holder_num_change": [-20000.0, -10000.0],
+                    "holder_num_ratio": [-3.85, -1.89],
                 }
             )
         )
@@ -764,6 +766,27 @@ class TestAuxiliaryDataText:
         result = await AIStrategyMixin()._build_auxiliary_data_text("000001.SZ", mock_cache)
 
         assert "质押比例较高" in result or result == "无辅助数据"
+
+    @pytest.mark.asyncio
+    async def test_build_auxiliary_data_holder_number_without_ratio(self, mock_cache):
+        """股东人数无变化率时仍输出户数"""
+        mock_cache.get_stk_holdernumber = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "end_date": ["20231231"],
+                    "holder_num": [500000],
+                    "holder_num_change": [None],
+                    "holder_num_ratio": [None],
+                }
+            )
+        )
+
+        result = await AIStrategyMixin()._build_auxiliary_data_text("000001.SZ", mock_cache)
+
+        assert "股东人数" in result
+        assert "500,000" in result
+        assert "筹码集中" not in result
+        assert "筹码分散" not in result
 
 
 class TestMacroContext:

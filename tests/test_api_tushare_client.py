@@ -51,7 +51,8 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
             client = TushareClient(token="dummy")
 
             # Mock internal limiter to verify acquire is called
-            client._rate_limiter = AsyncMock()
+            client._rate_limiter = MagicMock()
+            client._rate_limiter.consume_async = AsyncMock()
 
             await client.get_daily_quotes(ts_code="000001.SZ")
 
