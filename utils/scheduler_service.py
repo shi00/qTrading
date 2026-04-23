@@ -284,7 +284,20 @@ class SchedulerService:
 
             result = await processor.run_daily_update(progress_callback=_progress)
             self._last_update_date = today_str
-            added = getattr(result, "added", result) if result else 0  # type: ignore
+            # NOTE: Never use `if result` here.
+            # Pandas DataFrame truth-value is ambiguous and raises ValueError.
+            if result is None:
+                added = 0
+            elif hasattr(result, "added"):
+                added = getattr(result, "added", 0)  # type: ignore
+            elif hasattr(result, "empty"):
+                # DataFrame/Series fallback: treat row count as added amount
+                try:
+                    added = 0 if result.empty else len(result)  # type: ignore
+                except Exception:
+                    added = 0
+            else:
+                added = result
             return I18n.get("sched_daily_done", added=added)
 
         TaskManager().submit_task(

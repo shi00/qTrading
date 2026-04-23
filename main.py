@@ -41,6 +41,7 @@ async def main(page: ft.Page):
     close_confirm_dialog = None
     close_confirm_visible = False
     shutdown_requested = False
+    active_dialog = None
 
     def _schedule_async(coro):
         if hasattr(page, "run_task"):
@@ -76,13 +77,53 @@ async def main(page: ft.Page):
         finally:
             shutdown_requested = False
 
+    def _page_dialog_matches_close_confirm() -> bool:
+        return active_dialog is close_confirm_dialog
+
+    def _show_dialog(dialog):
+        nonlocal active_dialog
+        if hasattr(page, "open"):
+            page.open(dialog)
+            active_dialog = dialog
+            return
+        # Fallback for older/test page implementations.
+        page.dialog = dialog
+        dialog.open = True
+        active_dialog = dialog
+        page.update()
+
+    def _hide_dialog(dialog):
+        nonlocal active_dialog
+        if hasattr(page, "close"):
+            page.close(dialog)
+            if active_dialog is dialog:
+                active_dialog = None
+            return
+        dialog.open = False
+        if active_dialog is dialog:
+            active_dialog = None
+        page.update()
+
     def _hide_close_confirm_dialog():
         nonlocal close_confirm_visible
+        logger.info(
+            "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, dialog_open=%s, "
+            "page_dialog_is_close_confirm=%s",
+            close_confirm_visible,
+            close_confirm_dialog is not None,
+            getattr(close_confirm_dialog, "open", None),
+            _page_dialog_matches_close_confirm(),
+        )
         if close_confirm_dialog is None:
             return
-        close_confirm_dialog.open = False
+        _hide_dialog(close_confirm_dialog)
         close_confirm_visible = False
-        page.update()
+        logger.info(
+            "[Main] Close confirm dialog hidden. visible=%s, dialog_open=%s, page_dialog_is_close_confirm=%s",
+            close_confirm_visible,
+            getattr(close_confirm_dialog, "open", None),
+            _page_dialog_matches_close_confirm(),
+        )
 
     def _on_close_cancel(_):
         logger.info("[Main] Window close canceled by user.")
@@ -114,17 +155,55 @@ async def main(page: ft.Page):
 
     def _show_close_confirm_dialog():
         nonlocal close_confirm_visible
+        logger.info(
+            "[Main] Request to show close confirm dialog. visible=%s, shutdown_requested=%s, "
+            "dialog_exists=%s, dialog_open=%s, page_dialog_is_close_confirm=%s",
+            close_confirm_visible,
+            shutdown_requested,
+            close_confirm_dialog is not None,
+            getattr(close_confirm_dialog, "open", None),
+            _page_dialog_matches_close_confirm(),
+        )
         if close_confirm_visible or shutdown_requested:
+            logger.info(
+                "[Main] Skip showing close confirm dialog. visible=%s, shutdown_requested=%s, "
+                "dialog_open=%s, page_dialog_is_close_confirm=%s",
+                close_confirm_visible,
+                shutdown_requested,
+                getattr(close_confirm_dialog, "open", None),
+                _page_dialog_matches_close_confirm(),
+            )
             return
-        page.dialog = close_confirm_dialog
-        close_confirm_dialog.open = True
+        _show_dialog(close_confirm_dialog)
         close_confirm_visible = True
-        page.update()
+        logger.info(
+            "[Main] Close confirm dialog assigned before page.update(). visible=%s, dialog_open=%s, "
+            "page_dialog_is_close_confirm=%s",
+            close_confirm_visible,
+            getattr(close_confirm_dialog, "open", None),
+            _page_dialog_matches_close_confirm(),
+        )
+        logger.info(
+            "[Main] Close confirm dialog show request completed. visible=%s, dialog_open=%s, "
+            "page_dialog_is_close_confirm=%s",
+            close_confirm_visible,
+            getattr(close_confirm_dialog, "open", None),
+            _page_dialog_matches_close_confirm(),
+        )
 
     # ── 途径一：主退出路径 — 拦截窗口关闭事件 ──
     page.window.prevent_close = True
 
     async def _on_window_event(e):
+        logger.info(
+            "[Main] Window event received. type=%s, close_confirm_visible=%s, shutdown_requested=%s, "
+            "page_dialog_is_close_confirm=%s, dialog_open=%s",
+            getattr(e, "type", None),
+            close_confirm_visible,
+            shutdown_requested,
+            _page_dialog_matches_close_confirm(),
+            getattr(close_confirm_dialog, "open", None),
+        )
         if e.type == ft.WindowEventType.CLOSE:
             logger.info("[Main] Window CLOSE event received.")
             _show_close_confirm_dialog()

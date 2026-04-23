@@ -1,12 +1,15 @@
 import asyncio
 import json
+import logging
 import os
 import random
 import re
 import sys
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
-from playwright.async_api import Page, async_playwright
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 # Dynamically add the project root to sys.path so it can run from anywhere
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,8 +18,16 @@ if APP_ROOT not in sys.path:
 
 from data.cache.cache_manager import CacheManager  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
 AUTH_FILE = os.path.join(APP_ROOT, ".doubao_auth_state.json")
 MAX_EXCLUDE_RETRIES = 2  # 对于有毒批次的最高容忍次数
+CHAT_INPUT_WAIT_MS = 30000
+CHAT_INPUT_SELECTORS = [
+    ("css", 'textarea[data-testid="chat_input_input"]'),
+    ("css", "textarea"),
+    ("role", "textbox"),
+]
 
 # ==========================================
 # 豆包专用提示词模板 (Doubao Prompt Template)
@@ -51,6 +62,7 @@ class DoubaoTagger:
         self.cancel_event = None
         self.exclude_counter = defaultdict(int)
         self.dry_run = dry_run
+        self._concepts_cleared = False
 
     async def initialize(self):
         if self.dao is None:
@@ -58,7 +70,79 @@ class DoubaoTagger:
             await self.cm.init_db()
             self.dao = self.cm.stock_dao
 
-    async def process_batch(self, page: Page, stocks: list[tuple[str, str]]) -> bool:
+    async def _dump_debug_artifacts(self, page: "Page", reason: str):
+        try:
+            html_content = await page.content()
+            html_path = os.path.join(APP_ROOT, "doubao_dom_debug.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            screenshot_path = os.path.join(APP_ROOT, "debug_doubao_fail.png")
+            await page.screenshot(path=screenshot_path)
+            logger.info(
+                "[DoubaoTagger] Debug artifacts captured for %s. html=%s screenshot=%s",
+                reason,
+                html_path,
+                screenshot_path,
+            )
+        except Exception as ex:
+            logger.warning("[DoubaoTagger] Failed to capture debug artifacts for %s: %s", reason, ex)
+
+    async def _clear_existing_concepts_once(self):
+        if self.dry_run or self._concepts_cleared or self.dao is None:
+            return
+        await self.dao.clear_all_doubao_concepts()  # type: ignore[attr-defined]
+        self._concepts_cleared = True
+        logger.info("[DoubaoTagger] Existing Doubao concepts cleared after page became interactive.")
+
+    async def _find_chat_input(self, page: "Page", timeout_ms: int = CHAT_INPUT_WAIT_MS):
+        """Find the chat input with ordered selector fallbacks for DOM changes."""
+        candidate_errors: list[str] = []
+        deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+
+        for index, (kind, selector) in enumerate(CHAT_INPUT_SELECTORS):
+            remaining_budget_ms = max(1, int((deadline - asyncio.get_running_loop().time()) * 1000))
+            if remaining_budget_ms <= 0:
+                break
+            remaining_selectors = len(CHAT_INPUT_SELECTORS) - index
+            per_try_timeout_ms = max(1, remaining_budget_ms // remaining_selectors)
+            try:
+                if kind == "role":
+                    locator = page.get_by_role(selector).first
+                else:
+                    locator = page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=per_try_timeout_ms)
+                if hasattr(locator, "is_enabled") and not await locator.is_enabled():
+                    raise TimeoutError("locator is visible but disabled")
+                if hasattr(locator, "is_editable") and not await locator.is_editable():
+                    raise TimeoutError("locator is visible but not editable")
+                logger.info("[DoubaoTagger] Chat input matched via %s:%s", kind, selector)
+                return locator, f"{kind}:{selector}"
+            except Exception as ex:
+                candidate_errors.append(f"{kind}:{selector} -> {type(ex).__name__}: {ex}")
+
+        current_url = ""
+        current_title = ""
+        try:
+            current_url = page.url
+        except Exception:
+            pass
+        try:
+            current_title = await page.title()
+        except Exception:
+            pass
+
+        logger.error(
+            "[DoubaoTagger] Chat input not found. url=%s title=%s attempts=%s",
+            current_url,
+            current_title,
+            " | ".join(candidate_errors),
+        )
+        await self._dump_debug_artifacts(page, "chat_input_not_found")
+        raise TimeoutError(
+            f"Doubao chat input not found after selector fallback. url={current_url}, title={current_title}"
+        )
+
+    async def process_batch(self, page: "Page", stocks: list[tuple[str, str]]) -> bool:
         """核心交互逻辑：发送数据并等待大模型结果"""
         stock_text = "\n".join([f"{r[0]} ({r[1]})" for r in stocks])
         prompt = PROMPT_TEMPLATE.format(count=len(stocks), stock_list=stock_text)
@@ -74,11 +158,19 @@ class DoubaoTagger:
         except Exception:
             pass  # 可能已经在全新会话中了
 
-        # 等待输入框准备就绪
-        textarea = page.locator('textarea[data-testid="chat_input_input"]')
-        await textarea.wait_for(state="visible", timeout=10000)
-        await textarea.fill(prompt)
-        await asyncio.sleep(0.5)
+        try:
+            # 等待输入框准备就绪
+            textarea, matched_selector = await self._find_chat_input(page)
+            logger.info("[DoubaoTagger] Using chat input selector: %s", matched_selector)
+            await self._clear_existing_concepts_once()
+            await textarea.fill(prompt)
+            await asyncio.sleep(0.5)
+        except Exception as ex:
+            logger.error("[DoubaoTagger] Failed before prompt submission: %s", ex, exc_info=True)
+            print(f"❌ 输入框准备失败: {ex}", flush=True)
+            if "chat input not found after selector fallback" not in str(ex):
+                await self._dump_debug_artifacts(page, "prompt_submission_failed")
+            return False
 
         print("✈️ 发送 Prompt 给大模型...")
         await page.keyboard.press("Enter")
@@ -154,23 +246,17 @@ class DoubaoTagger:
                 return False
         else:
             print("❌ 未在返回结果中找到合规的 JSON (可能遭遇 WAF 拦截、截断或超时)。")
-            # 出错留痕
-            try:
-                html_content = await page.content()
-                with open(
-                    os.path.join(APP_ROOT, "doubao_dom_debug.html"),
-                    "w",
-                    encoding="utf-8",
-                ) as f:
-                    f.write(html_content)
-                await page.screenshot(
-                    path=os.path.join(APP_ROOT, "debug_doubao_fail.png"),
-                )
-            except Exception:
-                pass
+            await self._dump_debug_artifacts(page, "response_json_not_found")
             return False
 
     async def run(self, limit: int = 0):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as e:
+            raise RuntimeError(
+                "Playwright 未安装，无法运行豆包自动打标。请执行 `pip install playwright && playwright install`。"
+            ) from e
+
         if not os.path.exists(AUTH_FILE):
             print(
                 f"❌ 找不到持久化文件 {AUTH_FILE}！请先运行 doubao_login.py 登录。",

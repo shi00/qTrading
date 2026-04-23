@@ -48,7 +48,7 @@ class _DummyPage:
         self.padding = 0
         self.toast = None
         self.controls = []
-        self.dialog = None
+        self.current_dialog = None
         self.updated_count = 0
 
     def add(self, control):
@@ -56,6 +56,17 @@ class _DummyPage:
 
     def update(self):
         self.updated_count += 1
+
+    def open(self, dialog):
+        self.current_dialog = dialog
+        dialog.open = True
+        self.update()
+
+    def close(self, dialog):
+        if self.current_dialog is dialog:
+            self.current_dialog = None
+        dialog.open = False
+        self.update()
 
 
 class _FakeCoordinator:
@@ -88,6 +99,14 @@ class _FakeAlertDialog:
         self.actions = kwargs.get("actions", [])
         self.actions_alignment = kwargs.get("actions_alignment")
         self.open = False
+
+
+class _LoggerSpy:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def info(self, msg, *args):
+        self.messages.append(msg % args if args else msg)
 
 
 def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
@@ -152,15 +171,15 @@ async def test_window_close_success_cancels_watchdog(monkeypatch):
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
-    assert page.dialog is not None
-    assert page.dialog.open is True
+    assert page.current_dialog is not None
+    assert page.current_dialog.open is True
 
     coordinator = _FakeCoordinator.last
     assert coordinator is not None
     assert coordinator.start_watchdog_calls == 0
     assert coordinator.do_cleanup_calls == 0
 
-    confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
+    confirm_btn = cast(_FakeTextButton, page.current_dialog.actions[1])
     assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
     await asyncio.sleep(0)
@@ -180,10 +199,10 @@ async def test_window_close_cancel_does_not_shutdown(monkeypatch):
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
-    assert page.dialog is not None
-    assert page.dialog.open is True
+    assert page.current_dialog is not None
+    assert page.current_dialog.open is True
 
-    cancel_btn = cast(_FakeTextButton, page.dialog.actions[0])
+    cancel_btn = cast(_FakeTextButton, page.current_dialog.actions[0])
     assert cancel_btn.on_click is not None
     cancel_btn.on_click(MagicMock())
     await asyncio.sleep(0)
@@ -194,7 +213,7 @@ async def test_window_close_cancel_does_not_shutdown(monkeypatch):
     assert coordinator.do_cleanup_calls == 0
     assert coordinator.cancel_watchdog_calls == 0
     assert page.window.destroy_called == 0
-    assert page.dialog.open is False
+    assert page.current_dialog is None
 
 
 @pytest.mark.asyncio
@@ -209,7 +228,8 @@ async def test_window_close_failure_forces_exit(monkeypatch):
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
-    confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
+    assert page.current_dialog is not None
+    confirm_btn = cast(_FakeTextButton, page.current_dialog.actions[1])
     assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
     # Use the real sleep to yield control; app_main.asyncio.sleep is mocked.
@@ -263,13 +283,31 @@ async def test_window_close_during_shutdown_does_not_reopen_dialog(monkeypatch):
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
-    confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
+    assert page.current_dialog is not None
+    confirm_btn = cast(_FakeTextButton, page.current_dialog.actions[1])
     assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
     await started.wait()
 
     await on_event(SimpleNamespace(type="close"))
-    assert page.dialog.open is False
+    assert page.current_dialog is None
 
     release.set()
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_window_close_logs_dialog_state_transitions(monkeypatch):
+    _prepare_main(monkeypatch)
+    page = _DummyPage()
+    logger_spy = _LoggerSpy()
+    monkeypatch.setattr(app_main, "logger", logger_spy)
+
+    await app_main.main(page)
+    assert page.window.on_event is not None
+    on_event = cast(AsyncEventHandler, page.window.on_event)
+    await on_event(SimpleNamespace(type="close"))
+
+    assert any("Window event received." in msg for msg in logger_spy.messages)
+    assert any("Request to show close confirm dialog." in msg for msg in logger_spy.messages)
+    assert any("Close confirm dialog show request completed." in msg for msg in logger_spy.messages)
