@@ -211,6 +211,7 @@
     "screener_view_details": "View Details",
     "strategy_ai_active_name": "AI Deep Dive (Beta)",
     "strategy_ai_active_desc": "AI Auto-Selection: Quant filter for active stocks + DeepSeek/AI analysis of news and reports.",
+    "strategy_ai_nightly_name": "AI Auto Nightly Screening",
     "strategy_value_name": "Value Investing",
     "strategy_value_desc": "Criteria: PE 5-20x | PB 0.5-3x | Div Yield > 2% (Undervalued Blue Chips)",
     "strategy_growth_name": "High Growth",

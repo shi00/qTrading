@@ -9,7 +9,7 @@ from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import VirtualTable
-from ui.i18n import I18n
+from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import TASK_NAME_PREFIX, ScreenerViewModel
 from utils.log_decorators import UILogger
@@ -591,7 +591,7 @@ class ScreenerView(ft.Container):
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
                                 title=ft.Text(
-                                    f"{s['strategy_name']} ({s['cnt']})",
+                                    f"{translate_strategy_name(s['strategy_name'])} ({s['cnt']})",
                                     size=13,
                                 ),
                                 on_click=lambda e, d=d_key, sn=s["strategy_name"]: self._on_tree_item_click(d, sn),
@@ -648,7 +648,9 @@ class ScreenerView(ft.Container):
         else:
             ts = str(trade_date)
             display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-        label = strategy_name or I18n.get("screener_all_strategies", "全部策略")
+        label = (
+            translate_strategy_name(strategy_name) if strategy_name else I18n.get("screener_all_strategies", "全部策略")
+        )
         self._update_status(f"{display} / {label}", "blue")
         await self.vm.load_history_data(trade_date, strategy_name)
         self._toggle_progress(False)

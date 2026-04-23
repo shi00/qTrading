@@ -136,6 +136,7 @@
     "screener_view_details": "查看详情",
     "strategy_ai_active_name": "AI 深度精选 (Beta)",
     "strategy_ai_active_desc": "AI 全自动选股：先用量化筛选活跃股，再由 DeepSeek/AI 深度阅读新闻和财报进行最终评分。",
+    "strategy_ai_nightly_name": "AI 自动夜间选股",
     "strategy_value_name": "价值投资",
     "strategy_value_desc": "标准：市盈率 5-20倍 | 市净率 0.5-3倍 | 股息率 > 2% (寻找低估值蓝筹)",
     "strategy_growth_name": "高成长策略",
