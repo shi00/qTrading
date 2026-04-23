@@ -309,7 +309,7 @@ _STRATEGY_NAME_MAP = {
 }
 
 
-def translate_strategy_name(name: str) -> str:
+def translate_strategy_name(name: str | None) -> str | None:
     """
     Translate strategy name to localized version.
 

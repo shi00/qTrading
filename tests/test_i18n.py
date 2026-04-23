@@ -360,3 +360,56 @@ class TestI18nBackwardCompatibility:
         for key in llm_keys:
             result = I18n.get(key)
             assert result != key, f"LLM key '{key}' is missing"
+
+
+class TestTranslateStrategyName:
+    """Test translate_strategy_name function."""
+
+    def test_translate_ai_auto_nightly(self):
+        """Test translating AI_Auto_Nightly identifier."""
+        from ui.i18n import translate_strategy_name
+
+        I18n.set_locale("zh_CN")
+        result = translate_strategy_name("AI_Auto_Nightly")
+        assert result == "AI 自动夜间选股"
+
+        I18n.set_locale("en_US")
+        result = translate_strategy_name("AI_Auto_Nightly")
+        assert result == "AI Auto Nightly Screening"
+
+        I18n.set_locale("zh_CN")
+
+    def test_translate_already_localized_name(self):
+        """Test translating already localized names."""
+        from ui.i18n import translate_strategy_name
+
+        I18n.set_locale("zh_CN")
+        result = translate_strategy_name("价值投资")
+        assert result == "价值投资"
+
+        I18n.set_locale("en_US")
+        result = translate_strategy_name("Value Investing")
+        assert result == "Value Investing"
+
+        I18n.set_locale("zh_CN")
+
+    def test_translate_unknown_name_returns_original(self):
+        """Test that unknown names are returned as-is."""
+        from ui.i18n import translate_strategy_name
+
+        result = translate_strategy_name("UnknownStrategy")
+        assert result == "UnknownStrategy"
+
+    def test_translate_empty_string(self):
+        """Test translating empty string."""
+        from ui.i18n import translate_strategy_name
+
+        result = translate_strategy_name("")
+        assert result == ""
+
+    def test_translate_none_returns_none(self):
+        """Test translating None."""
+        from ui.i18n import translate_strategy_name
+
+        result = translate_strategy_name(None)
+        assert result is None

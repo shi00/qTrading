@@ -1268,6 +1268,10 @@ class ScreenerView(ft.Container):
             if pd.isna(val):
                 return "-"
 
+            # Translate strategy_name column
+            if col == "strategy_name":
+                return translate_strategy_name(str(val))
+
             # Format Dates safely
             if col in ["list_date", "trade_date"]:
                 import datetime
