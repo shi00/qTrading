@@ -301,6 +301,352 @@ class TestSaveResults(unittest.TestCase):
         asyncio.run(run_test())
 
 
+class TestReviewPredictionsCore(unittest.TestCase):
+    """测试 run_review 核心复盘流程（P1 级）"""
+
+    def _make_manager(self, mock_cache_instance, mock_api_instance=None):
+        with (
+            patch("data.persistence.review_manager.CacheManager", return_value=mock_cache_instance),
+            patch("data.persistence.review_manager.TushareClient", return_value=mock_api_instance),
+            patch("data.persistence.review_manager.ConfigHandler"),
+        ):
+            return ReviewManager()
+
+    def test_review_win_when_alpha_positive(self):
+        """Alpha > 0.5 时标记为 WIN"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240315", "20240318"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "pct_chg": [1.0],
+                }
+            )
+        )
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_screener_dao.update_prediction_result.call_args[0]
+            self.assertEqual(call_args[2], "WIN")
+
+        asyncio.run(run_test())
+
+    def test_review_loss_when_alpha_negative(self):
+        """Alpha < -0.5 时标记为 LOSS"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240315", "20240318"],
+                    "close": [10.0, 9.5],
+                    "pct_chg": [1.0, -5.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "pct_chg": [2.0],
+                }
+            )
+        )
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_screener_dao.update_prediction_result.call_args[0]
+            self.assertEqual(call_args[2], "LOSS")
+
+        asyncio.run(run_test())
+
+    def test_review_draw_when_alpha_near_zero(self):
+        """|Alpha| <= 0.5 时标记为 DRAW"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240315", "20240318"],
+                    "close": [10.0, 10.1],
+                    "pct_chg": [1.0, 1.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "pct_chg": [0.8],
+                }
+            )
+        )
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_screener_dao.update_prediction_result.call_args[0]
+            self.assertEqual(call_args[2], "DRAW")
+
+        asyncio.run(run_test())
+
+    def test_review_no_t1_data(self):
+        """T+1 数据缺失时不更新"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240315"],
+                    "close": [10.0],
+                    "pct_chg": [1.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_review_no_quotes_at_all(self):
+        """无行情数据时跳过"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+
+        mock_api_instance = MagicMock()
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_review_index_data_failure_defaults_zero(self):
+        """指数数据获取失败时 index_pct 默认 0.0"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240315", "20240318"],
+                    "close": [10.0, 10.3],
+                    "pct_chg": [1.0, 3.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(side_effect=Exception("API Error"))
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_screener_dao.update_prediction_result.call_args[0]
+            self.assertEqual(call_args[2], "WIN")
+
+        asyncio.run(run_test())
+
+    def test_review_empty_pending(self):
+        """无待复盘预测时直接返回"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+
+        mock_api_instance = MagicMock()
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_cache_instance.get_daily_quotes.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_review_t0_not_found_in_quotes(self):
+        """预测日期不在行情数据中时跳过"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240310"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240311", "20240312"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            mock_screener_dao.update_prediction_result.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_review_multiple_predictions(self):
+        """多条预测逐一复盘"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1, 2],
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240315", "20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        call_count = 0
+
+        async def mock_get_quotes(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return pd.DataFrame(
+                {
+                    "trade_date": ["20240315", "20240318"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(side_effect=mock_get_quotes)
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            self.assertEqual(mock_screener_dao.update_prediction_result.call_count, 2)
+
+        asyncio.run(run_test())
+
+
 class TestSaveResultsEdgeCases(unittest.TestCase):
     """测试保存结果边界条件"""
 

@@ -317,5 +317,192 @@ class TestTokenBucketAdaptiveRate(unittest.TestCase):
         self.assertAlmostEqual(bucket.min_rate, 2.0, places=2)
 
 
+class TestTokenBucketConcurrent(unittest.TestCase):
+    """测试 TokenBucket 并发安全性（P1 级）"""
+
+    def test_concurrent_reduce_rate_and_on_success(self):
+        """多线程同时调用 reduce_rate 和 on_success 不崩溃"""
+        bucket = TokenBucket(start_tokens=50, capacity=100, rate=10.0)
+        errors = []
+
+        def worker_reduce():
+            try:
+                for _ in range(50):
+                    bucket.reduce_rate(0.9)
+                    time.sleep(0.001)
+            except Exception as e:
+                errors.append(e)
+
+        def worker_success():
+            try:
+                for _ in range(50):
+                    bucket.on_success()
+                    time.sleep(0.001)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=worker_reduce),
+            threading.Thread(target=worker_success),
+            threading.Thread(target=worker_reduce),
+            threading.Thread(target=worker_success),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0)
+        self.assertGreaterEqual(bucket.rate, bucket.min_rate)
+        self.assertLessEqual(bucket.rate, bucket.original_rate)
+
+    def test_concurrent_consume_and_reduce_rate(self):
+        """多线程同时消费令牌和降低速率不崩溃"""
+        bucket = TokenBucket(start_tokens=50, capacity=100, rate=10.0)
+        errors = []
+
+        def worker_consume():
+            try:
+                for _ in range(20):
+                    bucket.consume(1)
+                    time.sleep(0.002)
+            except Exception as e:
+                errors.append(e)
+
+        def worker_reduce():
+            try:
+                for _ in range(20):
+                    bucket.reduce_rate(0.8)
+                    time.sleep(0.003)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=worker_consume),
+            threading.Thread(target=worker_reduce),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0)
+
+    def test_concurrent_reconfigure_and_consume(self):
+        """多线程同时 reconfigure 和消费不崩溃"""
+        bucket = TokenBucket(start_tokens=50, capacity=100, rate=10.0)
+        errors = []
+
+        def worker_reconfigure():
+            try:
+                for i in range(10):
+                    bucket.reconfigure(rate=5.0 + i)
+                    time.sleep(0.005)
+            except Exception as e:
+                errors.append(e)
+
+        def worker_consume():
+            try:
+                for _ in range(10):
+                    bucket.consume(1)
+                    time.sleep(0.005)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=worker_reconfigure),
+            threading.Thread(target=worker_consume),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0)
+
+
+class TestTokenBucketAdaptiveEdgeCases(unittest.TestCase):
+    """测试自适应速率边界条件（P1 级）"""
+
+    def test_reduce_rate_converges_to_min(self):
+        """连续 reduce_rate 收敛到 min_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0, min_rate=1.0)
+        for _ in range(20):
+            bucket.reduce_rate(0.5)
+
+        self.assertGreaterEqual(bucket.rate, 1.0)
+        self.assertAlmostEqual(bucket.rate, 1.0, places=2)
+
+    def test_on_success_recovery_step(self):
+        """on_success 恢复步长为 _RECOVERY_STEP * original_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.rate, 5.0, places=2)
+
+        bucket._consecutive_successes = 9
+        bucket._last_recovery_time = 0
+        bucket.on_success()
+
+        expected_rate = 5.0 + bucket._RECOVERY_STEP * 10.0
+        self.assertAlmostEqual(bucket.rate, expected_rate, places=2)
+
+    def test_on_success_recovery_interval_guard(self):
+        """_RECOVERY_INTERVAL 内不重复恢复"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.rate, 5.0, places=2)
+
+        bucket._consecutive_successes = 10
+        bucket._last_recovery_time = time.monotonic()
+        bucket.on_success()
+
+        self.assertAlmostEqual(bucket.rate, 5.0, places=2)
+
+    def test_on_success_no_recovery_above_original(self):
+        """恢复速率不超过 original_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
+        bucket.reduce_rate(0.9)
+        self.assertAlmostEqual(bucket.rate, 9.0, places=2)
+
+        for _ in range(100):
+            bucket._consecutive_successes = 10
+            bucket._last_recovery_time = 0
+            bucket.on_success()
+
+        self.assertLessEqual(bucket.rate, bucket.original_rate)
+
+    def test_reduce_rate_resets_consecutive_successes(self):
+        """reduce_rate 重置连续成功计数"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
+        for _ in range(5):
+            bucket.on_success()
+        self.assertEqual(bucket._consecutive_successes, 5)
+
+        bucket.reduce_rate(0.5)
+        self.assertEqual(bucket._consecutive_successes, 0)
+
+    def test_reconfigure_resets_min_rate(self):
+        """reconfigure 更新 min_rate"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        self.assertAlmostEqual(bucket.min_rate, 0.5, places=2)
+
+        bucket.reconfigure(rate=10.0)
+        self.assertAlmostEqual(bucket.min_rate, 1.0, places=2)
+
+    def test_reconfigure_trims_tokens_to_capacity(self):
+        """reconfigure 后 tokens 不超过新 capacity"""
+        bucket = TokenBucket(start_tokens=15, capacity=20, rate=5.0)
+        bucket.reconfigure(capacity=8)
+        self.assertAlmostEqual(bucket.tokens, 8.0, places=1)
+
+    def test_current_rate_per_min_reflects_adaptive(self):
+        """current_rate_per_min 反映自适应后的速率"""
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
+        self.assertAlmostEqual(bucket.current_rate_per_min, 600.0, places=1)
+
+        bucket.reduce_rate(0.5)
+        self.assertAlmostEqual(bucket.current_rate_per_min, 300.0, places=1)
+
+
 if __name__ == "__main__":
     unittest.main()
