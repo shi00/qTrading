@@ -200,6 +200,7 @@ async def test_window_close_cancel_does_not_shutdown(monkeypatch):
 @pytest.mark.asyncio
 async def test_window_close_failure_forces_exit(monkeypatch):
     exit_calls = []
+    real_sleep = asyncio.sleep
     _prepare_main(monkeypatch, cleanup_result=False, exit_spy=lambda code: exit_calls.append(code))
     monkeypatch.setattr(app_main.asyncio, "sleep", AsyncMock(return_value=None))
     page = _DummyPage()
@@ -211,8 +212,9 @@ async def test_window_close_failure_forces_exit(monkeypatch):
     confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
     assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # Use the real sleep to yield control; app_main.asyncio.sleep is mocked.
+    await real_sleep(0)
+    await real_sleep(0)
 
     coordinator = _FakeCoordinator.last
     assert coordinator is not None
