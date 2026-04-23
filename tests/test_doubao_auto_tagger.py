@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -126,11 +126,23 @@ async def test_find_chat_input_reports_page_context_when_all_selectors_fail():
 
 @pytest.mark.asyncio
 async def test_find_chat_input_uses_total_timeout_budget_instead_of_full_timeout_per_selector():
+    import asyncio
+
     tagger = DoubaoTagger()
     page = _FakePage(url="https://www.doubao.com/chat/", title="Doubao")
 
-    with pytest.raises(TimeoutError):
-        await tagger._find_chat_input(page, timeout_ms=90)
+    fake_time_values = [0.0, 0.0, 0.030, 0.060]
+    call_count = [0]
+
+    def fake_time():
+        idx = min(call_count[0], len(fake_time_values) - 1)
+        val = fake_time_values[idx]
+        call_count[0] += 1
+        return val
+
+    with patch.object(asyncio.get_running_loop(), "time", fake_time):
+        with pytest.raises(TimeoutError):
+            await tagger._find_chat_input(page, timeout_ms=90)
 
     attempted_timeouts = [timeout for _, timeout in page.timeout_log]
     assert len(attempted_timeouts) == 3

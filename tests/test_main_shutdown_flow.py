@@ -108,6 +108,9 @@ class _LoggerSpy:
     def info(self, msg, *args):
         self.messages.append(msg % args if args else msg)
 
+    def debug(self, msg, *args):
+        self.messages.append(msg % args if args else msg)
+
 
 def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     _FakeCoordinator.cleanup_result = cleanup_result
