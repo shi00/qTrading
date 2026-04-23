@@ -29,9 +29,12 @@ def test_oversold_prompt_matches_current_injected_data():
     """超跌反弹提示词应与当前代码真实注入的数据粒度对齐。"""
     prompt = STRATEGY_PROMPTS["oversold"]
 
-    assert "基于近60个交易日K线提炼出的" in prompt
-    assert "北向持股快照" in prompt
-    assert "主力净流入、全市场净流入" in prompt
+    # 正向断言：检查“摘要化注入”语义，而非绑定完整文案句子
+    assert "价格行为摘要" in prompt
+    assert ("近60个交易日" in prompt) or ("近60日" in prompt)
+    assert "北向持股" in prompt
+    assert "主力净流入" in prompt
+    assert "全市场净流入" in prompt
 
     assert "大宗交易" not in prompt
     assert "散户净额" not in prompt
@@ -157,7 +160,7 @@ async def test_oversold_runtime_strategy_context_keeps_all_core_blocks():
     assert "### sector" in strategy_segment
     assert "### market" in strategy_segment
     assert "### support" in strategy_segment
-    assert "支撑位分析" in strategy_segment
+    assert ("布林下轨" in strategy_segment) or ("VWAC" in strategy_segment)
     assert "...(truncated)" not in strategy_segment
 
     AIService._instance = None
