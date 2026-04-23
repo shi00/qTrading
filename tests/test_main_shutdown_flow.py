@@ -1,6 +1,8 @@
 import asyncio
 import os
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,10 +11,20 @@ import main as app_main
 import utils.shutdown as shutdown_mod
 
 
+AsyncEventHandler = Callable[[Any], Awaitable[None]]
+SyncClickHandler = Callable[[Any], None]
+
+
+class _FakeTextButton:
+    def __init__(self, label: str, on_click: SyncClickHandler | None = None):
+        self.label = label
+        self.on_click = on_click
+
+
 class _DummyWindow:
     def __init__(self):
         self.prevent_close = True
-        self.on_event = None
+        self.on_event: AsyncEventHandler | None = None
         self.min_width = 0
         self.min_height = 0
         self.width = 0
@@ -29,8 +41,8 @@ class _DummyWindow:
 class _DummyPage:
     def __init__(self):
         self.window = _DummyWindow()
-        self.on_disconnect = None
-        self.on_error = None
+        self.on_disconnect: AsyncEventHandler | None = None
+        self.on_error: Callable[[Any], None] | None = None
         self.title = ""
         self.window_icon = ""
         self.padding = 0
@@ -90,7 +102,7 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(
         app_main.ft,
         "TextButton",
-        lambda label, on_click=None, **_kwargs: SimpleNamespace(label=label, on_click=on_click),
+        lambda label, on_click=None, **_kwargs: _FakeTextButton(label=label, on_click=on_click),
     )
     monkeypatch.setattr(app_main.ft, "MainAxisAlignment", SimpleNamespace(END="end"))
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
@@ -120,7 +132,8 @@ async def test_disconnect_success_cancels_watchdog(monkeypatch):
     await app_main.main(page)
 
     assert page.on_disconnect is not None
-    await page.on_disconnect(MagicMock())
+    on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
+    await on_disconnect(MagicMock())
 
     coordinator = _FakeCoordinator.last
     assert coordinator is not None
@@ -137,7 +150,8 @@ async def test_window_close_success_cancels_watchdog(monkeypatch):
     await app_main.main(page)
 
     assert page.window.on_event is not None
-    await page.window.on_event(SimpleNamespace(type="close"))
+    on_event = cast(AsyncEventHandler, page.window.on_event)
+    await on_event(SimpleNamespace(type="close"))
     assert page.dialog is not None
     assert page.dialog.open is True
 
@@ -146,7 +160,8 @@ async def test_window_close_success_cancels_watchdog(monkeypatch):
     assert coordinator.start_watchdog_calls == 0
     assert coordinator.do_cleanup_calls == 0
 
-    confirm_btn = page.dialog.actions[1]
+    confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
+    assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
     await asyncio.sleep(0)
 
@@ -162,11 +177,14 @@ async def test_window_close_cancel_does_not_shutdown(monkeypatch):
     page = _DummyPage()
 
     await app_main.main(page)
-    await page.window.on_event(SimpleNamespace(type="close"))
+    assert page.window.on_event is not None
+    on_event = cast(AsyncEventHandler, page.window.on_event)
+    await on_event(SimpleNamespace(type="close"))
     assert page.dialog is not None
     assert page.dialog.open is True
 
-    cancel_btn = page.dialog.actions[0]
+    cancel_btn = cast(_FakeTextButton, page.dialog.actions[0])
+    assert cancel_btn.on_click is not None
     cancel_btn.on_click(MagicMock())
     await asyncio.sleep(0)
 
@@ -187,8 +205,11 @@ async def test_window_close_failure_forces_exit(monkeypatch):
     page = _DummyPage()
 
     await app_main.main(page)
-    await page.window.on_event(SimpleNamespace(type="close"))
-    confirm_btn = page.dialog.actions[1]
+    assert page.window.on_event is not None
+    on_event = cast(AsyncEventHandler, page.window.on_event)
+    await on_event(SimpleNamespace(type="close"))
+    confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
+    assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -210,7 +231,8 @@ async def test_disconnect_failure_forces_exit(monkeypatch):
 
     await app_main.main(page)
     assert page.on_disconnect is not None
-    await page.on_disconnect(MagicMock())
+    on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
+    await on_disconnect(MagicMock())
 
     coordinator = _FakeCoordinator.last
     assert coordinator is not None
@@ -236,12 +258,15 @@ async def test_window_close_during_shutdown_does_not_reopen_dialog(monkeypatch):
     page = _DummyPage()
 
     await app_main.main(page)
-    await page.window.on_event(SimpleNamespace(type="close"))
-    confirm_btn = page.dialog.actions[1]
+    assert page.window.on_event is not None
+    on_event = cast(AsyncEventHandler, page.window.on_event)
+    await on_event(SimpleNamespace(type="close"))
+    confirm_btn = cast(_FakeTextButton, page.dialog.actions[1])
+    assert confirm_btn.on_click is not None
     confirm_btn.on_click(MagicMock())
     await started.wait()
 
-    await page.window.on_event(SimpleNamespace(type="close"))
+    await on_event(SimpleNamespace(type="close"))
     assert page.dialog.open is False
 
     release.set()
