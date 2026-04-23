@@ -2,6 +2,7 @@
 
 import datetime
 import threading
+import typing
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -189,7 +190,7 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(mo
 
     monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
 
-    holder = {"factory": None}
+    holder: dict[str, typing.Any] = {"factory": None}
 
     class _FakeTaskManager:
         def update_progress(self, *_args, **_kwargs):
@@ -203,5 +204,6 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(mo
     await service._run_daily_update()
     assert holder["factory"] is not None
 
-    msg = await holder["factory"]("task-id")
+    factory = holder["factory"]
+    msg = await factory("task-id")
     assert msg == "sched_daily_done:2"
