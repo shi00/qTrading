@@ -62,7 +62,7 @@ class _FakeCoordinator:
     last = None
     cleanup_result = True
 
-    def __init__(self, _page):
+    def __init__(self, _page, **_kwargs):
         self.cleanup_done = False
         self.start_watchdog_calls = 0
         self.cancel_watchdog_calls = 0

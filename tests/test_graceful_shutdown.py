@@ -75,7 +75,7 @@ def mock_singletons():
 @pytest.mark.asyncio
 async def test_full_cleanup_all_steps(mock_singletons):
     """Verify all 7 cleanup steps are executed in order with all singletons present."""
-    coordinator = ShutdownCoordinator(page=None)
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
         ok = await coordinator.do_cleanup()
@@ -84,8 +84,7 @@ async def test_full_cleanup_all_steps(mock_singletons):
     mock_singletons["scheduler"].stop.assert_called_once()
     mock_singletons["NewsSubscriptionService"]._instance.stop.assert_called_once()
     mock_singletons["MarketDataService"]._instance.stop.assert_called_once()
-    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
-    mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
 
@@ -97,14 +96,14 @@ async def test_full_cleanup_all_steps(mock_singletons):
 @pytest.mark.asyncio
 async def test_cleanup_idempotent(mock_singletons):
     """Verify that calling do_cleanup twice only executes cleanup once."""
-    coordinator = ShutdownCoordinator(page=None)
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
         ok1 = await coordinator.do_cleanup()
         ok2 = await coordinator.do_cleanup()
 
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
-    mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
     assert ok1 is True
     assert ok2 is True
     assert coordinator.cleanup_done is True
@@ -142,7 +141,7 @@ async def test_safe_skip_empty_singletons():
     scheduler.scheduler.running = False
 
     try:
-        coordinator = ShutdownCoordinator(page=None)
+        coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
         with patch("asyncio.sleep", new_callable=AsyncMock):
             ok = await coordinator.do_cleanup()
         assert ok is True
@@ -195,7 +194,7 @@ async def test_ai_model_unloaded_when_present():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step6_unload_ai_model()
+        await coordinator._step5_unload_ai_model()
         LocalModelManager._instance.unload_model.assert_called_once()
     finally:
         LocalModelManager._instance = orig
@@ -212,43 +211,41 @@ async def test_ai_model_skipped_when_absent():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step6_unload_ai_model()
+        await coordinator._step5_unload_ai_model()
         LocalModelManager._instance.unload_model.assert_not_called()
     finally:
         LocalModelManager._instance = orig
 
 
 @pytest.mark.asyncio
-async def test_db_engine_disposed_when_present():
-    """Verify DB engine is disposed when CacheManager has an engine."""
-    from data.cache.cache_manager import CacheManager
+async def test_processor_close_called():
+    """Verify DataProcessor.close() is called (which internally handles DB engine disposal)."""
+    from data.data_processor import DataProcessor
 
-    orig = CacheManager._instance
-    CacheManager._instance = AsyncMock()
-    CacheManager._instance.engine = AsyncMock()
-    CacheManager._instance.close = AsyncMock()
+    orig = DataProcessor._instance
+    DataProcessor._instance = AsyncMock()
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step5_dispose_db_engine()
-        CacheManager._instance.close.assert_awaited_once()
+        await coordinator._step2_close_processor()
+        DataProcessor._instance.close.assert_awaited_once()
     finally:
-        CacheManager._instance = orig
+        DataProcessor._instance = orig
 
 
 @pytest.mark.asyncio
-async def test_db_engine_skipped_when_absent():
-    """Verify DB engine step is skipped when no engine exists."""
-    from data.cache.cache_manager import CacheManager
+async def test_processor_close_skipped_when_absent():
+    """Verify processor close step is skipped when no processor exists."""
+    from data.data_processor import DataProcessor
 
-    orig = CacheManager._instance
-    CacheManager._instance = None
+    orig = DataProcessor._instance
+    DataProcessor._instance = None
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step5_dispose_db_engine()
+        await coordinator._step2_close_processor()
     finally:
-        CacheManager._instance = orig
+        DataProcessor._instance = orig
 
 
 def test_watchdog_started_once():
@@ -291,10 +288,45 @@ def test_watchdog_can_restart_after_cancel():
         assert mock_thread.call_count == 2
 
 
+def test_watchdog_uses_force_exit_callback():
+    """Verify watchdog uses the injected force_exit_callback instead of os._exit."""
+    exit_calls = []
+    coordinator = ShutdownCoordinator(page=None, force_exit_callback=lambda code: exit_calls.append(code))
+
+    with patch("threading.Thread") as mock_thread:
+        coordinator.start_watchdog(10)
+        call_args = mock_thread.call_args
+        assert call_args is not None
+        thread_target = call_args.kwargs.get("target") or (call_args.args[0] if call_args.args else None)
+        assert thread_target is not None
+
+        thread_target()
+
+    assert exit_calls == [0]
+
+
+def test_watchdog_cancel_prevents_force_exit():
+    """Verify canceling watchdog prevents force exit callback from being called."""
+    exit_calls = []
+    coordinator = ShutdownCoordinator(page=None, force_exit_callback=lambda code: exit_calls.append(code))
+
+    with patch("threading.Thread") as mock_thread:
+        coordinator.start_watchdog(0.01)
+        call_args = mock_thread.call_args
+        assert call_args is not None
+        thread_target = call_args.kwargs.get("target") or (call_args.args[0] if call_args.args else None)
+        assert thread_target is not None
+
+        coordinator.cancel_watchdog()
+        thread_target()
+
+    assert exit_calls == []
+
+
 @pytest.mark.asyncio
 async def test_disconnect_after_cleanup_skips_exit():
     """Verify that disconnect after window close sees cleanup_done=True and skips exit."""
-    coordinator = ShutdownCoordinator(page=None)
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
         await coordinator.do_cleanup()
@@ -308,7 +340,7 @@ async def test_step_exception_does_not_crash(mock_singletons):
     """Verify that an exception in one step doesn't prevent other steps from running."""
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.side_effect = RuntimeError("boom")
 
-    coordinator = ShutdownCoordinator(page=None)
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
         ok = await coordinator.do_cleanup()
@@ -316,8 +348,7 @@ async def test_step_exception_does_not_crash(mock_singletons):
     assert ok is False
     assert coordinator.cleanup_done is True
     mock_singletons["scheduler"].stop.assert_called_once()
-    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
-    mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
     assert any(result.name == "Step 0" and result.ok is False for result in coordinator.step_results)
@@ -401,8 +432,8 @@ async def test_cleanup_caller_cancel_does_not_cancel_single_flight():
 
 
 @pytest.mark.asyncio
-async def test_step6_timeout_marks_cleanup_failed(mock_singletons):
-    """Verify blocking Step 6 is constrained by step timeout and marks cleanup failed."""
+async def test_step5_timeout_marks_cleanup_failed(mock_singletons):
+    """Verify blocking Step 5 (AI model unload) is constrained by step timeout and marks cleanup failed."""
     coordinator = ShutdownCoordinator(page=None)
 
     def _blocking_unload():
@@ -410,20 +441,20 @@ async def test_step6_timeout_marks_cleanup_failed(mock_singletons):
 
     with (
         patch("asyncio.sleep", new_callable=AsyncMock),
-        patch.object(coordinator, "_step6_unload_ai_model_sync", side_effect=_blocking_unload),
+        patch.object(coordinator, "_step5_unload_ai_model_sync", side_effect=_blocking_unload),
     ):
         ok = await coordinator.do_cleanup(timeout_s=2.0, step_timeout_s=0.01)
 
     assert ok is False
-    step6 = next(result for result in coordinator.step_results if result.name == "Step 6")
-    assert step6.ok is False
-    assert step6.timed_out is True
+    step5 = next(result for result in coordinator.step_results if result.name == "Step 5")
+    assert step5.ok is False
+    assert step5.timed_out is True
 
 
 @pytest.mark.asyncio
 async def test_step3_flush_exception_marks_cleanup_failed(mock_singletons):
     """Verify Step 3 flush errors are propagated as cleanup failure."""
-    coordinator = ShutdownCoordinator(page=None)
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
     mock_singletons["TaskManager"]._instance.flush_persistence = AsyncMock(side_effect=RuntimeError("flush failed"))
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
@@ -436,17 +467,39 @@ async def test_step3_flush_exception_marks_cleanup_failed(mock_singletons):
 
 
 @pytest.mark.asyncio
-async def test_step6_exception_marks_cleanup_failed(mock_singletons):
-    """Verify Step 6 runtime errors bubble up and fail cleanup."""
+async def test_step5_exception_marks_cleanup_failed(mock_singletons):
+    """Verify Step 5 (AI model) runtime errors bubble up and fail cleanup."""
     coordinator = ShutdownCoordinator(page=None)
 
     with (
         patch("asyncio.sleep", new_callable=AsyncMock),
-        patch.object(coordinator, "_step6_unload_ai_model_sync", side_effect=RuntimeError("llm unload failed")),
+        patch.object(coordinator, "_step5_unload_ai_model_sync", side_effect=RuntimeError("llm unload failed")),
     ):
         ok = await coordinator.do_cleanup()
 
     assert ok is False
-    step6 = next(result for result in coordinator.step_results if result.name == "Step 6")
-    assert step6.ok is False
-    assert step6.timed_out is False
+    step5 = next(result for result in coordinator.step_results if result.name == "Step 5")
+    assert step5.ok is False
+    assert step5.timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_service_stop_delay_configurable(mock_singletons):
+    """Verify service_stop_delay parameter controls the sleep after stopping services."""
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0.3)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await coordinator._step1_stop_services()
+
+        mock_sleep.assert_called_once_with(0.3)
+
+
+@pytest.mark.asyncio
+async def test_service_stop_delay_zero_skips_sleep(mock_singletons):
+    """Verify service_stop_delay=0 skips the sleep after stopping services."""
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        await coordinator._step1_stop_services()
+
+        mock_sleep.assert_not_called()

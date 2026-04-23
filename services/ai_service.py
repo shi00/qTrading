@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 LITELLM_AVAILABLE = True
 
 VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
+STRATEGY_CONTEXT_MAX_LEN = 1600
 
 
 def validate_ai_analysis_response(response: dict) -> dict:
@@ -622,7 +623,7 @@ class AIService:
         # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考)
         if strategy_context:
             user_prompt_parts.append(
-                f"<strategy_context>\n{self._safe_truncate(strategy_context, 1000)}\n</strategy_context>"
+                f"<strategy_context>\n{self._safe_truncate(strategy_context, STRATEGY_CONTEXT_MAX_LEN)}\n</strategy_context>"
             )
 
         user_prompt = "\n\n".join(user_prompt_parts)

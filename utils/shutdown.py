@@ -1,10 +1,10 @@
 import asyncio
-import inspect
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,17 @@ class StepResult:
     error: str = ""
 
 
+_CLEANUP_STEPS = [
+    ("Step 0", "_step0_cancel_tasks", True),
+    ("Step 1", "_step1_stop_services", True),
+    ("Step 2", "_step2_close_processor", True),
+    ("Step 3", "_step3_flush_db_writes", True),
+    ("Step 4", "_step4_clear_toast", False),
+    ("Step 5", "_step5_unload_ai_model", True),
+    ("Step 6", "_step6_shutdown_thread_pools", True),
+]
+
+
 class ShutdownCoordinator:
     """
     Centralized shutdown state and cleanup logic.
@@ -30,7 +41,13 @@ class ShutdownCoordinator:
         await coordinator.do_cleanup()
     """
 
-    def __init__(self, page=None):
+    def __init__(
+        self,
+        page=None,
+        *,
+        service_stop_delay: float = 0.5,
+        force_exit_callback: Callable[[int], None] | None = None,
+    ):
         self._page = page
         self._cleanup_started = False
         self._cleanup_done = False
@@ -39,6 +56,8 @@ class ShutdownCoordinator:
         self._step_results: list[StepResult] = []
         self._watchdog_started = False
         self._watchdog_cancel_event: threading.Event | None = None
+        self._service_stop_delay = service_stop_delay
+        self._force_exit = force_exit_callback or os._exit
 
     @property
     def cleanup_done(self) -> bool:
@@ -66,15 +85,16 @@ class ShutdownCoordinator:
         self._watchdog_started = True
         self._watchdog_cancel_event = threading.Event()
         cancel_event = self._watchdog_cancel_event
+        force_exit = self._force_exit
 
-        def _force_exit():
+        def _force_exit_thread():
             if cancel_event.wait(timeout_s):
                 logger.info("[Shutdown] Watchdog canceled before timeout.")
                 return
             logger.warning(f"[Shutdown] Watchdog timeout ({timeout_s}s) — forcing exit.")
-            os._exit(0)
+            force_exit(0)
 
-        threading.Thread(target=_force_exit, daemon=True).start()
+        threading.Thread(target=_force_exit_thread, daemon=True).start()
         logger.info(f"[Shutdown] Watchdog armed ({timeout_s}s).")
 
     def cancel_watchdog(self):
@@ -143,18 +163,9 @@ class ShutdownCoordinator:
                     pass
 
     async def _run_cleanup_steps(self, step_timeout_s: float) -> list[StepResult]:
-        steps = [
-            ("Step 0", self._step0_cancel_tasks, True),
-            ("Step 1", self._step1_stop_services, True),
-            ("Step 2", self._step2_stop_processor, True),
-            ("Step 3", self._step3_flush_db_writes, True),
-            ("Step 4", self._step4_clear_toast, False),
-            ("Step 5", self._step5_dispose_db_engine, True),
-            ("Step 6", self._step6_unload_ai_model, True),
-            ("Step 7", self._step7_shutdown_thread_pools, True),
-        ]
         results: list[StepResult] = []
-        for name, step_func, critical in steps:
+        for name, method_name, critical in _CLEANUP_STEPS:
+            step_func = getattr(self, method_name)
             results.append(
                 await self._run_async_step(
                     name=name,
@@ -227,14 +238,18 @@ class ShutdownCoordinator:
             logger.info("[Shutdown]   - MarketDataService")
             MarketDataService._instance.stop()
 
-        await asyncio.sleep(0.5)
+        if self._service_stop_delay > 0:
+            await asyncio.sleep(self._service_stop_delay)
 
-    async def _step2_stop_processor(self):
-        logger.info("[Shutdown] Step 2: Stopping DataProcessor...")
+    async def _step2_close_processor(self):
+        logger.info("[Shutdown] Step 2: Closing DataProcessor...")
         from data.data_processor import DataProcessor
 
         if DataProcessor._instance is not None:
-            await DataProcessor._instance.stop()
+            await DataProcessor._instance.close()
+            logger.info("[Shutdown]   - DataProcessor closed (includes DB engine disposal).")
+        else:
+            logger.info("[Shutdown]   - DataProcessor not initialized, skipping.")
 
     async def _step3_flush_db_writes(self):
         logger.info("[Shutdown] Step 3: Flushing pending DB writes...")
@@ -243,46 +258,30 @@ class ShutdownCoordinator:
         if TaskManager._instance is None:
             logger.info("[Shutdown]   - TaskManager not initialized, skipping flush.")
             return
-        if not hasattr(TaskManager._instance, "flush_persistence"):
-            raise RuntimeError("TaskManager.flush_persistence() is required for deterministic shutdown")
 
-        maybe_coro = TaskManager._instance.flush_persistence(timeout_s=1.5)
-        if not inspect.isawaitable(maybe_coro):
-            raise RuntimeError("TaskManager.flush_persistence() must return an awaitable")
-        await maybe_coro
+        await TaskManager._instance.flush_persistence(timeout_s=1.5)
         logger.info("[Shutdown]   - Task persistence flush completed.")
 
     async def _step4_clear_toast(self):
         logger.info("[Shutdown] Step 4: Clearing Toast Manager...")
         page = self._page
-        if page is not None and hasattr(page, "toast") and getattr(page, "toast", None):
+        toast = getattr(page, "toast", None) if page is not None else None
+        if toast is not None and hasattr(toast, "stop_all"):
             try:
-                if hasattr(page.toast, "stop_all"):
-                    res = page.toast.stop_all()
-                    if inspect.isawaitable(res):
-                        await res
-                    logger.info("[Shutdown]   - Toast Manager stopped.")
+                res = toast.stop_all()
+                if asyncio.iscoroutine(res):
+                    await res
+                logger.info("[Shutdown]   - Toast Manager stopped.")
             except Exception as e:
                 logger.debug(f"[Shutdown]   - Toast Manager cleanup skipped: {e}")
         else:
             logger.info("[Shutdown]   - Toast Manager not initialized, skipping.")
 
-    async def _step5_dispose_db_engine(self):
-        logger.info("[Shutdown] Step 5: Disposing async DB engine...")
-        from data.cache.cache_manager import CacheManager
+    async def _step5_unload_ai_model(self):
+        logger.info("[Shutdown] Step 5: Unloading AI model...")
+        await asyncio.to_thread(self._step5_unload_ai_model_sync)
 
-        if CacheManager._instance is not None and CacheManager._instance.engine is not None:
-            await CacheManager._instance.close()
-            logger.info("[Shutdown]   - Async engine disposed.")
-        else:
-            logger.info("[Shutdown]   - DB engine was never created, skipping.")
-
-    async def _step6_unload_ai_model(self):
-        logger.info("[Shutdown] Step 6: Unloading AI model...")
-
-        await asyncio.to_thread(self._step6_unload_ai_model_sync)
-
-    def _step6_unload_ai_model_sync(self):
+    def _step5_unload_ai_model_sync(self):
         from services.local_model_manager import LocalModelManager
 
         if LocalModelManager._instance is not None and LocalModelManager._instance._llm is not None:
@@ -291,15 +290,15 @@ class ShutdownCoordinator:
         else:
             logger.info("[Shutdown]   - AI model not loaded, skipping.")
 
-    async def _step7_shutdown_thread_pools(self):
-        logger.info("[Shutdown] Step 7: Shutting down Thread Pools...")
+    async def _step6_shutdown_thread_pools(self):
+        logger.info("[Shutdown] Step 6: Shutting down Thread Pools...")
+        await asyncio.to_thread(self._step6_shutdown_thread_pools_sync)
 
-        await asyncio.to_thread(self._step7_shutdown_thread_pools_sync)
-
-    def _step7_shutdown_thread_pools_sync(self):
+    def _step6_shutdown_thread_pools_sync(self):
         from utils.thread_pool import ThreadPoolManager
 
         if ThreadPoolManager._instance is not None:
             ThreadPoolManager._instance.shutdown(wait=False)
+            logger.info("[Shutdown]   - Thread pools shut down.")
         else:
             logger.info("[Shutdown]   - Thread pools not initialized, skipping.")
