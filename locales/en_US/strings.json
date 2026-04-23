@@ -18,6 +18,7 @@
     "task_cancel_tooltip": "Cancel Task",
     "task_stats_fmt": "Total: {total} · Running: {running}",
     "task_cancelled_desc": "User aborted the operation",
+    "task_failed_desc": "Task execution failed",
     "task_interrupted_desc": "Application crashed last time, task interrupted",
     "task_empty_title": "No Tasks",
     "task_empty_subtitle": "Progress will be shown here when syncing data or AI screening.",

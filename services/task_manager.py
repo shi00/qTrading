@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from ui.i18n import I18n
+from ui.i18n import I18n, classify_error
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager
 from utils.time_utils import CST_TZ, get_now
@@ -390,8 +390,9 @@ class TaskManager:
             raise  # Important to re-raise CancelledError for proper asyncio teardown
         except Exception as e:
             task.status = TaskStatus.FAILED
-            task.error = str(e)
-            task.description = f"Failed: {type(e).__name__}"
+            error_info = classify_error(e, context="general")
+            task.error = error_info["message"]
+            task.description = I18n.get("task_failed_desc", "任务执行失败")
             logger.error(
                 f"[TaskManager] Task {task.id} Failed: {e}\n{traceback.format_exc()}",
             )

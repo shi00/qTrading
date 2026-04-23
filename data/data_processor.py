@@ -300,7 +300,6 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             )
             raise RuntimeError("系统缺少自动化打标底层依赖组件。") from e
 
-        await self.cache.stock_dao.clear_all_doubao_concepts()
         tagger = DoubaoTagger()
         tagger.dao = self.cache.stock_dao
         tagger.cancel_event = cancel_event
