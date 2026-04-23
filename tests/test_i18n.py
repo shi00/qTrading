@@ -311,6 +311,8 @@ class TestI18nBackwardCompatibility:
             "common_save",
             "common_cancel",
             "common_confirm",
+            "exit_confirm_title",
+            "exit_confirm_content",
             "status_ready",
             "status_error",
         ]

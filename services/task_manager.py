@@ -114,6 +114,8 @@ class TaskManager:
             self._history: list[AppTask] = []
             self._db_ready = False
             self._loop: asyncio.AbstractEventLoop | None = None  # Captured in init_db
+            self._persist_pending_count = 0
+            self._persist_counter_lock = threading.Lock()
 
             self._initialized = True
             logger.info("[TaskManager] Initialized global task manager.")
@@ -498,15 +500,48 @@ class TaskManager:
             task.started_at.replace(tzinfo=None) if task.started_at else None,
             task.completed_at.replace(tzinfo=None) if task.completed_at else None,
         )
-        self._schedule_coro(self._persist_snapshot(snapshot))
+        self._queue_persist_snapshot(snapshot)
+
+    def _queue_persist_snapshot(self, snapshot: tuple):
+        """Schedule a tracked persistence write so shutdown can flush deterministically."""
+        with self._persist_counter_lock:
+            self._persist_pending_count += 1
+
+        async def _tracked_persist():
+            try:
+                await self._persist_snapshot(snapshot)
+            finally:
+                with self._persist_counter_lock:
+                    self._persist_pending_count = max(0, self._persist_pending_count - 1)
+
+        scheduled = self._schedule_coro(_tracked_persist())
+        if not scheduled:
+            with self._persist_counter_lock:
+                self._persist_pending_count = max(0, self._persist_pending_count - 1)
 
     def _schedule_coro(self, coro):
         """Schedule a coroutine on the main event loop.  Thread-safe."""
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.create_task, coro)
-        else:
-            coro.close()
-            logger.debug("[TaskManager] No event loop available, coroutine dropped.")
+            return True
+        coro.close()
+        logger.debug("[TaskManager] No event loop available, coroutine dropped.")
+        return False
+
+    async def flush_persistence(self, timeout_s: float = 1.5):
+        """Wait until all queued persistence writes are completed."""
+        if not self._db_ready:
+            return
+
+        deadline = _time.monotonic() + timeout_s
+        while True:
+            with self._persist_counter_lock:
+                pending = self._persist_pending_count
+            if pending <= 0:
+                return
+            if _time.monotonic() >= deadline:
+                raise TimeoutError(f"Task persistence flush timed out with {pending} pending write(s)")
+            await asyncio.sleep(0.02)
 
     async def _persist_snapshot(self, params: tuple):
         """Write a pre-captured snapshot tuple to DB."""

@@ -1,0 +1,248 @@
+import asyncio
+import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+import main as app_main
+import utils.shutdown as shutdown_mod
+
+
+class _DummyWindow:
+    def __init__(self):
+        self.prevent_close = True
+        self.on_event = None
+        self.min_width = 0
+        self.min_height = 0
+        self.width = 0
+        self.height = 0
+        self.destroy_called = 0
+
+    def destroy(self):
+        self.destroy_called += 1
+
+    def center(self):
+        return None
+
+
+class _DummyPage:
+    def __init__(self):
+        self.window = _DummyWindow()
+        self.on_disconnect = None
+        self.on_error = None
+        self.title = ""
+        self.window_icon = ""
+        self.padding = 0
+        self.toast = None
+        self.controls = []
+        self.dialog = None
+        self.updated_count = 0
+
+    def add(self, control):
+        self.controls.append(control)
+
+    def update(self):
+        self.updated_count += 1
+
+
+class _FakeCoordinator:
+    last = None
+    cleanup_result = True
+
+    def __init__(self, _page):
+        self.cleanup_done = False
+        self.start_watchdog_calls = 0
+        self.cancel_watchdog_calls = 0
+        self.do_cleanup_calls = 0
+        _FakeCoordinator.last = self
+
+    def start_watchdog(self, _timeout):
+        self.start_watchdog_calls += 1
+
+    def cancel_watchdog(self):
+        self.cancel_watchdog_calls += 1
+
+    async def do_cleanup(self, **_kwargs):
+        self.do_cleanup_calls += 1
+        return self.cleanup_result
+
+
+class _FakeAlertDialog:
+    def __init__(self, **kwargs):
+        self.modal = kwargs.get("modal")
+        self.title = kwargs.get("title")
+        self.content = kwargs.get("content")
+        self.actions = kwargs.get("actions", [])
+        self.actions_alignment = kwargs.get("actions_alignment")
+        self.open = False
+
+
+def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
+    _FakeCoordinator.cleanup_result = cleanup_result
+    monkeypatch.setattr(app_main, "setup_logging", lambda: None)
+    monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
+    monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
+    monkeypatch.setattr(app_main, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
+    monkeypatch.setattr(app_main.ft, "Container", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(app_main.ft, "AlertDialog", _FakeAlertDialog)
+    monkeypatch.setattr(app_main.ft, "Text", lambda value, **_kwargs: value)
+    monkeypatch.setattr(
+        app_main.ft,
+        "TextButton",
+        lambda label, on_click=None, **_kwargs: SimpleNamespace(label=label, on_click=on_click),
+    )
+    monkeypatch.setattr(app_main.ft, "MainAxisAlignment", SimpleNamespace(END="end"))
+    monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
+    monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
+    monkeypatch.setattr(app_main.ProxyManager, "apply_smart_proxy_policy", lambda: None)
+    monkeypatch.setattr(app_main.ConfigHandler, "ensure_defaults", lambda: None)
+    monkeypatch.setattr(app_main.ConfigHandler, "get_db_url", lambda: None)
+    monkeypatch.setattr(app_main.ConfigHandler, "get_token", lambda: None)
+    monkeypatch.setattr(app_main.ConfigHandler, "get_llm_config", lambda: {"api_key": None})
+    monkeypatch.setattr(app_main.ConfigHandler, "is_onboarding_complete", lambda: False)
+    monkeypatch.setattr(app_main.I18n, "initialize", lambda: None)
+    monkeypatch.setattr(app_main.I18n, "get", lambda key, default=None: default or key)
+    monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
+    if exit_spy is None:
+        monkeypatch.setattr(
+            os, "_exit", lambda _code: (_ for _ in ()).throw(AssertionError("os._exit should not be called"))
+        )
+    else:
+        monkeypatch.setattr(os, "_exit", exit_spy)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_success_cancels_watchdog(monkeypatch):
+    _prepare_main(monkeypatch)
+    page = _DummyPage()
+
+    await app_main.main(page)
+
+    assert page.on_disconnect is not None
+    await page.on_disconnect(MagicMock())
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert coordinator.start_watchdog_calls == 1
+    assert coordinator.do_cleanup_calls == 1
+    assert coordinator.cancel_watchdog_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_window_close_success_cancels_watchdog(monkeypatch):
+    _prepare_main(monkeypatch)
+    page = _DummyPage()
+
+    await app_main.main(page)
+
+    assert page.window.on_event is not None
+    await page.window.on_event(SimpleNamespace(type="close"))
+    assert page.dialog is not None
+    assert page.dialog.open is True
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert coordinator.start_watchdog_calls == 0
+    assert coordinator.do_cleanup_calls == 0
+
+    confirm_btn = page.dialog.actions[1]
+    confirm_btn.on_click(MagicMock())
+    await asyncio.sleep(0)
+
+    assert coordinator.start_watchdog_calls == 1
+    assert coordinator.do_cleanup_calls == 1
+    assert coordinator.cancel_watchdog_calls == 1
+    assert page.window.destroy_called == 1
+
+
+@pytest.mark.asyncio
+async def test_window_close_cancel_does_not_shutdown(monkeypatch):
+    _prepare_main(monkeypatch)
+    page = _DummyPage()
+
+    await app_main.main(page)
+    await page.window.on_event(SimpleNamespace(type="close"))
+    assert page.dialog is not None
+    assert page.dialog.open is True
+
+    cancel_btn = page.dialog.actions[0]
+    cancel_btn.on_click(MagicMock())
+    await asyncio.sleep(0)
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert coordinator.start_watchdog_calls == 0
+    assert coordinator.do_cleanup_calls == 0
+    assert coordinator.cancel_watchdog_calls == 0
+    assert page.window.destroy_called == 0
+    assert page.dialog.open is False
+
+
+@pytest.mark.asyncio
+async def test_window_close_failure_forces_exit(monkeypatch):
+    exit_calls = []
+    _prepare_main(monkeypatch, cleanup_result=False, exit_spy=lambda code: exit_calls.append(code))
+    monkeypatch.setattr(app_main.asyncio, "sleep", AsyncMock(return_value=None))
+    page = _DummyPage()
+
+    await app_main.main(page)
+    await page.window.on_event(SimpleNamespace(type="close"))
+    confirm_btn = page.dialog.actions[1]
+    confirm_btn.on_click(MagicMock())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert coordinator.start_watchdog_calls == 1
+    assert coordinator.do_cleanup_calls == 1
+    assert coordinator.cancel_watchdog_calls == 0
+    assert exit_calls == [0]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_failure_forces_exit(monkeypatch):
+    exit_calls = []
+    _prepare_main(monkeypatch, cleanup_result=False, exit_spy=lambda code: exit_calls.append(code))
+    monkeypatch.setattr(app_main.asyncio, "sleep", AsyncMock(return_value=None))
+    page = _DummyPage()
+
+    await app_main.main(page)
+    assert page.on_disconnect is not None
+    await page.on_disconnect(MagicMock())
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert coordinator.start_watchdog_calls == 1
+    assert coordinator.do_cleanup_calls == 1
+    assert coordinator.cancel_watchdog_calls == 0
+    assert exit_calls == [0]
+
+
+@pytest.mark.asyncio
+async def test_window_close_during_shutdown_does_not_reopen_dialog(monkeypatch):
+    _prepare_main(monkeypatch, cleanup_result=True)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocking_cleanup(self, **_kwargs):
+        self.do_cleanup_calls += 1
+        started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(_FakeCoordinator, "do_cleanup", _blocking_cleanup, raising=False)
+    page = _DummyPage()
+
+    await app_main.main(page)
+    await page.window.on_event(SimpleNamespace(type="close"))
+    confirm_btn = page.dialog.actions[1]
+    confirm_btn.on_click(MagicMock())
+    await started.wait()
+
+    await page.window.on_event(SimpleNamespace(type="close"))
+    assert page.dialog.open is False
+
+    release.set()
+    await asyncio.sleep(0)

@@ -420,5 +420,45 @@ class TestTaskManagerSubmitTask(unittest.TestCase):
         self.assertIsNone(task_id2)
 
 
+class TestTaskManagerPersistenceFlush(unittest.TestCase):
+    """测试持久化 flush 行为"""
+
+    def setUp(self):
+        TaskManager._instance = None
+        self.manager = TaskManager()
+        self.manager._db_ready = True
+
+    def test_flush_persistence_waits_until_no_pending(self):
+        """flush 会等待挂起写入完成"""
+
+        async def run():
+            with self.manager._persist_counter_lock:
+                self.manager._persist_pending_count = 1
+
+            async def complete_later():
+                await asyncio.sleep(0.02)
+                with self.manager._persist_counter_lock:
+                    self.manager._persist_pending_count = 0
+
+            asyncio.create_task(complete_later())
+            await self.manager.flush_persistence(timeout_s=0.5)
+
+            with self.manager._persist_counter_lock:
+                self.assertEqual(self.manager._persist_pending_count, 0)
+
+        asyncio.run(run())
+
+    def test_flush_persistence_timeout(self):
+        """flush 超时会抛出 TimeoutError"""
+
+        async def run():
+            with self.manager._persist_counter_lock:
+                self.manager._persist_pending_count = 1
+            with self.assertRaises(TimeoutError):
+                await self.manager.flush_persistence(timeout_s=0.01)
+
+        asyncio.run(run())
+
+
 if __name__ == "__main__":
     unittest.main()

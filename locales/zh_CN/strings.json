@@ -412,6 +412,8 @@
     "settings_news_prompt_hint": "自定义 AI 对新闻进行分类和情感打分的规则 (JSON格式)",
     "common_cancel": "取消",
     "common_confirm": "确认",
+    "exit_confirm_title": "确认退出",
+    "exit_confirm_content": "确认关闭程序吗？后台任务将停止并执行清理。",
     "common_save": "保存",
     "common_saved": "已保存",
     "common_completed": "已完成",

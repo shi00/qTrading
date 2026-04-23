@@ -1,10 +1,22 @@
 import asyncio
+import inspect
 import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StepResult:
+    name: str
+    critical: bool
+    ok: bool
+    timed_out: bool
+    elapsed_ms: float
+    error: str = ""
 
 
 class ShutdownCoordinator:
@@ -20,31 +32,58 @@ class ShutdownCoordinator:
 
     def __init__(self, page=None):
         self._page = page
+        self._cleanup_started = False
         self._cleanup_done = False
+        self._cleanup_success = False
+        self._cleanup_task = None
+        self._step_results: list[StepResult] = []
         self._watchdog_started = False
+        self._watchdog_cancel_event: threading.Event | None = None
 
     @property
     def cleanup_done(self) -> bool:
         return self._cleanup_done
 
     @property
+    def cleanup_success(self) -> bool:
+        return self._cleanup_success
+
+    @property
     def watchdog_started(self) -> bool:
         return self._watchdog_started
 
+    @property
+    def step_results(self) -> list[StepResult]:
+        return self._step_results[:]
+
     def start_watchdog(self, timeout_s=10):
-        if self._watchdog_started:
+        if (
+            self._watchdog_started
+            and self._watchdog_cancel_event is not None
+            and not self._watchdog_cancel_event.is_set()
+        ):
             return
         self._watchdog_started = True
+        self._watchdog_cancel_event = threading.Event()
+        cancel_event = self._watchdog_cancel_event
 
         def _force_exit():
-            time.sleep(timeout_s)
+            if cancel_event.wait(timeout_s):
+                logger.info("[Shutdown] Watchdog canceled before timeout.")
+                return
             logger.warning(f"[Shutdown] Watchdog timeout ({timeout_s}s) — forcing exit.")
             os._exit(0)
 
         threading.Thread(target=_force_exit, daemon=True).start()
         logger.info(f"[Shutdown] Watchdog armed ({timeout_s}s).")
 
-    async def do_cleanup(self):
+    def cancel_watchdog(self):
+        if self._watchdog_cancel_event is not None:
+            self._watchdog_cancel_event.set()
+        self._watchdog_started = False
+        self._watchdog_cancel_event = None
+
+    async def do_cleanup(self, timeout_s: float = 8.0, step_timeout_s: float = 3.0) -> bool:
         """
         Core cleanup coroutine. Stops all background services, flushes DB writes, closes pools.
 
@@ -53,45 +92,114 @@ class ShutdownCoordinator:
         - No exit statements (sys.exit / os._exit), caller decides how to exit
         - Each step is independently wrapped so one failure does not skip remaining steps
         """
-        if self._cleanup_done:
+        if self._cleanup_done and self._cleanup_task is None:
             logger.info("[Shutdown] Cleanup already completed, skipping.")
-            return
-        self._cleanup_done = True
+            return self._cleanup_success
 
-        logging.getLogger("asyncio").setLevel(logging.ERROR)
-        logger.info("[Shutdown] ========== Graceful Shutdown Initiated ==========")
+        if self._cleanup_task is None:
+            self._cleanup_started = True
+            logging.getLogger("asyncio").setLevel(logging.ERROR)
+            logger.info(
+                f"[Shutdown] ========== Graceful Shutdown Initiated =========="
+                f" (timeout={timeout_s:.1f}s, step_timeout={step_timeout_s:.1f}s) =========="
+            )
+            self._cleanup_task = asyncio.create_task(
+                self._execute_cleanup(timeout_s=timeout_s, step_timeout_s=step_timeout_s)
+            )
+        else:
+            logger.info("[Shutdown] Cleanup already running, joining existing cleanup task.")
 
+        return await asyncio.shield(self._cleanup_task)
+
+    async def _execute_cleanup(self, timeout_s: float, step_timeout_s: float) -> bool:
+        try:
+            self._step_results = await asyncio.wait_for(
+                self._run_cleanup_steps(step_timeout_s=step_timeout_s),
+                timeout=timeout_s,
+            )
+            critical_failures = [r for r in self._step_results if r.critical and not r.ok]
+            self._cleanup_success = len(critical_failures) == 0
+            if self._cleanup_success:
+                logger.info("[Shutdown] ========== Shutdown Sequence Complete ==========")
+            else:
+                failed_names = ", ".join(r.name for r in critical_failures)
+                logger.error(f"[Shutdown] Shutdown completed with CRITICAL step failures: {failed_names}")
+            return self._cleanup_success
+        except TimeoutError:
+            self._cleanup_success = False
+            logger.error(f"[Shutdown] Cleanup timed out after {timeout_s:.1f}s.")
+            return False
+        except Exception as ex:
+            self._cleanup_success = False
+            logger.error(f"[Shutdown] Cleanup failed unexpectedly: {ex}", exc_info=True)
+            return False
+        finally:
+            self._cleanup_done = True
+            self._cleanup_task = None
+            for handler in logging.root.handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
+
+    async def _run_cleanup_steps(self, step_timeout_s: float) -> list[StepResult]:
         steps = [
-            ("Step 0", self._step0_cancel_tasks),
-            ("Step 1", self._step1_stop_services),
-            ("Step 2", self._step2_stop_processor),
-            ("Step 3", self._step3_flush_db_writes),
-            ("Step 4", self._step4_clear_toast),
-            ("Step 5", self._step5_dispose_db_engine),
+            ("Step 0", self._step0_cancel_tasks, True),
+            ("Step 1", self._step1_stop_services, True),
+            ("Step 2", self._step2_stop_processor, True),
+            ("Step 3", self._step3_flush_db_writes, True),
+            ("Step 4", self._step4_clear_toast, False),
+            ("Step 5", self._step5_dispose_db_engine, True),
+            ("Step 6", self._step6_unload_ai_model, True),
+            ("Step 7", self._step7_shutdown_thread_pools, True),
         ]
+        results: list[StepResult] = []
+        for name, step_func, critical in steps:
+            results.append(
+                await self._run_async_step(
+                    name=name,
+                    step=step_func,
+                    step_timeout_s=step_timeout_s,
+                    critical=critical,
+                )
+            )
+        return results
 
-        for name, step in steps:
-            try:
-                await step()
-            except Exception as ex:
-                logger.error(f"[Shutdown] {name} failed: {ex}", exc_info=True)
-
-        for name, step in [
-            ("Step 6", self._step6_unload_ai_model),
-            ("Step 7", self._step7_shutdown_thread_pools),
-        ]:
-            try:
-                step()
-            except Exception as ex:
-                logger.error(f"[Shutdown] {name} failed: {ex}", exc_info=True)
-
-        logger.info("[Shutdown] ========== Shutdown Sequence Complete ==========")
-
-        for handler in logging.root.handlers:
-            try:
-                handler.flush()
-            except Exception:
-                pass
+    async def _run_async_step(self, name: str, step, step_timeout_s: float, critical: bool) -> StepResult:
+        start = time.perf_counter()
+        try:
+            await asyncio.wait_for(step(), timeout=step_timeout_s)
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(f"[Shutdown] {name} done in {elapsed_ms:.1f}ms")
+            return StepResult(
+                name=name,
+                critical=critical,
+                ok=True,
+                timed_out=False,
+                elapsed_ms=elapsed_ms,
+            )
+        except TimeoutError as ex:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.error(f"[Shutdown] {name} timed out after {step_timeout_s:.1f}s")
+            return StepResult(
+                name=name,
+                critical=critical,
+                ok=False,
+                timed_out=True,
+                elapsed_ms=elapsed_ms,
+                error=str(ex),
+            )
+        except Exception as ex:
+            logger.error(f"[Shutdown] {name} failed: {ex}", exc_info=True)
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            return StepResult(
+                name=name,
+                critical=critical,
+                ok=False,
+                timed_out=False,
+                elapsed_ms=elapsed_ms,
+                error=str(ex),
+            )
 
     async def _step0_cancel_tasks(self):
         logger.info("[Shutdown] Step 0: Cancelling managed tasks...")
@@ -129,16 +237,26 @@ class ShutdownCoordinator:
             await DataProcessor._instance.stop()
 
     async def _step3_flush_db_writes(self):
-        logger.info("[Shutdown] Step 3: Waiting for pending DB writes to flush (1.0s)...")
-        await asyncio.sleep(1.0)
+        logger.info("[Shutdown] Step 3: Flushing pending DB writes...")
+        from services.task_manager import TaskManager
+
+        if TaskManager._instance is None:
+            logger.info("[Shutdown]   - TaskManager not initialized, skipping flush.")
+            return
+        if not hasattr(TaskManager._instance, "flush_persistence"):
+            raise RuntimeError("TaskManager.flush_persistence() is required for deterministic shutdown")
+
+        maybe_coro = TaskManager._instance.flush_persistence(timeout_s=1.5)
+        if not inspect.isawaitable(maybe_coro):
+            raise RuntimeError("TaskManager.flush_persistence() must return an awaitable")
+        await maybe_coro
+        logger.info("[Shutdown]   - Task persistence flush completed.")
 
     async def _step4_clear_toast(self):
         logger.info("[Shutdown] Step 4: Clearing Toast Manager...")
         page = self._page
         if page is not None and hasattr(page, "toast") and getattr(page, "toast", None):
             try:
-                import inspect
-
                 if hasattr(page.toast, "stop_all"):
                     res = page.toast.stop_all()
                     if inspect.isawaitable(res):
@@ -159,21 +277,26 @@ class ShutdownCoordinator:
         else:
             logger.info("[Shutdown]   - DB engine was never created, skipping.")
 
-    def _step6_unload_ai_model(self):
+    async def _step6_unload_ai_model(self):
         logger.info("[Shutdown] Step 6: Unloading AI model...")
-        try:
-            from services.local_model_manager import LocalModelManager
 
-            if LocalModelManager._instance is not None and LocalModelManager._instance._llm is not None:
-                LocalModelManager._instance.unload_model()
-                logger.info("[Shutdown]   - Llama.cpp model evicted.")
-            else:
-                logger.info("[Shutdown]   - AI model not loaded, skipping.")
-        except Exception as e:
-            logger.debug(f"[Shutdown]   - AI model unload skipped: {e}")
+        await asyncio.to_thread(self._step6_unload_ai_model_sync)
 
-    def _step7_shutdown_thread_pools(self):
+    def _step6_unload_ai_model_sync(self):
+        from services.local_model_manager import LocalModelManager
+
+        if LocalModelManager._instance is not None and LocalModelManager._instance._llm is not None:
+            LocalModelManager._instance.unload_model()
+            logger.info("[Shutdown]   - Llama.cpp model evicted.")
+        else:
+            logger.info("[Shutdown]   - AI model not loaded, skipping.")
+
+    async def _step7_shutdown_thread_pools(self):
         logger.info("[Shutdown] Step 7: Shutting down Thread Pools...")
+
+        await asyncio.to_thread(self._step7_shutdown_thread_pools_sync)
+
+    def _step7_shutdown_thread_pools_sync(self):
         from utils.thread_pool import ThreadPoolManager
 
         if ThreadPoolManager._instance is not None:

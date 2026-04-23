@@ -38,16 +38,24 @@ async def main(page: ft.Page):
     from utils.shutdown import ShutdownCoordinator
 
     coordinator = ShutdownCoordinator(page)
+    close_confirm_dialog = None
+    close_confirm_visible = False
+    shutdown_requested = False
 
-    # ── 途径一：主退出路径 — 拦截窗口关闭事件 ──
-    page.window.prevent_close = True
+    def _schedule_async(coro):
+        if hasattr(page, "run_task"):
+            # Flet page can schedule coroutines bound to UI loop.
+            page.run_task(coro)
+            return
+        asyncio.create_task(coro())
 
-    async def _on_window_event(e):
-        if e.type == ft.WindowEventType.CLOSE:
-            logger.info("[Main] Window CLOSE event received.")
+    async def _perform_window_shutdown():
+        nonlocal shutdown_requested
+        try:
+            logger.info("[Main] Window close confirmed by user.")
             coordinator.start_watchdog(10)
 
-            await coordinator.do_cleanup()
+            cleanup_ok = await coordinator.do_cleanup(timeout_s=8.0, step_timeout_s=3.0)
 
             try:
                 page.window.prevent_close = False
@@ -55,10 +63,71 @@ async def main(page: ft.Page):
             except Exception:
                 pass
 
-            await asyncio.sleep(0.5)
+            if cleanup_ok:
+                coordinator.cancel_watchdog()
+                logger.info("[Main] Graceful window shutdown completed without force-exit.")
+                return
+
+            logger.error("[Main] Graceful shutdown incomplete, forcing process exit.")
+            await asyncio.sleep(0.2)
             import os
 
             os._exit(0)
+        finally:
+            shutdown_requested = False
+
+    def _hide_close_confirm_dialog():
+        nonlocal close_confirm_visible
+        if close_confirm_dialog is None:
+            return
+        close_confirm_dialog.open = False
+        close_confirm_visible = False
+        page.update()
+
+    def _on_close_cancel(_):
+        logger.info("[Main] Window close canceled by user.")
+        _hide_close_confirm_dialog()
+
+    def _on_close_confirm(_):
+        nonlocal shutdown_requested
+        _hide_close_confirm_dialog()
+        if shutdown_requested:
+            return
+        shutdown_requested = True
+        _schedule_async(_perform_window_shutdown)
+
+    close_confirm_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text(I18n.get("exit_confirm_title", default="确认退出")),
+        content=ft.Text(
+            I18n.get(
+                "exit_confirm_content",
+                default="确认关闭程序吗？后台任务将停止并执行清理。",
+            )
+        ),
+        actions=[
+            ft.TextButton(I18n.get("common_cancel", default="取消"), on_click=_on_close_cancel),
+            ft.TextButton(I18n.get("common_confirm", default="确认"), on_click=_on_close_confirm),
+        ],
+        actions_alignment=ft.MainAxisAlignment.END,
+    )
+
+    def _show_close_confirm_dialog():
+        nonlocal close_confirm_visible
+        if close_confirm_visible or shutdown_requested:
+            return
+        page.dialog = close_confirm_dialog
+        close_confirm_dialog.open = True
+        close_confirm_visible = True
+        page.update()
+
+    # ── 途径一：主退出路径 — 拦截窗口关闭事件 ──
+    page.window.prevent_close = True
+
+    async def _on_window_event(e):
+        if e.type == ft.WindowEventType.CLOSE:
+            logger.info("[Main] Window CLOSE event received.")
+            _show_close_confirm_dialog()
 
     page.window.on_event = _on_window_event
 
@@ -67,11 +136,15 @@ async def main(page: ft.Page):
         was_window_path = coordinator.cleanup_done
 
         coordinator.start_watchdog(10)
-        await coordinator.do_cleanup()
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=8.0, step_timeout_s=3.0)
 
         if not was_window_path:
-            logger.info("[Main] External disconnect — exiting after cleanup.")
-            await asyncio.sleep(0.5)
+            if cleanup_ok:
+                coordinator.cancel_watchdog()
+                logger.info("[Main] External disconnect cleanup completed; waiting for runtime to terminate naturally.")
+                return
+            logger.error("[Main] External disconnect cleanup incomplete, forcing process exit.")
+            await asyncio.sleep(0.2)
             import os
 
             os._exit(0)

@@ -474,6 +474,8 @@
     "common_prev_page": "Previous Page",
     "common_next_page": "Next Page",
     "common_confirm": "Confirm",
+    "exit_confirm_title": "Confirm Exit",
+    "exit_confirm_content": "Are you sure you want to close the application? Background tasks will stop and cleanup will run.",
     "common_save": "Save",
     "common_saved": "Saved",
     "common_completed": "Completed",

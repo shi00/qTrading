@@ -4,6 +4,8 @@ Tests directly import and exercise ShutdownCoordinator instead of maintaining
 a parallel simplified copy of the cleanup code.
 """
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -76,7 +78,7 @@ async def test_full_cleanup_all_steps(mock_singletons):
     coordinator = ShutdownCoordinator(page=None)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
-        await coordinator.do_cleanup()
+        ok = await coordinator.do_cleanup()
 
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
     mock_singletons["scheduler"].stop.assert_called_once()
@@ -87,7 +89,9 @@ async def test_full_cleanup_all_steps(mock_singletons):
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
 
+    assert ok is True
     assert coordinator.cleanup_done is True
+    assert coordinator.cleanup_success is True
 
 
 @pytest.mark.asyncio
@@ -96,11 +100,13 @@ async def test_cleanup_idempotent(mock_singletons):
     coordinator = ShutdownCoordinator(page=None)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
-        await coordinator.do_cleanup()
-        await coordinator.do_cleanup()
+        ok1 = await coordinator.do_cleanup()
+        ok2 = await coordinator.do_cleanup()
 
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
+    assert ok1 is True
+    assert ok2 is True
     assert coordinator.cleanup_done is True
 
 
@@ -138,7 +144,8 @@ async def test_safe_skip_empty_singletons():
     try:
         coordinator = ShutdownCoordinator(page=None)
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            await coordinator.do_cleanup()
+            ok = await coordinator.do_cleanup()
+        assert ok is True
         assert coordinator.cleanup_done is True
     finally:
         TaskManager._instance = orig_tm
@@ -188,7 +195,7 @@ async def test_ai_model_unloaded_when_present():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        coordinator._step6_unload_ai_model()
+        await coordinator._step6_unload_ai_model()
         LocalModelManager._instance.unload_model.assert_called_once()
     finally:
         LocalModelManager._instance = orig
@@ -205,7 +212,7 @@ async def test_ai_model_skipped_when_absent():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        coordinator._step6_unload_ai_model()
+        await coordinator._step6_unload_ai_model()
         LocalModelManager._instance.unload_model.assert_not_called()
     finally:
         LocalModelManager._instance = orig
@@ -267,6 +274,23 @@ def test_watchdog_daemon_thread():
         assert kwargs.get("daemon") is True
 
 
+def test_watchdog_can_restart_after_cancel():
+    """Verify watchdog can be restarted after cancel_watchdog is called."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    with patch("threading.Thread") as mock_thread:
+        coordinator.start_watchdog(10)
+        assert coordinator.watchdog_started is True
+        assert mock_thread.call_count == 1
+
+        coordinator.cancel_watchdog()
+        assert coordinator.watchdog_started is False
+
+        coordinator.start_watchdog(10)
+        assert coordinator.watchdog_started is True
+        assert mock_thread.call_count == 2
+
+
 @pytest.mark.asyncio
 async def test_disconnect_after_cleanup_skips_exit():
     """Verify that disconnect after window close sees cleanup_done=True and skips exit."""
@@ -287,11 +311,142 @@ async def test_step_exception_does_not_crash(mock_singletons):
     coordinator = ShutdownCoordinator(page=None)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
-        await coordinator.do_cleanup()
+        ok = await coordinator.do_cleanup()
 
+    assert ok is False
     assert coordinator.cleanup_done is True
     mock_singletons["scheduler"].stop.assert_called_once()
     mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
     mock_singletons["CacheManager"]._instance.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
+    assert any(result.name == "Step 0" and result.ok is False for result in coordinator.step_results)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_timeout_returns_false(mock_singletons):
+    """Verify cleanup returns False when total timeout is exceeded."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    async def _slow_steps(*_args, **_kwargs):
+        await asyncio.sleep(1.0)
+
+    with patch.object(
+        coordinator,
+        "_run_cleanup_steps",
+        new=AsyncMock(side_effect=_slow_steps),
+    ):
+        ok = await coordinator.do_cleanup(timeout_s=0.01, step_timeout_s=0.01)
+
+    assert ok is False
+    assert coordinator.cleanup_done is True
+    assert coordinator.cleanup_success is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_single_flight_concurrent_calls():
+    """Verify concurrent do_cleanup calls join the same cleanup task."""
+    coordinator = ShutdownCoordinator(page=None)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    call_count = 0
+
+    async def _fake_execute(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        started.set()
+        await release.wait()
+        return True
+
+    with patch.object(coordinator, "_execute_cleanup", new=AsyncMock(side_effect=_fake_execute)):
+        task1 = asyncio.create_task(coordinator.do_cleanup())
+        await started.wait()
+        task2 = asyncio.create_task(coordinator.do_cleanup())
+        await asyncio.sleep(0)
+        release.set()
+        res1, res2 = await asyncio.gather(task1, task2)
+
+    assert call_count == 1
+    assert res1 is True
+    assert res2 is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_caller_cancel_does_not_cancel_single_flight():
+    """Verify caller cancellation does not cancel the shared cleanup task."""
+    coordinator = ShutdownCoordinator(page=None)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    call_count = 0
+
+    async def _fake_execute(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        started.set()
+        await release.wait()
+        return True
+
+    with patch.object(coordinator, "_execute_cleanup", new=AsyncMock(side_effect=_fake_execute)):
+        first = asyncio.create_task(coordinator.do_cleanup())
+        await started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        release.set()
+        result = await coordinator.do_cleanup()
+
+    assert call_count == 1
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_step6_timeout_marks_cleanup_failed(mock_singletons):
+    """Verify blocking Step 6 is constrained by step timeout and marks cleanup failed."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    def _blocking_unload():
+        time.sleep(0.2)
+
+    with (
+        patch("asyncio.sleep", new_callable=AsyncMock),
+        patch.object(coordinator, "_step6_unload_ai_model_sync", side_effect=_blocking_unload),
+    ):
+        ok = await coordinator.do_cleanup(timeout_s=2.0, step_timeout_s=0.01)
+
+    assert ok is False
+    step6 = next(result for result in coordinator.step_results if result.name == "Step 6")
+    assert step6.ok is False
+    assert step6.timed_out is True
+
+
+@pytest.mark.asyncio
+async def test_step3_flush_exception_marks_cleanup_failed(mock_singletons):
+    """Verify Step 3 flush errors are propagated as cleanup failure."""
+    coordinator = ShutdownCoordinator(page=None)
+    mock_singletons["TaskManager"]._instance.flush_persistence = AsyncMock(side_effect=RuntimeError("flush failed"))
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        ok = await coordinator.do_cleanup()
+
+    assert ok is False
+    step3 = next(result for result in coordinator.step_results if result.name == "Step 3")
+    assert step3.ok is False
+    assert step3.timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_step6_exception_marks_cleanup_failed(mock_singletons):
+    """Verify Step 6 runtime errors bubble up and fail cleanup."""
+    coordinator = ShutdownCoordinator(page=None)
+
+    with (
+        patch("asyncio.sleep", new_callable=AsyncMock),
+        patch.object(coordinator, "_step6_unload_ai_model_sync", side_effect=RuntimeError("llm unload failed")),
+    ):
+        ok = await coordinator.do_cleanup()
+
+    assert ok is False
+    step6 = next(result for result in coordinator.step_results if result.name == "Step 6")
+    assert step6.ok is False
+    assert step6.timed_out is False
