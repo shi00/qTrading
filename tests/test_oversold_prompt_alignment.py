@@ -1,8 +1,10 @@
 import datetime
+import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
+from typing import Any
 
 from services.ai_service import AIService, STRATEGY_CONTEXT_MAX_LEN
 from strategies.all_strategies import StrategyManager
@@ -305,17 +307,22 @@ async def test_oversold_prompt_skips_shared_context_blocks():
     assert strategy.should_include_learning_context() is False
 
     with patch("services.ai_service.ConfigHandler.get_ai_system_prompt", return_value="test system prompt"):
-        await service.analyze_stock(
-            stock_info={"ts_code": "000001.SZ", "name": "平安银行"},
-            tech_info={"macd_signal": "BEARISH"},
-            news_list=[],
-            global_context="US market noise",
-            history_context="<history_context>few-shot bias</history_context>",
-            strategy_context="超跌策略上下文",
-            strategy_key=strategy.key,
-            include_global_context=strategy.should_include_global_context(),
-            include_learning_context=strategy.should_include_learning_context(),
-        )
+        analyze_kwargs: dict[str, Any] = {
+            "stock_info": {"ts_code": "000001.SZ", "name": "平安银行"},
+            "tech_info": {"macd_signal": "BEARISH"},
+            "news_list": [],
+            "global_context": "US market noise",
+            "history_context": "<history_context>few-shot bias</history_context>",
+            "strategy_context": "超跌策略上下文",
+            "strategy_key": strategy.key,
+        }
+        params = inspect.signature(service.analyze_stock).parameters
+        if "include_global_context" in params:
+            analyze_kwargs["include_global_context"] = strategy.should_include_global_context()
+        if "include_learning_context" in params:
+            analyze_kwargs["include_learning_context"] = strategy.should_include_learning_context()
+
+        await service.analyze_stock(**analyze_kwargs)
 
     messages = service._chat_completion.await_args.args[0]
     user_prompt = messages[1]["content"]
