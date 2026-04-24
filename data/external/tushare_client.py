@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 import tushare as ts
 
+from data.constants import attach_top_list_column_units
 from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
 from utils.time_utils import get_now
@@ -20,12 +21,8 @@ class TushareClient:
     """
 
     pro: typing.Any
-    # Singleton instance
     _instance = None
-    _lock = threading.Lock()  # Thread safety lock
-    _trade_cal_cache = set()  # Cache valid trading days (Set lookup O(1))
-    _loaded_years = set()  # Track which years have been loaded
-    _calendar_lock = threading.Lock()  # Lock for cache updates
+    _lock = threading.Lock()
 
     _COLUMN_RENAMES = {
         "cn_cpi": {"month": "period", "nt_val": "cpi"},
@@ -51,12 +48,8 @@ class TushareClient:
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
             cls._instance = None
-            cls._trade_cal_cache = set()
-            cls._loaded_years = set()
-            cls._initialized = False
 
     def __init__(self, token: str | None = None):
-        # Double-check locking for initialization to prevent race conditions
         if self._initialized:
             if token and token != self.token:
                 self.set_token(token)
@@ -66,8 +59,12 @@ class TushareClient:
             if self._initialized:
                 return
 
+            self._trade_cal_cache: set[str] = set()
+            self._loaded_years: set[str] = set()
+            self._calendar_lock = threading.Lock()
+
             self.token = token or ConfigHandler.get_token()
-            self.timeout = ConfigHandler.get_tushare_timeout()  # Custom timeout for Tushare
+            self.timeout = ConfigHandler.get_tushare_timeout()
             self.max_retries = ConfigHandler.get_request_max_retries()
 
             # Initialize Rate Limiter
@@ -364,24 +361,19 @@ class TushareClient:
 
         year = date_str[:4]
 
-        # 1. Fast Path: Check if year is already loaded (No Lock)
-        if year in TushareClient._loaded_years:
-            return date_str in TushareClient._trade_cal_cache
+        if year in self._loaded_years:
+            return date_str in self._trade_cal_cache
 
-        # 2. Slow Path: Load the year with Lock
         try:
-            with TushareClient._calendar_lock:
-                # Double-check inside lock
-                if year in TushareClient._loaded_years:
-                    return date_str in TushareClient._trade_cal_cache
+            with self._calendar_lock:
+                if year in self._loaded_years:
+                    return date_str in self._trade_cal_cache
 
                 logger.info(f"[Cache] Loading trading calendar for year {year}...")
 
-                # Fetch full year data
                 start_date = f"{year}0101"
                 end_date = f"{year}1231"
 
-                # Sync path: use tushare SDK directly (not async _handle_api_call)
                 if not self.pro:
                     raise Exception("Tushare Token not set")
                 df = self.pro.trade_cal(
@@ -392,10 +384,9 @@ class TushareClient:
                 )
 
                 if df is not None and not df.empty:
-                    # Helper to bulk update set
                     dates = set(df["cal_date"].tolist())
-                    TushareClient._trade_cal_cache.update(dates)
-                    TushareClient._loaded_years.add(year)
+                    self._trade_cal_cache.update(dates)
+                    self._loaded_years.add(year)
                     logger.info(
                         f"[Cache] Successfully loaded {len(dates)} trading days for {year}",
                     )
@@ -598,13 +589,14 @@ class TushareClient:
         )
 
     async def get_top_list(self, trade_date: str | None):  # type: ignore
-        """Dragon Tiger Board (LHB) data"""
+        """Dragon Tiger Board (LHB) data. top_list.net_amount is stored in yuan."""
 
-        return await self._handle_api_call(
+        df = await self._handle_api_call(
             self.pro.top_list,
             trade_date=trade_date,
             fields="trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason",
         )
+        return attach_top_list_column_units(df)
 
     async def get_top_inst(self, trade_date: str | None):  # type: ignore
         """LHB Institutional Seat Transaction Detail"""

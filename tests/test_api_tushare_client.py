@@ -7,19 +7,52 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
+
 # Make sure to import the class to be tested
 # Assuming path is setup or we run as module
+from data.constants import (
+    DATAFRAME_ATTR_COLUMN_UNITS,
+    DATAFRAME_ATTR_COLUMN_UNIT_SOURCES,
+    TOP_LIST_NET_AMOUNT_UNIT,
+    TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
+)
 from data.external.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 
 
 class TestTushareClient(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        # Reset singleton
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
 
     def tearDown(self):
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
+
+    @patch("tushare.pro_api")
+    @patch("tushare.set_token")
+    async def test_get_top_list_attaches_net_amount_unit_metadata(self, mock_set_token, mock_pro_api):
+        mock_pro_api.return_value = MagicMock()
+        client = TushareClient(token="dummy")
+        client._handle_api_call = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20230101"],
+                    "ts_code": ["000001.SZ"],
+                    "net_amount": [1000.0],
+                }
+            )
+        )
+
+        df = await client.get_top_list("20230101")
+
+        self.assertEqual(
+            df.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["net_amount"],
+            TOP_LIST_NET_AMOUNT_UNIT,
+        )
+        self.assertEqual(
+            df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["net_amount"],
+            TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
+        )
 
     # Legacy RateLimiter tests removed as RateLimiter class was replaced by TokenBucket
 
@@ -163,11 +196,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
         mock_api_instance.trade_cal.return_value = mock_df
 
         client = TushareClient(token="dummy")
-        # clear cache for test
-        TushareClient._trade_cal_cache = set()
-        TushareClient._loaded_years = set()
 
-        # 1. First Call: Should hit API (load 2025)
         is_open = client.is_trading_day("20250101")
         self.assertTrue(is_open)
         self.assertEqual(mock_api_instance.trade_cal.call_count, 1)
@@ -191,10 +220,10 @@ class TestSlowApiLimiters(unittest.IsolatedAsyncioTestCase):
     """测试慢速 API 专用限流器（P0 级）"""
 
     def setUp(self):
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
 
     def tearDown(self):
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -386,10 +415,10 @@ class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
     """测试 set_token 正确重建限流器（P0 级）"""
 
     def setUp(self):
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
 
     def tearDown(self):
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -455,6 +484,73 @@ class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(client._rate_limiter)
                 self.assertAlmostEqual(client._rate_limiter.rate, 200 / 60.0, places=2)
                 self.assertIn("top10_holders", client._slow_api_limiters)
+
+
+class TestClassVariableDirtyDataFix(unittest.IsolatedAsyncioTestCase):
+    """P0-2 修复验证：类变量残留脏数据问题"""
+
+    def setUp(self):
+        TushareClient._reset_singleton()
+
+    def tearDown(self):
+        TushareClient._reset_singleton()
+
+    @patch("tushare.pro_api")
+    @patch("tushare.set_token")
+    def test_reset_singleton_clears_trade_cal_cache(self, mock_set_token, mock_pro_api):
+        """_reset_singleton 后新实例的交易日历缓存应为空"""
+        mock_pro_api.return_value = MagicMock()
+
+        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+            client1 = TushareClient(token="token1")
+            client1._trade_cal_cache.add("20250101")
+            client1._loaded_years.add("2025")
+            self.assertEqual(len(client1._trade_cal_cache), 1)
+            self.assertEqual(len(client1._loaded_years), 1)
+
+        TushareClient._reset_singleton()
+
+        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+            client2 = TushareClient(token="token2")
+            self.assertEqual(len(client2._trade_cal_cache), 0)
+            self.assertEqual(len(client2._loaded_years), 0)
+
+    @patch("tushare.pro_api")
+    @patch("tushare.set_token")
+    def test_reset_singleton_clears_rate_limiter(self, mock_set_token, mock_pro_api):
+        """_reset_singleton 后新实例的限流器应为全新对象"""
+        mock_pro_api.return_value = MagicMock()
+
+        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+            client1 = TushareClient(token="token1")
+            old_limiter = client1._rate_limiter
+            old_slow_limiter = client1._slow_api_limiters.get("top10_holders")
+
+        TushareClient._reset_singleton()
+
+        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+            client2 = TushareClient(token="token2")
+            self.assertIsNot(client2._rate_limiter, old_limiter)
+            self.assertIsNot(client2._slow_api_limiters.get("top10_holders"), old_slow_limiter)
+
+    @patch("tushare.pro_api")
+    @patch("tushare.set_token")
+    def test_trade_cal_cache_is_instance_variable(self, mock_set_token, mock_pro_api):
+        """交易日历缓存应为实例变量而非类变量"""
+        mock_pro_api.return_value = MagicMock()
+
+        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+            client = TushareClient(token="dummy")
+            self.assertIn("_trade_cal_cache", client.__dict__)
+            self.assertIn("_loaded_years", client.__dict__)
+            self.assertIn("_calendar_lock", client.__dict__)
+
+    @patch("tushare.pro_api")
+    @patch("tushare.set_token")
+    def test_no_class_level_mutable_state(self, mock_set_token, mock_pro_api):
+        """类级别不应有可变状态（_trade_cal_cache, _loaded_years）"""
+        self.assertFalse(hasattr(TushareClient, "_trade_cal_cache"))
+        self.assertFalse(hasattr(TushareClient, "_loaded_years"))
 
 
 if __name__ == "__main__":
