@@ -502,6 +502,8 @@ class AIService:
         on_chunk=None,
         history_context: str = None,  # type: ignore
         strategy_key: str = None,  # type: ignore
+        include_global_context: bool = True,
+        include_learning_context: bool = True,
         ui_prompt_override: str = None,  # type: ignore
     ) -> dict:
         """
@@ -558,7 +560,7 @@ class AIService:
         stock_xml = "\n".join([f"  {k}: {v}" for k, v in clean_stock_info.items()])
 
         # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
-        if history_context is None:
+        if history_context is None and include_learning_context:
             try:
                 from data.persistence.review_manager import ReviewManager
 
@@ -569,6 +571,8 @@ class AIService:
                     f"[AIService] Analyze | ⚠️ Learning context fetch failed: {e}",
                 )
                 history_context = ""
+        elif history_context is None:
+            history_context = ""
 
         # Load System Prompt
         from strategies.strategy_prompts import _UNIVERSAL_RULES, resolve_prompt
@@ -601,7 +605,7 @@ class AIService:
         )
 
         # 3. 外部辅助与噪音偏多的长文本 (Middle - 允许注意力分散)
-        if global_context:
+        if global_context and include_global_context:
             user_prompt_parts.append(
                 f"<global_context>\n{self._safe_truncate(global_context, 2000)}\n</global_context>"
             )
@@ -617,7 +621,7 @@ class AIService:
             user_prompt_parts.append(f"<recent_price_action>\n{history_text}\n</recent_price_action>")
 
         # 5. Few-Shot 学习样例
-        if history_context:
+        if history_context and include_learning_context:
             user_prompt_parts.append(self._safe_truncate(history_context, 3000))
 
         # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考)

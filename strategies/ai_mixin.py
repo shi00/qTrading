@@ -25,6 +25,7 @@ from datetime import timedelta
 
 import pandas as pd
 
+from data.constants import TOP_LIST_NET_AMOUNT_UNIT, get_column_unit
 from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from strategies.utils import fmt_val, safe_float
@@ -124,6 +125,14 @@ class AIStrategyMixin:
         """Get list of context block names to build for this strategy."""
         return list(self._context_builders.keys())
 
+    def should_include_global_context(self) -> bool:
+        """Whether this strategy should inject shared market/global context."""
+        return True
+
+    def should_include_learning_context(self) -> bool:
+        """Whether this strategy should inject cross-run historical learning context."""
+        return True
+
     async def _prefetch_strategy_specific(
         self, candidates_df: pd.DataFrame, context: dict, prefetched: PreFetchedContext
     ) -> PreFetchedContext:
@@ -213,21 +222,23 @@ class AIStrategyMixin:
         # --- Fetch Global Context ONCE ---
         # --- Pre-fetch Learning Context ONCE for the entire batch ---
         history_context = ""
-        try:
-            from data.persistence.review_manager import ReviewManager
+        if self.should_include_learning_context():
+            try:
+                from data.persistence.review_manager import ReviewManager
 
-            rm = ReviewManager()
-            history_context = await rm.get_learning_context()
-        except Exception as e:
-            logger.warning(
-                f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}",
-            )
+                rm = ReviewManager()
+                history_context = await rm.get_learning_context()
+            except Exception as e:
+                logger.warning(
+                    f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}",
+                )
 
         global_context = ""
-        try:
-            global_context = await NewsFetcher.get_us_major_moves()
-        except Exception as e:
-            logger.warning(f"[AIStrategyMixin] Failed to fetch global context: {e}")
+        if self.should_include_global_context():
+            try:
+                global_context = await NewsFetcher.get_us_major_moves()
+            except Exception as e:
+                logger.warning(f"[AIStrategyMixin] Failed to fetch global context: {e}")
 
         # --- Pre-fetch Concepts for all candidates (N+1 optimization) ---
         concepts_map = {}
@@ -541,7 +552,7 @@ class AIStrategyMixin:
                 rsi_features = TechnicalAnalysis.analyze_rsi_oversold_features(df_sorted["close"], period=rsi_period)
                 row["_rsi_feature_text"] = rsi_features.get("feature_text", "")
                 row["_rsi_consecutive_days"] = rsi_features.get("consecutive_oversold_days", 0)
-                row["_rsi_days_since_healthy"] = rsi_features.get("days_since_healthy", 99)
+                row["_rsi_days_since_healthy"] = rsi_features.get("days_since_healthy")
                 row["_rsi_stagnation"] = rsi_features.get("stagnation_detected", False)
             else:
                 row["_rsi_feature_text"] = ""
@@ -629,6 +640,8 @@ class AIStrategyMixin:
                 on_chunk=on_chunk,
                 history_context=prefetched.history_context,
                 strategy_key=getattr(self, "key", None),
+                include_global_context=self.should_include_global_context(),
+                include_learning_context=self.should_include_learning_context(),
                 ui_prompt_override=ui_prompt_override,
             )
             return ai_result
@@ -908,6 +921,15 @@ class AIStrategyMixin:
         sf = safe_float
         parts = []
 
+        def format_amount(amount: float, source_unit: str) -> str:
+            amount_yuan = amount * 10000 if source_unit == "wan_yuan" else amount
+            abs_amount = abs(amount_yuan)
+            if abs_amount >= 1e8:
+                return f"{amount_yuan / 1e8:.2f}亿元"
+            if abs_amount >= 1e4:
+                return f"{amount_yuan / 1e4:.2f}万元"
+            return f"{amount_yuan:.0f}元"
+
         # 1. Moneyflow (主力资金)
         mf_df = prefetched.get("moneyflow_df")
         if mf_df is not None and not mf_df.empty:
@@ -921,8 +943,8 @@ class AIStrategyMixin:
                 sell_elg = sf(row.get("sell_elg_amount"))
                 net_main = (buy_lg + buy_elg) - (sell_lg + sell_elg)
                 net_total = sf(row.get("net_mf_amount"))
-                parts.append(f"主力净流入: {net_main:.2f}万元 (大单+超大单)")
-                parts.append(f"全市场净流入: {net_total:.2f}万元")
+                parts.append(f"主力净流入: {format_amount(net_main, 'wan_yuan')} (大单+超大单)")
+                parts.append(f"全市场净流入: {format_amount(net_total, 'wan_yuan')}")
             else:
                 parts.append("个股资金流数据: 当日无记录")
         else:
@@ -937,7 +959,8 @@ class AIStrategyMixin:
                 reason = row.get("reason")
                 reason = reason if reason and not (isinstance(reason, float) and reason != reason) else "N/A"
                 net_amt = sf(row.get("net_amount"))
-                parts.append(f"龙虎榜: 是 (原因: {reason}, 净买入: {net_amt:.2f}万元)")
+                net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
+                parts.append(f"龙虎榜: 是 (原因: {reason}, 净买入: {format_amount(net_amt, net_amount_unit)})")
             else:
                 parts.append("龙虎榜: 当日未上榜")
         else:

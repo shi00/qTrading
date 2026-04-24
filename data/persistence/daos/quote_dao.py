@@ -4,6 +4,7 @@ import typing
 
 import pandas as pd
 
+from data.constants import attach_top_list_column_units
 from data.persistence.models import (
     BlockTrade,
     DailyQuotes,
@@ -452,7 +453,8 @@ class QuoteDao(BaseDao):
         if trade_date:
             sql += " AND trade_date=$1"
             p.append(trade_date)
-        return await self._read_db(sql, p)
+        df = await self._read_db(sql, p)
+        return attach_top_list_column_units(df)
 
     # --- Margin ---
     async def save_margin_daily(self, df: pd.DataFrame):

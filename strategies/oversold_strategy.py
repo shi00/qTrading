@@ -38,6 +38,14 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         self.register_context_builder("market", self._build_market_context)
         self.register_context_builder("support", self._build_support_context)
 
+    def should_include_global_context(self) -> bool:
+        """超跌反弹优先关注个股自身修复信号，避免被美股噪音干扰。"""
+        return False
+
+    def should_include_learning_context(self) -> bool:
+        """超跌反弹避免注入 few-shot 复盘样例，降低命令式偏置。"""
+        return False
+
     # ============================================================
     # Dynamic Parameters — exposed to UI as a slider
     # ============================================================
@@ -91,14 +99,16 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         period = row.get("_rsi_period", 14)
         rsi = row.get(f"rsi_{period}", "N/A")
         threshold = row.get("_rsi_threshold", 30)
+        vol_ratio_threshold = row.get("_vol_ratio_threshold", 1.5)
         rsi_feature = row.get("_rsi_feature_text", "")
 
         context_parts = [
             "该股票由 RSI 超跌反弹策略筛选。",
+            (f"当前策略参数: RSI周期={period}, 超卖阈值={threshold}, 量能判定阈值={vol_ratio_threshold}"),
             f"当前 RSI({period}) = {rsi}（阈值 < {threshold}），表明处于极端超卖状态。",
         ]
 
-        if rsi_feature:
+        if rsi_feature and "暂不解读" not in rsi_feature and "历史数据不足" not in rsi_feature:
             context_parts.append(f"【形态反馈】{rsi_feature}")
 
         context_parts.append("请评估：这是「黄金坑」反弹机会（如恐慌急跌/钝化），还是基本面恶化导致的「无底洞」下跌？")
@@ -119,6 +129,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         params = context.get("params", {})
         rsi_period = params.get("rsi_period", 14)
         rsi_threshold = params.get("rsi_threshold", 30)
+        vol_ratio_threshold = params.get("vol_ratio_threshold", 1.5)
 
         # --- Phase 1: Math Filter ---
         candidates = await self._math_filter(context, rsi_period, rsi_threshold)
@@ -129,6 +140,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         # Inject thresholds into each row so get_ai_context() can use them
         candidates["_rsi_period"] = rsi_period
         candidates["_rsi_threshold"] = rsi_threshold
+        candidates["_vol_ratio_threshold"] = vol_ratio_threshold
 
         logger.info(
             f"[OversoldStrategy] Phase 1 complete: {len(candidates)} candidates (RSI < {rsi_threshold})",
