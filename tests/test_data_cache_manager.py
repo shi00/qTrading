@@ -7,6 +7,12 @@ import pandas as pd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from data.constants import (
+    DATAFRAME_ATTR_COLUMN_UNITS,
+    DATAFRAME_ATTR_COLUMN_UNIT_SOURCES,
+    TOP_LIST_NET_AMOUNT_UNIT,
+    TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
+)
 from tests.test_infra_base import TestDatabaseBase
 
 
@@ -362,6 +368,14 @@ class TestCacheManager(TestDatabaseBase):
         res = await self.cache.get_top_list(datetime.date(2023, 1, 1))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["net_amount"], 1000)
+        self.assertEqual(
+            res.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["net_amount"],
+            TOP_LIST_NET_AMOUNT_UNIT,
+        )
+        self.assertEqual(
+            res.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["net_amount"],
+            TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
+        )
 
     async def test_block_trade(self):
         """Test Block Trade"""

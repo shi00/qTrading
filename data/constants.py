@@ -66,6 +66,75 @@ MAJOR_INDICES = [
     "000688.SH",  # STAR 50
 ]
 
+# DataFrame column unit metadata
+DATAFRAME_ATTR_COLUMN_UNITS = "column_units"
+DATAFRAME_ATTR_COLUMN_UNIT_SOURCES = "column_unit_sources"
+TOP_LIST_NET_AMOUNT_UNIT = "yuan"
+TOP_LIST_NET_AMOUNT_UNIT_SOURCE = {
+    "provider": "tushare.top_list",
+    "doc_url": "https://tushare.pro/document/2?doc_id=106",
+    "doc_field": "net_amount",
+    "doc_description": "龙虎榜净买入额（元）",
+}
+TOP_LIST_COLUMN_UNITS = {
+    "net_amount": TOP_LIST_NET_AMOUNT_UNIT,
+}
+TOP_LIST_COLUMN_UNIT_SOURCES = {
+    "net_amount": TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
+}
+
+
+def attach_column_units(df, column_units: dict[str, str]):
+    """Attach non-schema unit metadata to a DataFrame."""
+    if df is None:
+        return df
+
+    existing = dict(df.attrs.get(DATAFRAME_ATTR_COLUMN_UNITS, {}))
+    existing.update(column_units)
+    df.attrs[DATAFRAME_ATTR_COLUMN_UNITS] = existing
+    return df
+
+
+def attach_column_unit_sources(df, column_unit_sources: dict[str, dict[str, str]]):
+    """Attach upstream evidence for non-schema unit metadata to a DataFrame."""
+    if df is None:
+        return df
+
+    existing = {
+        column_name: dict(source)
+        for column_name, source in df.attrs.get(DATAFRAME_ATTR_COLUMN_UNIT_SOURCES, {}).items()
+    }
+    for column_name, source in column_unit_sources.items():
+        existing[column_name] = dict(source)
+    df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES] = existing
+    return df
+
+
+def attach_top_list_column_units(df):
+    """Declare known top_list units and their upstream documentation without changing schema."""
+    df = attach_column_units(df, TOP_LIST_COLUMN_UNITS)
+    return attach_column_unit_sources(df, TOP_LIST_COLUMN_UNIT_SOURCES)
+
+
+def get_column_unit(df, column_name: str, default: str | None = None) -> str | None:
+    """Read unit metadata from a DataFrame."""
+    if df is None:
+        return default
+
+    column_units = df.attrs.get(DATAFRAME_ATTR_COLUMN_UNITS, {})
+    return column_units.get(column_name, default)
+
+
+def get_column_unit_source(df, column_name: str, default: dict | None = None) -> dict | None:
+    """Read upstream evidence for a column unit from a DataFrame."""
+    if df is None:
+        return default
+
+    column_unit_sources = df.attrs.get(DATAFRAME_ATTR_COLUMN_UNIT_SOURCES, {})
+    source = column_unit_sources.get(column_name)
+    return dict(source) if isinstance(source, dict) else default
+
+
 # Earnings Season Months (Q1, Q2, Q3, Q4 disclosure periods)
 # Jan/Apr/Jul/Oct are the start of disclosure windows usually
 EARNINGS_SEASON_MONTHS = [1, 4, 7, 10]
