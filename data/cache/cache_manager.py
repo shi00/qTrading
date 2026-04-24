@@ -838,6 +838,10 @@ class CacheManager:
         """获取股东人数"""
         return await self.holder_dao.get_stk_holdernumber(ts_code)
 
+    async def get_existing_top10_ts_codes(self, period: str) -> set[str]:
+        """获取指定报告期已有 top10_holders 数据的股票代码集合"""
+        return await self.holder_dao.get_existing_top10_ts_codes(period)
+
     # --- 宏观数据方法 ---
     async def get_macro_economy(self) -> pd.DataFrame:
         """获取宏观经济数据"""

@@ -15,6 +15,8 @@ _MAX_ERRORS = 5
 
 _PROGRESS_LOG_INTERVAL = 200
 
+_CHECKPOINT_INTERVAL = 5000
+
 
 class HolderSyncStrategy(ISyncStrategy):
     """
@@ -151,6 +153,12 @@ class HolderSyncStrategy(ISyncStrategy):
         This is the most API-intensive operation (~5500 calls per quarter).
         The dedicated slow-API rate limiter in TushareClient handles pacing.
 
+        Incremental sync: queries existing ts_codes for this period from DB
+        and skips them, avoiding redundant API calls.
+
+        Checkpoint resume: periodically saves progress so that an interrupted
+        sync can resume from the last checkpoint instead of starting over.
+
         Returns total row count on success, -1 on error.
         """
         try:
@@ -159,15 +167,36 @@ class HolderSyncStrategy(ISyncStrategy):
                 logger.warning("[HolderSync] No stock list available for top10_holders sync")
                 return -1
 
-            ts_codes = stock_df["ts_code"].tolist()
-            total = len(ts_codes)
+            all_ts_codes = stock_df["ts_code"].tolist()
+            total = len(all_ts_codes)
+
+            existing_ts_codes = await self._get_existing_top10_ts_codes(period)
+            if existing_ts_codes:
+                ts_codes = [c for c in all_ts_codes if c not in existing_ts_codes]
+                skipped = total - len(ts_codes)
+                logger.info(
+                    f"[HolderSync] top10_holders | Incremental: {skipped}/{total} stocks "
+                    f"already synced for period={period}, {len(ts_codes)} remaining",
+                )
+            else:
+                ts_codes = all_ts_codes
+
+            if not ts_codes:
+                logger.info(
+                    f"[HolderSync] top10_holders | All stocks already synced for period={period}, skipping",
+                )
+                return 0
+
+            remaining = len(ts_codes)
             all_dfs = []
             stock_errors = 0
             consecutive_errors = 0
             rate_limit_hits = 0
+            total_rows = 0
+            checkpoint_rows = 0
 
             logger.info(
-                f"[HolderSync] top10_holders | Starting per-stock sync: {total} stocks, period={period}",
+                f"[HolderSync] top10_holders | Starting per-stock sync: {remaining} stocks, period={period}",
             )
 
             for i, ts_code in enumerate(ts_codes):
@@ -182,6 +211,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     )
                     if df is not None and not df.empty:
                         all_dfs.append(df)
+                        total_rows += len(df)
                     consecutive_errors = 0
                 except Exception as e:
                     stock_errors += 1
@@ -201,7 +231,7 @@ class HolderSyncStrategy(ISyncStrategy):
                         logger.warning(
                             f"[HolderSync] top10_holders | {consecutive_errors} consecutive errors, aborting",
                         )
-                        return -1
+                        break
 
                 if (i + 1) % _PROGRESS_LOG_INTERVAL == 0:
                     elapsed_info = ""
@@ -212,28 +242,76 @@ class HolderSyncStrategy(ISyncStrategy):
                             elapsed_info = f", rate={slow_limiter.current_rate_per_min:.0f}/min"
 
                     logger.info(
-                        f"[HolderSync] top10_holders | Progress: {i + 1}/{total} "
-                        f"({(i + 1) * 100 // total}%), "
+                        f"[HolderSync] top10_holders | Progress: {i + 1}/{remaining} "
+                        f"({(i + 1) * 100 // remaining}%), "
                         f"errors={stock_errors}, rate_limits={rate_limit_hits}{elapsed_info}",
                     )
+
+                if total_rows - checkpoint_rows >= _CHECKPOINT_INTERVAL and all_dfs:
+                    if await self._save_top10_checkpoint(all_dfs, period):
+                        checkpoint_rows = total_rows
+                        all_dfs = []
 
             if all_dfs:
                 combined = pd.concat(all_dfs, ignore_index=True)
                 await self.context.cache.save_top10_holders(combined)
                 logger.info(
-                    f"[HolderSync] Table | top10_holders period={period}: "
-                    f"{len(combined)} records from {len(all_dfs)}/{total} stocks, "
-                    f"errors={stock_errors}, rate_limits={rate_limit_hits}",
+                    f"[HolderSync] Table | top10_holders period={period}: saved final batch of {len(combined)} records",
                 )
-                return len(combined)
 
-            logger.debug(
-                f"[HolderSync] Table | top10_holders period={period}: no data",
+            total_coverage = len(existing_ts_codes) + (remaining - stock_errors)
+            logger.info(
+                f"[HolderSync] Table | top10_holders period={period}: "
+                f"{total_rows} records, "
+                f"coverage: {total_coverage}/{total} stocks, "
+                f"errors={stock_errors}, rate_limits={rate_limit_hits}",
             )
-            return 0
+
+            if consecutive_errors >= _MAX_ERRORS:
+                return -1
+
+            return total_rows
         except Exception as e:
             self._log_sync_error("top10_holders", period, e)
             return -1
+
+    async def _get_existing_top10_ts_codes(self, period: str) -> set[str]:
+        """
+        Query the database for ts_codes that already have top10_holders
+        data for the given period. Returns empty set on error (falls back
+        to full sync).
+        """
+        try:
+            return await self.context.cache.get_existing_top10_ts_codes(period)
+        except Exception as e:
+            logger.warning(
+                f"[HolderSync] top10_holders | Failed to query existing ts_codes "
+                f"for period={period}, falling back to full sync: {e}",
+            )
+            return set()
+
+    async def _save_top10_checkpoint(self, all_dfs: list[pd.DataFrame], period: str) -> bool:
+        """
+        Save accumulated top10_holders data as a checkpoint.
+        This ensures that if the sync is interrupted, already-fetched data
+        is persisted and won't need to be re-fetched on the next run.
+
+        Returns True if checkpoint was saved successfully, False otherwise.
+        Caller MUST NOT clear all_dfs unless this returns True, otherwise
+        data will be lost.
+        """
+        try:
+            combined = pd.concat(all_dfs, ignore_index=True)
+            await self.context.cache.save_top10_holders(combined)
+            logger.info(
+                f"[HolderSync] top10_holders | Checkpoint saved: {len(combined)} records for period={period}",
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"[HolderSync] top10_holders | Checkpoint save failed for period={period}: {e}",
+            )
+            return False
 
     def _log_sync_error(self, table_name: str, date_str: str, e: Exception):
         err_str = str(e).lower()

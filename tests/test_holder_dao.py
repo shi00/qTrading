@@ -219,3 +219,89 @@ class TestHolderDataQuality:
                 change_pct = (curr_num - prev_num) / prev_num * 100
 
                 assert change_pct < 0
+
+
+class TestHolderDaoIncremental:
+    """测试增量同步查询方法"""
+
+    @pytest.fixture
+    def holder_dao(self, test_engine):
+        return HolderDao(test_engine)
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_with_data(self, holder_dao):
+        """有数据时返回 ts_code 集合"""
+        mock_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "600000.SH"]})
+
+        with patch.object(
+            holder_dao,
+            "_read_db",
+            new_callable=AsyncMock,
+            return_value=mock_df,
+        ):
+            result = await holder_dao.get_existing_top10_ts_codes("20231231")
+
+            assert result == {"000001.SZ", "000002.SZ", "600000.SH"}
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_empty(self, holder_dao):
+        """无数据时返回空集合"""
+        with patch.object(
+            holder_dao,
+            "_read_db",
+            new_callable=AsyncMock,
+            return_value=pd.DataFrame(),
+        ):
+            result = await holder_dao.get_existing_top10_ts_codes("20231231")
+
+            assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_none_result(self, holder_dao):
+        """数据库返回 None 时返回空集合"""
+        with patch.object(
+            holder_dao,
+            "_read_db",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await holder_dao.get_existing_top10_ts_codes("20231231")
+
+            assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_db_error(self, holder_dao):
+        """数据库错误时返回空集合（降级到全量同步）"""
+        with patch.object(
+            holder_dao,
+            "_read_db",
+            new_callable=AsyncMock,
+            side_effect=Exception("DB Error"),
+        ):
+            result = await holder_dao.get_existing_top10_ts_codes("20231231")
+
+            assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_empty_period(self, holder_dao):
+        """空 period 返回空集合"""
+        result = await holder_dao.get_existing_top10_ts_codes("")
+
+        assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_correct_sql(self, holder_dao):
+        """验证 SQL 查询使用了正确的 period 参数"""
+        with patch.object(
+            holder_dao,
+            "_read_db",
+            new_callable=AsyncMock,
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}),
+        ) as mock_read:
+            await holder_dao.get_existing_top10_ts_codes("20230930")
+
+            mock_read.assert_called_once()
+            call_args = mock_read.call_args
+            assert "top10_holders" in call_args[0][0]
+            assert "end_date" in call_args[0][0]
+            assert call_args[0][1] == ("20230930",)

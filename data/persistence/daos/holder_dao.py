@@ -204,3 +204,31 @@ class HolderDao(BaseDao):
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to get holder number batch: {e}")
             return pd.DataFrame()
+
+    async def get_existing_top10_ts_codes(self, period: str) -> set[str]:
+        """
+        Get ts_codes that already have top10_holders data for a given period.
+
+        Used for incremental sync: skip stocks that already have data,
+        avoiding redundant O(N) API calls.
+
+        Args:
+            period: Reporting period in YYYYMMDD format (e.g. '20231231')
+
+        Returns:
+            Set of ts_codes that already have top10_holders data for this period
+        """
+        if not period:
+            return set()
+
+        try:
+            df = await self._read_db(
+                "SELECT DISTINCT ts_code FROM top10_holders WHERE end_date = $1",
+                (period,),
+            )
+            if df is not None and not df.empty:
+                return set(df["ts_code"].tolist())
+            return set()
+        except Exception as e:
+            logger.warning(f"[HolderDao] Failed to get existing top10 ts_codes for period={period}: {e}")
+            return set()

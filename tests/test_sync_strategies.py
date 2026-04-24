@@ -302,6 +302,7 @@ class TestHolderSyncStrategy:
         context = MagicMock(spec=SyncContext)
         context.api = AsyncMock()
         context.cache = AsyncMock()
+        context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
         return context
 
     @pytest.fixture
@@ -431,6 +432,7 @@ class TestHolderSyncTop10Detailed:
         context = MagicMock(spec=SyncContext)
         context.api = AsyncMock()
         context.cache = AsyncMock()
+        context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
         return context
 
     @pytest.fixture
@@ -593,6 +595,176 @@ class TestHolderSyncTop10Detailed:
         count = await strategy._sync_top10_holders("20231231")
 
         assert count == 5
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_incremental_skips_existing(self, strategy, mock_context):
+        """增量同步：已有数据的股票被跳过，只同步缺失的股票"""
+        stock_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
+
+        holder_dfs = [
+            pd.DataFrame({"ts_code": [c], "holder_name": [f"holder_{c}"], "hold_ratio": [10.0]})
+            for c in ["000003.SZ", "000004.SZ"]
+        ]
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=holder_dfs)
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        count = await strategy._sync_top10_holders("20231231")
+
+        assert count == 2
+        assert mock_context.api.get_top10_holders.call_count == 2
+        called_codes = [call.kwargs["ts_code"] for call in mock_context.api.get_top10_holders.call_args_list]
+        assert "000001.SZ" not in called_codes
+        assert "000002.SZ" not in called_codes
+        assert "000003.SZ" in called_codes
+        assert "000004.SZ" in called_codes
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_incremental_all_already_synced(self, strategy, mock_context):
+        """增量同步：所有股票已有数据时直接返回 0，不调用 API"""
+        stock_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
+
+        mock_context.api.get_top10_holders = AsyncMock()
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        count = await strategy._sync_top10_holders("20231231")
+
+        assert count == 0
+        mock_context.api.get_top10_holders.assert_not_called()
+        mock_context.cache.save_top10_holders.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_incremental_query_fails_fallback_full(self, strategy, mock_context):
+        """增量查询失败时回退到全量同步"""
+        stock_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(side_effect=Exception("DB Error"))
+
+        holder_dfs = [
+            pd.DataFrame({"ts_code": [c], "holder_name": [f"holder_{c}"], "hold_ratio": [10.0]})
+            for c in ["000001.SZ", "000002.SZ"]
+        ]
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=holder_dfs)
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        count = await strategy._sync_top10_holders("20231231")
+
+        assert count == 2
+        assert mock_context.api.get_top10_holders.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_checkpoint_saves_periodically(self, strategy, mock_context):
+        """断点续传：累积足够行数时触发中间保存"""
+        codes = [f"00000{i:02d}.SZ" for i in range(10)]
+        stock_df = pd.DataFrame({"ts_code": codes})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        holder_dfs = [
+            pd.DataFrame(
+                {
+                    "ts_code": [c] * 10,
+                    "holder_name": [f"h{j}" for j in range(10)],
+                    "hold_ratio": [1.0] * 10,
+                }
+            )
+            for c in codes
+        ]
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=holder_dfs)
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        with patch.object(holder, "_CHECKPOINT_INTERVAL", 50):
+            count = await strategy._sync_top10_holders("20231231")
+
+        assert count == 100
+        assert mock_context.cache.save_top10_holders.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_resume_after_circuit_breaker(self, strategy, mock_context):
+        """熔断后已保存的数据不会丢失：下次增量同步可跳过已同步股票"""
+        stock_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=Exception("API Error"))
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        count = await strategy._sync_top10_holders("20231231")
+
+        assert count == -1
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_empty_period(self, strategy, mock_context):
+        """period 为空字符串时 get_existing_top10_ts_codes 返回空集"""
+        stock_df = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        mock_context.api.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["h"], "hold_ratio": [5.0]})
+        )
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        count = await strategy._sync_top10_holders("")
+
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_checkpoint_failure_preserves_data(self, strategy, mock_context):
+        """断点续传：checkpoint 保存失败时数据不丢失，最终仍会尝试保存"""
+        codes = [f"00000{i:02d}.SZ" for i in range(10)]
+        stock_df = pd.DataFrame({"ts_code": codes})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        holder_dfs = [
+            pd.DataFrame(
+                {
+                    "ts_code": [c] * 10,
+                    "holder_name": [f"h{j}" for j in range(10)],
+                    "hold_ratio": [1.0] * 10,
+                }
+            )
+            for c in codes
+        ]
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=holder_dfs)
+
+        save_results = []
+
+        async def mock_save(df):
+            if len(save_results) == 0:
+                save_results.append(("failed", len(df)))
+                raise Exception("DB write error during checkpoint")
+            save_results.append(("ok", len(df)))
+
+        mock_context.cache.save_top10_holders = AsyncMock(side_effect=mock_save)
+
+        with patch.object(holder, "_CHECKPOINT_INTERVAL", 50):
+            count = await strategy._sync_top10_holders("20231231")
+
+        assert count == 100
+        assert len(save_results) >= 2
+        assert save_results[0] == ("failed", 50)
+        successful_rows = sum(rows for status, rows in save_results if status == "ok")
+        assert successful_rows == 100
+
+    @pytest.mark.asyncio
+    async def test_sync_top10_holders_circuit_breaker_no_data_to_save(self, strategy, mock_context):
+        """熔断时若所有 API 均失败，save_top10_holders 不应被调用"""
+        stock_df = pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(6)]})
+        mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
+        mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        mock_context.api.get_top10_holders = AsyncMock(side_effect=Exception("API Error"))
+        mock_context.cache.save_top10_holders = AsyncMock()
+
+        count = await strategy._sync_top10_holders("20231231")
+
+        assert count == -1
+        mock_context.cache.save_top10_holders.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_cancellation_during_retry(self, strategy, mock_context):
