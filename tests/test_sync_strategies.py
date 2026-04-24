@@ -685,7 +685,7 @@ class TestHolderSyncTop10Detailed:
     @pytest.mark.asyncio
     async def test_sync_top10_holders_resume_after_circuit_breaker(self, strategy, mock_context):
         """熔断后已保存的数据不会丢失：下次增量同步可跳过已同步股票"""
-        stock_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+        stock_df = pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(6)]})
         mock_context.cache.get_stock_basic = AsyncMock(return_value=stock_df)
         mock_context.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
 
