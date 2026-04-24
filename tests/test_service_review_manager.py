@@ -140,8 +140,10 @@ class TestGetLearningContext(unittest.TestCase):
         async def run_test():
             result = await manager.get_learning_context(limit=3)
             self.assertIn("history_context", result)
-            self.assertIn("Success Examples", result)
-            self.assertIn("Mistakes to Avoid", result)
+            self.assertIn("复盘参考 - 正向样本", result)
+            self.assertIn("复盘参考 - 负向样本", result)
+            self.assertNotIn("Learn from these", result)
+            self.assertNotIn("Do NOT repeat", result)
 
         asyncio.run(run_test())
 
@@ -161,7 +163,7 @@ class TestGetLearningContext(unittest.TestCase):
 
         async def run_test():
             result = await manager.get_learning_context(limit=3)
-            self.assertIn("No historical data available", result)
+            self.assertIn("暂无可用历史复盘样本", result)
 
         asyncio.run(run_test())
 

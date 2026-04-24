@@ -445,8 +445,17 @@ class TestRSIOversoldFeatures(unittest.TestCase):
         result = TechnicalAnalysis.analyze_rsi_oversold_features(close, period=14)
 
         self.assertEqual(result["consecutive_oversold_days"], 0)
-        self.assertEqual(result["days_since_healthy"], 99)
-        self.assertIn("缺乏足够历史数据", result["feature_text"])
+        self.assertIsNone(result["days_since_healthy"])
+        self.assertIn("暂不解读超卖形态", result["feature_text"])
+
+    def test_days_since_healthy_is_capped_by_recent_window(self):
+        """长历史序列不应回退到伪精确的超长天数。"""
+        close = pd.Series([10.0 + i * 0.2 for i in range(80)] + [26.0 - i * 0.25 for i in range(80)])
+
+        result = TechnicalAnalysis.analyze_rsi_oversold_features(close, period=14)
+
+        self.assertIsNone(result["days_since_healthy"])
+        self.assertIn("近60日内未回到多头状态", result["feature_text"])
 
 
 class TestPolarsExpressions(unittest.TestCase):

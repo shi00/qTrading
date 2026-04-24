@@ -213,19 +213,17 @@ class ReviewManager:
         xml = "<history_context>\n"
 
         if wins:
-            xml += "  [Success Examples - Learn from these]\n"
+            xml += "  [复盘参考 - 正向样本]\n"
             for w in wins:
-                xml += f"  - {w['code']} ({w['name']}): Predicted score {w['score']}, actual +{w['pct']:.1f}%\n"
+                xml += f"  - {w['code']} ({w['name']}): 次日 {w['pct']:+.1f}%，当时归因摘要: {w['reason'] or '无'}\n"
 
         if losses:
-            xml += "  [Mistakes to Avoid - Do NOT repeat]\n"
+            xml += "  [复盘参考 - 负向样本]\n"
             for loss in losses:
-                xml += (
-                    f"  - {loss['code']} ({loss['name']}): Predicted score {loss['score']}, actual {loss['pct']:.1f}%\n"
-                )
+                xml += f"  - {loss['code']} ({loss['name']}): 次日 {loss['pct']:+.1f}%，当时归因摘要: {loss['reason'] or '无'}\n"
 
         if not wins and not losses:
-            xml += "  No historical data available yet.\n"
+            xml += "  暂无可用历史复盘样本。\n"
 
         xml += "</history_context>"
         return xml

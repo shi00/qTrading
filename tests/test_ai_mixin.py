@@ -21,6 +21,7 @@ import pytest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from data.constants import attach_column_units
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import safe_float
 
@@ -608,6 +609,74 @@ class TestSafeFloat:
     def test_custom_default(self):
         """自定义默认值"""
         assert safe_float(None, default=-1.0) == -1.0
+
+
+class TestCapitalFlowText:
+    """测试资金流文本格式化"""
+
+    def test_formats_top_list_net_amount_as_yuan_based_unit(self):
+        text = AIStrategyMixin._build_capital_flow_text(
+            "000001.SZ",
+            {
+                "moneyflow_df": pd.DataFrame(),
+                "top_list_df": pd.DataFrame(
+                    {
+                        "ts_code": ["000001.SZ"],
+                        "reason": ["日跌幅偏离值达到7%的前五只证券"],
+                        "net_amount": [-97685500.0],
+                    }
+                ),
+                "northbound_df": pd.DataFrame(),
+            },
+        )
+
+        assert "净买入: -9768.55万元" in text
+        assert "亿元" not in text
+
+    def test_formats_moneyflow_amount_as_wan_yuan_based_unit(self):
+        text = AIStrategyMixin._build_capital_flow_text(
+            "000001.SZ",
+            {
+                "moneyflow_df": pd.DataFrame(
+                    {
+                        "ts_code": ["000001.SZ"],
+                        "buy_lg_amount": [1200.0],
+                        "sell_lg_amount": [200.0],
+                        "buy_elg_amount": [800.0],
+                        "sell_elg_amount": [100.0],
+                        "net_mf_amount": [2500.0],
+                    }
+                ),
+                "top_list_df": pd.DataFrame(),
+                "northbound_df": pd.DataFrame(),
+            },
+        )
+
+        assert "主力净流入: 1700.00万元" in text
+        assert "全市场净流入: 2500.00万元" in text
+
+    def test_prefers_top_list_unit_metadata_over_default_assumption(self):
+        top_list_df = attach_column_units(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "reason": ["机构专用席位净买入"],
+                    "net_amount": [12000.0],
+                }
+            ),
+            {"net_amount": "wan_yuan"},
+        )
+
+        text = AIStrategyMixin._build_capital_flow_text(
+            "000001.SZ",
+            {
+                "moneyflow_df": pd.DataFrame(),
+                "top_list_df": top_list_df,
+                "northbound_df": pd.DataFrame(),
+            },
+        )
+
+        assert "净买入: 1.20亿元" in text
 
 
 class TestMultiPeriodFinancials:

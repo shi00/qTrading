@@ -211,14 +211,18 @@ class TechnicalAnalysis:
         Returns:
             dict 包含特征值和描述文本
         """
+        lookback_days = max(60, period + 20)
+        if close is not None and len(close) > lookback_days:
+            close = close.tail(lookback_days)
+
         rsi = TechnicalAnalysis.calculate_rsi_pandas(close, period)
 
-        if rsi.empty or len(rsi) < 20:
+        if rsi.empty or close is None or len(close) < max(20, period + 6):
             return {
                 "consecutive_oversold_days": 0,
-                "days_since_healthy": 99,
+                "days_since_healthy": None,
                 "stagnation_detected": False,
-                "feature_text": "RSI 状态: 缺乏足够历史数据",
+                "feature_text": "RSI 状态: 最近历史数据不足，暂不解读超卖形态",
             }
 
         current_rsi = rsi.iloc[-1]
@@ -233,15 +237,16 @@ class TechnicalAnalysis:
                     break
 
         healthy_mask = rsi > 50
-        days_since_healthy = 99
+        days_since_healthy = None
         if healthy_mask.any():
             last_healthy_idx = healthy_mask[healthy_mask].index[-1]
             days_since_healthy = len(rsi) - rsi.index.get_loc(last_healthy_idx) - 1  # type: ignore
 
         stagnation_detected = False
-        if len(rsi) >= 20:
-            recent_close = close.tail(20)
-            recent_rsi = rsi.tail(20)
+        recent_window = min(len(rsi), 20)
+        if recent_window >= 20:
+            recent_close = close.tail(recent_window)
+            recent_rsi = rsi.tail(recent_window)
 
             is_price_new_low = recent_close.iloc[-1] <= recent_close.iloc[:-1].min()
 
@@ -250,13 +255,17 @@ class TechnicalAnalysis:
                 rsi_deviation_pct = (current_rsi - rsi_min) / rsi_min * 100
                 stagnation_detected = is_price_new_low and (rsi_deviation_pct > 5)
 
-        panic_str = "【恐慌急跌】" if days_since_healthy <= 8 else "【阴跌耗损】"
+        healthy_text = f"近{len(rsi)}日内未回到多头状态(>50)"
+        panic_str = ""
+        if days_since_healthy is not None:
+            panic_str = "【恐慌急跌】" if days_since_healthy <= 8 else "【阴跌耗损】"
+            healthy_text = f"距上次多头状态(>50)已历经 {days_since_healthy} 天 {panic_str}"
+
         stagnation_str = "【RSI 超卖钝化】" if stagnation_detected else ""
 
-        feature_text = (
-            f"已连续 {consecutive_days} 天处于超卖(<30)；"
-            f"距上次多头状态(>50)已历经 {days_since_healthy} 天 {panic_str} {stagnation_str}"
-        )
+        feature_text = f"近{len(rsi)}日观察: 已连续 {consecutive_days} 天处于超卖(<30)；{healthy_text}"
+        if stagnation_str:
+            feature_text += f" {stagnation_str}"
 
         return {
             "consecutive_oversold_days": consecutive_days,
