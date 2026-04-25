@@ -94,6 +94,40 @@ class DoubaoTagger:
         self._concepts_cleared = True
         logger.info("[DoubaoTagger] Existing Doubao concepts cleared after page became interactive.")
 
+    def _is_valid_storage_state_payload(self, payload: object) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        cookies = payload.get("cookies")
+        origins = payload.get("origins")
+        if not isinstance(cookies, list) or not isinstance(origins, list):
+            return False
+        return bool(cookies or origins)
+
+    async def _refresh_auth_state(self, context) -> bool:
+        tmp_auth_file = f"{AUTH_FILE}.tmp"
+        try:
+            await context.storage_state(path=tmp_auth_file)
+            with open(tmp_auth_file, encoding="utf-8") as f:
+                payload = json.load(f)
+            if not self._is_valid_storage_state_payload(payload):
+                logger.warning("[DoubaoTagger] Skip auth snapshot refresh because payload looks invalid.")
+                return False
+            os.replace(tmp_auth_file, AUTH_FILE)
+            logger.info("[DoubaoTagger] Auth snapshot refreshed before context rebuild.")
+            return True
+        except Exception as ex:
+            logger.warning("[DoubaoTagger] Failed to refresh auth snapshot: %s", ex)
+            return False
+        finally:
+            if os.path.exists(tmp_auth_file):
+                try:
+                    os.remove(tmp_auth_file)
+                except OSError:
+                    logger.debug(
+                        "[DoubaoTagger] Failed to delete temporary auth snapshot: %s",
+                        tmp_auth_file,
+                    )
+
     async def _find_chat_input(self, page: "Page", timeout_ms: int = CHAT_INPUT_WAIT_MS):
         """Find the chat input with ordered selector fallbacks for DOM changes."""
         candidate_errors: list[str] = []
@@ -284,9 +318,14 @@ class DoubaoTagger:
 
                 # 浏览器内存清理 (保留原有优秀机制)
                 if batch_count > 0 and batch_count % 15 == 0:
-                    print("🧹 清理浏览器缓存与僵尸内存，重建上下文...")
-                    # 修复：在销毁上下文前，保存最新的 Cookie 和 LocalStorage，避免 Token 过期导致豆包白屏
-                    await context.storage_state(path=AUTH_FILE)
+                    print("🧹 清理浏览器缓存与僵尸内存，重建上下文...", flush=True)
+                    if consecutive_failures == 0:
+                        await self._refresh_auth_state(context)
+                    else:
+                        logger.warning(
+                            "[DoubaoTagger] Skip auth snapshot refresh before rebuild because consecutive_failures=%s",
+                            consecutive_failures,
+                        )
                     await page.close()
                     await context.close()
                     context = await browser.new_context(storage_state=AUTH_FILE)
