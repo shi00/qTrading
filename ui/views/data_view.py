@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import logging
+import os
 import re
 import time
 
@@ -38,6 +39,9 @@ class TableViewerTab(ft.Container):
         self.sort_asc = True  # Sort direction (True = ASC, False = DESC)
         self._is_loading = False  # Prevent concurrent data loading
         self._tables_loaded = False  # Skip re-loading when switching back to this view
+        self._pending_export_df = None  # Temp storage for export data
+
+        self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)
 
         # UI Elements
         self.table_selector = ft.Dropdown(
@@ -308,6 +312,16 @@ class TableViewerTab(ft.Container):
             expand=True,
             spacing=0,
         )
+
+    def did_mount(self):
+        if self.page:
+            self.page.overlay.append(self.save_file_picker)
+            self.page.update()
+
+    def will_unmount(self):
+        if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
+            self.page.overlay.remove(self.save_file_picker)
+            self.page.update()
 
     async def did_mount_async(self):
         """Called when the control is added to the page (Async wrapper manually called)"""
@@ -681,16 +695,11 @@ class TableViewerTab(ft.Container):
             await self._toggle_loading(False)
 
     async def _export_csv(self, current_page=True):
-        import os
-
         try:
             if self.progress_bar.visible:
-                return  # Prevent double click
+                return
             await self._toggle_loading(True)
 
-            await self._toggle_loading(True)
-
-            # Prepare args (must be done on main thread if accessing UI controls)
             filters = []
             if self.filter_val.value:
                 filter_col = self.filter_col.value
@@ -699,7 +708,6 @@ class TableViewerTab(ft.Container):
                     filter_val = filter_val.replace("-", "")
                 filters.append((filter_col, self.filter_op.value, filter_val))
 
-            # Resolve Sort Column Name for Export
             sort_col_name = None
             if self.sort_col_index is not None and 0 <= self.sort_col_index < len(
                 self.table_columns,
@@ -716,40 +724,63 @@ class TableViewerTab(ft.Container):
                 sort_asc=self.sort_asc,
             )
 
-            # Execute in background
             df = await ThreadPoolManager().run_async(TaskType.CPU, query_func)
 
             if df.empty:
                 self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore
+                await self._toggle_loading(False)
                 return
-
-            # Save File (IO operation, also good to keep off main thread if heavy, but usually fast enough)
-            export_dir = "exports"
-            if not os.path.exists(export_dir):
-                os.makedirs(export_dir)
 
             suffix = f"_p{self.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.current_table}{suffix}_{timestamp}.csv"
-            filepath = os.path.join(export_dir, filename)
+            default_filename = f"{self.current_table}{suffix}_{timestamp}.csv"
 
-            # Writing large CSV can also block, so we push it to executor
-            await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                lambda: df.to_csv(filepath, index=False, encoding="utf-8-sig"),
+            self._pending_export_df = df
+            self.save_file_picker.save_file(
+                dialog_title=I18n.get("data_export_save_title"),
+                file_name=default_filename,
+                allowed_extensions=["csv"],
             )
-
-            msg = I18n.get("data_export_success", file=filename)
-            self.page.show_toast(msg, "success")  # type: ignore
 
         except Exception as e:
             logger.error(f"Export failed: {e}", exc_info=True)
             self.page.show_toast(  # type: ignore
-                I18n.get("data_export_fail", error="内部处理错误"),
+                I18n.get("data_export_fail", error=str(e)),
                 "error",
             )
-        finally:
             await self._toggle_loading(False)
+
+    def _on_save_file_result(self, e: ft.FilePickerResultEvent):
+        if not self.page:
+            self._pending_export_df = None
+            return
+
+        if e.path and self._pending_export_df is not None:
+            df = self._pending_export_df
+            self._pending_export_df = None
+
+            async def _do_save(filepath):
+                try:
+                    await ThreadPoolManager().run_async(
+                        TaskType.CPU,
+                        lambda: df.to_csv(filepath, index=False, encoding="utf-8-sig"),
+                    )
+                    filename = os.path.basename(filepath)
+                    msg = I18n.get("data_export_success", file=filename)
+                    self.page.show_toast(msg, "success")  # type: ignore
+                except Exception as ex:
+                    logger.error(f"Export write failed: {ex}", exc_info=True)
+                    self.page.show_toast(  # type: ignore
+                        I18n.get("data_export_fail", error=str(ex)),
+                        "error",
+                    )
+                finally:
+                    await self._toggle_loading(False)
+
+            self.page.run_task(_do_save, e.path)  # type: ignore
+        else:
+            self._pending_export_df = None
+            self.page.run_task(self._toggle_loading, False)  # type: ignore
 
     def update_theme(self):
         """Update styles on theme change"""

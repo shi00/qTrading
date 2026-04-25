@@ -120,6 +120,57 @@ class TestQfqCalculation(unittest.TestCase):
 
         self.assertEqual(result["close"].iloc[0], 10.0)
 
+    def test_qfq_null_adj_factor_degradation(self):
+        """首行 adj_factor NULL 用 latest_factor 填充，ratio=1.0，价格不变"""
+        df = pd.DataFrame(
+            [
+                {"trade_date": "20240101", "close": 10.0, "open": 10.0, "high": 10.5, "low": 9.5, "adj_factor": None},
+                {"trade_date": "20240102", "close": 11.0, "open": 11.0, "high": 11.5, "low": 10.5, "adj_factor": 1.1},
+                {"trade_date": "20240103", "close": 12.0, "open": 12.0, "high": 12.5, "low": 11.5, "adj_factor": 1.2},
+            ]
+        )
+
+        result = TechnicalAnalysis._get_qfq_df(df)
+
+        self.assertFalse(result["close"].isna().any(), "NULL adj_factor should be degraded, not produce NaN prices")
+        self.assertAlmostEqual(result["close"].iloc[0], 10.0, places=2)
+        self.assertAlmostEqual(result["close"].iloc[1], 11.0 * 1.1 / 1.2, places=2)
+        self.assertAlmostEqual(result["close"].iloc[2], 12.0, places=2)
+
+    def test_qfq_null_adj_factor_filled_with_latest(self):
+        """中间行 adj_factor NULL 用 ffill 前向填充，再用 latest_factor 兜底"""
+        df = pd.DataFrame(
+            [
+                {"trade_date": "20240101", "close": 10.0, "open": 10.0, "high": 10.5, "low": 9.5, "adj_factor": 1.0},
+                {"trade_date": "20240102", "close": 11.0, "open": 11.0, "high": 11.5, "low": 10.5, "adj_factor": None},
+                {"trade_date": "20240103", "close": 12.0, "open": 12.0, "high": 12.5, "low": 11.5, "adj_factor": 1.2},
+            ]
+        )
+
+        result = TechnicalAnalysis._get_qfq_df(df)
+
+        self.assertFalse(result["close"].isna().any())
+        self.assertAlmostEqual(result["close"].iloc[0], 10.0 * 1.0 / 1.2, places=2)
+        self.assertAlmostEqual(result["close"].iloc[1], 11.0 * 1.0 / 1.2, places=2)
+        self.assertAlmostEqual(result["close"].iloc[2], 12.0, places=2)
+
+    def test_qfq_all_null_adj_factor(self):
+        """全部 adj_factor 为 NULL 时降级为原始价格"""
+        df = pd.DataFrame(
+            [
+                {"trade_date": "20240101", "close": 10.0, "adj_factor": None},
+                {"trade_date": "20240102", "close": 11.0, "adj_factor": None},
+                {"trade_date": "20240103", "close": 12.0, "adj_factor": None},
+            ]
+        )
+
+        result = TechnicalAnalysis._get_qfq_df(df)
+
+        self.assertFalse(result["close"].isna().any())
+        self.assertAlmostEqual(result["close"].iloc[0], 10.0, places=2)
+        self.assertAlmostEqual(result["close"].iloc[1], 11.0, places=2)
+        self.assertAlmostEqual(result["close"].iloc[2], 12.0, places=2)
+
 
 class TestMACD(unittest.TestCase):
     """测试 MACD 计算"""

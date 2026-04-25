@@ -289,6 +289,7 @@
     "data_err_fetch": "Data fetch error: {error}",
     "data_export_fail": "Export failed: {error}",
     "data_export_no_data": "No data to export",
+    "data_export_save_title": "Choose export file location",
     "data_export_success": "Exported to {file}",
     "dialog_confirm_init_title": "Confirm Initialization",
     "dialog_confirm_init_content": "Fetch all market, financial, and macro data for the configured history range. This may take a while. Continue?",

@@ -1,5 +1,6 @@
 import datetime
 import logging
+import re
 import typing
 
 import pandas as pd
@@ -78,6 +79,14 @@ def _get_default_synced_tables() -> list[str]:
     return _DEFAULT_SYNCED_TABLES
 
 
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _is_safe_identifier(name: str) -> bool:
+    """Check if a name is a safe SQL identifier (lowercase letters, digits, underscores)."""
+    return bool(_SAFE_IDENTIFIER_RE.match(name))
+
+
 def _normalize_trade_date(val: typing.Any) -> typing.Any:
     """
     Normalize trade date value to datetime.date.
@@ -135,7 +144,7 @@ class QuoteDao(BaseDao):
 
         allowed_tables = set(_get_default_synced_tables())
         for table in tables:
-            if table not in allowed_tables:
+            if table not in allowed_tables or not _is_safe_identifier(table):
                 logger.warning(f"[QuoteDao] Invalid table name rejected: {table}")
                 return False
             try:
@@ -305,6 +314,10 @@ class QuoteDao(BaseDao):
             return set()
 
         date_col = date_col_map[table_name]
+
+        if not _is_safe_identifier(table_name) or not _is_safe_identifier(date_col):
+            logger.warning(f"[QuoteDao] Invalid identifier rejected: table={table_name}, col={date_col}")
+            return set()
 
         try:
             df = await self._read_db(

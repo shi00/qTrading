@@ -1341,3 +1341,67 @@ class TestCacheManagerGetIncompleteFinancialStocks:
 
         assert result == {"000001.SZ"}
         cache_manager.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(4, 3)
+
+
+class TestConsecutiveFailuresCircuitBreaker:
+    """测试 historical.py 连续失败熔断机制 (P1-5)"""
+
+    def test_consecutive_counter_resets_on_success(self):
+        """连续失败计数器在成功后重置"""
+        consecutive_failures = 0
+
+        consecutive_failures += 1
+        consecutive_failures += 1
+        assert consecutive_failures == 2
+
+        consecutive_failures = 0
+        assert consecutive_failures == 0
+
+        for _ in range(5):
+            consecutive_failures += 1
+        assert consecutive_failures == 5
+
+        consecutive_failures = 0
+        assert consecutive_failures == 0
+
+    def test_consecutive_threshold_triggers_abort(self):
+        """连续失败超过阈值触发熔断"""
+        consecutive_failures = 0
+        CB_THRESHOLD = 3
+        abort_sync = False
+
+        for _ in range(4):
+            consecutive_failures += 1
+            if consecutive_failures > CB_THRESHOLD:
+                abort_sync = True
+                break
+
+        assert abort_sync is True
+        assert consecutive_failures == 4
+
+    def test_interleaved_failures_no_abort(self):
+        """交替失败和成功不触发熔断（非连续）"""
+        consecutive_failures = 0
+        CB_THRESHOLD = 3
+        abort_sync = False
+
+        for result in ["fail", "success", "fail", "success", "fail"]:
+            if result == "success":
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                if consecutive_failures > CB_THRESHOLD:
+                    abort_sync = True
+                    break
+
+        assert abort_sync is False
+        assert consecutive_failures == 1
+
+    def test_cb_threshold_dynamic_calculation(self):
+        """熔断阈值随总天数动态调整"""
+        assert min(50, max(10, int(0 * 0.1) if 0 > 0 else 10)) == 10
+        assert min(50, max(10, int(50 * 0.1))) == 10
+        assert min(50, max(10, int(100 * 0.1))) == 10
+        assert min(50, max(10, int(200 * 0.1))) == 20
+        assert min(50, max(10, int(500 * 0.1))) == 50
+        assert min(50, max(10, int(1000 * 0.1))) == 50

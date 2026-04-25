@@ -271,5 +271,79 @@ class TestQualityGateClass(unittest.TestCase):
         self.assertIsNotNone(gate)
 
 
+class TestComputeTier(unittest.TestCase):
+    """测试 _compute_tier 统一 Tier 计算函数"""
+
+    def test_critical_missing_tables(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.9, missing_critical=True), 0)
+
+    def test_bronze_extreme_lag(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=10, fin_fresh_ratio=0.9, missing_critical=False), 1)
+
+    def test_bronze_moderate_lag(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=6, fin_fresh_ratio=0.9, missing_critical=False), 1)
+
+    def test_gold_high_fin_ratio(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False), 3)
+
+    def test_gold_fresh_fin_date(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10), 3)
+
+    def test_silver_fresh_quotes_moderate_fin(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=2, fin_fresh_ratio=0.6, missing_critical=False), 2)
+
+    def test_silver_small_lag(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=3, fin_fresh_ratio=0.3, missing_critical=False), 2)
+
+    def test_stale_fin_date_no_gold(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=200), 2)
+
+    def test_fast_path_uses_fin_lag_over_ratio(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.3, missing_critical=False, fin_lag_days=10), 2)
+
+    def test_fast_path_gold_requires_both_fin_lag_and_ratio(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.6, missing_critical=False, fin_lag_days=10), 3)
+
+    def test_bronze_low_fin_ratio_with_lag(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=4, fin_fresh_ratio=0.2, missing_critical=False), 2)
+
+    def test_bronze_zero_fin_ratio(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.0, missing_critical=False), 1)
+
+    def test_bronze_near_zero_fin_ratio(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.05, missing_critical=False), 1)
+
+    def test_silver_min_fin_ratio_with_small_lag(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(_compute_tier(lag_days=3, fin_fresh_ratio=0.1, missing_critical=False), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

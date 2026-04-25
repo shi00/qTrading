@@ -1,6 +1,8 @@
 import asyncio
+import os
+import tempfile
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
@@ -112,6 +114,45 @@ class TestScreenerViewModel(unittest.TestCase):
             # Dataframe updated
             self.assertEqual(len(self.vm._full_results), 2)
             self.assertEqual(self.vm._full_results.iloc[0]["name"], "S1")
+
+        asyncio.run(run_test())
+
+    def test_get_export_data_none_when_empty(self):
+        self.vm._full_results = None
+        self.assertIsNone(self.vm.get_export_data())
+
+    def test_get_export_data_none_when_empty_df(self):
+        self.vm._full_results = pd.DataFrame()
+        self.assertIsNone(self.vm.get_export_data())
+
+    def test_get_export_data_returns_df(self):
+        df = pd.DataFrame({"A": [1, 2, 3]})
+        self.vm._full_results = df
+        result = self.vm.get_export_data()
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 3)
+
+    def test_export_results_no_data(self):
+        async def run_test():
+            self.vm._full_results = None
+            path, error = await self.vm.export_results("/tmp/test.csv")
+            self.assertIsNone(path)
+            self.assertEqual(error, "No data to export")
+
+        asyncio.run(run_test())
+
+    def test_export_results_success(self):
+        async def run_test():
+            self.vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+            with tempfile.TemporaryDirectory() as tmpdir:
+                filepath = os.path.join(tmpdir, "test_export.csv")
+                with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+                    mock_tm.return_value.run_async = AsyncMock(
+                        side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
+                    )
+                    path, error = await self.vm.export_results(filepath)
+                    self.assertEqual(path, filepath)
+                    self.assertIsNone(error)
 
         asyncio.run(run_test())
 

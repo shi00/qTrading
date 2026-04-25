@@ -131,17 +131,25 @@ class ScreenerDao(BaseDao):
                FROM stock_basic b
                         LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
                         LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
-                        LEFT JOIN (SELECT f1.*
-                                   FROM financial_reports f1
-                                            INNER JOIN (SELECT ts_code, MAX(ann_date) as max_ann
-                                                        FROM financial_reports
-                                                        WHERE ann_date <= $3
-                                                        GROUP BY ts_code) f2
-                                                       ON f1.ts_code = f2.ts_code AND f1.ann_date = f2.max_ann
-                                   WHERE f1.end_date = (
-                                       SELECT MAX(f3.end_date) FROM financial_reports f3
-                                       WHERE f3.ts_code = f1.ts_code AND f3.ann_date = f1.ann_date
-                                   )) f
+                        LEFT JOIN (SELECT f_inner.ts_code,
+                                          f_inner.roe,
+                                          f_inner.grossprofit_margin,
+                                          f_inner.debt_to_assets,
+                                          f_inner.or_yoy,
+                                          f_inner.netprofit_yoy
+                                   FROM (SELECT ts_code,
+                                                roe,
+                                                grossprofit_margin,
+                                                debt_to_assets,
+                                                or_yoy,
+                                                netprofit_yoy,
+                                                ROW_NUMBER() OVER (
+                                                    PARTITION BY ts_code
+                                                    ORDER BY ann_date DESC, end_date DESC
+                                                ) AS rn
+                                         FROM financial_reports
+                                         WHERE ann_date <= $3) f_inner
+                                   WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
                WHERE q.close IS NOT NULL \
               """

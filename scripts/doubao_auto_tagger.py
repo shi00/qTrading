@@ -147,7 +147,7 @@ class DoubaoTagger:
         stock_text = "\n".join([f"{r[0]} ({r[1]})" for r in stocks])
         prompt = PROMPT_TEMPLATE.format(count=len(stocks), stock_list=stock_text)
 
-        print(f"⏳ 开始处理新批次，共 {len(stocks)} 只股票...")
+        print(f"⏳ 开始处理新批次，共 {len(stocks)} 只股票...", flush=True)
         await page.goto("https://www.doubao.com/chat/")
 
         # 更稳健的 DOM 等待：使用 get_by_xxx 语义化选择器
@@ -172,11 +172,11 @@ class DoubaoTagger:
                 await self._dump_debug_artifacts(page, "prompt_submission_failed")
             return False
 
-        print("✈️ 发送 Prompt 给大模型...")
+        print("✈️ 发送 Prompt 给大模型...", flush=True)
         await page.keyboard.press("Enter")
 
         # 智能等待机制，摒弃单纯的 Sleep
-        print("⏳ 等待大模型生成代码结构返回，这可能需要几十秒...")
+        print("⏳ 等待大模型生成代码结构返回，这可能需要几十秒...", flush=True)
         response_text = ""
         last_stock_code = stocks[-1][0]
 
@@ -242,10 +242,10 @@ class DoubaoTagger:
                 print(f"🎉 成果入库完成！写入 {count} 条专属概念。", flush=True)
                 return True
             except json.JSONDecodeError as e:
-                print(f"❌ JSON 解析失败: {e}")
+                print(f"❌ JSON 解析失败: {e}", flush=True)
                 return False
         else:
-            print("❌ 未在返回结果中找到合规的 JSON (可能遭遇 WAF 拦截、截断或超时)。")
+            print("❌ 未在返回结果中找到合规的 JSON (可能遭遇 WAF 拦截、截断或超时)。", flush=True)
             await self._dump_debug_artifacts(page, "response_json_not_found")
             return False
 
@@ -285,6 +285,8 @@ class DoubaoTagger:
                 # 浏览器内存清理 (保留原有优秀机制)
                 if batch_count > 0 and batch_count % 15 == 0:
                     print("🧹 清理浏览器缓存与僵尸内存，重建上下文...")
+                    # 修复：在销毁上下文前，保存最新的 Cookie 和 LocalStorage，避免 Token 过期导致豆包白屏
+                    await context.storage_state(path=AUTH_FILE)
                     await page.close()
                     await context.close()
                     context = await browser.new_context(storage_state=AUTH_FILE)
@@ -343,7 +345,7 @@ class DoubaoTagger:
                     for s in stocks:
                         exclude_codes.append(s[0])
                         self.exclude_counter[s[0]] += 1
-                    print("⚠️ 本批次已加入隔离排查队列。")
+                    print("⚠️ 本批次已加入隔离排查队列。", flush=True)
 
                 # WAF 熔断深度休眠退避策略
                 if consecutive_failures > 0:

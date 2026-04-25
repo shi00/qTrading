@@ -223,6 +223,7 @@ class ScreeningHistory(Base):
             name="uq_screening_history_date_strategy_code",
         ),
         Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
+        Index("idx_sh_date_code", "trade_date", "ts_code"),
     )
 
 
@@ -285,7 +286,10 @@ class FinancialReports(Base):
     goodwill = Column(Float)
     audit_result = Column(String)
     n_cashflow_act = Column(Float)  # 经营活动产生的现金流量净额
-    __table_args__ = (Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),)
+    __table_args__ = (
+        Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
+        Index("ix_financial_reports_ann_date", "ann_date"),
+    )
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 

@@ -32,6 +32,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _compute_tier(
+    lag_days: int,
+    fin_fresh_ratio: float,
+    missing_critical: bool = False,
+    fin_lag_days: int | None = None,
+) -> int:
+    """
+    Shared tier computation logic used by both fast-path and deep-path.
+
+    Rules (applied in order):
+      1. CRITICAL (0): Missing critical tables
+      2. BRONZE  (1): Quotes lag > TIER_QUOTE_FRESHNESS_DAYS or fin_fresh_ratio too low
+      3. GOLD    (3): All fresh AND (fin_fresh_ratio > 0.9 OR fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS)
+      4. SILVER  (2): Default for fresh quotes but not meeting GOLD criteria
+
+    Note: The CRITICAL tier for extreme lag (> HEALTH_THRESHOLD_MARKET_LAG_DAYS) is
+    handled by check_data_health's status aggregation before calling this function,
+    not within _compute_tier itself. This avoids over-penalizing in the fast-path
+    where deep health data is unavailable.
+
+    Args:
+        lag_days: Calendar days since latest quote data
+        fin_fresh_ratio: Financial data coverage ratio (0.0-1.0), 0.5 used as neutral when unknown
+        missing_critical: Whether any critical table has < 10% coverage
+        fin_lag_days: Calendar days since latest financial data (optional, used by fast-path)
+    """
+    if missing_critical:
+        return 0
+
+    if lag_days > TIER_QUOTE_FRESHNESS_DAYS:
+        return 1
+
+    fin_ok_for_gold = False
+    if fin_lag_days is not None:
+        fin_ok_for_gold = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS and fin_fresh_ratio >= 0.5
+    else:
+        fin_ok_for_gold = fin_fresh_ratio > 0.9
+
+    if fin_ok_for_gold:
+        return 3
+
+    if fin_fresh_ratio > 0.5:
+        return 2
+
+    if lag_days <= 5 and fin_fresh_ratio >= 0.1:
+        return 2
+
+    return 1
+
+
 class HealthCheckMixin:
     """
     Mixin providing data health check and quality scanning capabilities.
@@ -139,11 +189,10 @@ class HealthCheckMixin:
                 return
 
             if days_lag <= TIER_QUOTE_FRESHNESS_DAYS:
-                # Check all other critical tables for freshness
                 stale_critical = []
                 for table in critical_tables:
                     if table == "daily_quotes":
-                        continue  # Already checked
+                        continue
 
                     info = sync_dict.get(table, {})
                     last_date = info.get("last_data_date", "") if info else ""
@@ -155,26 +204,29 @@ class HealthCheckMixin:
                         except (ValueError, TypeError):
                             stale_critical.append(table)
 
-                if stale_critical:
-                    self._quality_tier = 1  # BRONZE - some critical tables are stale
-                    logger.warning(
-                        f"[DataProcessor] FastCheck | ⚠️ Critical tables stale: {stale_critical}. Degrading to BRONZE.",
-                    )
-                else:
-                    self._quality_tier = 2  # SILVER — all critical tables fresh
+                missing_critical = bool(stale_critical)
 
-                    # Optional upgrade to GOLD if financial data is also fresh
-                    fin_info = sync_dict.get("financial_reports", {})
-                    fin_date = fin_info.get("last_data_date", "") if fin_info else ""
-                    if fin_date:
-                        try:
-                            fin_lag = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
-                            if fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS:
-                                self._quality_tier = 3  # GOLD
-                        except (ValueError, TypeError):
-                            pass  # Stay at SILVER, no downgrade
+                fin_lag_days = None
+                fin_info = sync_dict.get("financial_reports", {})
+                fin_date = fin_info.get("last_data_date", "") if fin_info else ""
+                if fin_date:
+                    try:
+                        fin_lag_days = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
+                    except (ValueError, TypeError):
+                        pass
+
+                self._quality_tier = _compute_tier(
+                    lag_days=days_lag,
+                    fin_fresh_ratio=0.5,
+                    missing_critical=missing_critical,
+                    fin_lag_days=fin_lag_days,
+                )
             else:
-                self._quality_tier = 1  # Stale quotes -> BRONZE
+                self._quality_tier = _compute_tier(
+                    lag_days=days_lag,
+                    fin_fresh_ratio=0.5,
+                    missing_critical=False,
+                )
 
             logger.debug(
                 f"[DataProcessor] FastCheck | Derived fast Tier parameter = {self._quality_tier}",
@@ -349,16 +401,13 @@ class HealthCheckMixin:
             if status == "red":
                 self._quality_tier = 0
             elif status == "yellow":
-                # Force downgrade to Bronze if data is stale, missing depth, or missing breadth
                 self._quality_tier = 1
-            # If everything is green, grant Gold. If yellow (e.g. minor lag), grant Silver.
-            # Only upgrade, never blindly carry over an unjustified current tier
-            elif fin_fresh_ratio > 0.9:
-                self._quality_tier = 3  # GOLD
-            elif fin_fresh_ratio > 0.5 or lag_days <= 5:
-                self._quality_tier = 2  # SILVER
             else:
-                self._quality_tier = 1  # BRONZE
+                self._quality_tier = _compute_tier(
+                    lag_days=lag_days,
+                    fin_fresh_ratio=fin_fresh_ratio,
+                    missing_critical=bool(missing_critical),
+                )
 
             # Calculate overall system coverage (using financial as main proxy)
             sys_coverage = fin_fresh_ratio * 100

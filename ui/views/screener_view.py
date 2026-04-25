@@ -1,5 +1,6 @@
 import datetime
 import logging
+import os
 import time
 
 import flet as ft
@@ -13,6 +14,7 @@ from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import TASK_NAME_PREFIX, ScreenerViewModel
 from utils.log_decorators import UILogger
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ class ScreenerView(ft.Container):
         # UI State
         self.selected_strategy = None
         self._pending_strategy_key = None  # For deep linking
+
+        self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)
 
         # --- UI Components ---
         # 1. Controls
@@ -191,6 +195,10 @@ class ScreenerView(ft.Container):
         self._setup_layout()
 
     def did_mount(self):
+        if self.page:
+            self.page.overlay.append(self.save_file_picker)
+            self.page.update()
+
         # Initialize ViewModel and Bindings
         self.vm.bind(
             on_update=self._update_ui,
@@ -209,6 +217,10 @@ class ScreenerView(ft.Container):
     def will_unmount(self):
         TaskManager().unsubscribe(self._on_tasks_updated)
         self.vm.dispose()
+
+        if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
+            self.page.overlay.remove(self.save_file_picker)
+            self.page.update()
 
         # P1-11 Fix: Detach the thousands of Flet Row references inside the VirtualTable
         if hasattr(self, "result_table") and self.result_table:
@@ -1087,28 +1099,54 @@ class ScreenerView(ft.Container):
     async def _on_export_click(self, e):
         """Export current results"""
         UILogger.log_action("ScreenerView", "Click", "btn_export")
+
+        df = self.vm.get_export_data()
+        if df is None:
+            if hasattr(self.page, "show_toast"):
+                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore
+            return
+
+        timestamp = get_now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"screener_results_{timestamp}.csv"
+
+        self.save_file_picker.save_file(
+            dialog_title=I18n.get("data_export_save_title"),
+            file_name=default_filename,
+            allowed_extensions=["csv"],
+        )
+
+    def _on_save_file_result(self, e: ft.FilePickerResultEvent):
+        if not self.page:
+            return
+
+        if not e.path:
+            return
+
         self.export_btn.disabled = True
         self.export_btn.update()
 
-        try:
-            path, error = await self.vm.export_results()
-            if path:
-                # Show toast info
-                if hasattr(self.page, "show_toast"):
+        async def _do_export(filepath):
+            try:
+                path, error = await self.vm.export_results(filepath)
+                if path:
+                    filename = os.path.basename(filepath)
+                    if hasattr(self.page, "show_toast"):
+                        self.page.show_toast(  # type: ignore
+                            I18n.get("data_export_success", file=filename),
+                            "success",
+                        )
+                elif hasattr(self.page, "show_toast"):
                     self.page.show_toast(  # type: ignore
-                        I18n.get("data_export_success").format(file=path),
-                        "success",
+                        I18n.get("data_export_fail", error=error),
+                        "error",
                     )
-            elif hasattr(self.page, "show_toast"):
-                self.page.show_toast(  # type: ignore
-                    I18n.get("data_export_fail").format(error=error),
-                    "error",
-                )
-        except Exception as ex:
-            logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
-        finally:
-            self.export_btn.disabled = False
-            self.export_btn.update()
+            except Exception as ex:
+                logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
+            finally:
+                self.export_btn.disabled = False
+                self.export_btn.update()
+
+        self.page.run_task(_do_export, e.path)  # type: ignore
 
     def _on_page_size_change(self, e):
         try:

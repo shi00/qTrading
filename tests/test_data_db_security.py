@@ -77,5 +77,40 @@ class TestDatabaseManagerSecurity(TestDatabaseBase):
         self.assertIn("Only SELECT statements are allowed", result.get("error", ""))
 
 
+class TestSafeIdentifier(unittest.TestCase):
+    """Test _is_safe_identifier validation for SQL injection prevention."""
+
+    def test_valid_identifiers(self):
+        from data.persistence.daos.quote_dao import _is_safe_identifier
+
+        self.assertTrue(_is_safe_identifier("daily_quotes"))
+        self.assertTrue(_is_safe_identifier("trade_date"))
+        self.assertTrue(_is_safe_identifier("table_1"))
+        self.assertTrue(_is_safe_identifier("a"))
+
+    def test_invalid_identifiers(self):
+        from data.persistence.daos.quote_dao import _is_safe_identifier
+
+        self.assertFalse(_is_safe_identifier(""))
+        self.assertFalse(_is_safe_identifier("DROP TABLE"))
+        self.assertFalse(_is_safe_identifier("1; DROP TABLE"))
+        self.assertFalse(_is_safe_identifier("table; DROP TABLE users"))
+        self.assertFalse(_is_safe_identifier("table--comment"))
+        self.assertFalse(_is_safe_identifier("table' OR '1'='1"))
+        self.assertFalse(_is_safe_identifier("UPPERCASE"))
+        self.assertFalse(_is_safe_identifier("table name"))
+
+    def test_cached_dates_whitelist_rejection(self):
+        from data.persistence.daos.quote_dao import _is_safe_identifier
+
+        malicious_names = [
+            "daily_quotes; DROP TABLE users--",
+            "1; DELETE FROM daily_quotes",
+            "daily_quotes' UNION SELECT * FROM users--",
+        ]
+        for name in malicious_names:
+            self.assertFalse(_is_safe_identifier(name), f"Should reject: {name}")
+
+
 if __name__ == "__main__":
     unittest.main()

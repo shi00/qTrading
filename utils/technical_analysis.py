@@ -18,16 +18,20 @@ class TechnicalAnalysis:
             return df
 
         try:
-            # Check if factors are valid
-            latest_factor = df["adj_factor"].iloc[-1]
-            if pd.isna(latest_factor) or latest_factor == 0:
-                return df
-
-            # If all factors are 1.0 or same, no need to adjust
-            if (df["adj_factor"] == latest_factor).all():
-                return df
-
             df_adj = df.copy()
+            valid_factors = df["adj_factor"].dropna()
+            if valid_factors.empty:
+                return df
+
+            latest_factor = valid_factors.iloc[-1]
+            if latest_factor == 0:
+                return df
+
+            df_adj["adj_factor"] = df_adj["adj_factor"].ffill().fillna(latest_factor)
+
+            if (df_adj["adj_factor"] == latest_factor).all():
+                return df
+
             ratio = df_adj["adj_factor"] / latest_factor
 
             df_adj["close"] = df_adj["close"] * ratio
@@ -37,7 +41,6 @@ class TechnicalAnalysis:
 
             return df_adj
         except Exception:
-            # Fallback to raw if calculation fails
             return df
 
     @staticmethod

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import time
 from collections.abc import Callable
 
@@ -14,7 +13,6 @@ from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
 from ui.i18n import I18n
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -569,20 +567,18 @@ class ScreenerViewModel:
         if self.on_update:
             self.on_update()
 
-    async def export_results(self, folder="exports"):
-        """Export current results to CSV"""
+    def get_export_data(self):
+        """Get the current results DataFrame for export"""
+        if self._full_results is None or self._full_results.empty:
+            return None
+        return self._full_results
+
+    async def export_results(self, filepath):
+        """Export current results to CSV at the specified path"""
         if self._full_results is None or self._full_results.empty:
             return None, "No data to export"
 
         try:
-            if not os.path.exists(folder):
-                os.makedirs(folder)
-
-            timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-            filename = f"screener_results_{timestamp}.csv"
-            filepath = os.path.join(folder, filename)
-
-            # Run in thread
             await ThreadPoolManager().run_async(
                 TaskType.CPU,
                 self._full_results.to_csv,

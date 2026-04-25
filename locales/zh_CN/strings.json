@@ -246,6 +246,7 @@
     "data_err_fetch": "数据读取失败: {error}",
     "data_export_fail": "导出失败: {error}",
     "data_export_no_data": "无数据可导出",
+    "data_export_save_title": "选择导出文件保存位置",
     "data_export_success": "已导出至 {file}",
     "settings_tab_general": "基本配置",
     "settings_tab_data": "数据管理",
