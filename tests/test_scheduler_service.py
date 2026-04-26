@@ -1,8 +1,10 @@
 """Tests for SchedulerService singleton management."""
 
 import datetime
+import sys
 import threading
 import typing
+import types
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -207,3 +209,139 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(mo
     factory = holder["factory"]
     msg = await factory("task-id")
     assert msg == "sched_daily_done:2"
+
+
+@pytest.mark.asyncio
+async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch):
+    """夜间预测任务应将 context.trade_date 透传到 save_results。"""
+    import services.task_manager as tm_mod
+    import utils.scheduler_service as sched_mod
+
+    sched_mod.SchedulerService._reset_singleton()
+    service = sched_mod.SchedulerService()
+
+    fake_now = datetime.datetime(2026, 4, 23, 20, 30, 0)
+    monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
+    monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        sched_mod.I18n,
+        "get",
+        staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
+    )
+
+    holder: dict[str, typing.Any] = {"factory": None, "saved": None}
+
+    class _FakeTradeCalendar:
+        async def is_trading_day(self, _today):
+            return True
+
+    class _FakeProcessor:
+        def __init__(self):
+            self.trade_calendar = _FakeTradeCalendar()
+
+        async def init_data(self):
+            return None
+
+        async def prepare_market_data(self):
+            return None
+
+        async def get_strategy_data(self):
+            return {
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20260423"]}),
+                "trade_date": "20260423",
+            }
+
+    class _FakeReviewManager:
+        async def save_results(self, strategy_name, result_df, trade_date=None):
+            holder["saved"] = (strategy_name, trade_date, result_df.copy())
+
+    class _FakeTaskManager:
+        def update_progress(self, *_args, **_kwargs):
+            return None
+
+        def submit_task(self, **kwargs):
+            holder["factory"] = kwargs.get("coroutine_factory")
+
+    class _FakeStrategy:
+        async def filter(self, context):
+            assert context["trade_date"] == "20260423"
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
+
+    monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
+    monkeypatch.setattr(sched_mod, "ReviewManager", _FakeReviewManager)
+    monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
+    monkeypatch.setitem(sys.modules, "strategies.ai_strategy", types.SimpleNamespace(AISelectionStrategy=_FakeStrategy))
+
+    await service._run_nightly_prediction()
+    assert holder["factory"] is not None
+
+    msg = await holder["factory"]("task-id")
+    assert msg == "sched_pred_done_found:1"
+    assert holder["saved"] is not None
+    assert holder["saved"][0] == "AI_Auto_Nightly"
+    assert holder["saved"][1] == "20260423"
+
+
+@pytest.mark.asyncio
+async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
+    """夜间预测任务在缺少 context.trade_date 时应拒绝保存。"""
+    import services.task_manager as tm_mod
+    import utils.scheduler_service as sched_mod
+
+    sched_mod.SchedulerService._reset_singleton()
+    service = sched_mod.SchedulerService()
+
+    fake_now = datetime.datetime(2026, 4, 23, 20, 30, 0)
+    monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
+    monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        sched_mod.I18n,
+        "get",
+        staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
+    )
+
+    holder: dict[str, typing.Any] = {"factory": None, "save_called": False}
+
+    class _FakeTradeCalendar:
+        async def is_trading_day(self, _today):
+            return True
+
+    class _FakeProcessor:
+        def __init__(self):
+            self.trade_calendar = _FakeTradeCalendar()
+
+        async def init_data(self):
+            return None
+
+        async def prepare_market_data(self):
+            return None
+
+        async def get_strategy_data(self):
+            return {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
+
+    class _FakeReviewManager:
+        async def save_results(self, strategy_name, result_df, trade_date=None):
+            holder["save_called"] = True
+
+    class _FakeTaskManager:
+        def update_progress(self, *_args, **_kwargs):
+            return None
+
+        def submit_task(self, **kwargs):
+            holder["factory"] = kwargs.get("coroutine_factory")
+
+    class _FakeStrategy:
+        async def filter(self, context):
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
+
+    monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
+    monkeypatch.setattr(sched_mod, "ReviewManager", _FakeReviewManager)
+    monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
+    monkeypatch.setitem(sys.modules, "strategies.ai_strategy", types.SimpleNamespace(AISelectionStrategy=_FakeStrategy))
+
+    await service._run_nightly_prediction()
+    assert holder["factory"] is not None
+
+    with pytest.raises(RuntimeError, match="missing trade_date"):
+        await holder["factory"]("task-id")
+    assert holder["save_called"] is False

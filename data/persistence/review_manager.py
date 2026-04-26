@@ -72,7 +72,7 @@ class ReviewManager:
 
             try:
                 # Find the index of prediction date
-                t0_row = df_quotes[df_quotes["trade_date"] == pred_date]
+                t0_row = df_quotes[df_quotes["trade_date"].astype(object) == pred_date]
                 if t0_row.empty:
                     continue
 
@@ -82,7 +82,6 @@ class ReviewManager:
                 t1_pct: float | None = None
                 if len(df_quotes) > t0_idx + 1:  # type: ignore
                     t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
-                    t1_row["close"]
                     t1_pct = float(t1_row["pct_chg"])
 
                 # Check T+5 (optional, simpler logic here just for T+1 focus first)
@@ -103,7 +102,11 @@ class ReviewManager:
 
                     index_pct = 0.0
                     try:
-                        trade_date = str(t1_row["trade_date"])
+                        t1_date_val = t1_row["trade_date"]
+                        if hasattr(t1_date_val, "strftime"):
+                            trade_date = t1_date_val.strftime("%Y%m%d")
+                        else:
+                            trade_date = str(t1_date_val).replace("-", "")
                         df_idx = await self.api.get_index_daily(
                             ts_code=index_code,
                             start_date=trade_date,
@@ -238,15 +241,64 @@ class ReviewManager:
         """Update DB with result. index_pct reserved for future alpha storage."""
         await self.cache.screener_dao.update_prediction_result(record_id, pct, label)
 
-    async def save_results(self, strategy_name: str | None, df: pd.DataFrame):
+    @staticmethod
+    def _normalize_trade_date(value: typing.Any) -> datetime.date:
+        """Normalize supported trade_date input types to datetime.date."""
+        if isinstance(value, pd.Timestamp):
+            return value.date()
+        if isinstance(value, datetime.datetime):
+            return value.date()
+        if isinstance(value, datetime.date):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            for fmt in ("%Y%m%d", "%Y-%m-%d"):
+                try:
+                    return datetime.datetime.strptime(raw, fmt).date()
+                except ValueError:
+                    continue
+        raise ValueError(f"Unsupported trade_date value: {value!r}")
+
+    async def save_results(
+        self,
+        strategy_name: str | None,
+        df: pd.DataFrame,
+        trade_date: datetime.date | datetime.datetime | pd.Timestamp | str | None = None,
+    ):
         """
         Save screening results to history for future review.
         Persists the full strategy execution snapshot including financial indicators and AI thinking.
+
+        Args:
+            strategy_name: Name of the strategy that produced the results.
+            df: DataFrame of screening results.
+            trade_date: The trading date being analyzed (not the current natural date).
+                        If omitted, a single unique df["trade_date"] value may be used.
         """
         if df is None or df.empty:
             return
 
-        current_date = get_now().date()
+        effective_date = self._normalize_trade_date(trade_date) if trade_date is not None else None
+
+        df_trade_date = None
+        if "trade_date" in df.columns:
+            normalized_dates = {self._normalize_trade_date(v) for v in df["trade_date"].dropna().unique().tolist()}
+            if len(normalized_dates) > 1:
+                raise ValueError("save_results received multiple trade_date values in result dataframe")
+            if normalized_dates:
+                df_trade_date = next(iter(normalized_dates))
+
+        if effective_date is None and df_trade_date is not None:
+            effective_date = df_trade_date
+        elif effective_date is not None and df_trade_date is not None and effective_date != df_trade_date:
+            raise ValueError(
+                f"save_results trade_date mismatch: arg={effective_date} df={df_trade_date}",
+            )
+
+        if effective_date is None:
+            raise ValueError(
+                "save_results requires an analysis trade_date or a single unique df['trade_date'] value",
+            )
 
         # Helpers to safely extract fields
         def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):
@@ -287,7 +339,7 @@ class ReviewManager:
 
             records.append(
                 (
-                    current_date,
+                    effective_date,
                     strategy_name,
                     ts_code,
                     _s(row, "name"),

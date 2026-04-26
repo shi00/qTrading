@@ -5,6 +5,7 @@ Tests for ReviewManager.
 """
 
 import asyncio
+import datetime
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -255,10 +256,15 @@ class TestSaveResults(unittest.TestCase):
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
+        analysis_date = datetime.date(2024, 12, 31)
 
         async def run_test():
-            await manager.save_results("test_strategy", mock_df)
+            await manager.save_results("test_strategy", mock_df, trade_date=analysis_date)
             mock_screener_dao.save_screening_results.assert_called_once()
+            call_args = mock_screener_dao.save_screening_results.call_args
+            records = call_args[0][0]
+            saved_date = records[0][0]
+            self.assertEqual(saved_date, analysis_date)
 
         asyncio.run(run_test())
 
@@ -674,7 +680,11 @@ class TestSaveResultsEdgeCases(unittest.TestCase):
         manager = ReviewManager()
 
         async def run_test():
-            await manager.save_results("test_strategy", mock_df)
+            await manager.save_results(
+                "test_strategy",
+                mock_df,
+                trade_date=datetime.date(2024, 12, 31),
+            )
             mock_screener_dao.save_screening_results.assert_not_called()
 
         asyncio.run(run_test())
@@ -708,10 +718,162 @@ class TestSaveResultsEdgeCases(unittest.TestCase):
         manager = ReviewManager()
 
         async def run_test():
-            await manager.save_results("test_strategy", mock_df)
+            await manager.save_results(
+                "test_strategy",
+                mock_df,
+                trade_date=datetime.date(2024, 12, 31),
+            )
             mock_screener_dao.save_screening_results.assert_called_once()
             call_args = mock_screener_dao.save_screening_results.call_args[0][0]
             self.assertEqual(len(call_args), 1)
+
+        asyncio.run(run_test())
+
+
+class TestSaveResultsTradeDateSemantics(unittest.TestCase):
+    """测试 save_results 的 trade_date 语义：必须使用分析交易日而非当前自然日"""
+
+    def _make_mock_df(self):
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.5],
+                "pct_chg": [2.5],
+                "industry": ["银行"],
+                "vol": [1000000],
+                "amount": [10500000],
+                "turnover_rate": [1.5],
+                "pe_ttm": [6.5],
+                "pb": [0.8],
+                "ps_ttm": [1.2],
+                "dv_ttm": [3.5],
+                "total_mv": [1000000],
+                "circ_mv": [800000],
+                "roe": [12.5],
+                "grossprofit_margin": [45.0],
+                "debt_to_assets": [60.0],
+                "or_yoy": [10.0],
+                "netprofit_yoy": [15.0],
+                "ai_score": [85],
+                "ai_reason": ["技术突破"],
+                "thinking": ["看好后市"],
+            }
+        )
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_explicit_trade_date_used(self, mock_config, mock_api, mock_cache):
+        """显式传入 trade_date 时，使用该日期而非当前自然日"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache.return_value = mock_cache_instance
+
+        manager = ReviewManager()
+        analysis_date = datetime.date(2024, 12, 31)
+
+        async def run_test():
+            await manager.save_results("test_strategy", self._make_mock_df(), trade_date=analysis_date)
+            mock_screener_dao.save_screening_results.assert_called_once()
+            records = mock_screener_dao.save_screening_results.call_args[0][0]
+            saved_date = records[0][0]
+            self.assertEqual(saved_date, analysis_date)
+            self.assertNotEqual(saved_date, datetime.date.today())
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_missing_trade_date_raises(self, mock_config, mock_api, mock_cache):
+        """未传入 trade_date 且结果不带 trade_date 时，应拒绝保存"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache.return_value = mock_cache_instance
+
+        manager = ReviewManager()
+
+        async def run_test():
+            with self.assertRaises(ValueError):
+                await manager.save_results("test_strategy", self._make_mock_df())
+            mock_screener_dao.save_screening_results.assert_not_called()
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_weekend_analysis_date_preserved(self, mock_config, mock_api, mock_cache):
+        """周五盘后分析时，trade_date 应为周五而非周六"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache.return_value = mock_cache_instance
+
+        manager = ReviewManager()
+        friday_date = datetime.date(2024, 12, 27)
+
+        async def run_test():
+            await manager.save_results("test_strategy", self._make_mock_df(), trade_date=friday_date)
+            records = mock_screener_dao.save_screening_results.call_args[0][0]
+            saved_date = records[0][0]
+            self.assertEqual(saved_date, friday_date)
+            self.assertEqual(saved_date.weekday(), 4)
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_df_trade_date_used_when_arg_missing(self, mock_config, mock_api, mock_cache):
+        """未显式传参时，可从结果集中唯一 trade_date 推导分析日"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache.return_value = mock_cache_instance
+
+        manager = ReviewManager()
+        df = self._make_mock_df().copy()
+        df["trade_date"] = ["20241231"]
+
+        async def run_test():
+            await manager.save_results("test_strategy", df)
+            records = mock_screener_dao.save_screening_results.call_args[0][0]
+            self.assertEqual(records[0][0], datetime.date(2024, 12, 31))
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_trade_date_mismatch_raises(self, mock_config, mock_api, mock_cache):
+        """显式 trade_date 与结果中的 trade_date 冲突时拒绝保存"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache.return_value = mock_cache_instance
+
+        manager = ReviewManager()
+        df = self._make_mock_df().copy()
+        df["trade_date"] = ["20241230"]
+
+        async def run_test():
+            with self.assertRaises(ValueError):
+                await manager.save_results("test_strategy", df, trade_date=datetime.date(2024, 12, 31))
+            mock_screener_dao.save_screening_results.assert_not_called()
 
         asyncio.run(run_test())
 

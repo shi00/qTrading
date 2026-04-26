@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os
 import tempfile
 import unittest
@@ -153,6 +154,101 @@ class TestScreenerViewModel(unittest.TestCase):
                     path, error = await self.vm.export_results(filepath)
                     self.assertEqual(path, filepath)
                     self.assertIsNone(error)
+
+        asyncio.run(run_test())
+
+    def test_run_strategy_passes_trade_date_to_save_results(self):
+        """验证 run_strategy 从 context 获取 trade_date 并传给 save_results"""
+
+        async def run_test():
+            analysis_date = datetime.date(2024, 12, 27)
+            result_df = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "name": ["平安银行"],
+                    "close": [10.5],
+                    "pct_chg": [2.5],
+                    "ai_score": [85],
+                    "ai_reason": ["test"],
+                    "thinking": ["test"],
+                }
+            )
+
+            mock_strategy = MagicMock()
+            mock_strategy.name = "test_strategy"
+            mock_strategy.filter = AsyncMock(return_value=result_df)
+            self.vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+
+            self.vm.data_processor.get_strategy_data = AsyncMock(
+                return_value={
+                    "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                    "trade_date": analysis_date,
+                }
+            )
+
+            submitted_coro = []
+
+            def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+                submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+                return "test_task_id"
+
+            with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+                mock_tm.return_value.update_progress = MagicMock()
+                mock_tm.return_value.submit_task = mock_submit_task
+                await self.vm.run_strategy("test_strategy", save_results=True)
+
+            for coro in submitted_coro:
+                await coro
+
+            self.vm.review_mgr.save_results.assert_called_once()
+            call_kwargs = self.vm.review_mgr.save_results.call_args
+            passed_trade_date = call_kwargs.kwargs.get("trade_date")
+            self.assertEqual(
+                passed_trade_date,
+                analysis_date,
+                f"save_results should receive trade_date={analysis_date}, got {passed_trade_date}",
+            )
+
+        asyncio.run(run_test())
+
+    def test_run_strategy_raises_when_trade_date_missing_before_save(self):
+        """验证保存前缺失 trade_date 时，run_strategy 会明确失败"""
+
+        async def run_test():
+            result_df = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "name": ["平安银行"],
+                    "close": [10.5],
+                    "pct_chg": [2.5],
+                }
+            )
+
+            mock_strategy = MagicMock()
+            mock_strategy.name = "test_strategy"
+            mock_strategy.filter = AsyncMock(return_value=result_df)
+            self.vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+            self.vm.data_processor.get_strategy_data = AsyncMock(
+                return_value={
+                    "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                }
+            )
+
+            submitted_coro = []
+
+            def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+                submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+                return "test_task_id"
+
+            with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+                mock_tm.return_value.update_progress = MagicMock()
+                mock_tm.return_value.submit_task = mock_submit_task
+                await self.vm.run_strategy("test_strategy", save_results=True)
+
+            self.assertEqual(len(submitted_coro), 1)
+            with self.assertRaises(RuntimeError):
+                await submitted_coro[0]
+            self.vm.review_mgr.save_results.assert_not_called()
 
         asyncio.run(run_test())
 

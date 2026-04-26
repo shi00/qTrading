@@ -203,7 +203,12 @@ class ScreenerViewModel:
                     self._update_pagination()
 
                     if save_results:
-                        await self.review_mgr.save_results(strategy.name, result_df)
+                        analysis_trade_date = context.get("trade_date")
+                        if not analysis_trade_date:
+                            raise RuntimeError(
+                                "Missing analysis trade_date in screening context; refusing to save results",
+                            )
+                        await self.review_mgr.save_results(strategy.name, result_df, trade_date=analysis_trade_date)
 
                     # Update Local View
                     if self.on_update:

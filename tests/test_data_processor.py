@@ -807,7 +807,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""
         self.mock_cache.get_screening_data = AsyncMock(
-            return_value=pd.DataFrame({"pe": [10]}),
+            return_value=pd.DataFrame({"pe": [10], "trade_date": ["20230101"]}),
         )
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230101")
 
@@ -827,6 +827,8 @@ class TestDataProcessor(unittest.TestCase):
         context = await self.processor.prepare_screening_context()
 
         self.assertIn("screening_data", context)
+        self.assertIn("trade_date", context)
+        self.assertEqual(context["trade_date"], "20230101")
         self.assertIn("northbound_data", context)
         self.assertIn("moneyflow_data", context)
         self.assertIn("top_list", context)
@@ -834,6 +836,55 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_prepare_screening_context(self):
         asyncio.run(self.async_test_prepare_screening_context())
+
+    async def async_test_prepare_screening_context_resolves_trade_date_from_data(self):
+        """当缓存 trade_date 缺失时，应从 screening_data 的唯一 trade_date 推导"""
+        self.processor._quality_tier = 3
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
+        self.mock_cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20230103"],
+                    "close": [10.0],
+                }
+            ),
+        )
+        self.mock_cache.get_northbound = AsyncMock(return_value=None)
+        self.mock_cache.get_moneyflow = AsyncMock(return_value=None)
+        self.mock_cache.get_top_list = AsyncMock(return_value=None)
+        self.mock_cache.get_block_trade = AsyncMock(return_value=None)
+
+        context = await self.processor.prepare_screening_context()
+
+        self.assertEqual(context["trade_date"], "20230103")
+        self.mock_cache.get_northbound.assert_called_once_with(trade_date="20230103")
+        self.mock_cache.get_moneyflow.assert_called_once_with(trade_date="20230103")
+        self.mock_cache.get_top_list.assert_called_once_with(trade_date="20230103")
+        self.mock_cache.get_block_trade.assert_called_once_with(trade_date="20230103")
+
+    def test_prepare_screening_context_resolves_trade_date_from_data(self):
+        asyncio.run(self.async_test_prepare_screening_context_resolves_trade_date_from_data())
+
+    async def async_test_prepare_screening_context_raises_on_trade_date_mismatch(self):
+        """缓存 trade_date 与 screening_data.trade_date 不一致时，应立即失败"""
+        self.processor._quality_tier = 3
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230101")
+        self.mock_cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20230102"],
+                    "close": [10.0],
+                }
+            ),
+        )
+
+        with self.assertRaises(RuntimeError):
+            await self.processor.prepare_screening_context()
+
+    def test_prepare_screening_context_raises_on_trade_date_mismatch(self):
+        asyncio.run(self.async_test_prepare_screening_context_raises_on_trade_date_mismatch())
 
     # --- Cancel & Lifecycle ---
 

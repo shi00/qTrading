@@ -788,6 +788,55 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def get_strategy_data(self):
         return await self.prepare_screening_context()
 
+    @staticmethod
+    def _normalize_context_trade_date(value):
+        """Normalize trade_date values used in screening context to YYYYMMDD strings."""
+        if value is None or pd.isna(value):
+            return None
+        if isinstance(value, pd.Timestamp):
+            return value.strftime("%Y%m%d")
+        if isinstance(value, datetime.datetime):
+            return value.strftime("%Y%m%d")
+        if isinstance(value, datetime.date):
+            return value.strftime("%Y%m%d")
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            return parse_date(raw).strftime("%Y%m%d")
+        except Exception:
+            return raw
+
+    @classmethod
+    def _resolve_screening_trade_date(cls, explicit_trade_date, screening_data: pd.DataFrame):
+        """Ensure context trade_date is present and consistent with screening data."""
+        resolved_trade_date = cls._normalize_context_trade_date(explicit_trade_date)
+        df_trade_date = None
+
+        if screening_data is not None and not screening_data.empty and "trade_date" in screening_data.columns:
+            unique_dates = {
+                cls._normalize_context_trade_date(v) for v in screening_data["trade_date"].dropna().unique().tolist()
+            }
+            unique_dates.discard(None)
+            if len(unique_dates) > 1:
+                raise RuntimeError(
+                    "Screening data contains multiple trade_date values; context cannot be built safely",
+                )
+            if unique_dates:
+                df_trade_date = next(iter(unique_dates))
+
+        if resolved_trade_date is None:
+            resolved_trade_date = df_trade_date
+        elif df_trade_date is not None and resolved_trade_date != df_trade_date:
+            raise RuntimeError(
+                f"Screening context trade_date mismatch: cache={resolved_trade_date} data={df_trade_date}",
+            )
+
+        if resolved_trade_date is None:
+            raise RuntimeError("No analysis trade_date available for screening context")
+
+        return resolved_trade_date
+
     @log_async_operation(
         operation_name="prepare_screening_context",
         threshold_ms=PerfThreshold.DB_BULK_IO,
@@ -804,28 +853,31 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Decorator handles exception logging. Exceptions will bubble up to ViewModel.
 
         # 1. Main Screening Data (Quotes + Indicators)
-        # Use actual latest trade date available in the database
+        # Resolve the business trade_date from cache and validate it against screening data.
         trade_date = await self.cache.get_latest_trade_date()
-        context["screening_data"] = await self.get_screening_data(trade_date)
+        screening_data = await self.get_screening_data(trade_date)
+        resolved_trade_date = self._resolve_screening_trade_date(trade_date, screening_data)
+        context["screening_data"] = screening_data
+        context["trade_date"] = resolved_trade_date
 
         # 2. Auxiliary Data
         # Northbound
-        nb = await self.cache.get_northbound(trade_date=trade_date)
+        nb = await self.cache.get_northbound(trade_date=resolved_trade_date)
         if nb is not None:
             context["northbound_data"] = nb
 
         # Moneyflow
-        mf = await self.cache.get_moneyflow(trade_date=trade_date)
+        mf = await self.cache.get_moneyflow(trade_date=resolved_trade_date)
         if mf is not None:
             context["moneyflow_data"] = mf
 
         # Top List (LHB)
-        lhb = await self.cache.get_top_list(trade_date=trade_date)
+        lhb = await self.cache.get_top_list(trade_date=resolved_trade_date)
         if lhb is not None:
             context["top_list"] = lhb
 
         # Block Trade
-        blk = await self.cache.get_block_trade(trade_date=trade_date)
+        blk = await self.cache.get_block_trade(trade_date=resolved_trade_date)
         if blk is not None:
             context["block_trade"] = blk
 

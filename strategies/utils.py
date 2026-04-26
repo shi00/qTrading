@@ -1,3 +1,4 @@
+import datetime
 import math
 from typing import Any, TypedDict
 from collections.abc import Callable
@@ -39,6 +40,8 @@ class StrategyContext(TypedDict, total=False):
     on_stream_result: Callable
     on_stream_start: Callable
     northbound_data: pd.DataFrame
+    moneyflow_data: pd.DataFrame
     top_list: pd.DataFrame
     block_trade: pd.DataFrame
+    trade_date: datetime.date | datetime.datetime | str
     _task_id: str

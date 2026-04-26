@@ -394,7 +394,10 @@ class SchedulerService:
             if result_df is not None and not result_df.empty:
                 tm.update_progress(task_id, 0.9, I18n.get("sched_pred_saving"))
                 rm = ReviewManager()
-                await rm.save_results("AI_Auto_Nightly", result_df)
+                analysis_trade_date = context.get("trade_date")
+                if not analysis_trade_date:
+                    raise RuntimeError("Nightly prediction context missing trade_date; refusing to save results")
+                await rm.save_results("AI_Auto_Nightly", result_df, trade_date=analysis_trade_date)
                 self._last_pred_date = today_str
                 return I18n.get("sched_pred_done_found", count=len(result_df))
             self._last_pred_date = today_str
