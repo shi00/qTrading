@@ -766,6 +766,8 @@
     "health_avg_recency": "平均时效",
     "health_days": "天",
     "health_sample_size": "样本数量",
+    "health_fundamental_completeness": "基本面完整度",
+    "health_fin_recency": "财报时效",
     "scan_title": "深度扫描进度",
     "ds_last_update": "最后更新",
     "ds_data_coverage": "数据覆盖",

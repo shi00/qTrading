@@ -89,49 +89,54 @@ class ReviewManager:
                 # Check T+5 (optional, simpler logic here just for T+1 focus first)
 
                 if t1_pct is not None:
-                    # Determine Result (Relative Return)
-                    # We need Index Return for this date to calculate Alpha.
-                    # Default benchmark: 000300.SH (CSI 300) or 000001.SH (Shanghai Composite)
                     index_code = ConfigHandler.get_config(
                         "benchmark_index",
                         "000001.SH",
                     )
 
-                    # Fetch Index Quote for T+1
-                    # Since we don't cache index daily quotes in the same efficient way yet (or handled by quotes table?),
-                    # We might need to fetch it dynamically or ensure we sync benchmarks.
-                    # For now, let's fetch on demand via API if missing.
+                    t1_date_val = t1_row["trade_date"]
+                    if hasattr(t1_date_val, "strftime"):
+                        trade_date = t1_date_val.strftime("%Y%m%d")
+                    else:
+                        trade_date = str(t1_date_val).replace("-", "")
 
-                    index_pct = 0.0
+                    index_pct = None
                     try:
-                        t1_date_val = t1_row["trade_date"]
-                        if hasattr(t1_date_val, "strftime"):
-                            trade_date = t1_date_val.strftime("%Y%m%d")
-                        else:
-                            trade_date = str(t1_date_val).replace("-", "")
-                        df_idx = await self.api.get_index_daily(
+                        df_idx_local = await self.cache.get_index_daily(
                             ts_code=index_code,
-                            start_date=trade_date,
-                            end_date=trade_date,
+                            trade_date=trade_date,
                         )
-                        if df_idx is not None and not df_idx.empty:
-                            index_pct = float(df_idx.iloc[0]["pct_chg"])
+                        if df_idx_local is not None and not df_idx_local.empty:
+                            index_pct = float(df_idx_local.iloc[0]["pct_chg"])
                     except Exception:
-                        pass  # Network fail, assume 0 benchmark
+                        pass
 
-                    # Alpha Calculation
+                    if index_pct is None:
+                        try:
+                            df_idx = await self.api.get_index_daily(
+                                ts_code=index_code,
+                                start_date=trade_date,
+                                end_date=trade_date,
+                            )
+                            if df_idx is not None and not df_idx.empty:
+                                index_pct = float(df_idx.iloc[0]["pct_chg"])
+                        except Exception:
+                            pass
+
+                    if index_pct is None:
+                        logger.warning(
+                            f"[Review] {ts_code}: Index return unavailable for {trade_date}, skipping to avoid label pollution",
+                        )
+                        continue
+
                     alpha = t1_pct - index_pct
 
                     label = "DRAW"
-                    # Win Condition: Alpha > 0 (Outperform Marker) AND Absolute > -2% (Avoid disaster)
-                    # Strict: Must make money OR outperform significantly
-
                     if alpha > 0.5:
                         label = "WIN"
                     elif alpha < -0.5:
                         label = "LOSS"
 
-                    # Log it
                     await self._update_result(row["id"], t1_pct, label, index_pct)
                     updated_count += 1
                     logger.info(

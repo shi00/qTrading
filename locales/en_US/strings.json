@@ -814,6 +814,8 @@
     "health_avg_recency": "Avg Recency",
     "health_days": "Days",
     "health_sample_size": "Sample Size",
+    "health_fundamental_completeness": "Fundamental Completeness",
+    "health_fin_recency": "Fin. Recency",
     "scan_title": "Deep Scan Progress",
     "health_coverage": "Coverage & Freshness",
     "health_section_stock": "Stock Coverage",

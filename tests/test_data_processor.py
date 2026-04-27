@@ -100,6 +100,11 @@ class TestDataProcessor(unittest.TestCase):
         )
         self.mock_cache.get_cached_financial_records = AsyncMock(return_value=set())
         self.mock_cache.get_trade_cal = AsyncMock()  # Added missing AsyncMock
+        # FIX: Mock get_field_completeness (needed by HealthCheckMixin)
+        mock_quote_dao = MagicMock()
+        mock_quote_dao.get_field_completeness = AsyncMock(return_value={})
+        self.mock_cache.quote_dao = mock_quote_dao
+        self.mock_cache.get_field_completeness = AsyncMock(return_value={})
         # FIX: Mock get_trade_cal_range (needed by CalendarMixin._ensure_trade_cal_impl)
         self.mock_cache.get_trade_cal_range = AsyncMock(
             return_value=("20200101", "20261231"),
@@ -806,10 +811,14 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""
+        self.processor._quality_tier = 3
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame({"pe": [10], "trade_date": ["20230101"]}),
         )
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230101")
+        self.mock_cache.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"roe": [0.15], "trade_date": ["20230101"]}),
+        )
 
         self.mock_cache.get_northbound = AsyncMock(
             return_value=pd.DataFrame({"ratio": [5]}),
@@ -829,6 +838,7 @@ class TestDataProcessor(unittest.TestCase):
         self.assertIn("screening_data", context)
         self.assertIn("trade_date", context)
         self.assertEqual(context["trade_date"], "20230101")
+        self.assertIn("fundamental_screening_data", context)
         self.assertIn("northbound_data", context)
         self.assertIn("moneyflow_data", context)
         self.assertIn("top_list", context)
@@ -847,6 +857,15 @@ class TestDataProcessor(unittest.TestCase):
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20230103"],
                     "close": [10.0],
+                }
+            ),
+        )
+        self.mock_cache.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20230103"],
+                    "roe": [0.15],
                 }
             ),
         )
@@ -983,7 +1002,10 @@ class TestDataProcessor(unittest.TestCase):
         import datetime as dt
 
         # Fix time for deterministic date calculations
-        fixed_now = dt.datetime(2025, 12, 1)
+        from zoneinfo import ZoneInfo
+
+        cst = ZoneInfo("Asia/Shanghai")
+        fixed_now = dt.datetime(2025, 12, 1, tzinfo=cst)
 
         # Mock stock basic
         stocks = [f"{i:06d}.SZ" for i in range(1, 6)]
@@ -1011,6 +1033,28 @@ class TestDataProcessor(unittest.TestCase):
                 )
         batch_df = pd.DataFrame(rows)
         self.mock_cache.get_daily_quotes = AsyncMock(return_value=batch_df)
+
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20251201")
+        self.mock_cache.get_field_completeness = AsyncMock(
+            return_value={
+                "roe": 0.9,
+                "or_yoy": 0.85,
+                "netprofit_yoy": 0.8,
+                "dv_ttm": 0.9,
+                "pe_ttm": 0.95,
+                "pb": 0.95,
+                "debt_to_assets": 0.85,
+            },
+        )
+        self.mock_cache.quote_dao.get_field_completeness = self.mock_cache.get_field_completeness
+        self.mock_cache.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20251120"],
+                }
+            ),
+        )
 
         progress_calls = []
 
@@ -1045,6 +1089,56 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_run_quality_scan_empty_stocks(self):
         asyncio.run(self.async_test_run_quality_scan_empty_stocks())
+
+    async def async_test_run_quality_scan_low_fundamental(self):
+        """Test run_quality_scan with low fundamental completeness caps tier to SILVER"""
+        stocks = [f"{i:06d}.SZ" for i in range(1, 6)]
+        fixed_now = datetime.datetime(2025, 12, 1, 16, 0, 0)
+        cal_dates = [(fixed_now - datetime.timedelta(days=i)).strftime("%Y%m%d") for i in range(30)]
+
+        self.mock_cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * len(stocks)}),
+        )
+        self.mock_cache.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": cal_dates, "is_open": [1] * len(cal_dates)}),
+        )
+        rows = []
+        for code in stocks:
+            for d in cal_dates:
+                rows.append({"ts_code": code, "trade_date": d, "close": 10.0, "vol": 1000})
+        batch_df = pd.DataFrame(rows)
+        self.mock_cache.get_daily_quotes = AsyncMock(return_value=batch_df)
+
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20251201")
+        self.mock_cache.get_field_completeness = AsyncMock(
+            return_value={
+                "roe": 0.1,
+                "or_yoy": 0.05,
+                "netprofit_yoy": 0.05,
+                "dv_ttm": 0.1,
+                "pe_ttm": 0.1,
+                "pb": 0.1,
+                "debt_to_assets": 0.05,
+            },
+        )
+        self.mock_cache.quote_dao.get_field_completeness = self.mock_cache.get_field_completeness
+        self.mock_cache.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20251120"],
+                }
+            ),
+        )
+
+        with patch("data.mixins.health_mixin.get_now", return_value=fixed_now):
+            with patch("random.sample", side_effect=lambda pop, k: pop[:k]):
+                result = await self.processor.run_quality_scan(sample_size=5)
+
+        self.assertEqual(result["tier"], 2)
+
+    def test_run_quality_scan_low_fundamental(self):
+        asyncio.run(self.async_test_run_quality_scan_low_fundamental())
 
     async def async_test_run_quality_scan_cancellation(self):
         """Test run_quality_scan respects cancellation"""

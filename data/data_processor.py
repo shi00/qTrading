@@ -604,6 +604,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def get_screening_data(self, trade_date=None):
         return await self.cache.get_screening_data(trade_date)
 
+    async def get_fundamental_screening_data(self, trade_date=None):
+        return await self.cache.get_fundamental_screening_data(trade_date)
+
     async def initialize_system(self, progress_callback=None, quick=False):
         """
         Orchestrate system initialization with 6 distinct steps.
@@ -844,10 +847,17 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def prepare_screening_context(self):
         """Prepare context for screening execution."""
 
-        # Ensure quality tier has been initialized before screening
-        # None = never checked; runs the lightweight fast-path exactly once per app lifecycle
         if self._quality_tier is None:
             await self._assign_basic_tier()
+
+        if self._quality_tier <= 1:
+            try:
+                await self.check_data_health()
+            except Exception as e:
+                logger.warning(
+                    f"[DataProcessor] Deep health check during screening prep failed, "
+                    f"keeping fast-path tier={self._quality_tier}: {e}",
+                )
 
         context = {}
         # Decorator handles exception logging. Exceptions will bubble up to ViewModel.
@@ -859,6 +869,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         resolved_trade_date = self._resolve_screening_trade_date(trade_date, screening_data)
         context["screening_data"] = screening_data
         context["trade_date"] = resolved_trade_date
+
+        fundamental_data = await self.get_fundamental_screening_data(resolved_trade_date)
+        if fundamental_data is not None and not fundamental_data.empty:
+            context["fundamental_screening_data"] = fundamental_data
 
         # 2. Auxiliary Data
         # Northbound

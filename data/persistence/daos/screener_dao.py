@@ -164,6 +164,60 @@ class ScreenerDao(BaseDao):
               """
         return await self._read_db(sql, (trade_date, trade_date, trade_date))
 
+    async def get_fundamental_screening_data(self, trade_date: str | None = None):
+        if not trade_date:
+            trade_date = await self._get_latest_closed_trade_date()
+
+        sql = """
+              SELECT b.ts_code,
+                     b.name,
+                     b.industry,
+                     b.list_date,
+                     b.list_status,
+                     q.trade_date,
+                     q.close,
+                     q.pct_chg,
+                     q.vol,
+                     q.amount,
+                     i.pe_ttm,
+                     i.pb,
+                     i.ps_ttm,
+                     i.dv_ttm,
+                     i.total_mv,
+                     i.circ_mv,
+                     i.turnover_rate,
+                     f.roe,
+                     f.grossprofit_margin,
+                     f.debt_to_assets,
+                     f.or_yoy,
+                     f.netprofit_yoy
+               FROM stock_basic b
+                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
+                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
+                        LEFT JOIN (SELECT f_inner.ts_code,
+                                          f_inner.roe,
+                                          f_inner.grossprofit_margin,
+                                          f_inner.debt_to_assets,
+                                          f_inner.or_yoy,
+                                          f_inner.netprofit_yoy
+                                   FROM (SELECT ts_code,
+                                                roe,
+                                                grossprofit_margin,
+                                                debt_to_assets,
+                                                or_yoy,
+                                                netprofit_yoy,
+                                                ROW_NUMBER() OVER (
+                                                    PARTITION BY ts_code
+                                                    ORDER BY ann_date DESC, end_date DESC
+                                                ) AS rn
+                                         FROM financial_reports
+                                         WHERE ann_date <= $3) f_inner
+                                   WHERE f_inner.rn = 1) f
+                                  ON b.ts_code = f.ts_code
+               WHERE b.list_status = 'L'
+              """
+        return await self._read_db(sql, (trade_date, trade_date, trade_date))
+
     # --- Review Manager Methods (P2-S3 Abstracting raw SQL) ---
 
     async def get_pending_predictions(self, date_threshold: str):

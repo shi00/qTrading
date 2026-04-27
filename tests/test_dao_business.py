@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.market_dao import MarketDao
+from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.sync_dao import SyncDao
 
@@ -59,6 +60,11 @@ async def market_dao(test_engine: AsyncEngine):
 @pytest_asyncio.fixture
 async def screener_dao(test_engine: AsyncEngine):
     return ScreenerDao(test_engine)
+
+
+@pytest_asyncio.fixture
+async def quote_dao(test_engine: AsyncEngine):
+    return QuoteDao(test_engine)
 
 
 @pytest_asyncio.fixture
@@ -619,6 +625,27 @@ class TestScreenerDao:
         assert result["ai_score"].iloc[0] == 85
         assert result["ai_reason"].iloc[0] == "AI推荐理由"
         assert result["thinking"].iloc[0] == "思考过程"
+
+    async def test_get_fundamental_screening_data_includes_suspended(self, screener_dao, clean_db, setup_stock_data):
+        """基本面筛选数据应包含无行情/停牌股票"""
+        result = await screener_dao.get_fundamental_screening_data(trade_date="2024-03-21")
+
+        assert not result.empty
+        ts_codes = set(result["ts_code"].tolist())
+        assert "000001.SZ" in ts_codes
+        assert "000002.SZ" in ts_codes
+
+    async def test_get_field_completeness(self, quote_dao, clean_db, setup_stock_data):
+        """字段级基本面完整度查询"""
+        result = await quote_dao.get_field_completeness(trade_date="2024-03-21")
+
+        assert isinstance(result, dict)
+        assert "roe" in result
+        assert result["roe"] > 0
+        assert "pe_ttm" in result
+        assert result["pe_ttm"] > 0
+        assert "or_yoy" in result
+        assert result["or_yoy"] == 0.0
 
 
 @pytest.mark.asyncio

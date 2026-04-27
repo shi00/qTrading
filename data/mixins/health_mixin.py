@@ -18,6 +18,8 @@ from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
     TIER_FINANCIAL_FRESHNESS_DAYS,
+    TIER_FUNDAMENTAL_HIGH_THRESHOLD,
+    TIER_FUNDAMENTAL_LOW_THRESHOLD,
     TIER_QUOTE_FRESHNESS_DAYS,
 )
 from data.data_dictionary import TABLE_DEFINITIONS
@@ -37,15 +39,18 @@ def _compute_tier(
     fin_fresh_ratio: float,
     missing_critical: bool = False,
     fin_lag_days: int | None = None,
+    avg_fundamental: float | None = None,
 ) -> int:
     """
     Shared tier computation logic used by both fast-path and deep-path.
 
     Rules (applied in order):
       1. CRITICAL (0): Missing critical tables
-      2. BRONZE  (1): Quotes lag > TIER_QUOTE_FRESHNESS_DAYS or fin_fresh_ratio too low
-      3. GOLD    (3): All fresh AND (fin_fresh_ratio > 0.9 OR fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS)
-      4. SILVER  (2): Default for fresh quotes but not meeting GOLD criteria
+      2. BRONZE  (1): Quotes lag > TIER_QUOTE_FRESHNESS_DAYS
+      3. SILVER  (2): Quotes fresh but field-level fundamental completeness < TIER_FUNDAMENTAL_LOW_THRESHOLD (insufficient for fundamental strategies)
+      4. GOLD    (3): All fresh AND (fin_fresh_ratio > 0.9 OR fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS)
+                      AND field-level fundamental completeness > TIER_FUNDAMENTAL_HIGH_THRESHOLD (when available)
+      5. SILVER  (2): Default for fresh quotes but not meeting GOLD criteria
 
     Note: The CRITICAL tier for extreme lag (> HEALTH_THRESHOLD_MARKET_LAG_DAYS) is
     handled by check_data_health's status aggregation before calling this function,
@@ -57,12 +62,16 @@ def _compute_tier(
         fin_fresh_ratio: Financial data coverage ratio (0.0-1.0), 0.5 used as neutral when unknown
         missing_critical: Whether any critical table has < 10% coverage
         fin_lag_days: Calendar days since latest financial data (optional, used by fast-path)
+        avg_fundamental: Field-level fundamental completeness (0.0-1.0), None when unavailable
     """
     if missing_critical:
         return 0
 
     if lag_days > TIER_QUOTE_FRESHNESS_DAYS:
         return 1
+
+    if avg_fundamental is not None and avg_fundamental < TIER_FUNDAMENTAL_LOW_THRESHOLD:
+        return 2
 
     fin_ok_for_gold = False
     if fin_lag_days is not None:
@@ -71,7 +80,8 @@ def _compute_tier(
         fin_ok_for_gold = fin_fresh_ratio > 0.9
 
     if fin_ok_for_gold:
-        return 3
+        if avg_fundamental is None or avg_fundamental > TIER_FUNDAMENTAL_HIGH_THRESHOLD:
+            return 3
 
     if fin_fresh_ratio > 0.5:
         return 2
@@ -403,10 +413,33 @@ class HealthCheckMixin:
             elif status == "yellow":
                 self._quality_tier = 1
             else:
+                avg_fund = None
+                fin_lag_days = None
+                try:
+                    latest_td = await self.cache.get_latest_trade_date()
+                    if latest_td:
+                        fc = await self.cache.get_field_completeness(latest_td)
+                        if fc:
+                            avg_fund = sum(fc.values()) / len(fc)
+                except Exception as e:
+                    logger.debug(f"[DataProcessor] HealthCheck | Field completeness check skipped: {e}")
+                try:
+                    sync_records = await self.cache.get_sync_status()
+                    if sync_records is not None and not sync_records.empty:
+                        fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
+                        if not fin_info.empty:
+                            fin_date_str = fin_info.iloc[0].get("last_data_date", "")
+                            if fin_date_str:
+                                fin_lag_days = (get_now() - parse_date(str(fin_date_str), "%Y%m%d")).days
+                except Exception:
+                    pass
+
                 self._quality_tier = _compute_tier(
                     lag_days=lag_days,
                     fin_fresh_ratio=fin_fresh_ratio,
                     missing_critical=bool(missing_critical),
+                    fin_lag_days=fin_lag_days,
+                    avg_fundamental=avg_fund,
                 )
 
             # Calculate overall system coverage (using financial as main proxy)
@@ -560,29 +593,72 @@ class HealthCheckMixin:
                     )
                     scan_results["nulls"].append(null_res.get("close", 0.0))
 
-            # 4. Aggregate
+            # 4. Aggregate Quote Metrics
             avg_continuity = (
                 sum(scan_results["continuity"]) / len(scan_results["continuity"]) if scan_results["continuity"] else 0
             )
             avg_recency = sum(scan_results["recency"]) / len(scan_results["recency"]) if scan_results["recency"] else 99
 
-            tier = 1
-            if avg_continuity > 0.95 and avg_recency < 5:
-                tier = 2
-            if avg_continuity > 0.99 and avg_recency < 3:
-                tier = 3  # Placeholder logic for Tier 3
+            # 5. Fundamental Field Completeness
+            fundamental_completeness = {}
+            try:
+                latest_td = await self.cache.get_latest_trade_date()
+                if latest_td:
+                    fundamental_completeness = await self.cache.get_field_completeness(latest_td)
+            except Exception as e:
+                logger.debug(f"[DataProcessor] QualityScan | Fundamental completeness check skipped: {e}")
+
+            avg_fundamental = (
+                sum(fundamental_completeness.values()) / len(fundamental_completeness)
+                if fundamental_completeness
+                else 0.0
+            )
+
+            # 6. Multi-table Coverage (financial_reports recency)
+            fin_recency_ok = False
+            fin_lag_days = None
+            try:
+                sync_records = await self.cache.get_sync_status()
+                if sync_records is not None and not sync_records.empty:
+                    fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
+                    if not fin_info.empty:
+                        fin_date_str = fin_info.iloc[0].get("last_data_date", "")
+                        if fin_date_str:
+                            fin_dt = parse_date(str(fin_date_str), "%Y%m%d")
+                            fin_lag_days = (get_now() - fin_dt).days
+                            fin_recency_ok = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS
+            except Exception:
+                pass
+
+            # 7. Composite Score & Tier
+            quote_score = avg_continuity * 100
+            fundamental_score = avg_fundamental * 100
+            composite_score = quote_score * 0.5 + fundamental_score * 0.3 + (100.0 if fin_recency_ok else 0.0) * 0.2
+
+            tier = _compute_tier(
+                lag_days=int(avg_recency),
+                fin_fresh_ratio=0.5,
+                missing_critical=False,
+                fin_lag_days=fin_lag_days,
+                avg_fundamental=avg_fundamental if fundamental_completeness else None,
+            )
 
             self._quality_tier = tier
             logger.info(
-                f"[DataProcessor] QualityScan | ✅ Thorough evaluation complete. Validated Deep Tier is {tier}",
+                f"[DataProcessor] QualityScan | ✅ Thorough evaluation complete. "
+                f"Composite={composite_score:.0f} (Quote={quote_score:.0f}, Fin={fundamental_score:.0f}, "
+                f"FinRecency={'OK' if fin_recency_ok else 'STALE'}). Tier={tier}",
             )
 
             result = {
-                "score": int(avg_continuity * 100),
+                "score": int(composite_score),
                 "tier": tier,
                 "sample_size": len(sample),
                 "avg_continuity": avg_continuity,
                 "avg_lag": avg_recency,
+                "fundamental_completeness": fundamental_completeness,
+                "avg_fundamental": avg_fundamental,
+                "fin_recency_ok": fin_recency_ok,
             }
 
             if progress_callback:

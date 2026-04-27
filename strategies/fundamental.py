@@ -1,5 +1,6 @@
 import polars as pl
 
+from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
 from strategies.utils import fmt_val
@@ -7,6 +8,9 @@ from strategies.utils import fmt_val
 
 @register_strategy("value")
 class ValueStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.SILVER
+    requires_fundamental_coverage = True
+
     def __init__(self):
         super().__init__("strategy_value_name", "strategy_value_desc")
 
@@ -82,6 +86,9 @@ class ValueStrategy(PolarsBaseStrategy):
 
 @register_strategy("growth")
 class GrowthStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.SILVER
+    requires_fundamental_coverage = True
+
     def __init__(self):
         super().__init__("strategy_growth_name", "strategy_growth_desc")
 
@@ -147,6 +154,9 @@ class GrowthStrategy(PolarsBaseStrategy):
 
 @register_strategy("dividend")
 class DividendStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.SILVER
+    requires_fundamental_coverage = True
+
     def __init__(self):
         super().__init__("strategy_dividend_name", "strategy_dividend_desc")
 
@@ -185,6 +195,9 @@ class DividendStrategy(PolarsBaseStrategy):
 
 @register_strategy("cashflow")
 class CashFlowStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.SILVER
+    requires_fundamental_coverage = True
+
     def __init__(self):
         super().__init__("strategy_cashflow_name", "strategy_cashflow_desc")
 
@@ -235,6 +248,8 @@ class CashFlowStrategy(PolarsBaseStrategy):
 
 @register_strategy("large_pe")
 class LargePEStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.SILVER
+
     def __init__(self):
         super().__init__("strategy_large_pe_name", "strategy_large_pe_desc")
 

@@ -813,7 +813,63 @@ class QuoteDao(BaseDao):
 
             results[trade_date] = result
 
+        field_completeness = {}
+        try:
+            sorted_dates = [d for d in results if results[d].get("expected_base", 0) > 0]
+            if sorted_dates:
+                latest_date = max(sorted_dates)
+                field_completeness = await self.get_field_completeness(latest_date)
+        except Exception as e:
+            logger.debug(f"[QuoteDao] Field completeness check skipped: {e}")
+
+        if field_completeness:
+            for trade_date in results:
+                results[trade_date]["field_completeness"] = field_completeness
+
         return results
+
+    async def get_field_completeness(self, trade_date: str | datetime.date) -> dict[str, float]:
+        """Query field-level fundamental completeness for a given trade_date.
+
+        Returns a dict mapping field names (roe, or_yoy, etc.) to their non-null ratio
+        across all listed stocks. Returns empty dict on failure.
+        """
+        field_sql = """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(roe) AS roe_count,
+                COUNT(or_yoy) AS or_yoy_count,
+                COUNT(netprofit_yoy) AS netprofit_yoy_count,
+                COUNT(dv_ttm) AS dv_ttm_count,
+                COUNT(pe_ttm) AS pe_ttm_count,
+                COUNT(pb) AS pb_count,
+                COUNT(debt_to_assets) AS debt_to_assets_count
+            FROM (
+                SELECT b.ts_code,
+                       i.pe_ttm, i.pb, i.dv_ttm,
+                       f.roe, f.or_yoy, f.netprofit_yoy, f.debt_to_assets
+                FROM stock_basic b
+                LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $1
+                LEFT JOIN (SELECT ts_code, roe, or_yoy, netprofit_yoy, debt_to_assets,
+                                  ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY ann_date DESC, end_date DESC) AS rn
+                           FROM financial_reports WHERE ann_date <= $2) f
+                          ON b.ts_code = f.ts_code AND f.rn = 1
+                WHERE b.list_status = 'L'
+            ) sub
+        """
+        try:
+            df_fields = await self._read_db(field_sql, (trade_date, trade_date))
+            if df_fields is not None and not df_fields.empty:
+                row_f = df_fields.iloc[0]
+                total = int(row_f["total"]) if row_f["total"] else 0
+                if total > 0:
+                    result = {}
+                    for col in ["roe", "or_yoy", "netprofit_yoy", "dv_ttm", "pe_ttm", "pb", "debt_to_assets"]:
+                        result[col] = float(row_f[f"{col}_count"]) / total
+                    return result
+        except Exception as e:
+            logger.debug(f"[QuoteDao] get_field_completeness failed for {trade_date}: {e}")
+        return {}
 
     async def get_sync_quality_score(self, trade_date: datetime.date | str) -> dict:
         """

@@ -660,7 +660,7 @@ class TestBreakpointResumeCoreTables:
         await strategy._run_historical_sync(days=2, progress_callback=None, result=result)
 
         strategy.sync_daily_market_snapshot.assert_awaited_once()
-        called_date = strategy.sync_daily_market_snapshot.await_args.kwargs.get("trade_date")
+        called_date = strategy.sync_daily_market_snapshot.await_args[0][0]
         assert called_date == d2
         assert result.updated == 1
         assert result.added == 1

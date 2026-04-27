@@ -708,6 +708,44 @@ class HealthScanDialog(ft.AlertDialog):
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_AROUND,
             ),
+            ft.Divider(height=10),
+            ft.Row(
+                [
+                    ft.Column(
+                        [
+                            ft.Text(
+                                I18n.get("health_fundamental_completeness"),
+                                size=12,
+                                color=AppColors.TEXT_SECONDARY,
+                            ),
+                            ft.Text(
+                                f"{result.get('avg_fundamental', 0) * 100:.1f}%",
+                                size=16,
+                                weight=ft.FontWeight.BOLD,
+                                color=AppColors.SUCCESS
+                                if result.get("avg_fundamental", 0) > 0.7
+                                else (AppColors.WARNING if result.get("avg_fundamental", 0) > 0.5 else AppColors.ERROR),
+                            ),
+                        ],
+                    ),
+                    ft.Column(
+                        [
+                            ft.Text(
+                                I18n.get("health_fin_recency"),
+                                size=12,
+                                color=AppColors.TEXT_SECONDARY,
+                            ),
+                            ft.Text(
+                                "✓" if result.get("fin_recency_ok", False) else "✗",
+                                size=16,
+                                weight=ft.FontWeight.BOLD,
+                                color=AppColors.SUCCESS if result.get("fin_recency_ok", False) else AppColors.ERROR,
+                            ),
+                        ],
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_AROUND,
+            ),
         ]
         self.result_content.visible = True
         self.page_ref.update()

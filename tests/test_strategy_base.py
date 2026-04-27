@@ -50,7 +50,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.context = {"screening_data": self.base_data}
+        self.context = {"screening_data": self.base_data, "fundamental_screening_data": self.base_data}
 
     def test_manager(self):
         s = self.mgr.get_strategy("value")
@@ -225,7 +225,14 @@ class TestAIIntegration(unittest.TestCase):
                 instance = cls()
                 tier = instance.required_quality_tier
                 self.assertIsInstance(tier, QualityTier)
-                if cls is TechnicalBreakoutStrategy:
+                if cls in (
+                    TechnicalBreakoutStrategy,
+                    ValueStrategy,
+                    GrowthStrategy,
+                    DividendStrategy,
+                    CashFlowStrategy,
+                    LargePEStrategy,
+                ):
                     self.assertEqual(tier, QualityTier.SILVER)
                 else:
                     self.assertEqual(tier, QualityTier.BRONZE)

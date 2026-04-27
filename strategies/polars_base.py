@@ -40,22 +40,25 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     """
 
     required_quality_tier: QualityTier = QualityTier.BRONZE
+    requires_fundamental_coverage: bool = False
 
     async def filter(self, context: StrategyContext):
-        """
-        Template method that handles boilerplates.
-        Subclasses should implement `_filter_logic(lazy_frame, context) -> LazyFrame`.
-
-        Phase 1: Math filtering (Polars)
-        Phase 2: AI analysis (via AIStrategyMixin.run_ai_analysis) — skipped if enable_ai_analysis=False
-        """
         _check_tier(
             context.get("data_processor"),
             self.required_quality_tier,
             f"{self.__class__.__name__}.filter",
         )
 
-        df = context.get("screening_data")
+        if self.requires_fundamental_coverage:
+            df = context.get("fundamental_screening_data")
+            if df is None or df.empty:
+                logger.warning(
+                    f"[Strategy] {self.name}: fundamental_screening_data unavailable, "
+                    f"cannot execute fundamental strategy without it"
+                )
+                return pd.DataFrame()
+        else:
+            df = context.get("screening_data")
         if df is None:
             df = context.get("data")
 

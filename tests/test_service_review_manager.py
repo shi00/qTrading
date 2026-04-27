@@ -520,7 +520,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_review_index_data_failure_defaults_zero(self):
-        """指数数据获取失败时 index_pct 默认 0.0"""
+        """指数数据获取失败时跳过记录以避免标签污染"""
         mock_screener_dao = MagicMock()
         mock_screener_dao.get_pending_predictions = AsyncMock(
             return_value=pd.DataFrame(
@@ -544,6 +544,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
         mock_api_instance.get_index_daily = AsyncMock(side_effect=Exception("API Error"))
@@ -552,9 +553,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_called_once()
-            call_args = mock_screener_dao.update_prediction_result.call_args[0]
-            self.assertEqual(call_args[2], "WIN")
+            mock_screener_dao.update_prediction_result.assert_not_called()
 
         asyncio.run(run_test())
 

@@ -432,8 +432,10 @@ class CacheManager:
 
     # --- Screening Data ---
     async def get_screening_data(self, trade_date: str | None = None):
-        # P0-2: DAO now self-resolves latest_trade_date internally (Defense in Depth)
         return await self.screener_dao.get_screening_data(trade_date)
+
+    async def get_fundamental_screening_data(self, trade_date: str | None = None):
+        return await self.screener_dao.get_fundamental_screening_data(trade_date)
 
     # --- Sync Stats & Misc ---
     async def update_sync_status(
@@ -888,6 +890,11 @@ class CacheManager:
     async def get_sync_quality_score(self, trade_date: datetime.date | str) -> dict:
         """获取单个日期的同步质量评分"""
         return await self.quote_dao.get_sync_quality_score(trade_date)
+
+    async def get_field_completeness(self, trade_date: str | datetime.date) -> dict[str, float]:
+        """获取字段级基本面完整度"""
+        await self.wait_for_maintenance()
+        return await self.quote_dao.get_field_completeness(trade_date)
 
     # === L2 批量预取方法（避免 N+1 查询）===
 
