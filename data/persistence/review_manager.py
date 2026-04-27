@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import json
 import logging
 import typing
 
@@ -264,6 +266,8 @@ class ReviewManager:
         strategy_name: str | None,
         df: pd.DataFrame,
         trade_date: datetime.date | datetime.datetime | pd.Timestamp | str | None = None,
+        run_id: str | None = None,
+        params_snapshot: str | dict[str, typing.Any] | None = None,
     ):
         """
         Save screening results to history for future review.
@@ -299,6 +303,17 @@ class ReviewManager:
             raise ValueError(
                 "save_results requires an analysis trade_date or a single unique df['trade_date'] value",
             )
+
+        if run_id is None:
+            seed = f"{effective_date.isoformat()}|{strategy_name or ''}"
+            run_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:16]
+
+        if params_snapshot is None:
+            params_snapshot_str = None
+        elif isinstance(params_snapshot, str):
+            params_snapshot_str = params_snapshot
+        else:
+            params_snapshot_str = json.dumps(params_snapshot, ensure_ascii=False, sort_keys=True)
 
         # Helpers to safely extract fields
         def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):
@@ -339,6 +354,7 @@ class ReviewManager:
 
             records.append(
                 (
+                    run_id,
                     effective_date,
                     strategy_name,
                     ts_code,
@@ -367,6 +383,7 @@ class ReviewManager:
                     ai_score,
                     str(ai_reason),
                     str(thinking),
+                    params_snapshot_str,
                 ),
             )
 
