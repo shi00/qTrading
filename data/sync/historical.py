@@ -215,7 +215,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     for date in dates_to_verify:
                         date_key = to_date_key(date)
                         quality = quality_results.get(date_key)
-                        if quality is not None and quality.get("score", 0) < QUALITY_THRESHOLD:
+                        if quality is None:
+                            low_quality_dates.append(date)
+                            logger.debug(
+                                f"[HistoricalSync] QualityCheck | {date} missing quality result, mark for re-sync"
+                            )
+                            continue
+
+                        if quality.get("score", 0) < QUALITY_THRESHOLD:
                             low_quality_dates.append(date)
                             issues_str = ", ".join(quality.get("issues", [])[:3])
                             logger.debug(

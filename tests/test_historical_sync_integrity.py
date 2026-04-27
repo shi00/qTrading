@@ -621,6 +621,50 @@ class TestBreakpointResumeCoreTables:
         assert "block_trade" not in strategy.CORE_RESUME_TABLES
         assert "moneyflow_daily" not in strategy.CORE_RESUME_TABLES
 
+    @pytest.mark.asyncio
+    async def test_resume_marks_missing_quality_as_resync(self, mock_context):
+        """
+        回归测试：quality_results 缺失日期 key 时应强制重同步
+
+        场景：两个核心表都存在缓存日期，但质量结果只返回其中一天。
+        期望：缺失质量结果的日期不能被当作高质量跳过，必须执行重同步。
+        """
+        from data.sync.historical import HistoricalSyncStrategy
+
+        strategy = HistoricalSyncStrategy(mock_context)
+        result = SyncResult()
+
+        d1 = datetime.date(2024, 1, 1)
+        d2 = datetime.date(2024, 1, 2)
+        trade_dates = [d1, d2]
+
+        mock_context.processor = MagicMock()
+        mock_context.processor.trade_calendar = MagicMock()
+        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=trade_dates)
+
+        cached_dates = {d1, d2}
+        mock_context.cache.get_cached_dates_for_table = AsyncMock(return_value=cached_dates)
+        mock_context.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                d1: {
+                    "score": 95,
+                    "expected_base": 5000,
+                    "tables": {},
+                    "issues": [],
+                }
+            }
+        )
+
+        strategy.sync_daily_market_snapshot = AsyncMock(return_value=True)
+
+        await strategy._run_historical_sync(days=2, progress_callback=None, result=result)
+
+        strategy.sync_daily_market_snapshot.assert_awaited_once()
+        called_date = strategy.sync_daily_market_snapshot.await_args.kwargs.get("trade_date")
+        assert called_date == d2
+        assert result.updated == 1
+        assert result.added == 1
+
 
 class TestIncompleteFinancialStocksDetection:
     """M4 修复验证：get_incomplete_financial_stocks 漏检"""

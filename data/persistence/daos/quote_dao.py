@@ -717,8 +717,7 @@ class QuoteDao(BaseDao):
             "limit_list": 0.30,
             "suspend_d": 0.10,
             # tolerance values below are not used for expected count calculation
-            # (FIXED_EXPECTED_TABLES provides fixed expected counts instead),
-            # but they still affect low_frequency_tables classification (>=0.5 = not low-frequency)
+            # (FIXED_EXPECTED_TABLES provides fixed expected counts instead).
             "index_daily": 0.95,
             "index_dailybasic": 0.95,
             "top_list": 0.30,
@@ -757,8 +756,9 @@ class QuoteDao(BaseDao):
 
             reference_count = quotes_count if quotes_count > 0 else expected_base
 
-            LOW_FREQUENCY_THRESHOLD = 0.5
-            low_frequency_tables = {t for t, tol in table_tolerance_map.items() if tol < LOW_FREQUENCY_THRESHOLD}
+            # Low-frequency exemption must be controlled by explicit table allowlist,
+            # not by tolerance values, to avoid accidental score inflation after config changes.
+            low_frequency_tables = {t for t in LOW_FREQUENCY_TABLES if t in tables}
 
             for table in tables:
                 if table == "daily_quotes":
