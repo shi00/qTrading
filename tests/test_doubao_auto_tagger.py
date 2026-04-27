@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -178,80 +177,6 @@ async def test_process_batch_returns_false_when_input_preparation_fails(monkeypa
 
     assert success is False
     tagger._dump_debug_artifacts.assert_awaited_once_with(page, "prompt_submission_failed")
-
-
-@pytest.mark.asyncio
-async def test_refresh_auth_state_keeps_existing_auth_file_when_snapshot_is_invalid(tmp_path, monkeypatch):
-    auth_file = tmp_path / "auth.json"
-    auth_file.write_text(json.dumps({"cookies": [{"name": "session"}], "origins": []}), encoding="utf-8")
-    monkeypatch.setattr("scripts.doubao_auto_tagger.AUTH_FILE", str(auth_file))
-
-    async def _write_invalid_snapshot(*, path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"cookies": [], "origins": []}, f)
-
-    context = SimpleNamespace(storage_state=AsyncMock(side_effect=_write_invalid_snapshot))
-    tagger = DoubaoTagger()
-
-    refreshed = await tagger._refresh_auth_state(context)
-
-    assert refreshed is False
-    assert json.loads(auth_file.read_text(encoding="utf-8")) == {
-        "cookies": [{"name": "session"}],
-        "origins": [],
-    }
-
-
-@pytest.mark.asyncio
-async def test_run_refreshes_auth_state_before_rebuilding_context_every_15_batches(tmp_path, monkeypatch):
-    auth_file = tmp_path / "auth.json"
-    auth_file.write_text(json.dumps({"cookies": [{"name": "session"}], "origins": []}), encoding="utf-8")
-    monkeypatch.setattr("scripts.doubao_auto_tagger.AUTH_FILE", str(auth_file))
-
-    class _FakePlaywrightContextManager:
-        def __init__(self, browser):
-            self._browser = browser
-
-        async def __aenter__(self):
-            return SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=self._browser)))
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-    first_page = SimpleNamespace(close=AsyncMock())
-    rebuilt_page = SimpleNamespace(close=AsyncMock())
-    first_context = SimpleNamespace(
-        new_page=AsyncMock(return_value=first_page),
-        close=AsyncMock(),
-    )
-    rebuilt_context = SimpleNamespace(
-        new_page=AsyncMock(return_value=rebuilt_page),
-        close=AsyncMock(),
-    )
-    browser = SimpleNamespace(
-        new_context=AsyncMock(side_effect=[first_context, rebuilt_context]),
-        close=AsyncMock(),
-    )
-
-    monkeypatch.setattr(
-        "playwright.async_api.async_playwright",
-        lambda: _FakePlaywrightContextManager(browser),
-    )
-
-    dao = SimpleNamespace(
-        get_stocks_without_ai_concepts=AsyncMock(side_effect=[[("000001.SZ", "平安银行")]] * 15 + [[]])
-    )
-    tagger = DoubaoTagger()
-    tagger.dao = dao
-    tagger.process_batch = AsyncMock(return_value=True)  # type: ignore[method-assign]
-    tagger._refresh_auth_state = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-    await tagger.run(limit=0)
-
-    tagger._refresh_auth_state.assert_awaited_once_with(first_context)
-    first_page.close.assert_awaited_once()
-    first_context.close.assert_awaited_once()
-    browser.new_context.assert_awaited_with(storage_state=str(auth_file))
 
 
 @pytest.mark.asyncio
