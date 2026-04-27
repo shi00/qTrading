@@ -967,8 +967,8 @@ class TestSaveResultsRunIdReproducibility(unittest.TestCase):
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.ConfigHandler")
-    def test_same_date_strategy_produces_same_auto_run_id(self, mock_config, mock_api, mock_cache):
-        """同一 trade_date + strategy_name 自动生成相同的 run_id（向后兼容）"""
+    def test_auto_run_id_is_unique_per_call(self, mock_config, mock_api, mock_cache):
+        """未传入 run_id 时应自动生成唯一值，同一 trade_date + strategy_name 的两次调用产生不同 run_id"""
         mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
         manager = ReviewManager()
 
@@ -990,7 +990,7 @@ class TestSaveResultsRunIdReproducibility(unittest.TestCase):
             records2 = mock_dao.save_screening_results.call_args[0][0]
             run_id2 = records2[0][0]
 
-            self.assertEqual(run_id1, run_id2)
+            self.assertNotEqual(run_id1, run_id2)
 
         asyncio.run(run_test())
 

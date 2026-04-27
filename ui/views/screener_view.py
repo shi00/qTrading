@@ -589,12 +589,14 @@ class ScreenerView(ft.Container):
                             ),
                             on_click=lambda e, d=d_key: self._on_tree_item_click(
                                 d,
-                                None,
+                                run_id=None,
                             ),
                             dense=True,
                         ),
                     )
                     for s in strategies:
+                        strategy_display = translate_strategy_name(s["strategy_name"])
+                        run_suffix = f" [{s['run_id'][:8]}]" if len(strategies) > 1 else ""
                         subtiles.append(
                             ft.ListTile(
                                 leading=ft.Icon(
@@ -603,10 +605,10 @@ class ScreenerView(ft.Container):
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
                                 title=ft.Text(
-                                    f"{translate_strategy_name(s['strategy_name'])} ({s['cnt']})",
+                                    f"{strategy_display}{run_suffix} ({s['cnt']})",
                                     size=13,
                                 ),
-                                on_click=lambda e, d=d_key, sn=s["strategy_name"]: self._on_tree_item_click(d, sn),
+                                on_click=lambda e, d=d_key, rid=s["run_id"]: self._on_tree_item_click(d, run_id=rid),
                                 dense=True,
                             ),
                         )
@@ -644,27 +646,31 @@ class ScreenerView(ft.Container):
                 exc_info=True,
             )
 
-    def _on_tree_item_click(self, trade_date: str, strategy_name=None):
+    def _on_tree_item_click(self, trade_date: str, strategy_name=None, run_id=None):
         """Handle click on a tree node to load historical records."""
         if not self.page:
             return
-        self.page.run_task(self._load_history_for_date, trade_date, strategy_name)
+        self.page.run_task(self._load_history_for_date, trade_date, strategy_name, run_id)
 
-    async def _load_history_for_date(self, trade_date, strategy_name):
-        """Load historical data for a specific date/strategy and refresh table."""
+    async def _load_history_for_date(self, trade_date, strategy_name=None, run_id=None):
+        """Load historical data for a specific run_id or date/strategy and refresh table."""
         self._toggle_progress(True)
         if isinstance(trade_date, (datetime.date, datetime.datetime)):
             display = trade_date.strftime("%Y-%m-%d")
-            # Convert back to ISO string for backend query since UI handles string selection
             trade_date = display
         else:
             ts = str(trade_date)
             display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-        label = (
-            translate_strategy_name(strategy_name) if strategy_name else I18n.get("screener_all_strategies", "全部策略")
-        )
+        if run_id:
+            label = f"#{run_id[:8]}"
+        else:
+            label = (
+                translate_strategy_name(strategy_name)
+                if strategy_name
+                else I18n.get("screener_all_strategies", "全部策略")
+            )
         self._update_status(f"{display} / {label}", "blue")
-        await self.vm.load_history_data(trade_date, strategy_name)
+        await self.vm.load_history_data(trade_date, strategy_name, run_id)
         self._toggle_progress(False)
 
     def _on_load_more_history(self, e):

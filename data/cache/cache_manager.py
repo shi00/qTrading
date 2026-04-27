@@ -731,8 +731,10 @@ class CacheManager:
     async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
         return await self.screener_dao.get_history_tree(offset, limit)
 
-    async def get_history_records(self, trade_date: str | None, strategy_name: str | None = None):
-        return await self.screener_dao.get_history_records(trade_date, strategy_name)
+    async def get_history_records(
+        self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
+    ):
+        return await self.screener_dao.get_history_records(trade_date, strategy_name, run_id)
 
     async def get_pending_reviews(self):
         return await self.screener_dao.get_pending_reviews()

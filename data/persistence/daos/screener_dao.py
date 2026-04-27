@@ -39,14 +39,16 @@ class ScreenerDao(BaseDao):
     async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
         """
         Get aggregated tree data for the history sidebar.
-        Returns rows of (trade_date, strategy_name, cnt) grouped and ordered by date DESC.
+        Returns rows of (run_id, trade_date, strategy_name, cnt) grouped by run_id.
         Python caller should further group by trade_date to build the tree structure.
+        Each run_id represents a distinct execution, enabling multiple same-day runs
+        to be distinguished in the UI.
         """
         sql = """
-            SELECT trade_date, strategy_name, COUNT(*) as cnt
+            SELECT run_id, trade_date, strategy_name, COUNT(*) as cnt
             FROM screening_history
-            GROUP BY trade_date, strategy_name
-            ORDER BY trade_date DESC
+            GROUP BY run_id, trade_date, strategy_name
+            ORDER BY trade_date DESC, MIN(created_at) DESC
             LIMIT $1 OFFSET $2
         """
         return await self._read_db(
@@ -54,10 +56,17 @@ class ScreenerDao(BaseDao):
             ((limit or 30) * 5, offset),
         )  # limit*5 to cover multiple strategies per date
 
-    async def get_history_records(self, trade_date: str | None, strategy_name: str | None = None):
+    async def get_history_records(
+        self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
+    ):
         """
-        Get screening records for a specific date, optionally filtered by strategy.
+        Get screening records for a specific run_id, or fall back to trade_date/strategy_name.
+        When run_id is provided, it takes priority and returns records for that specific run.
         """
+        if run_id:
+            sql = f"SELECT {self.SH_FULL_COLS} FROM screening_history WHERE run_id = $1 ORDER BY ai_score DESC"
+            return await self._read_db(sql, (run_id,))
+
         sql = f"SELECT {self.SH_FULL_COLS} FROM screening_history WHERE trade_date = $1"
         p = [trade_date]
         if strategy_name:

@@ -1,8 +1,8 @@
 import datetime
-import hashlib
 import json
 import logging
 import typing
+import uuid
 
 import pandas as pd
 
@@ -305,8 +305,7 @@ class ReviewManager:
             )
 
         if run_id is None:
-            seed = f"{effective_date.isoformat()}|{strategy_name or ''}"
-            run_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:16]
+            run_id = uuid.uuid4().hex[:16]
 
         if params_snapshot is None:
             params_snapshot_str = None

@@ -158,7 +158,7 @@ class TestScreenerViewModel(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_run_strategy_passes_trade_date_to_save_results(self):
-        """验证 run_strategy 从 context 获取 trade_date 并传给 save_results"""
+        """验证 run_strategy 从 context 获取 trade_date 并传给 save_results，同时透传 run_id 和 params_snapshot"""
 
         async def run_test():
             analysis_date = datetime.date(2024, 12, 27)
@@ -179,6 +179,7 @@ class TestScreenerViewModel(unittest.TestCase):
             mock_strategy.filter = AsyncMock(return_value=result_df)
             self.vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
 
+            test_params = {"rsi_threshold": 30, "volume_ratio": 2.0}
             self.vm.data_processor.get_strategy_data = AsyncMock(
                 return_value={
                     "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
@@ -195,7 +196,7 @@ class TestScreenerViewModel(unittest.TestCase):
             with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
                 mock_tm.return_value.update_progress = MagicMock()
                 mock_tm.return_value.submit_task = mock_submit_task
-                await self.vm.run_strategy("test_strategy", save_results=True)
+                await self.vm.run_strategy("test_strategy", save_results=True, params=test_params)
 
             for coro in submitted_coro:
                 await coro
@@ -207,6 +208,13 @@ class TestScreenerViewModel(unittest.TestCase):
                 passed_trade_date,
                 analysis_date,
                 f"save_results should receive trade_date={analysis_date}, got {passed_trade_date}",
+            )
+            passed_run_id = call_kwargs.kwargs.get("run_id")
+            self.assertIsNotNone(passed_run_id, "save_results should receive a non-None run_id")
+            self.assertEqual(len(passed_run_id), 16, f"run_id should be 16 chars, got {len(passed_run_id)}")
+            passed_params = call_kwargs.kwargs.get("params_snapshot")
+            self.assertEqual(
+                passed_params, test_params, "save_results should receive params_snapshot matching the UI params"
             )
 
         asyncio.run(run_test())

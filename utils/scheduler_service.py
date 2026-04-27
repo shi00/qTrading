@@ -397,7 +397,10 @@ class SchedulerService:
                 analysis_trade_date = context.get("trade_date")
                 if not analysis_trade_date:
                     raise RuntimeError("Nightly prediction context missing trade_date; refusing to save results")
-                await rm.save_results("AI_Auto_Nightly", result_df, trade_date=analysis_trade_date)
+                import uuid as _uuid
+
+                run_id = _uuid.uuid4().hex[:16]
+                await rm.save_results("AI_Auto_Nightly", result_df, trade_date=analysis_trade_date, run_id=run_id)
                 self._last_pred_date = today_str
                 return I18n.get("sched_pred_done_found", count=len(result_df))
             self._last_pred_date = today_str

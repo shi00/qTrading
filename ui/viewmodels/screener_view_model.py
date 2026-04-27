@@ -208,7 +208,16 @@ class ScreenerViewModel:
                             raise RuntimeError(
                                 "Missing analysis trade_date in screening context; refusing to save results",
                             )
-                        await self.review_mgr.save_results(strategy.name, result_df, trade_date=analysis_trade_date)
+                        import uuid as _uuid
+
+                        run_id = _uuid.uuid4().hex[:16]
+                        await self.review_mgr.save_results(
+                            strategy.name,
+                            result_df,
+                            trade_date=analysis_trade_date,
+                            run_id=run_id,
+                            params_snapshot=params or {},
+                        )
 
                     # Update Local View
                     if self.on_update:
@@ -543,21 +552,21 @@ class ScreenerViewModel:
         df = await cache.get_history_tree(offset=offset)
         if df is None or df.empty:
             return {}
-        # Group by trade_date -> {date: [{strategy_name, cnt}, ...]}
+        # Group by trade_date -> {date: [{run_id, strategy_name, cnt}, ...]}
         tree = {}
         for _, row in df.iterrows():
             date = str(row["trade_date"])
             if date not in tree:
                 tree[date] = []
             tree[date].append(
-                {"strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore
+                {"run_id": row["run_id"], "strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore
             )
         return tree
 
-    async def load_history_data(self, trade_date: str, strategy_name: str = None):  # type: ignore
-        """Load historical screening records for a specific date/strategy."""
+    async def load_history_data(self, trade_date: str, strategy_name: str = None, run_id: str = None):  # type: ignore
+        """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name."""
         cache = CacheManager()
-        df = await cache.get_history_records(trade_date, strategy_name)
+        df = await cache.get_history_records(trade_date, strategy_name, run_id)
         if df is not None and not df.empty:
             self._full_results = df
         else:

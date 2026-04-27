@@ -213,7 +213,7 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(mo
 
 @pytest.mark.asyncio
 async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch):
-    """夜间预测任务应将 context.trade_date 透传到 save_results。"""
+    """夜间预测任务应将 context.trade_date 透传到 save_results，并生成唯一 run_id。"""
     import services.task_manager as tm_mod
     import utils.scheduler_service as sched_mod
 
@@ -253,7 +253,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
 
     class _FakeReviewManager:
         async def save_results(self, strategy_name, result_df, trade_date=None, run_id=None, params_snapshot=None):
-            holder["saved"] = (strategy_name, trade_date, result_df.copy())
+            holder["saved"] = (strategy_name, trade_date, run_id, result_df.copy())
 
     class _FakeTaskManager:
         def update_progress(self, *_args, **_kwargs):
@@ -280,6 +280,8 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     assert holder["saved"] is not None
     assert holder["saved"][0] == "AI_Auto_Nightly"
     assert holder["saved"][1] == "20260423"
+    assert holder["saved"][2] is not None, "save_results should receive a non-None run_id"
+    assert len(holder["saved"][2]) == 16, f"run_id should be 16 chars, got {len(holder['saved'][2])}"
 
 
 @pytest.mark.asyncio
