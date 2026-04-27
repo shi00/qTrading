@@ -4,10 +4,8 @@ Runs as a background task within the Flet application using APScheduler.
 """
 
 import asyncio
-import json
 import logging
 import threading
-import uuid
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -399,19 +397,7 @@ class SchedulerService:
                 analysis_trade_date = context.get("trade_date")
                 if not analysis_trade_date:
                     raise RuntimeError("Nightly prediction context missing trade_date; refusing to save results")
-                run_id = uuid.uuid4().hex[:12].upper()
-                params_snap = json.dumps(
-                    {"strategy": "AI_Auto_Nightly", "params": context.get("params", {})},
-                    ensure_ascii=False,
-                    default=str,
-                )
-                await rm.save_results(
-                    "AI_Auto_Nightly",
-                    result_df,
-                    trade_date=analysis_trade_date,
-                    run_id=run_id,
-                    params_snapshot=params_snap,
-                )
+                await rm.save_results("AI_Auto_Nightly", result_df, trade_date=analysis_trade_date)
                 self._last_pred_date = today_str
                 return I18n.get("sched_pred_done_found", count=len(result_df))
             self._last_pred_date = today_str

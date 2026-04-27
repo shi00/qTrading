@@ -1,8 +1,6 @@
 import asyncio
-import json
 import logging
 import time
-import uuid
 from collections.abc import Callable
 
 import pandas as pd
@@ -210,19 +208,7 @@ class ScreenerViewModel:
                             raise RuntimeError(
                                 "Missing analysis trade_date in screening context; refusing to save results",
                             )
-                        run_id = uuid.uuid4().hex[:12].upper()
-                        params_snap = json.dumps(
-                            {"strategy": strategy.name, "params": params or {}},
-                            ensure_ascii=False,
-                            default=str,
-                        )
-                        await self.review_mgr.save_results(
-                            strategy.name,
-                            result_df,
-                            trade_date=analysis_trade_date,
-                            run_id=run_id,
-                            params_snapshot=params_snap,
-                        )
+                        await self.review_mgr.save_results(strategy.name, result_df, trade_date=analysis_trade_date)
 
                     # Update Local View
                     if self.on_update:
