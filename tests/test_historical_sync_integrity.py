@@ -501,6 +501,83 @@ class TestLowFrequencyTableScoring:
                 for table in LOW_FREQUENCY_TABLES:
                     if table in result.get("tables", {}):
                         assert result["tables"][table].get("passed") is True
+                        assert result["tables"][table].get("exempt") is True
+                        assert result["tables"][table].get("ratio") is None
+
+    @pytest.mark.asyncio
+    async def test_low_frequency_tables_do_not_inflate_score(self, quote_dao):
+        """
+        低频表不应抬高质量分数
+
+        场景：高频表 ratio=0.9，低频表 ratio=None/exempt=True
+        期望：分数仅基于高频表计算，不被低频表抬高
+        """
+        from data.persistence.daos.quote_dao import LOW_FREQUENCY_TABLES
+
+        mock_expected = {datetime.date(2024, 1, 1): 5000}
+
+        async def mock_read_db(query, *args, **kwargs):
+            if "stock_counts" in query or "expected_count" in query:
+                return pd.DataFrame(
+                    {
+                        "trade_date": [datetime.date(2024, 1, 1)],
+                        "expected_count": [5000],
+                    }
+                )
+            if "COUNT" in query:
+                return pd.DataFrame(
+                    {
+                        "trade_date": [datetime.date(2024, 1, 1)],
+                        "cnt": [4500],
+                    }
+                )
+            return pd.DataFrame()
+
+        with (
+            patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=mock_read_db),
+            patch.object(
+                quote_dao,
+                "get_bulk_expected_stock_counts",
+                new_callable=AsyncMock,
+                return_value=mock_expected,
+            ),
+        ):
+            scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
+
+            if datetime.date(2024, 1, 1) in scores:
+                result = scores[datetime.date(2024, 1, 1)]
+                score = result.get("score", 0)
+                for table in LOW_FREQUENCY_TABLES:
+                    if table in result.get("tables", {}):
+                        assert result["tables"][table].get("exempt") is True
+                        assert result["tables"][table].get("ratio") is None
+                exempt_count = sum(
+                    1 for t, info in result.get("tables", {}).items() if info.get("exempt") or info.get("ratio") is None
+                )
+                non_exempt_count = sum(
+                    1
+                    for t, info in result.get("tables", {}).items()
+                    if not info.get("exempt") and info.get("ratio") is not None
+                )
+                if non_exempt_count > 0 and exempt_count > 0:
+                    from utils.config_handler import ConfigHandler
+
+                    quality_config = ConfigHandler.get_sync_integrity_config()
+                    quality_weights = quality_config.get("quality_weights", {})
+                    total_weight = 0
+                    weighted_score = 0
+                    for t, info in result["tables"].items():
+                        if info.get("exempt") or info.get("ratio") is None:
+                            continue
+                        if "ratio" in info:
+                            w = quality_weights.get(t, 5)
+                            weighted_score += info["ratio"] * w
+                            total_weight += w
+                    expected_score = int(min(100, (weighted_score / total_weight) * 100)) if total_weight > 0 else 0
+                    assert score == expected_score, (
+                        f"Score {score} should equal weighted score {expected_score}, "
+                        f"not inflated by {exempt_count} exempt tables"
+                    )
 
 
 class TestBreakpointResumeCoreTables:
@@ -850,6 +927,66 @@ class TestP1IndexTablesInLowFrequency:
         from data.persistence.daos.quote_dao import LOW_FREQUENCY_TABLES
 
         assert "moneyflow_hsgt" not in LOW_FREQUENCY_TABLES
+
+    def test_index_tables_use_fixed_expected(self):
+        """
+        测试指数/聚合表使用固定期望值而非股票数比例
+
+        场景：index_daily/index_dailybasic/moneyflow_hsgt 不应使用 reference_count * tolerance
+        """
+        from data.persistence.daos.quote_dao import FIXED_EXPECTED_TABLES
+
+        assert "index_daily" in FIXED_EXPECTED_TABLES
+        assert "index_dailybasic" in FIXED_EXPECTED_TABLES
+        assert "moneyflow_hsgt" in FIXED_EXPECTED_TABLES
+        assert FIXED_EXPECTED_TABLES["index_daily"] > 0
+        assert FIXED_EXPECTED_TABLES["index_dailybasic"] > 0
+        assert FIXED_EXPECTED_TABLES["moneyflow_hsgt"] > 0
+
+    @pytest.mark.asyncio
+    async def test_index_tables_not_falsely_reported_incomplete(self, quote_dao):
+        """
+        测试指数/聚合表数据完整时不会误报为不完整
+
+        场景：index_daily 有 7 条记录时，应 passed=True 而非 passed=False
+        """
+        from data.persistence.daos.quote_dao import FIXED_EXPECTED_TABLES
+
+        mock_expected = {datetime.date(2024, 1, 1): 5000}
+
+        async def mock_get_bulk_table_counts(table_name, start_date, end_date):
+            if table_name in FIXED_EXPECTED_TABLES:
+                return {datetime.date(2024, 1, 1): FIXED_EXPECTED_TABLES[table_name]}
+            return {datetime.date(2024, 1, 1): 5000}
+
+        with (
+            patch.object(
+                quote_dao,
+                "get_bulk_table_counts",
+                new_callable=AsyncMock,
+                side_effect=mock_get_bulk_table_counts,
+            ),
+            patch.object(
+                quote_dao,
+                "get_bulk_expected_stock_counts",
+                new_callable=AsyncMock,
+                return_value=mock_expected,
+            ),
+        ):
+            scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
+
+            if datetime.date(2024, 1, 1) in scores:
+                result = scores[datetime.date(2024, 1, 1)]
+                for table in FIXED_EXPECTED_TABLES:
+                    if table in result.get("tables", {}):
+                        table_info = result["tables"][table]
+                        assert table_info["passed"] is True, (
+                            f"{table} should be passed=True with fixed expected={FIXED_EXPECTED_TABLES[table]}, "
+                            f"but got expected={table_info['expected']}, count={table_info['count']}, ratio={table_info['ratio']}"
+                        )
+                        assert table_info["expected"] == FIXED_EXPECTED_TABLES[table], (
+                            f"{table} expected should be {FIXED_EXPECTED_TABLES[table]}, got {table_info['expected']}"
+                        )
 
 
 class TestP1TradingDayValidation:

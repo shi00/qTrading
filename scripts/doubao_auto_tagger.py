@@ -94,40 +94,6 @@ class DoubaoTagger:
         self._concepts_cleared = True
         logger.info("[DoubaoTagger] Existing Doubao concepts cleared after page became interactive.")
 
-    def _is_valid_storage_state_payload(self, payload: object) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        cookies = payload.get("cookies")
-        origins = payload.get("origins")
-        if not isinstance(cookies, list) or not isinstance(origins, list):
-            return False
-        return bool(cookies or origins)
-
-    async def _refresh_auth_state(self, context) -> bool:
-        tmp_auth_file = f"{AUTH_FILE}.tmp"
-        try:
-            await context.storage_state(path=tmp_auth_file)
-            with open(tmp_auth_file, encoding="utf-8") as f:
-                payload = json.load(f)
-            if not self._is_valid_storage_state_payload(payload):
-                logger.warning("[DoubaoTagger] Skip auth snapshot refresh because payload looks invalid.")
-                return False
-            os.replace(tmp_auth_file, AUTH_FILE)
-            logger.info("[DoubaoTagger] Auth snapshot refreshed before context rebuild.")
-            return True
-        except Exception as ex:
-            logger.warning("[DoubaoTagger] Failed to refresh auth snapshot: %s", ex)
-            return False
-        finally:
-            if os.path.exists(tmp_auth_file):
-                try:
-                    os.remove(tmp_auth_file)
-                except OSError:
-                    logger.debug(
-                        "[DoubaoTagger] Failed to delete temporary auth snapshot: %s",
-                        tmp_auth_file,
-                    )
-
     async def _find_chat_input(self, page: "Page", timeout_ms: int = CHAT_INPUT_WAIT_MS):
         """Find the chat input with ordered selector fallbacks for DOM changes."""
         candidate_errors: list[str] = []
@@ -181,7 +147,7 @@ class DoubaoTagger:
         stock_text = "\n".join([f"{r[0]} ({r[1]})" for r in stocks])
         prompt = PROMPT_TEMPLATE.format(count=len(stocks), stock_list=stock_text)
 
-        print(f"⏳ 开始处理新批次，共 {len(stocks)} 只股票...", flush=True)
+        print(f"⏳ 开始处理新批次，共 {len(stocks)} 只股票...")
         await page.goto("https://www.doubao.com/chat/")
 
         # 更稳健的 DOM 等待：使用 get_by_xxx 语义化选择器
@@ -206,11 +172,11 @@ class DoubaoTagger:
                 await self._dump_debug_artifacts(page, "prompt_submission_failed")
             return False
 
-        print("✈️ 发送 Prompt 给大模型...", flush=True)
+        print("✈️ 发送 Prompt 给大模型...")
         await page.keyboard.press("Enter")
 
         # 智能等待机制，摒弃单纯的 Sleep
-        print("⏳ 等待大模型生成代码结构返回，这可能需要几十秒...", flush=True)
+        print("⏳ 等待大模型生成代码结构返回，这可能需要几十秒...")
         response_text = ""
         last_stock_code = stocks[-1][0]
 
@@ -276,10 +242,10 @@ class DoubaoTagger:
                 print(f"🎉 成果入库完成！写入 {count} 条专属概念。", flush=True)
                 return True
             except json.JSONDecodeError as e:
-                print(f"❌ JSON 解析失败: {e}", flush=True)
+                print(f"❌ JSON 解析失败: {e}")
                 return False
         else:
-            print("❌ 未在返回结果中找到合规的 JSON (可能遭遇 WAF 拦截、截断或超时)。", flush=True)
+            print("❌ 未在返回结果中找到合规的 JSON (可能遭遇 WAF 拦截、截断或超时)。")
             await self._dump_debug_artifacts(page, "response_json_not_found")
             return False
 
@@ -318,14 +284,7 @@ class DoubaoTagger:
 
                 # 浏览器内存清理 (保留原有优秀机制)
                 if batch_count > 0 and batch_count % 15 == 0:
-                    print("🧹 清理浏览器缓存与僵尸内存，重建上下文...", flush=True)
-                    if consecutive_failures == 0:
-                        await self._refresh_auth_state(context)
-                    else:
-                        logger.warning(
-                            "[DoubaoTagger] Skip auth snapshot refresh before rebuild because consecutive_failures=%s",
-                            consecutive_failures,
-                        )
+                    print("🧹 清理浏览器缓存与僵尸内存，重建上下文...")
                     await page.close()
                     await context.close()
                     context = await browser.new_context(storage_state=AUTH_FILE)
@@ -384,7 +343,7 @@ class DoubaoTagger:
                     for s in stocks:
                         exclude_codes.append(s[0])
                         self.exclude_counter[s[0]] += 1
-                    print("⚠️ 本批次已加入隔离排查队列。", flush=True)
+                    print("⚠️ 本批次已加入隔离排查队列。")
 
                 # WAF 熔断深度休眠退避策略
                 if consecutive_failures > 0:

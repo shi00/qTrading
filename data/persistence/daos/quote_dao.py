@@ -5,7 +5,7 @@ import typing
 
 import pandas as pd
 
-from data.constants import attach_top_list_column_units
+from data.constants import MAJOR_INDICES, attach_top_list_column_units
 from data.persistence.models import (
     BlockTrade,
     DailyQuotes,
@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 _DEFAULT_SYNCED_TABLES: list[str] | None = None
 
 LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "block_trade"}
+
+FIXED_EXPECTED_TABLES: dict[str, int] = {
+    "index_daily": len(MAJOR_INDICES),
+    "index_dailybasic": len(MAJOR_INDICES),
+    "moneyflow_hsgt": 1,
+}
 
 _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
     {
@@ -710,6 +716,9 @@ class QuoteDao(BaseDao):
             "northbound_holding": 0.50,
             "limit_list": 0.30,
             "suspend_d": 0.10,
+            # tolerance values below are not used for expected count calculation
+            # (FIXED_EXPECTED_TABLES provides fixed expected counts instead),
+            # but they still affect low_frequency_tables classification (>=0.5 = not low-frequency)
             "index_daily": 0.95,
             "index_dailybasic": 0.95,
             "top_list": 0.30,
@@ -733,7 +742,7 @@ class QuoteDao(BaseDao):
                 continue
 
             quotes_count = table_counts.get("daily_quotes", {}).get(trade_date, 0)
-            quotes_ratio = quotes_count / expected_base if expected_base > 0 else 0
+            quotes_ratio = min(1.0, quotes_count / expected_base) if expected_base > 0 else 0
             quotes_passed = quotes_ratio >= config["quotes_tolerance_ratio"]
 
             result["tables"]["daily_quotes"] = {
@@ -748,9 +757,6 @@ class QuoteDao(BaseDao):
 
             reference_count = quotes_count if quotes_count > 0 else expected_base
 
-            total_ratio = quotes_ratio
-            valid_tables = 1
-
             LOW_FREQUENCY_THRESHOLD = 0.5
             low_frequency_tables = {t for t, tol in table_tolerance_map.items() if tol < LOW_FREQUENCY_THRESHOLD}
 
@@ -760,17 +766,22 @@ class QuoteDao(BaseDao):
 
                 count = table_counts.get(table, {}).get(trade_date, 0)
                 tolerance = table_tolerance_map.get(table, 0.80)
-                expected = int(reference_count * tolerance)
 
                 if table in low_frequency_tables:
                     result["tables"][table] = {
                         "count": count,
                         "expected": 0,
-                        "ratio": 1.0,
+                        "ratio": None,
                         "passed": True,
+                        "exempt": True,
                         "note": "低频事件表，不计入评分",
                     }
                     continue
+
+                if table in FIXED_EXPECTED_TABLES:
+                    expected = FIXED_EXPECTED_TABLES[table]
+                else:
+                    expected = int(reference_count * tolerance)
 
                 ratio = min(1.0, count / expected) if expected > 0 else 0
                 passed = count >= expected
@@ -782,25 +793,23 @@ class QuoteDao(BaseDao):
                     "passed": passed,
                 }
 
-                total_ratio += ratio
-                valid_tables += 1
-
                 if not passed:
                     result["issues"].append(f"{table}: {count}/{expected}")
 
-            if valid_tables > 0:
-                quality_weights = config.get("quality_weights", {})
-                total_weight = 0
-                weighted_score = 0
+            quality_weights = config.get("quality_weights", {})
+            total_weight = 0
+            weighted_score = 0
 
-                for table, info in result["tables"].items():
-                    if "ratio" in info:
-                        weight = quality_weights.get(table, 5)
-                        weighted_score += info["ratio"] * weight
-                        total_weight += weight
+            for table, info in result["tables"].items():
+                if info.get("exempt") or info.get("ratio") is None:
+                    continue
+                if "ratio" in info:
+                    weight = quality_weights.get(table, 5)
+                    weighted_score += info["ratio"] * weight
+                    total_weight += weight
 
-                if total_weight > 0:
-                    result["score"] = int(min(100, (weighted_score / total_weight) * 100))
+            if total_weight > 0:
+                result["score"] = int(min(100, (weighted_score / total_weight) * 100))
 
             results[trade_date] = result
 

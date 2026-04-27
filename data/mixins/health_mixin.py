@@ -76,7 +76,7 @@ def _compute_tier(
     if fin_fresh_ratio > 0.5:
         return 2
 
-    if lag_days <= 5 and fin_fresh_ratio >= 0.1:
+    if lag_days <= TIER_QUOTE_FRESHNESS_DAYS and fin_fresh_ratio >= 0.1:
         return 2
 
     return 1

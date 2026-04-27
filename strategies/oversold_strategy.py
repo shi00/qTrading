@@ -220,11 +220,10 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
             # Calculate QFQ Close (前复权收盘价)
             if "adj_factor" in df.columns:
-                latest_factor = pl.col("adj_factor").forward_fill().over("ts_code").last().over("ts_code")
-                qfq_expr = (
-                    pl.col("close")
-                    * (pl.col("adj_factor").forward_fill().over("ts_code").fill_null(latest_factor) / latest_factor)
-                ).alias("qfq_close")
+                ffilled = pl.col("adj_factor").forward_fill().over("ts_code")
+                latest_factor = ffilled.last().over("ts_code").fill_null(1.0)
+                safe_latest = pl.when(latest_factor == 0).then(1.0).otherwise(latest_factor)
+                qfq_expr = (pl.col("close") * (ffilled.fill_null(safe_latest) / safe_latest)).alias("qfq_close")
                 df_lazy = df_lazy.with_columns(qfq_expr)
             else:
                 df_lazy = df_lazy.with_columns(pl.col("close").alias("qfq_close"))
