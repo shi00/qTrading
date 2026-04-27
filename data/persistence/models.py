@@ -184,6 +184,7 @@ class SyncStatus(Base):
 class ScreeningHistory(Base):
     __tablename__ = "screening_history"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(16), nullable=False)
     trade_date = Column(Date, nullable=False)
     strategy_name = Column(String, nullable=False)
     ts_code = Column(String, nullable=False)
@@ -213,17 +214,18 @@ class ScreeningHistory(Base):
     ai_reason = Column(String)
     thinking = Column(String)
     prediction_result = Column(String)
+    params_snapshot = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint(
-            "trade_date",
-            "strategy_name",
+            "run_id",
             "ts_code",
-            name="uq_screening_history_date_strategy_code",
+            name="uq_screening_history_run_code",
         ),
         Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
         Index("idx_sh_date_code", "trade_date", "ts_code"),
+        Index("idx_sh_run_id", "run_id"),
     )
 
 

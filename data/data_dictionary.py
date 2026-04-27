@@ -412,6 +412,8 @@ TABLE_DEFINITIONS = {
             "t5_price": "col_t5_price",
             "t1_pct": "col_t1_pct",
             "t5_pct": "col_t5_pct",
+            "run_id": "col_run_id",
+            "params_snapshot": "col_params_snapshot",
         },
     },
     "sync_status": {

@@ -277,14 +277,15 @@ class TestCacheManager(TestDatabaseBase):
         from sqlalchemy import text
 
         sql = text("""INSERT INTO screening_history
-                 (trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
-                 VALUES (:trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
+                 (run_id, trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
+                 VALUES (:run_id, :trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
 
         async with self.cache.engine.begin() as conn:
             await conn.execute(
                 sql,
                 [
                     {
+                        "run_id": "RUN001",
                         "trade_date": datetime.date(2023, 1, 1),
                         "strategy_name": "value",
                         "ts_code": "000001.SZ",

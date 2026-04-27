@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 class ScreenerDao(BaseDao):
     @functools.cached_property
     def SH_BASE_COLS(self):
-        """Dynamically generate base columns excluding heavy fields like 'thinking'."""
-        cols = get_model_columns(ScreeningHistory, exclude={"updated_at", "created_at", "thinking"})
+        """Dynamically generate base columns excluding heavy fields like 'thinking' and 'params_snapshot'."""
+        cols = get_model_columns(ScreeningHistory, exclude={"updated_at", "created_at", "thinking", "params_snapshot"})
         return ", ".join(cols)
 
     @functools.cached_property
     def SH_FULL_COLS(self):
-        """Full columns including 'thinking' for detail views."""
-        return f"{self.SH_BASE_COLS}, thinking"
+        """Full columns including 'thinking' and 'params_snapshot' for detail views."""
+        return f"{self.SH_BASE_COLS}, thinking, params_snapshot"
 
     # --- Screening History ---
 
@@ -210,5 +210,5 @@ class ScreenerDao(BaseDao):
             df=df,
             table_name="screening_history",
             columns=all_cols,
-            pk_columns=["trade_date", "strategy_name", "ts_code"],
+            pk_columns=["run_id", "ts_code"],
         )

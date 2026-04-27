@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import logging
 import typing
 
@@ -264,6 +265,8 @@ class ReviewManager:
         strategy_name: str | None,
         df: pd.DataFrame,
         trade_date: datetime.date | datetime.datetime | pd.Timestamp | str | None = None,
+        run_id: str | None = None,
+        params_snapshot: str | None = None,
     ):
         """
         Save screening results to history for future review.
@@ -274,6 +277,9 @@ class ReviewManager:
             df: DataFrame of screening results.
             trade_date: The trading date being analyzed (not the current natural date).
                         If omitted, a single unique df["trade_date"] value may be used.
+            run_id: Unique identifier for this strategy execution run.
+                    If None, auto-generated from trade_date + strategy_name hash.
+            params_snapshot: JSON string of strategy parameters and AI prompt context.
         """
         if df is None or df.empty:
             return
@@ -299,6 +305,10 @@ class ReviewManager:
             raise ValueError(
                 "save_results requires an analysis trade_date or a single unique df['trade_date'] value",
             )
+
+        if run_id is None:
+            raw = f"{effective_date}|{strategy_name}"
+            run_id = hashlib.md5(raw.encode()).hexdigest()[:12].upper()
 
         # Helpers to safely extract fields
         def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):
@@ -339,34 +349,32 @@ class ReviewManager:
 
             records.append(
                 (
+                    run_id,
                     effective_date,
                     strategy_name,
                     ts_code,
                     _s(row, "name"),
                     _f(row, "close"),
                     _f(row, "pct_chg"),
-                    # Market data snapshot
                     _s(row, "industry"),
                     _f(row, "vol"),
                     _f(row, "amount"),
                     _f(row, "turnover_rate"),
-                    # Valuation snapshot
                     _f(row, "pe_ttm"),
                     _f(row, "pb"),
                     _f(row, "ps_ttm"),
                     _f(row, "dv_ttm"),
                     _f(row, "total_mv"),
                     _f(row, "circ_mv"),
-                    # Financial snapshot
                     _f(row, "roe"),
                     _f(row, "grossprofit_margin"),
                     _f(row, "debt_to_assets"),
                     _f(row, "or_yoy"),
                     _f(row, "netprofit_yoy"),
-                    # AI analysis
                     ai_score,
                     str(ai_reason),
                     str(thinking),
+                    params_snapshot,
                 ),
             )
 

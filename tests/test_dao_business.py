@@ -302,6 +302,7 @@ class TestScreenerDao:
         """保存并查询筛选历史"""
         records = [
             (
+                "RUN001",
                 "2024-03-21",
                 "oversold",
                 "000001.SZ",
@@ -326,6 +327,7 @@ class TestScreenerDao:
                 85,
                 "AI推荐理由",
                 "思考过程",
+                None,
             )
         ]
         await screener_dao.save_screening_results(records)
@@ -339,6 +341,7 @@ class TestScreenerDao:
         """获取历史树形数据"""
         records = [
             (
+                "RUN001",
                 "2024-03-21",
                 "oversold",
                 "000001.SZ",
@@ -363,8 +366,10 @@ class TestScreenerDao:
                 85,
                 "理由",
                 "思考",
+                None,
             ),
             (
+                "RUN001",
                 "2024-03-21",
                 "oversold",
                 "000002.SZ",
@@ -389,6 +394,7 @@ class TestScreenerDao:
                 80,
                 "理由",
                 "思考",
+                None,
             ),
         ]
         await screener_dao.save_screening_results(records)
@@ -402,6 +408,7 @@ class TestScreenerDao:
         """获取待复盘记录"""
         records = [
             (
+                "RUN001",
                 "2024-03-21",
                 "oversold",
                 "000001.SZ",
@@ -426,6 +433,7 @@ class TestScreenerDao:
                 85,
                 "理由",
                 "思考",
+                None,
             ),
         ]
         await screener_dao.save_screening_results(records)
@@ -437,6 +445,7 @@ class TestScreenerDao:
         """更新筛选表现"""
         records = [
             (
+                "RUN001",
                 "2024-03-21",
                 "oversold",
                 "000001.SZ",
@@ -461,6 +470,7 @@ class TestScreenerDao:
                 85,
                 "理由",
                 "思考",
+                None,
             ),
         ]
         await screener_dao.save_screening_results(records)
@@ -479,6 +489,7 @@ class TestScreenerDao:
         """获取学习样本"""
         records = [
             (
+                "RUN001",
                 "2024-03-20",
                 "oversold",
                 "000001.SZ",
@@ -503,6 +514,7 @@ class TestScreenerDao:
                 85,
                 "理由",
                 "思考",
+                None,
             ),
         ]
         await screener_dao.save_screening_results(records)
@@ -535,6 +547,7 @@ class TestScreenerDao:
             exclude={"id", "updated_at", "created_at", "t1_price", "t1_pct", "t5_price", "t5_pct", "prediction_result"},
         )
         expected_order = [
+            "run_id",
             "trade_date",
             "strategy_name",
             "ts_code",
@@ -559,11 +572,13 @@ class TestScreenerDao:
             "ai_score",
             "ai_reason",
             "thinking",
+            "params_snapshot",
         ]
         assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
 
         records = [
             (
+                "RUN001",
                 "2024-03-21",
                 "oversold",
                 "000001.SZ",
@@ -588,6 +603,7 @@ class TestScreenerDao:
                 85,
                 "AI推荐理由",
                 "思考过程",
+                None,
             ),
         ]
         await screener_dao.save_screening_results(records)
@@ -964,25 +980,29 @@ class TestScreenerDaoDynamicCols:
         assert "prediction_result" in col_list
 
     def test_sh_full_cols_includes_thinking(self):
-        """Verify SH_FULL_COLS includes 'thinking'"""
+        """Verify SH_FULL_COLS includes 'thinking' and 'params_snapshot'"""
         from data.persistence.daos.screener_dao import ScreenerDao
 
         dao = ScreenerDao.__new__(ScreenerDao)
         full_cols = dao.SH_FULL_COLS
 
         assert "thinking" in full_cols
-        assert full_cols.endswith(", thinking")
+        assert "params_snapshot" in full_cols
+        assert full_cols.endswith(", thinking, params_snapshot")
 
     def test_sh_base_cols_matches_model(self):
-        """Verify SH_BASE_COLS count matches ScreeningHistory columns minus 'thinking' and 'created_at'"""
+        """Verify SH_BASE_COLS count matches ScreeningHistory columns minus excluded fields"""
         from data.persistence.daos.screener_dao import ScreenerDao
-        from data.persistence.models import ScreeningHistory
+        from data.persistence.models import ScreeningHistory, get_model_columns
 
         dao = ScreenerDao.__new__(ScreenerDao)
         col_list = [c.strip() for c in dao.SH_BASE_COLS.split(",")]
 
-        expected_count = len(ScreeningHistory.__table__.columns) - 2
-        assert len(col_list) == expected_count
+        expected_cols = get_model_columns(
+            ScreeningHistory,
+            exclude={"updated_at", "created_at", "thinking", "params_snapshot"},
+        )
+        assert len(col_list) == len(expected_cols)
 
     def test_sh_base_cols_cached(self):
         """Verify cached_property only computes once"""

@@ -252,7 +252,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
             }
 
     class _FakeReviewManager:
-        async def save_results(self, strategy_name, result_df, trade_date=None):
+        async def save_results(self, strategy_name, result_df, trade_date=None, run_id=None, params_snapshot=None):
             holder["saved"] = (strategy_name, trade_date, result_df.copy())
 
     class _FakeTaskManager:
@@ -320,7 +320,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
             return {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
 
     class _FakeReviewManager:
-        async def save_results(self, strategy_name, result_df, trade_date=None):
+        async def save_results(self, strategy_name, result_df, trade_date=None, run_id=None, params_snapshot=None):
             holder["save_called"] = True
 
     class _FakeTaskManager:

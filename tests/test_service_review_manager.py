@@ -263,7 +263,7 @@ class TestSaveResults(unittest.TestCase):
             mock_screener_dao.save_screening_results.assert_called_once()
             call_args = mock_screener_dao.save_screening_results.call_args
             records = call_args[0][0]
-            saved_date = records[0][0]
+            saved_date = records[0][1]
             self.assertEqual(saved_date, analysis_date)
 
         asyncio.run(run_test())
@@ -780,7 +780,7 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
             await manager.save_results("test_strategy", self._make_mock_df(), trade_date=analysis_date)
             mock_screener_dao.save_screening_results.assert_called_once()
             records = mock_screener_dao.save_screening_results.call_args[0][0]
-            saved_date = records[0][0]
+            saved_date = records[0][1]
             self.assertEqual(saved_date, analysis_date)
             self.assertNotEqual(saved_date, datetime.date.today())
 
@@ -825,7 +825,7 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
         async def run_test():
             await manager.save_results("test_strategy", self._make_mock_df(), trade_date=friday_date)
             records = mock_screener_dao.save_screening_results.call_args[0][0]
-            saved_date = records[0][0]
+            saved_date = records[0][1]
             self.assertEqual(saved_date, friday_date)
             self.assertEqual(saved_date.weekday(), 4)
 
@@ -850,7 +850,7 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
         async def run_test():
             await manager.save_results("test_strategy", df)
             records = mock_screener_dao.save_screening_results.call_args[0][0]
-            self.assertEqual(records[0][0], datetime.date(2024, 12, 31))
+            self.assertEqual(records[0][1], datetime.date(2024, 12, 31))
 
         asyncio.run(run_test())
 
@@ -874,6 +874,206 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
             with self.assertRaises(ValueError):
                 await manager.save_results("test_strategy", df, trade_date=datetime.date(2024, 12, 31))
             mock_screener_dao.save_screening_results.assert_not_called()
+
+        asyncio.run(run_test())
+
+
+class TestSaveResultsRunIdReproducibility(unittest.TestCase):
+    """测试 run_id + params_snapshot 确保筛选历史可复现性"""
+
+    def _make_mock_df(self, ts_codes=None):
+        if ts_codes is None:
+            ts_codes = ["000001.SZ"]
+        n = len(ts_codes)
+        return pd.DataFrame(
+            {
+                "ts_code": ts_codes,
+                "name": ["测试"] * n,
+                "close": [10.5] * n,
+                "pct_chg": [2.5] * n,
+                "industry": ["银行"] * n,
+                "vol": [1000000] * n,
+                "amount": [10500000] * n,
+                "turnover_rate": [1.5] * n,
+                "pe_ttm": [6.5] * n,
+                "pb": [0.8] * n,
+                "ps_ttm": [1.2] * n,
+                "dv_ttm": [3.5] * n,
+                "total_mv": [1000000] * n,
+                "circ_mv": [800000] * n,
+                "roe": [12.5] * n,
+                "grossprofit_margin": [45.0] * n,
+                "debt_to_assets": [60.0] * n,
+                "or_yoy": [10.0] * n,
+                "netprofit_yoy": [15.0] * n,
+                "ai_score": [85] * n,
+                "ai_reason": ["技术突破"] * n,
+                "thinking": ["看好后市"] * n,
+            }
+        )
+
+    def _setup_mocks(self, mock_config, mock_api, mock_cache):
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock()
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache.return_value = mock_cache_instance
+        return mock_screener_dao
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_run_id_in_records(self, mock_config, mock_api, mock_cache):
+        """save_results 应在每条记录中包含 run_id"""
+        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
+        manager = ReviewManager()
+
+        async def run_test():
+            await manager.save_results(
+                "test_strategy",
+                self._make_mock_df(["000001.SZ", "000002.SZ"]),
+                trade_date=datetime.date(2024, 12, 31),
+                run_id="ABC123DEF456",
+            )
+            records = mock_dao.save_screening_results.call_args[0][0]
+            self.assertEqual(len(records), 2)
+            for rec in records:
+                self.assertEqual(rec[0], "ABC123DEF456")
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_auto_generated_run_id_when_missing(self, mock_config, mock_api, mock_cache):
+        """未传入 run_id 时应自动生成基于 trade_date + strategy_name 的哈希"""
+        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
+        manager = ReviewManager()
+
+        async def run_test():
+            await manager.save_results(
+                "test_strategy",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+            )
+            records = mock_dao.save_screening_results.call_args[0][0]
+            run_id = records[0][0]
+            self.assertIsNotNone(run_id)
+            self.assertIsInstance(run_id, str)
+            self.assertGreater(len(run_id), 0)
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_same_date_strategy_produces_same_auto_run_id(self, mock_config, mock_api, mock_cache):
+        """同一 trade_date + strategy_name 自动生成相同的 run_id（向后兼容）"""
+        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
+        manager = ReviewManager()
+
+        async def run_test():
+            await manager.save_results(
+                "test_strategy",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+            )
+            records1 = mock_dao.save_screening_results.call_args[0][0]
+            run_id1 = records1[0][0]
+
+            mock_dao.save_screening_results.reset_mock()
+            await manager.save_results(
+                "test_strategy",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+            )
+            records2 = mock_dao.save_screening_results.call_args[0][0]
+            run_id2 = records2[0][0]
+
+            self.assertEqual(run_id1, run_id2)
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_explicit_run_id_allows_multiple_runs(self, mock_config, mock_api, mock_cache):
+        """显式传入不同 run_id 允许同一日同一策略保存多次运行结果"""
+        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
+        manager = ReviewManager()
+
+        async def run_test():
+            await manager.save_results(
+                "test_strategy",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+                run_id="RUN_001",
+            )
+            records1 = mock_dao.save_screening_results.call_args[0][0]
+            self.assertEqual(records1[0][0], "RUN_001")
+
+            mock_dao.save_screening_results.reset_mock()
+            await manager.save_results(
+                "test_strategy",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+                run_id="RUN_002",
+            )
+            records2 = mock_dao.save_screening_results.call_args[0][0]
+            self.assertEqual(records2[0][0], "RUN_002")
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_params_snapshot_in_records(self, mock_config, mock_api, mock_cache):
+        """save_results 应在每条记录末尾包含 params_snapshot"""
+        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
+        manager = ReviewManager()
+
+        async def run_test():
+            await manager.save_results(
+                "oversold",
+                self._make_mock_df(["000001.SZ", "000002.SZ"]),
+                trade_date=datetime.date(2024, 12, 31),
+                run_id="SNAP_TEST",
+                params_snapshot='{"strategy": "oversold", "params": {"rsi_threshold": 30}}',
+            )
+            records = mock_dao.save_screening_results.call_args[0][0]
+            self.assertEqual(len(records), 2)
+            for rec in records:
+                self.assertEqual(rec[-1], '{"strategy": "oversold", "params": {"rsi_threshold": 30}}')
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_different_strategies_different_auto_run_id(self, mock_config, mock_api, mock_cache):
+        """不同策略名在相同日期应产生不同的自动 run_id"""
+        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
+        manager = ReviewManager()
+
+        async def run_test():
+            await manager.save_results(
+                "oversold",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+            )
+            records1 = mock_dao.save_screening_results.call_args[0][0]
+            run_id1 = records1[0][0]
+
+            mock_dao.save_screening_results.reset_mock()
+            await manager.save_results(
+                "momentum",
+                self._make_mock_df(),
+                trade_date=datetime.date(2024, 12, 31),
+            )
+            records2 = mock_dao.save_screening_results.call_args[0][0]
+            run_id2 = records2[0][0]
+
+            self.assertNotEqual(run_id1, run_id2)
 
         asyncio.run(run_test())
 
