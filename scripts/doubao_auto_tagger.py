@@ -64,6 +64,14 @@ class DoubaoTagger:
         self.dry_run = dry_run
         self._concepts_cleared = False
 
+    @staticmethod
+    def _is_valid_auth_snapshot(snapshot) -> bool:
+        return (
+            isinstance(snapshot, dict)
+            and isinstance(snapshot.get("cookies"), list)
+            and isinstance(snapshot.get("origins"), list)
+        )
+
     async def initialize(self):
         if self.dao is None:
             self.cm = CacheManager()
@@ -93,6 +101,27 @@ class DoubaoTagger:
         await self.dao.clear_all_doubao_concepts()  # type: ignore[attr-defined]
         self._concepts_cleared = True
         logger.info("[DoubaoTagger] Existing Doubao concepts cleared after page became interactive.")
+
+    async def _refresh_auth_state(self, context) -> bool:
+        """Persist the latest storage state without clobbering a known-good auth file."""
+        try:
+            snapshot = await context.storage_state()
+        except Exception as ex:
+            logger.warning("[DoubaoTagger] Failed to export auth snapshot: %s", ex)
+            return False
+
+        if not self._is_valid_auth_snapshot(snapshot):
+            logger.warning("[DoubaoTagger] Skipping auth state refresh due to invalid snapshot structure.")
+            return False
+
+        try:
+            with open(AUTH_FILE, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+            logger.info("[DoubaoTagger] Auth state refreshed: %s", AUTH_FILE)
+            return True
+        except OSError as ex:
+            logger.warning("[DoubaoTagger] Failed to persist auth state to %s: %s", AUTH_FILE, ex)
+            return False
 
     async def _find_chat_input(self, page: "Page", timeout_ms: int = CHAT_INPUT_WAIT_MS):
         """Find the chat input with ordered selector fallbacks for DOM changes."""
@@ -285,6 +314,7 @@ class DoubaoTagger:
                 # 浏览器内存清理 (保留原有优秀机制)
                 if batch_count > 0 and batch_count % 15 == 0:
                     print("🧹 清理浏览器缓存与僵尸内存，重建上下文...")
+                    await self._refresh_auth_state(context)
                     await page.close()
                     await context.close()
                     context = await browser.new_context(storage_state=AUTH_FILE)
