@@ -850,13 +850,14 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         if self._quality_tier is None:
             await self._assign_basic_tier()
 
-        if self._quality_tier <= 1:
+        quality_tier = self._quality_tier
+        if quality_tier is not None and quality_tier <= 1:
             try:
                 await self.check_data_health()
             except Exception as e:
                 logger.warning(
                     f"[DataProcessor] Deep health check during screening prep failed, "
-                    f"keeping fast-path tier={self._quality_tier}: {e}",
+                    f"keeping fast-path tier={quality_tier}: {e}",
                 )
 
         context = {}
