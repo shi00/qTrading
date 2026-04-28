@@ -239,6 +239,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             progress_callback=progress_callback,
         )
         self._quality_tier = None
+        self._health_cache = {"time": 0, "data": None}
         return result
 
     async def repair_financial_data(self, ts_codes, progress_callback=None):

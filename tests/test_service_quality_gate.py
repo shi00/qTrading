@@ -321,7 +321,7 @@ class TestComputeTier(unittest.TestCase):
 
         self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=200), 2)
 
-    def test_fast_path_uses_fin_lag_over_ratio(self):
+    def test_fast_path_low_ratio_with_fin_lag_no_gold(self):
         from data.mixins.health_mixin import _compute_tier
 
         self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.3, missing_critical=False, fin_lag_days=10), 2)

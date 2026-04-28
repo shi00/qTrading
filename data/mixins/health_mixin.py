@@ -122,7 +122,8 @@ class HealthCheckMixin:
           - CRITICAL (0): No sync_status records at all, or daily_quotes never synced.
           - BRONZE  (1): daily_quotes exists but is stale (> TIER_QUOTE_FRESHNESS_DAYS lag).
           - SILVER  (2): All critical tables are fresh. Sufficient for MA/RSI strategies.
-          - GOLD    (3): All critical tables fresh AND financial_reports recent (< TIER_FINANCIAL_FRESHNESS_DAYS).
+                         (GOLD is unreachable in fast-path because field-level fundamental
+                          completeness is unavailable; use check_data_health for GOLD.)
         """
         try:
             sync_records = await self.cache.get_sync_status()
