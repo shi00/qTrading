@@ -48,7 +48,7 @@ class LocalModelManager:
     _instance: Optional["LocalModelManager"] = None
     _initialized: bool = False
     _lock = threading.Lock()
-    _llm: Optional["Llama"] = None
+    _llm: Any | None = None
     _model_path: str = ""
     _model_md5: str = ""
     _model_stat: tuple = (0, 0)
@@ -206,7 +206,7 @@ class LocalModelManager:
                 self._is_loading = False
 
     @staticmethod
-    def _create_llama_instance(model_path: str, config: dict[str, Any]) -> "Llama":
+    def _create_llama_instance(model_path: str, config: dict[str, Any]) -> Any:
         """
         Sync factory method to create Llama instance with config.
         """
@@ -214,7 +214,7 @@ class LocalModelManager:
             f"[LocalModel] Initializing Llama in thread: {threading.current_thread().name}",
         )
 
-        return Llama(
+        return Llama(  # type: ignore[operator]
             model_path=model_path,
             n_threads=config.get("n_threads", 4),
             n_batch=config.get("n_batch", 1024),

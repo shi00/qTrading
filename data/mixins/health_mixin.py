@@ -689,8 +689,11 @@ class HealthCheckMixin:
                         fin_date_str = fin_info.iloc[0].get("last_data_date", "")
                         if fin_date_str:
                             fin_dt = parse_date(str(fin_date_str), "%Y%m%d")
-                            fin_dt_date = fin_dt.date() if hasattr(fin_dt, "date") else fin_dt
-                            fin_lag_days = (end_date_obj - fin_dt_date).days
+                            fin_dt_date = fin_dt.date() if isinstance(fin_dt, datetime.datetime) else fin_dt
+                            end_as_date = (
+                                end_date_obj.date() if isinstance(end_date_obj, datetime.datetime) else end_date_obj
+                            )
+                            fin_lag_days = (end_as_date - fin_dt_date).days
                             fin_recency_ok = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS
             except Exception:
                 pass

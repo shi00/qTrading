@@ -88,13 +88,13 @@ class ReviewManager:
                 if len(df_quotes) > t0_idx + 1:  # type: ignore
                     t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
                     t1_pct = float(t1_row["pct_chg"])
-                    if "close" in t1_row.index and pd.notna(t1_row["close"]):
+                    if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
                         t1_price = float(t1_row["close"])
 
                 if len(df_quotes) > t0_idx + 5:  # type: ignore
                     t5_row = df_quotes.iloc[t0_idx + 5]  # type: ignore
                     t5_pct = float(t5_row["pct_chg"])
-                    if "close" in t5_row.index and pd.notna(t5_row["close"]):
+                    if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
 
                 if t1_pct is not None:

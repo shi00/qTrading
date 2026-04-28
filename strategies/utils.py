@@ -45,3 +45,4 @@ class StrategyContext(TypedDict, total=False):
     block_trade: pd.DataFrame
     trade_date: datetime.date | datetime.datetime | str
     _task_id: str
+    _dependency_status: dict[str, Any]
