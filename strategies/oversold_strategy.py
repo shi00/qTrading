@@ -26,6 +26,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                      "golden pit" rebounds from "falling knife" traps.
     """
 
+    required_context_keys = ["screening_data"]
+    required_tables = ["daily_quotes"]
+
     @property
     def required_history_days(self):
         return ConfigHandler.get_init_history_years() * 250
@@ -125,6 +128,17 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         Phase 1: RSI math filter (Polars) → top N oversold candidates
         Phase 2: AI analysis (via Mixin) → scored and ranked results
         """
+        dep_result = self.check_dependencies(context)
+        if dep_result["status"] == "unready":
+            logger.warning(
+                f"[Strategy] {self.name}: dependencies unready, "
+                f"missing_keys={dep_result['missing_keys']}, "
+                f"missing_tables={dep_result['missing_tables']}"
+            )
+            return pd.DataFrame()
+        elif dep_result["status"] == "degraded":
+            logger.info(f"[Strategy] {self.name}: running in degraded mode, empty_keys={dep_result['empty_keys']}")
+
         # --- Read dynamic params from UI (with fallback) ---
         params = context.get("params", {})
         rsi_period = params.get("rsi_period", 14)
@@ -166,10 +180,24 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             logger.error("[OversoldStrategy] DataProcessor not found in context.")
             return pd.DataFrame()
 
-        # Prepare Date Range
-        # RSI needs at least N+1 days; EMA initialization needs even more for smooth stability.
-        # Fetching 120 trading days ensures even a 30-day RSI is fully stabilized.
-        end_date_obj = await dp.trade_calendar.get_latest_trade_date()
+        context_trade_date = context.get("trade_date")
+        if context_trade_date:
+            if isinstance(context_trade_date, str):
+                for fmt in ("%Y%m%d", "%Y-%m-%d"):
+                    try:
+                        end_date_obj = datetime.datetime.strptime(context_trade_date, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    logger.warning(f"[OversoldStrategy] Cannot parse trade_date: {context_trade_date}")
+                    return pd.DataFrame()
+            elif isinstance(context_trade_date, datetime.date):
+                end_date_obj = context_trade_date
+            else:
+                end_date_obj = context_trade_date
+        else:
+            end_date_obj = await dp.trade_calendar.get_latest_trade_date()
         if not end_date_obj:
             logger.warning(
                 "[OversoldStrategy] No trade date found. Is the calendar service initialized?",

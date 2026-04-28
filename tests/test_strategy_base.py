@@ -395,5 +395,92 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(fmt_val(0.0), "0")
 
 
+class TestDependencyCheck(unittest.TestCase):
+    def test_northbound_declares_dependencies(self):
+        s = NorthboundStrategy()
+        self.assertIn("northbound_data", s.required_context_keys)
+        self.assertIn("northbound_holding", s.required_tables)
+
+    def test_institutional_declares_dependencies(self):
+        s = InstitutionalStrategy()
+        self.assertIn("top_list", s.required_context_keys)
+        self.assertIn("top_list", s.required_tables)
+
+    def test_block_trade_declares_dependencies(self):
+        s = BlockTradeStrategy()
+        self.assertIn("block_trade", s.required_context_keys)
+        self.assertIn("block_trade", s.required_tables)
+
+    def test_oversold_declares_dependencies(self):
+        s = OversoldStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("daily_quotes", s.required_tables)
+        self.assertNotIn("data_processor", s.required_context_keys)
+
+    def test_check_dependencies_missing_key(self):
+        s = NorthboundStrategy()
+        result = s.check_dependencies({})
+        self.assertEqual(result["status"], "unready")
+        self.assertIn("northbound_data", result["missing_keys"])
+
+    def test_check_dependencies_empty_key(self):
+        s = NorthboundStrategy()
+        result = s.check_dependencies({"northbound_data": pd.DataFrame()})
+        self.assertEqual(result["status"], "degraded")
+        self.assertIn("northbound_data", result["empty_keys"])
+
+    def test_check_dependencies_ok(self):
+        s = NorthboundStrategy()
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ratio": [5.0]})
+        result = s.check_dependencies({"northbound_data": df})
+        self.assertEqual(result["status"], "ready")
+
+    def test_value_strategy_declares_fundamental_deps(self):
+        s = ValueStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("fundamental_screening_data", s.required_context_keys)
+        self.assertIn("daily_quotes", s.required_tables)
+        self.assertIn("daily_indicators", s.required_tables)
+
+    def test_polars_base_default_deps(self):
+        s = TechnicalBreakoutStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("daily_quotes", s.required_tables)
+
+    def test_check_dependencies_table_missing(self):
+        s = ValueStrategy()
+        result = s.check_dependencies({"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})})
+        self.assertEqual(result["status"], "unready")
+        self.assertIn("fundamental_screening_data", result["missing_keys"])
+
+    def test_ai_selection_declares_dependencies(self):
+        from strategies.ai_strategy import AISelectionStrategy
+
+        s = AISelectionStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("daily_quotes", s.required_tables)
+        self.assertIn("daily_indicators", s.required_tables)
+
+    def test_growth_strategy_declares_deps(self):
+        s = GrowthStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("fundamental_screening_data", s.required_context_keys)
+
+    def test_dividend_strategy_declares_deps(self):
+        s = DividendStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("fundamental_screening_data", s.required_context_keys)
+
+    def test_cashflow_strategy_declares_deps(self):
+        s = CashFlowStrategy()
+        self.assertIn("screening_data", s.required_context_keys)
+        self.assertIn("fundamental_screening_data", s.required_context_keys)
+
+    def test_check_dependencies_returns_missing_tables(self):
+        s = NorthboundStrategy()
+        result = s.check_dependencies({})
+        self.assertIn("northbound_holding", result["missing_tables"])
+
+
 if __name__ == "__main__":
     unittest.main()

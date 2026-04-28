@@ -10,6 +10,8 @@ from strategies.utils import fmt_val
 class ValueStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    required_context_keys = ["screening_data", "fundamental_screening_data"]
+    required_tables = ["daily_quotes", "daily_indicators"]
 
     def __init__(self):
         super().__init__("strategy_value_name", "strategy_value_desc")
@@ -88,6 +90,8 @@ class ValueStrategy(PolarsBaseStrategy):
 class GrowthStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    required_context_keys = ["screening_data", "fundamental_screening_data"]
+    required_tables = ["daily_quotes", "daily_indicators"]
 
     def __init__(self):
         super().__init__("strategy_growth_name", "strategy_growth_desc")
@@ -156,6 +160,8 @@ class GrowthStrategy(PolarsBaseStrategy):
 class DividendStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    required_context_keys = ["screening_data", "fundamental_screening_data"]
+    required_tables = ["daily_quotes", "daily_indicators"]
 
     def __init__(self):
         super().__init__("strategy_dividend_name", "strategy_dividend_desc")
@@ -197,6 +203,8 @@ class DividendStrategy(PolarsBaseStrategy):
 class CashFlowStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    required_context_keys = ["screening_data", "fundamental_screening_data"]
+    required_tables = ["daily_quotes", "daily_indicators"]
 
     def __init__(self):
         super().__init__("strategy_cashflow_name", "strategy_cashflow_desc")

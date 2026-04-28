@@ -177,6 +177,7 @@ class SyncStatus(Base):
     last_data_date = Column(Date)
     record_count = Column(Integer)
     status = Column(String)
+    last_result_status = Column(String)
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
@@ -214,6 +215,7 @@ class ScreeningHistory(Base):
     ai_reason = Column(String)
     thinking = Column(String)
     prediction_result = Column(String)
+    review_status = Column(String, server_default="PENDING")
     params_snapshot = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 

@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 @register_strategy("ai_active")
 class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
+    required_context_keys = ["screening_data"]
+    required_tables = ["daily_quotes", "daily_indicators"]
+
     @property
     def required_history_days(self):
         from utils.config_handler import ConfigHandler
@@ -27,6 +30,15 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
     @require_quality(QualityTier.SILVER)
     async def filter(self, context: StrategyContext):
         if context is None:
+            return pd.DataFrame()
+
+        dep_result = self.check_dependencies(context)
+        if dep_result["status"] == "unready":
+            logger.warning(
+                f"[Strategy] {self.name}: dependencies unready, "
+                f"missing_keys={dep_result['missing_keys']}, "
+                f"missing_tables={dep_result['missing_tables']}"
+            )
             return pd.DataFrame()
 
         # Support both keys (test uses screening_data, legacy uses data)

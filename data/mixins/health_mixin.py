@@ -14,9 +14,11 @@ import time
 from typing import TYPE_CHECKING
 
 from data.constants import (
+    CRITICAL_EMPTY_TABLES,
     HEALTH_THRESHOLD_BREADTH,
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
+    SYNC_RESULT_EMPTY,
     TIER_FINANCIAL_FRESHNESS_DAYS,
     TIER_FUNDAMENTAL_HIGH_THRESHOLD,
     TIER_FUNDAMENTAL_LOW_THRESHOLD,
@@ -200,12 +202,26 @@ class HealthCheckMixin:
 
             if days_lag <= TIER_QUOTE_FRESHNESS_DAYS:
                 stale_critical = []
+                empty_critical = []
                 for table in critical_tables:
-                    if table == "daily_quotes":
+                    info = sync_dict.get(table, {})
+                    if not info:
+                        stale_critical.append(table)
                         continue
 
-                    info = sync_dict.get(table, {})
-                    last_date = info.get("last_data_date", "") if info else ""
+                    last_date = info.get("last_data_date", "")
+                    result_status = info.get("last_result_status", "")
+                    record_count = info.get("record_count", 0)
+
+                    if table in CRITICAL_EMPTY_TABLES:
+                        if (
+                            result_status == SYNC_RESULT_EMPTY
+                            or info.get("status") == "empty"
+                            or (record_count is not None and record_count == 0)
+                        ):
+                            empty_critical.append(table)
+                            continue
+
                     if last_date:
                         try:
                             table_lag = (get_now() - parse_date(str(last_date), "%Y%m%d")).days
@@ -213,6 +229,16 @@ class HealthCheckMixin:
                                 stale_critical.append(table)
                         except (ValueError, TypeError):
                             stale_critical.append(table)
+                    else:
+                        stale_critical.append(table)
+
+                if empty_critical:
+                    self._quality_tier = 0
+                    logger.warning(
+                        f"[DataProcessor] FastCheck | ⚠️ Critical tables with EMPTY data: {empty_critical}. "
+                        f"Tier forced to CRITICAL (0)",
+                    )
+                    return
 
                 missing_critical = bool(stale_critical)
 
@@ -420,7 +446,8 @@ class HealthCheckMixin:
                     if latest_td:
                         fc = await self.cache.get_field_completeness(latest_td)
                         if fc:
-                            avg_fund = sum(fc.values()) / len(fc)
+                            valid_values = [v for v in fc.values() if v is not None]
+                            avg_fund = sum(valid_values) / len(valid_values) if valid_values else None
                 except Exception as e:
                     logger.debug(f"[DataProcessor] HealthCheck | Field completeness check skipped: {e}")
                 try:
@@ -609,9 +636,10 @@ class HealthCheckMixin:
                 logger.debug(f"[DataProcessor] QualityScan | Fundamental completeness check skipped: {e}")
 
             avg_fundamental = (
-                sum(fundamental_completeness.values()) / len(fundamental_completeness)
-                if fundamental_completeness
-                else 0.0
+                sum(v for v in fundamental_completeness.values() if v is not None)
+                / len([v for v in fundamental_completeness.values() if v is not None])
+                if fundamental_completeness and any(v is not None for v in fundamental_completeness.values())
+                else None
             )
 
             # 6. Multi-table Coverage (financial_reports recency)
@@ -632,8 +660,14 @@ class HealthCheckMixin:
 
             # 7. Composite Score & Tier
             quote_score = avg_continuity * 100
-            fundamental_score = avg_fundamental * 100
-            composite_score = quote_score * 0.5 + fundamental_score * 0.3 + (100.0 if fin_recency_ok else 0.0) * 0.2
+            if avg_fundamental is not None:
+                fundamental_score = avg_fundamental * 100
+            else:
+                fundamental_score = None
+            if fundamental_score is not None:
+                composite_score = quote_score * 0.5 + fundamental_score * 0.3 + (100.0 if fin_recency_ok else 0.0) * 0.2
+            else:
+                composite_score = quote_score * 0.7 + (100.0 if fin_recency_ok else 0.0) * 0.3
 
             tier = _compute_tier(
                 lag_days=int(avg_recency),

@@ -82,9 +82,12 @@ class ReviewManager:
 
                 # Check T+1
                 t1_pct: float | None = None
+                t1_price: float | None = None
                 if len(df_quotes) > t0_idx + 1:  # type: ignore
                     t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
                     t1_pct = float(t1_row["pct_chg"])
+                    if "close" in t1_row.index and pd.notna(t1_row["close"]):
+                        t1_price = float(t1_row["close"])
 
                 # Check T+5 (optional, simpler logic here just for T+1 focus first)
 
@@ -137,7 +140,7 @@ class ReviewManager:
                     elif alpha < -0.5:
                         label = "LOSS"
 
-                    await self._update_result(row["id"], t1_pct, label, index_pct)
+                    await self._update_result(row["id"], t1_pct, label, index_pct, t1_price)
                     updated_count += 1
                     logger.info(
                         f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}",
@@ -244,9 +247,10 @@ class ReviewManager:
         pct: typing.Any,
         label: typing.Any,
         index_pct: typing.Any = 0.0,
+        t1_price: typing.Any = None,
     ):
-        """Update DB with result. index_pct reserved for future alpha storage."""
-        await self.cache.screener_dao.update_prediction_result(record_id, pct, label)
+        """Update DB with T+1 result, including t1_price and review_status."""
+        await self.cache.screener_dao.update_prediction_result(record_id, pct, label, t1_price)
 
     @staticmethod
     def _normalize_trade_date(value: typing.Any) -> datetime.date:

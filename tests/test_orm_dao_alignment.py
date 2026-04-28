@@ -281,7 +281,17 @@ class TestOrmDaoAlignment:
         model_cols = get_model_columns(ScreeningHistory)
         dao_cols = extract_cols_from_method(ScreenerDao.save_screening_results)
         assert dao_cols is not None
-        excluded = {"id", "updated_at", "created_at", "t1_price", "t1_pct", "t5_price", "t5_pct", "prediction_result"}
+        excluded = {
+            "id",
+            "updated_at",
+            "created_at",
+            "t1_price",
+            "t1_pct",
+            "t5_price",
+            "t5_pct",
+            "prediction_result",
+            "review_status",
+        }
         expected = model_cols - excluded
         missing = expected - dao_cols
         assert not missing, f"save_screening_results missing: {missing}"

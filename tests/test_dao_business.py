@@ -484,7 +484,9 @@ class TestScreenerDao:
         history = await screener_dao.get_screening_history()
         record_id = history["id"].iloc[0]
 
-        updates = [(10.5, 5.0, 11.0, 10.0, record_id)]
+        from data.constants import REVIEW_STATUS_T1_DONE
+
+        updates = [(10.5, 5.0, 11.0, 10.0, REVIEW_STATUS_T1_DONE, record_id)]
         await screener_dao.update_screening_performance(updates)
 
         result = await screener_dao.get_screening_history()
@@ -534,6 +536,167 @@ class TestScreenerDao:
         assert len(wins) == 1
         assert wins["prediction_result"].iloc[0] == "WIN"
 
+    async def test_save_screening_results_sets_review_status_pending(self, screener_dao, clean_db):
+        """保存筛选结果时，review_status 应自动设为 PENDING"""
+        from data.constants import REVIEW_STATUS_PENDING
+
+        records = [
+            (
+                "RUN001",
+                "2024-03-21",
+                "oversold",
+                "000001.SZ",
+                "平安银行",
+                10.0,
+                2.0,
+                "银行",
+                1000000,
+                10000000,
+                1.5,
+                5.0,
+                0.5,
+                1.0,
+                2.0,
+                1000000000.0,
+                500000000.0,
+                12.0,
+                30.0,
+                80.0,
+                5.0,
+                8.0,
+                85,
+                "理由",
+                "思考",
+                None,
+            ),
+        ]
+        await screener_dao.save_screening_results(records)
+
+        history = await screener_dao.get_screening_history()
+        assert history["review_status"].iloc[0] == REVIEW_STATUS_PENDING
+
+    async def test_update_prediction_result_sets_review_status_t1_done(self, screener_dao, clean_db):
+        """更新预测结果时，review_status 应设为 T1_DONE"""
+        from data.constants import REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
+
+        records = [
+            (
+                "RUN001",
+                "2024-03-21",
+                "oversold",
+                "000001.SZ",
+                "平安银行",
+                10.0,
+                2.0,
+                "银行",
+                1000000,
+                10000000,
+                1.5,
+                5.0,
+                0.5,
+                1.0,
+                2.0,
+                1000000000.0,
+                500000000.0,
+                12.0,
+                30.0,
+                80.0,
+                5.0,
+                8.0,
+                85,
+                "理由",
+                "思考",
+                None,
+            ),
+        ]
+        await screener_dao.save_screening_results(records)
+
+        history = await screener_dao.get_screening_history()
+        record_id = history["id"].iloc[0]
+        assert history["review_status"].iloc[0] == REVIEW_STATUS_PENDING
+
+        await screener_dao.update_prediction_result(record_id, 5.0, "WIN", t1_price=10.5)
+
+        history_updated = await screener_dao.get_screening_history()
+        assert history_updated["review_status"].iloc[0] == REVIEW_STATUS_T1_DONE
+        assert history_updated["t1_price"].iloc[0] == 10.5
+
+    async def test_get_pending_reviews_filters_by_review_status(self, screener_dao, clean_db):
+        """get_pending_reviews 应只返回 review_status 为 PENDING 或 NULL 的记录"""
+
+        records_pending = [
+            (
+                "RUN001",
+                "2024-03-21",
+                "oversold",
+                "000001.SZ",
+                "平安银行",
+                10.0,
+                2.0,
+                "银行",
+                1000000,
+                10000000,
+                1.5,
+                5.0,
+                0.5,
+                1.0,
+                2.0,
+                1000000000.0,
+                500000000.0,
+                12.0,
+                30.0,
+                80.0,
+                5.0,
+                8.0,
+                85,
+                "理由",
+                "思考",
+                None,
+            ),
+        ]
+        await screener_dao.save_screening_results(records_pending)
+
+        records_done = [
+            (
+                "RUN002",
+                "2024-03-21",
+                "oversold",
+                "000002.SZ",
+                "万科A",
+                15.0,
+                3.0,
+                "房地产",
+                2000000,
+                20000000,
+                2.0,
+                6.0,
+                0.6,
+                1.5,
+                2.5,
+                2000000000.0,
+                1000000000.0,
+                15.0,
+                35.0,
+                75.0,
+                6.0,
+                9.0,
+                80,
+                "理由2",
+                "思考2",
+                None,
+            ),
+        ]
+        await screener_dao.save_screening_results(records_done)
+
+        history = await screener_dao.get_screening_history()
+        done_id = history[history["ts_code"] == "000002.SZ"]["id"].iloc[0]
+        await screener_dao.update_prediction_result(done_id, 3.0, "LOSS")
+
+        pending = await screener_dao.get_pending_reviews()
+        pending_codes = [r["ts_code"] for r in pending]
+        assert "000001.SZ" in pending_codes
+        assert "000002.SZ" not in pending_codes
+
     async def test_get_screening_data_complex_join(self, screener_dao, clean_db, setup_stock_data):
         """测试复杂 JOIN 查询获取筛选数据"""
         result = await screener_dao.get_screening_data(trade_date="2024-03-21")
@@ -550,7 +713,17 @@ class TestScreenerDao:
 
         all_cols = get_model_columns(
             ScreeningHistory,
-            exclude={"id", "updated_at", "created_at", "t1_price", "t1_pct", "t5_price", "t5_pct", "prediction_result"},
+            exclude={
+                "id",
+                "updated_at",
+                "created_at",
+                "t1_price",
+                "t1_pct",
+                "t5_price",
+                "t5_pct",
+                "prediction_result",
+                "review_status",
+            },
         )
         expected_order = [
             "run_id",
@@ -627,13 +800,14 @@ class TestScreenerDao:
         assert result["thinking"].iloc[0] == "思考过程"
 
     async def test_get_fundamental_screening_data_includes_suspended(self, screener_dao, clean_db, setup_stock_data):
-        """基本面筛选数据应包含无行情/停牌股票"""
+        """基本面筛选数据应包含无行情/停牌股票，且包含is_tradable列"""
         result = await screener_dao.get_fundamental_screening_data(trade_date="2024-03-21")
 
         assert not result.empty
         ts_codes = set(result["ts_code"].tolist())
         assert "000001.SZ" in ts_codes
         assert "000002.SZ" in ts_codes
+        assert "is_tradable" in result.columns
 
     async def test_get_field_completeness(self, quote_dao, clean_db, setup_stock_data):
         """字段级基本面完整度查询"""
@@ -985,6 +1159,83 @@ class TestSyncDao:
         await sync_dao.clear_step4_sync_status()
         completed = await sync_dao.get_completed_step4_stocks(sync_version=1)
         assert len(completed) == 0
+
+    async def test_sync_status_last_result_status_has_data(self, sync_dao, clean_db):
+        """成功同步有数据时，last_result_status 应为 HAS_DATA"""
+        from data.constants import SYNC_RESULT_HAS_DATA
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5000,
+            status="success",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_result_status"] == SYNC_RESULT_HAS_DATA
+
+    async def test_sync_status_last_result_status_empty(self, sync_dao, clean_db):
+        """成功同步空数据时，last_result_status 应为 EMPTY"""
+        from data.constants import SYNC_RESULT_EMPTY
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=0,
+            status="success",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_result_status"] == SYNC_RESULT_EMPTY
+
+    async def test_sync_status_last_result_status_fetch_failed(self, sync_dao, clean_db):
+        """获取失败时，last_result_status 应为 FETCH_FAILED"""
+        from data.constants import SYNC_RESULT_FETCH_FAILED
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=0,
+            status="fetch_failed",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_result_status"] == SYNC_RESULT_FETCH_FAILED
+
+    async def test_sync_status_last_result_status_save_failed(self, sync_dao, clean_db):
+        """保存失败时，last_result_status 应为 SAVE_FAILED"""
+        from data.constants import SYNC_RESULT_SAVE_FAILED
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=0,
+            status="save_failed",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_result_status"] == SYNC_RESULT_SAVE_FAILED
+
+    async def test_sync_status_empty_status_updates_date(self, sync_dao, clean_db):
+        """empty 状态应更新 last_data_date 和 record_count"""
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 21),
+            record_count=5000,
+            status="success",
+        )
+
+        await sync_dao.update_sync_status(
+            table_name="daily_quotes",
+            last_data_date=datetime.date(2024, 3, 22),
+            record_count=0,
+            status="empty",
+        )
+
+        result = await sync_dao.get_sync_status(table_name="daily_quotes")
+        assert result["last_data_date"] == datetime.date(2024, 3, 22)
+        assert result["record_count"] == 0
+        assert result["status"] == "empty"
 
 
 class TestScreenerDaoDynamicCols:

@@ -408,6 +408,7 @@ TABLE_DEFINITIONS = {
             "ai_reason": "col_ai_reason",
             "strategy_name": "col_strategy_name",
             "prediction_result": "col_prediction_result",
+            "review_status": "col_review_status",
             "t1_price": "col_t1_price",
             "t5_price": "col_t5_price",
             "t1_pct": "col_t1_pct",
@@ -423,6 +424,7 @@ TABLE_DEFINITIONS = {
             "last_sync_date": "col_last_sync_date",
             "last_data_date": "col_last_data_date",
             "record_count": "col_record_count",
+            "last_result_status": "col_last_result_status",
         },
     },
     "stock_sync_status": {

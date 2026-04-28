@@ -39,9 +39,19 @@ def register_strategy(key: str):
 
 
 class BaseStrategy(ABC):
-    # Declare min trading days of history required for this strategy to run correctly.
-    # Subclasses override as needed. 0 = snapshot-only, no historical dependency.
     required_history_days: int = 0
+
+    required_context_keys: list[str] = []
+    required_tables: list[str] = []
+
+    CONTEXT_KEY_TABLE_MAP: dict[str, str] = {
+        "northbound_data": "northbound_holding",
+        "moneyflow_data": "moneyflow_daily",
+        "top_list": "top_list",
+        "block_trade": "block_trade",
+        "screening_data": "daily_quotes",
+        "fundamental_screening_data": "daily_indicators",
+    }
 
     def __init__(self, name_key: str, desc_key: str):
         self._name_key = name_key
@@ -85,6 +95,59 @@ class BaseStrategy(ABC):
         Default: returns empty list (no tunable parameters).
         """
         return []
+
+    def check_dependencies(self, context: StrategyContext) -> dict[str, Any]:
+        """
+        Validate strategy dependencies against the provided context.
+        Returns a dict with:
+          - 'ready': bool — True if all required dependencies are present
+          - 'status': 'ready' | 'degraded' | 'unready'
+          - 'missing_keys': list of missing context keys
+          - 'missing_tables': list of missing table names
+          - 'empty_keys': list of context keys present but with empty data
+        """
+        missing_keys = []
+        missing_tables = []
+        empty_keys = []
+
+        for key in self.required_context_keys:
+            data = context.get(key)
+            if data is None:
+                missing_keys.append(key)
+                table_name = self.CONTEXT_KEY_TABLE_MAP.get(key)
+                if table_name and table_name not in missing_tables:
+                    missing_tables.append(table_name)
+            elif hasattr(data, "empty") and data.empty:
+                empty_keys.append(key)
+
+        for table in self.required_tables:
+            if table not in missing_tables:
+                found = False
+                for key, mapped_table in self.CONTEXT_KEY_TABLE_MAP.items():
+                    if mapped_table == table:
+                        data = context.get(key)
+                        if data is not None and not (hasattr(data, "empty") and data.empty):
+                            found = True
+                            break
+                        elif data is None and key not in missing_keys:
+                            missing_keys.append(key)
+                if not found and table not in missing_tables:
+                    missing_tables.append(table)
+
+        if missing_keys:
+            status = "unready"
+        elif empty_keys:
+            status = "degraded"
+        else:
+            status = "ready"
+
+        return {
+            "ready": status == "ready",
+            "status": status,
+            "missing_keys": missing_keys,
+            "missing_tables": missing_tables,
+            "empty_keys": empty_keys,
+        }
 
     @abstractmethod
     async def filter(self, context: StrategyContext):

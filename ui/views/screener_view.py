@@ -1269,6 +1269,7 @@ class ScreenerView(ft.Container):
             # History-specific: hide verbose/review-only fields
             "thinking",
             "prediction_result",
+            "review_status",
             "created_at",
             "t1_price",
             "t1_pct",

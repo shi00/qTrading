@@ -861,39 +861,73 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 )
 
         context = {}
-        # Decorator handles exception logging. Exceptions will bubble up to ViewModel.
+        diagnostics = {
+            "quality_tier": self._quality_tier,
+            "trade_date": None,
+            "base_complete": False,
+            "strategy_ready": False,
+            "table_status": {},
+        }
 
-        # 1. Main Screening Data (Quotes + Indicators)
-        # Resolve the business trade_date from cache and validate it against screening data.
         trade_date = await self.cache.get_latest_trade_date()
         screening_data = await self.get_screening_data(trade_date)
         resolved_trade_date = self._resolve_screening_trade_date(trade_date, screening_data)
+
+        if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
+            suspended_count = int((~screening_data["is_tradable"]).sum())
+            screening_data = screening_data[screening_data["is_tradable"]].copy()
+            if suspended_count > 0:
+                diagnostics["suspended_filtered"] = suspended_count
+        elif screening_data is not None and not screening_data.empty and "is_tradable" not in screening_data.columns:
+            logger.warning(
+                "[DataProcessor] is_tradable column missing from screening_data; suspended stocks will NOT be filtered"
+            )
+
         context["screening_data"] = screening_data
         context["trade_date"] = resolved_trade_date
+        diagnostics["trade_date"] = resolved_trade_date
+
+        base_complete = screening_data is not None and not screening_data.empty
+        diagnostics["base_complete"] = base_complete
 
         fundamental_data = await self.get_fundamental_screening_data(resolved_trade_date)
         if fundamental_data is not None and not fundamental_data.empty:
+            if "is_tradable" in fundamental_data.columns:
+                fundamental_data = fundamental_data[fundamental_data["is_tradable"]].copy()
             context["fundamental_screening_data"] = fundamental_data
+            diagnostics["table_status"]["fundamental_screening_data"] = {
+                "ready": not fundamental_data.empty,
+                "rows": len(fundamental_data),
+            }
+        else:
+            diagnostics["table_status"]["fundamental_screening_data"] = {"ready": False, "rows": 0}
 
-        # 2. Auxiliary Data
-        # Northbound
-        nb = await self.cache.get_northbound(trade_date=resolved_trade_date)
-        if nb is not None:
-            context["northbound_data"] = nb
+        diagnostics["table_status"]["screening_data"] = {
+            "ready": base_complete,
+            "rows": len(screening_data) if screening_data is not None else 0,
+        }
 
-        # Moneyflow
-        mf = await self.cache.get_moneyflow(trade_date=resolved_trade_date)
-        if mf is not None:
-            context["moneyflow_data"] = mf
+        auxiliary_tables = {
+            "northbound_data": self.cache.get_northbound,
+            "moneyflow_data": self.cache.get_moneyflow,
+            "top_list": self.cache.get_top_list,
+            "block_trade": self.cache.get_block_trade,
+        }
 
-        # Top List (LHB)
-        lhb = await self.cache.get_top_list(trade_date=resolved_trade_date)
-        if lhb is not None:
-            context["top_list"] = lhb
+        all_aux_ready = True
+        for key, fetch_func in auxiliary_tables.items():
+            data = await fetch_func(trade_date=resolved_trade_date)
+            if data is not None:
+                context[key] = data
+                is_empty = hasattr(data, "empty") and data.empty
+                diagnostics["table_status"][key] = {"ready": not is_empty, "rows": len(data) if not is_empty else 0}
+                if is_empty:
+                    all_aux_ready = False
+            else:
+                diagnostics["table_status"][key] = {"ready": False, "rows": 0}
+                all_aux_ready = False
 
-        # Block Trade
-        blk = await self.cache.get_block_trade(trade_date=resolved_trade_date)
-        if blk is not None:
-            context["block_trade"] = blk
+        diagnostics["strategy_ready"] = base_complete and all_aux_ready
+        context["_diagnostics"] = diagnostics
 
         return context

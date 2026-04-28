@@ -13,7 +13,14 @@ import threading
 
 import pandas as pd
 
-from data.constants import MAJOR_INDICES
+from data.constants import (
+    CRITICAL_EMPTY_TABLES,
+    MAJOR_INDICES,
+    SYNC_RESULT_EMPTY,
+    SYNC_RESULT_FETCH_FAILED,
+    SYNC_RESULT_HAS_DATA,
+    SYNC_RESULT_SAVE_FAILED,
+)
 from data.sync.base import ISyncStrategy, SyncResult
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
@@ -471,13 +478,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
               - 'saved': number of rows saved (0 if empty, None if failed)
               - 'fetched': number of rows fetched from API
               - 'success': True if save succeeded (including empty data), False if failed
+              - 'result_status': SYNC_RESULT_* constant indicating the outcome
             """
             df = data_map.get(key)
 
             if df is None:
                 if key in error_map:
                     logger.warning(f"[HistoricalSync] DaySync | ⚠️ Fetch failed for {key}, skipping sync_status update")
-                return {"saved": None, "fetched": 0, "success": False}
+                return {"saved": None, "fetched": 0, "success": False, "result_status": SYNC_RESULT_FETCH_FAILED}
 
             fetched_count = len(df)
 
@@ -494,7 +502,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     else:
                         row_count = await method(df)
                     saved = row_count if row_count is not None else len(df)
-                    return {"saved": saved, "fetched": fetched_count, "success": True}
+                    return {
+                        "saved": saved,
+                        "fetched": fetched_count,
+                        "success": True,
+                        "result_status": SYNC_RESULT_HAS_DATA,
+                    }
                 except Exception as e:
                     if critical:
                         logger.error(
@@ -505,11 +518,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     logger.warning(
                         f"[HistoricalSync] DaySync | ⚠️ Non-critical save {key} failed: {e}, skipping sync_status update",
                     )
-                    return {"saved": None, "fetched": fetched_count, "success": False}
+                    return {
+                        "saved": None,
+                        "fetched": fetched_count,
+                        "success": False,
+                        "result_status": SYNC_RESULT_SAVE_FAILED,
+                    }
 
             if df is not None and df.empty:
                 logger.debug(f"[HistoricalSync] DaySync | {key} returned empty data, will update sync_status with 0")
-            return {"saved": 0, "fetched": fetched_count, "success": True}
+            return {"saved": 0, "fetched": fetched_count, "success": True, "result_status": SYNC_RESULT_EMPTY}
 
         # 1. Quotes (Critical)
         quotes_rows = await save_if_ok("quotes", cache.save_daily_quotes, critical=True)
@@ -614,10 +632,35 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | None):
             saved = result.get("saved") if isinstance(result, dict) else result
+            result_status = result.get("result_status") if isinstance(result, dict) else None
             if saved is not None:
-                await cache.update_sync_status(table_name, trade_date, saved or 0)
+                effective_status = "success"
+                if table_name in CRITICAL_EMPTY_TABLES and result_status == SYNC_RESULT_EMPTY:
+                    effective_status = "empty"
+                    logger.warning(
+                        f"[HistoricalSync] DaySync | ⚠️ Critical table {table_name} returned EMPTY for {trade_date}, "
+                        f"marking sync_status as 'empty' instead of 'success'"
+                    )
+                await cache.update_sync_status(
+                    table_name,
+                    trade_date,
+                    saved or 0,
+                    status=effective_status,
+                    last_result_status=result_status,
+                )
             else:
-                logger.debug(f"[HistoricalSync] Skipping sync_status for {table_name} due to fetch/save failure")
+                is_save_failed = result_status == SYNC_RESULT_SAVE_FAILED
+                await cache.update_sync_status(
+                    table_name,
+                    trade_date or datetime.date.today(),
+                    0,
+                    status="save_failed" if is_save_failed else "fetch_failed",
+                    last_result_status=result_status
+                    or (SYNC_RESULT_SAVE_FAILED if is_save_failed else SYNC_RESULT_FETCH_FAILED),
+                )
+                logger.debug(
+                    f"[HistoricalSync] Recorded {'save_failed' if is_save_failed else 'fetch_failed'} for {table_name}"
+                )
 
         def verify_data_integrity(key: str, result_data: typing.Any):
             if not isinstance(result_data, dict):

@@ -1053,6 +1053,7 @@
     "col_pledge_count": "Pledge Count",
     "col_pledge_ratio": "Pledge Ratio",
     "col_prediction_result": "Prediction Result",
+    "col_review_status": "Review Status",
     "col_pre_close": "Pre Close",
     "col_pretrade_date": "Pretrade Date",
     "col_proc": "Proc",
@@ -1066,6 +1067,7 @@
     "col_ratio": "Ratio",
     "col_reason": "Reason",
     "col_record_count": "Record Count",
+    "col_last_result_status": "Sync Result",
     "col_record_date": "Record Date",
     "col_report_type": "Report Type",
     "col_rest_pledge": "Rest Pledge",
@@ -1140,5 +1142,16 @@
     "tushare_verify_failed": "Token verification failed",
     "tushare_no_token": "No Token yet?",
     "tushare_register": "Register",
-    "tushare_token_required": "Please enter Token"
+    "tushare_token_required": "Please enter Token",
+    "sync_result_has_data": "Has Data",
+    "sync_result_empty": "Empty",
+    "sync_result_fetch_failed": "Fetch Failed",
+    "sync_result_save_failed": "Save Failed",
+    "review_status_pending": "Pending Review",
+    "review_status_t1_done": "T+1 Reviewed",
+    "review_status_completed": "Review Completed",
+    "health_empty_critical": "Critical data table is empty",
+    "health_suspended_filtered": "Filtered {count} suspended stocks",
+    "strategy_dep_unready": "Strategy dependencies not ready",
+    "strategy_dep_degraded": "Strategy running in degraded mode"
 }

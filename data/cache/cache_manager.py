@@ -444,12 +444,14 @@ class CacheManager:
         last_data_date: str,
         record_count: int,
         status: str = "success",
+        last_result_status: str | None = None,
     ):
         return await self.sync_dao.update_sync_status(
             table_name,
             last_data_date,
             record_count,
             status,
+            last_result_status,
         )
 
     async def get_sync_status(self, table_name: str | None = None):
@@ -741,7 +743,7 @@ class CacheManager:
     async def get_pending_reviews(self):
         return await self.screener_dao.get_pending_reviews()
 
-    async def update_screening_performance(self, updates: dict):
+    async def update_screening_performance(self, updates: list[tuple]):
         return await self.screener_dao.update_screening_performance(updates)
 
     async def get_learning_examples(self, limit: int | None = 3):

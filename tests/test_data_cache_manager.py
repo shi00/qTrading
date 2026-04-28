@@ -306,7 +306,9 @@ class TestCacheManager(TestDatabaseBase):
         self.assertEqual(len(pending), 1)
         record_id = pending[0]["id"]
 
-        updates = [(11.0, 10.0, 12.0, 20.0, record_id)]
+        from data.constants import REVIEW_STATUS_T1_DONE
+
+        updates = [(11.0, 10.0, 12.0, 20.0, REVIEW_STATUS_T1_DONE, record_id)]
         await self.cache.update_screening_performance(updates)
 
         history_updated = await self.cache.get_screening_history("value")

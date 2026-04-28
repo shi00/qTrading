@@ -41,6 +41,8 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
 
     required_quality_tier: QualityTier = QualityTier.BRONZE
     requires_fundamental_coverage: bool = False
+    required_context_keys: list[str] = ["screening_data"]
+    required_tables: list[str] = ["daily_quotes"]
 
     async def filter(self, context: StrategyContext):
         _check_tier(
@@ -48,6 +50,19 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             self.required_quality_tier,
             f"{self.__class__.__name__}.filter",
         )
+
+        dep_result = self.check_dependencies(context)
+        if dep_result["status"] == "unready":
+            logger.warning(
+                f"[Strategy] {self.name}: dependencies unready, "
+                f"missing_keys={dep_result['missing_keys']}, "
+                f"missing_tables={dep_result['missing_tables']}"
+            )
+            context["_dependency_status"] = dep_result
+            return pd.DataFrame()
+        elif dep_result["status"] == "degraded":
+            logger.info(f"[Strategy] {self.name}: running in degraded mode, empty_keys={dep_result['empty_keys']}")
+            context["_dependency_status"] = dep_result
 
         if self.requires_fundamental_coverage:
             df = context.get("fundamental_screening_data")

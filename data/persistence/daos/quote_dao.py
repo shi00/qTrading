@@ -833,10 +833,15 @@ class QuoteDao(BaseDao):
 
         Returns a dict mapping field names (roe, or_yoy, etc.) to their non-null ratio
         across all listed stocks. Returns empty dict on failure.
+
+        For historical dates where daily_indicators data is unavailable,
+        indicator fields are excluded from the result to avoid conflating
+        "not yet synced" with "field missing".
         """
         field_sql = """
             SELECT
                 COUNT(*) AS total,
+                COUNT(i.trade_date) AS indicators_available,
                 COUNT(roe) AS roe_count,
                 COUNT(or_yoy) AS or_yoy_count,
                 COUNT(netprofit_yoy) AS netprofit_yoy_count,
@@ -846,6 +851,7 @@ class QuoteDao(BaseDao):
                 COUNT(debt_to_assets) AS debt_to_assets_count
             FROM (
                 SELECT b.ts_code,
+                       i.trade_date AS indicator_date,
                        i.pe_ttm, i.pb, i.dv_ttm,
                        f.roe, f.or_yoy, f.netprofit_yoy, f.debt_to_assets
                 FROM stock_basic b
@@ -863,9 +869,19 @@ class QuoteDao(BaseDao):
                 row_f = df_fields.iloc[0]
                 total = int(row_f["total"]) if row_f["total"] else 0
                 if total > 0:
+                    indicators_available = int(row_f["indicators_available"]) if row_f["indicators_available"] else 0
+                    indicator_coverage = indicators_available / total if total > 0 else 0.0
                     result = {}
-                    for col in ["roe", "or_yoy", "netprofit_yoy", "dv_ttm", "pe_ttm", "pb", "debt_to_assets"]:
+                    fin_fields = ["roe", "or_yoy", "netprofit_yoy", "debt_to_assets"]
+                    ind_fields = ["dv_ttm", "pe_ttm", "pb"]
+                    for col in fin_fields:
                         result[col] = float(row_f[f"{col}_count"]) / total
+                    if indicator_coverage >= 0.5:
+                        for col in ind_fields:
+                            result[col] = float(row_f[f"{col}_count"]) / total
+                    else:
+                        for col in ind_fields:
+                            result[col] = None
                     return result
         except Exception as e:
             logger.debug(f"[QuoteDao] get_field_completeness failed for {trade_date}: {e}")
