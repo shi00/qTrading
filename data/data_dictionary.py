@@ -42,11 +42,6 @@ COMMON_COLUMNS = {
     "turnover_rate_f": "col_turnover_rate_f",
     "volume_ratio": "col_volume_ratio",
     "adj_factor": "col_adj_factor",
-    # Adjusted Prices
-    "qfq_open": "col_qfq_open",
-    "qfq_high": "col_qfq_high",
-    "qfq_low": "col_qfq_low",
-    "qfq_close": "col_qfq_close",
     # Valuation
     "pe": "col_pe",
     "pe_ttm": "col_pe_ttm",

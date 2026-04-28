@@ -19,6 +19,9 @@ from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
+_CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
+_CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
+
 
 class SchedulerService:
     """
@@ -66,10 +69,22 @@ class SchedulerService:
             },
             timezone="Asia/Shanghai",
         )
-        self._last_update_date = None
-        self._last_pred_date = None
+        self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
+        self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
         self._initialized = True
         logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
+
+    @staticmethod
+    def _persist_run_date(config_key: str, value: str | None):
+        ConfigHandler.save_config({config_key: value or ""})
+
+    def _mark_daily_update_done(self, today_str: str):
+        self._last_update_date = today_str
+        self._persist_run_date(_CFG_LAST_DAILY_UPDATE, today_str)
+
+    def _mark_nightly_prediction_done(self, today_str: str):
+        self._last_pred_date = today_str
+        self._persist_run_date(_CFG_LAST_NIGHTLY_PREDICTION, today_str)
 
     def start(self):
         """Start the scheduler"""
@@ -283,7 +298,7 @@ class SchedulerService:
                 tm.update_progress(task_id, current / total if total else 0, msg)
 
             result = await processor.run_daily_update(progress_callback=_progress)
-            self._last_update_date = today_str
+            self._mark_daily_update_done(today_str)
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
             if result is None:
@@ -401,9 +416,9 @@ class SchedulerService:
 
                 run_id = _uuid.uuid4().hex[:16]
                 await rm.save_results("AI_Auto_Nightly", result_df, trade_date=analysis_trade_date, run_id=run_id)
-                self._last_pred_date = today_str
+                self._mark_nightly_prediction_done(today_str)
                 return I18n.get("sched_pred_done_found", count=len(result_df))
-            self._last_pred_date = today_str
+            self._mark_nightly_prediction_done(today_str)
             return I18n.get("sched_pred_done_empty")
 
         TaskManager().submit_task(

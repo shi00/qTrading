@@ -83,13 +83,19 @@ class ReviewManager:
                 # Check T+1
                 t1_pct: float | None = None
                 t1_price: float | None = None
+                t5_pct: float | None = None
+                t5_price: float | None = None
                 if len(df_quotes) > t0_idx + 1:  # type: ignore
                     t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
                     t1_pct = float(t1_row["pct_chg"])
                     if "close" in t1_row.index and pd.notna(t1_row["close"]):
                         t1_price = float(t1_row["close"])
 
-                # Check T+5 (optional, simpler logic here just for T+1 focus first)
+                if len(df_quotes) > t0_idx + 5:  # type: ignore
+                    t5_row = df_quotes.iloc[t0_idx + 5]  # type: ignore
+                    t5_pct = float(t5_row["pct_chg"])
+                    if "close" in t5_row.index and pd.notna(t5_row["close"]):
+                        t5_price = float(t5_row["close"])
 
                 if t1_pct is not None:
                     index_code = ConfigHandler.get_config(
@@ -140,10 +146,20 @@ class ReviewManager:
                     elif alpha < -0.5:
                         label = "LOSS"
 
-                    await self._update_result(row["id"], t1_pct, label, index_pct, t1_price)
+                    await self._update_result(
+                        row["id"],
+                        t1_pct,
+                        label,
+                        index_pct=index_pct,
+                        t1_price=t1_price,
+                        t5_pct=t5_pct,
+                        t5_price=t5_price,
+                        alpha=alpha,
+                    )
                     updated_count += 1
                     logger.info(
-                        f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}",
+                        f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}"
+                        f", T+5={t5_pct if t5_pct is not None else 'N/A'}",
                     )
 
             except Exception as e:
@@ -192,6 +208,7 @@ class ReviewManager:
                         {
                             "code": row["ts_code"],
                             "name": row["name"],
+                            "alpha": row["alpha"],
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "reason": str(row["ai_reason"])[:50]
@@ -210,6 +227,7 @@ class ReviewManager:
                         {
                             "code": row["ts_code"],
                             "name": row["name"],
+                            "alpha": row["alpha"],
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "reason": str(row["ai_reason"])[:50]
@@ -228,12 +246,18 @@ class ReviewManager:
         if wins:
             xml += "  [复盘参考 - 正向样本]\n"
             for w in wins:
-                xml += f"  - {w['code']} ({w['name']}): 次日 {w['pct']:+.1f}%，当时归因摘要: {w['reason'] or '无'}\n"
+                xml += (
+                    f"  - {w['code']} ({w['name']}): Alpha {w['alpha']:+.1f}%，次日 {w['pct']:+.1f}%，"
+                    f"当时归因摘要: {w['reason'] or '无'}\n"
+                )
 
         if losses:
             xml += "  [复盘参考 - 负向样本]\n"
             for loss in losses:
-                xml += f"  - {loss['code']} ({loss['name']}): 次日 {loss['pct']:+.1f}%，当时归因摘要: {loss['reason'] or '无'}\n"
+                xml += (
+                    f"  - {loss['code']} ({loss['name']}): Alpha {loss['alpha']:+.1f}%，次日 {loss['pct']:+.1f}%，"
+                    f"当时归因摘要: {loss['reason'] or '无'}\n"
+                )
 
         if not wins and not losses:
             xml += "  暂无可用历史复盘样本。\n"
@@ -248,9 +272,21 @@ class ReviewManager:
         label: typing.Any,
         index_pct: typing.Any = 0.0,
         t1_price: typing.Any = None,
+        t5_pct: typing.Any = None,
+        t5_price: typing.Any = None,
+        alpha: typing.Any = None,
     ):
-        """Update DB with T+1 result, including t1_price and review_status."""
-        await self.cache.screener_dao.update_prediction_result(record_id, pct, label, t1_price)
+        """Update DB with T+1/T+5 review metrics and review_status."""
+        await self.cache.screener_dao.update_prediction_result(
+            record_id,
+            pct,
+            label,
+            t1_price,
+            t5_pct=t5_pct,
+            t5_price=t5_price,
+            index_pct=index_pct,
+            alpha=alpha,
+        )
 
     @staticmethod
     def _normalize_trade_date(value: typing.Any) -> datetime.date:

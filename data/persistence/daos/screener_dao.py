@@ -3,7 +3,7 @@ import logging
 
 import pandas as pd
 
-from data.constants import REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
+from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
 from data.persistence.models import ScreeningHistory, get_model_columns
 
 from .base_dao import BaseDao
@@ -66,24 +66,29 @@ class ScreenerDao(BaseDao):
     async def get_pending_reviews(self):
         sql = f"""
             SELECT {self.SH_BASE_COLS} FROM screening_history
-            WHERE review_status = $1 OR review_status IS NULL
+            WHERE review_status IN ($1, $2) OR review_status IS NULL
             ORDER BY created_at DESC LIMIT 500
         """
-        df = await self._read_db(sql, (REVIEW_STATUS_PENDING,))
+        df = await self._read_db(sql, (REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
         if df is None or df.empty:
             return []
         return df.to_dict("records")
 
-    async def update_screening_performance(self, updates: list[tuple]):
-        if not updates:
-            return
-        sql = "UPDATE screening_history SET t1_price = $1, t1_pct = $2, t5_price = $3, t5_pct = $4, review_status = $5 WHERE id = $6"
-        await self._write_db(sql, updates, is_many=True)
-
     async def get_learning_examples(self, limit: int | None = 3):
-
-        sql_win = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='WIN' ORDER BY t1_pct DESC LIMIT $1"
-        sql_loss = f"SELECT {self.SH_BASE_COLS} FROM screening_history WHERE prediction_result='LOSS' ORDER BY t1_pct ASC LIMIT $1"
+        sql_win = f"""
+            SELECT {self.SH_BASE_COLS}
+            FROM screening_history
+            WHERE prediction_result='WIN' AND alpha IS NOT NULL
+            ORDER BY alpha DESC, t1_pct DESC
+            LIMIT $1
+        """
+        sql_loss = f"""
+            SELECT {self.SH_BASE_COLS}
+            FROM screening_history
+            WHERE prediction_result='LOSS' AND alpha IS NOT NULL
+            ORDER BY alpha ASC, t1_pct ASC
+            LIMIT $1
+        """
 
         wins = await self._read_db(sql_win, (limit,))
         losses = await self._read_db(sql_loss, (limit,))
@@ -223,11 +228,11 @@ class ScreenerDao(BaseDao):
             SELECT id, trade_date, ts_code, ai_score, ai_reason
             FROM screening_history
             WHERE trade_date >= $1
-              AND (review_status = $2 OR review_status IS NULL)
+              AND (review_status IN ($2, $3) OR review_status IS NULL)
               AND ai_score > 0
             ORDER BY trade_date DESC
         """
-        df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING))
+        df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
         return df if df is not None else pd.DataFrame()
 
     async def get_learning_context(self, limit: int = 3, is_win: bool = True):
@@ -235,27 +240,46 @@ class ScreenerDao(BaseDao):
         order = "DESC" if is_win else "ASC"
 
         sql = f"""
-            SELECT ts_code, name, t1_pct, ai_score, ai_reason
+            SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
             FROM screening_history
-            WHERE prediction_result = $1 AND t1_pct IS NOT NULL
-            ORDER BY t1_pct {order}
+            WHERE prediction_result = $1 AND alpha IS NOT NULL
+            ORDER BY alpha {order}, t1_pct {order}
             LIMIT $2
         """
         df = await self._read_db(sql, (label, limit))
         return df if df is not None else pd.DataFrame()
 
-    async def update_prediction_result(self, record_id: int, pct: float, label: str, t1_price: float | None = None):
-        """Update DB with T+1 result, including t1_price and review_status transition."""
-        if t1_price is not None:
-            sql = """UPDATE screening_history
-                     SET "t1_pct"=$1, "prediction_result"=$2, "t1_price"=$3, "review_status"=$4
-                     WHERE "id"=$5"""
-            await self._write_db(sql, (pct, label, t1_price, REVIEW_STATUS_T1_DONE, record_id), is_many=False)
-        else:
-            sql = """UPDATE screening_history
-                     SET "t1_pct"=$1, "prediction_result"=$2, "review_status"=$3
-                     WHERE "id"=$4"""
-            await self._write_db(sql, (pct, label, REVIEW_STATUS_T1_DONE, record_id), is_many=False)
+    async def update_prediction_result(
+        self,
+        record_id: int,
+        pct: float,
+        label: str,
+        t1_price: float | None = None,
+        *,
+        t5_pct: float | None = None,
+        t5_price: float | None = None,
+        index_pct: float | None = None,
+        alpha: float | None = None,
+    ):
+        """Update review metrics and advance review_status according to available horizons."""
+        review_status = REVIEW_STATUS_COMPLETED if t5_pct is not None else REVIEW_STATUS_T1_DONE
+        sql = """
+            UPDATE screening_history
+            SET "t1_pct"=$1,
+                "prediction_result"=$2,
+                "t1_price"=$3,
+                "t5_pct"=$4,
+                "t5_price"=$5,
+                "index_pct"=$6,
+                "alpha"=$7,
+                "review_status"=$8
+            WHERE "id"=$9
+        """
+        await self._write_db(
+            sql,
+            (pct, label, t1_price, t5_pct, t5_price, index_pct, alpha, review_status, record_id),
+            is_many=False,
+        )
 
     async def save_screening_results(self, records: list):
         if not records:
@@ -271,6 +295,8 @@ class ScreenerDao(BaseDao):
                 "t1_pct",
                 "t5_price",
                 "t5_pct",
+                "index_pct",
+                "alpha",
                 "prediction_result",
                 "review_status",
             },

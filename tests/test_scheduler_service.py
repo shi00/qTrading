@@ -347,3 +347,44 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
     with pytest.raises(RuntimeError, match="missing trade_date"):
         await holder["factory"]("task-id")
     assert holder["save_called"] is False
+
+
+def test_scheduler_loads_persisted_idempotency_dates(monkeypatch):
+    """重建调度器时应从配置恢复最近执行日期。"""
+    import utils.scheduler_service as sched_mod
+
+    sched_mod.SchedulerService._reset_singleton()
+
+    values = {
+        "scheduler_last_daily_update": "20260428",
+        "scheduler_last_nightly_prediction": "20260427",
+    }
+    monkeypatch.setattr(
+        sched_mod.ConfigHandler, "get_setting", staticmethod(lambda key, default=None: values.get(key, default))
+    )
+
+    service = sched_mod.SchedulerService()
+
+    assert service._last_update_date == "20260428"
+    assert service._last_pred_date == "20260427"
+
+
+def test_scheduler_marks_run_dates_and_persists(monkeypatch):
+    """任务完成后应同时更新内存态和持久化配置。"""
+    import utils.scheduler_service as sched_mod
+
+    sched_mod.SchedulerService._reset_singleton()
+    saved = []
+    monkeypatch.setattr(sched_mod.ConfigHandler, "get_setting", staticmethod(lambda key, default=None: default))
+    monkeypatch.setattr(
+        sched_mod.ConfigHandler, "save_config", staticmethod(lambda payload: saved.append(payload) or True)
+    )
+
+    service = sched_mod.SchedulerService()
+    service._mark_daily_update_done("20260428")
+    service._mark_nightly_prediction_done("20260428")
+
+    assert service._last_update_date == "20260428"
+    assert service._last_pred_date == "20260428"
+    assert {"scheduler_last_daily_update": "20260428"} in saved
+    assert {"scheduler_last_nightly_prediction": "20260428"} in saved

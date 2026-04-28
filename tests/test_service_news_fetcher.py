@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.external.news_fetcher import NewsFetcher
+from data.external.news_fetcher import NewsFetcher, _run_with_python_string_storage
 
 
 class TestGetStockNews(unittest.TestCase):
@@ -344,6 +344,22 @@ class TestNewsFetcherEdgeCases(unittest.TestCase):
             self.assertEqual(len(result), 1)
 
         asyncio.run(run_test())
+
+    def test_run_with_python_string_storage_restores_global_option(self):
+        """全局 pandas string_storage 应在调用后恢复。"""
+        original = pd.options.mode.string_storage
+        pd.options.mode.string_storage = "pyarrow"
+
+        def _fetcher():
+            self.assertEqual(pd.options.mode.string_storage, "python")
+            return "ok"
+
+        try:
+            result = _run_with_python_string_storage(_fetcher)
+            self.assertEqual(result, "ok")
+            self.assertEqual(pd.options.mode.string_storage, "pyarrow")
+        finally:
+            pd.options.mode.string_storage = original
 
 
 if __name__ == "__main__":

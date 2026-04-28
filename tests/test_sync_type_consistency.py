@@ -65,6 +65,11 @@ class TestSyncTypeConsistency:
         assert "get_now()" in source, "HolderSyncStrategy should use get_now() instead of datetime.date.today()"
         assert "datetime.date.today()" not in source, "HolderSyncStrategy should not use datetime.date.today()"
 
+    def test_historical_sync_uses_get_now_instead_of_date_today(self):
+        source = inspect.getsource(HistoricalSyncStrategy)
+        assert "get_now()" in source, "HistoricalSyncStrategy should use get_now() instead of datetime.date.today()"
+        assert "datetime.date.today()" not in source, "HistoricalSyncStrategy should not use datetime.date.today()"
+
     def test_historical_sync_moneyflow_accepts_datetime_date(self):
         source = inspect.getsource(HistoricalSyncStrategy.sync_moneyflow)
         assert "datetime.date" in source or "date | None" in source, (

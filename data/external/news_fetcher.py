@@ -18,6 +18,17 @@ logger = logging.getLogger(__name__)
 _pd_options_lock = threading.Lock()
 
 
+def _run_with_python_string_storage(fetcher):
+    """Run AKShare calls under a single critical section for global pandas option safety."""
+    with _pd_options_lock:
+        old_storage = pd.options.mode.string_storage
+        pd.options.mode.string_storage = "python"
+        try:
+            return fetcher()
+        finally:
+            pd.options.mode.string_storage = old_storage
+
+
 class NewsFetcher:
     """
     Fetches news data using AKShare and direct robust Sina/THS clients.
@@ -54,14 +65,7 @@ class NewsFetcher:
 
         # Run the IO bound akshare calls in the thread pool
         def _fetch():
-            # Apply PyArrow Workaround with thread-safety lock:
-            # pd.options.mode.string_storage is a global mutable setting.
-            # Multiple threads calling this concurrently could clobber each other.
-            with _pd_options_lock:
-                old_storage = pd.options.mode.string_storage
-                pd.options.mode.string_storage = "python"
-
-            try:
+            def _fetch_locked():
                 # -------------------------------------------------------------
                 # Layer 1: 巨潮资讯公告 (CNINFO Official Filings)
                 # -------------------------------------------------------------
@@ -137,16 +141,15 @@ class NewsFetcher:
                 except Exception as e:
                     logger.warning(f"[News] EM search failed for {ts_code}: {e}")
 
+                return []
+
+            try:
+                return _run_with_python_string_storage(_fetch_locked)
             except Exception as outer_e:
                 logger.error(
                     f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}",
                 )
-            finally:
-                # Always restore global pandas settings (inside lock for thread-safety)
-                with _pd_options_lock:
-                    pd.options.mode.string_storage = old_storage
-
-            return []
+                return []
 
         try:
             # We use the IO Thread Pool with a 15-second timeout via asyncio.wait_for
@@ -169,7 +172,7 @@ class NewsFetcher:
 
             def _fetch():
                 # ProxyManager already whitelists domestic domains via NO_PROXY at startup
-                return ak.stock_info_global_cls()
+                return _run_with_python_string_storage(ak.stock_info_global_cls)
 
             try:
                 # Use Global IO Pool
@@ -341,7 +344,7 @@ class NewsFetcher:
                 # Sina Finance - Concept Boards
                 # ProxyManager already whitelists domestic domains via NO_PROXY at startup
                 try:
-                    return ak.stock_sector_spot(indicator="概念")
+                    return _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念"))
                 except Exception as e:
                     logger.warning(f"[News] Sina Concept Boards failed: {e}")
                     return None

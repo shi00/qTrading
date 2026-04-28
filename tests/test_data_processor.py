@@ -364,6 +364,35 @@ class TestDataProcessor(unittest.TestCase):
     def test_get_trade_dates_fallback(self):
         asyncio.run(self.async_test_get_trade_dates_fallback())
 
+    async def async_test_get_stock_history_prefers_latest_closed_trade_date(self):
+        """盘中读取历史行情时，应以最近闭市日作为结束日。"""
+        fixed_now = datetime.datetime(2026, 3, 9, 10, 0, 0)
+        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2026, 3, 6))
+        self.processor.get_trade_dates = AsyncMock(
+            return_value=[
+                datetime.date(2026, 3, 4),
+                datetime.date(2026, 3, 5),
+                datetime.date(2026, 3, 6),
+            ]
+        )
+        self.mock_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+
+        with patch("data.data_processor.get_now", return_value=fixed_now):
+            await self.processor.get_stock_history("000001.SZ", days=2)
+
+        self.processor.get_trade_dates.assert_awaited_once_with(
+            start_date=datetime.date(2026, 3, 2),
+            end_date=datetime.date(2026, 3, 6),
+        )
+        self.mock_cache.get_daily_quotes.assert_awaited_once_with(
+            ts_code="000001.SZ",
+            start_date=datetime.date(2026, 3, 5),
+            end_date=datetime.date(2026, 3, 6),
+        )
+
+    def test_get_stock_history_prefers_latest_closed_trade_date(self):
+        asyncio.run(self.async_test_get_stock_history_prefers_latest_closed_trade_date())
+
     async def async_test_ensure_trade_cal_memory_cache(self):
         """Test ensure_trade_cal correctly delegates to TradeCalendarService"""
         result = await self.processor.ensure_trade_cal("20230101")
@@ -567,6 +596,8 @@ class TestDataProcessor(unittest.TestCase):
             self.processor._health_cache = {"time": 0, "data": None}
             res = await self.processor.check_data_health()
             self.assertEqual(res["status"], "yellow")
+            self.assertEqual(res["tier"], 2)
+            self.assertEqual(self.processor._quality_tier, 2)
             self.assertTrue(any("深度不足" in r or "depth" in r.lower() for r in res.get("reasons", [])))
             self.assertEqual(res["details"]["missing_depth"], 2)
 
@@ -885,6 +916,43 @@ class TestDataProcessor(unittest.TestCase):
     def test_prepare_screening_context_resolves_trade_date_from_data(self):
         asyncio.run(self.async_test_prepare_screening_context_resolves_trade_date_from_data())
 
+    async def async_test_prepare_screening_context_prefers_latest_closed_trade_date(self):
+        """无显式 trade_date 时，应优先使用交易日服务的最近闭市日而不是库里最大日期。"""
+        self.processor._quality_tier = 3
+        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230106")
+        self.mock_cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20230105"],
+                    "close": [10.0],
+                }
+            ),
+        )
+        self.mock_cache.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20230105"],
+                    "roe": [0.15],
+                }
+            ),
+        )
+        self.mock_cache.get_northbound = AsyncMock(return_value=None)
+        self.mock_cache.get_moneyflow = AsyncMock(return_value=None)
+        self.mock_cache.get_top_list = AsyncMock(return_value=None)
+        self.mock_cache.get_block_trade = AsyncMock(return_value=None)
+
+        context = await self.processor.prepare_screening_context()
+
+        self.assertEqual(context["trade_date"], "20230105")
+        self.mock_cache.get_screening_data.assert_awaited_once_with("20230105")
+        self.mock_cache.get_latest_trade_date.assert_not_awaited()
+
+    def test_prepare_screening_context_prefers_latest_closed_trade_date(self):
+        asyncio.run(self.async_test_prepare_screening_context_prefers_latest_closed_trade_date())
+
     async def async_test_prepare_screening_context_raises_on_trade_date_mismatch(self):
         """缓存 trade_date 与 screening_data.trade_date 不一致时，应立即失败"""
         self.processor._quality_tier = 3
@@ -904,6 +972,18 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_prepare_screening_context_raises_on_trade_date_mismatch(self):
         asyncio.run(self.async_test_prepare_screening_context_raises_on_trade_date_mismatch())
+
+    async def async_test_get_strategy_data_passes_trade_date_through(self):
+        """get_strategy_data 应透传指定 trade_date 到 prepare_screening_context。"""
+        self.processor.prepare_screening_context = AsyncMock(return_value={"trade_date": "20230105"})
+
+        context = await self.processor.get_strategy_data(trade_date="20230105")
+
+        self.assertEqual(context["trade_date"], "20230105")
+        self.processor.prepare_screening_context.assert_awaited_once_with(trade_date="20230105")
+
+    def test_get_strategy_data_passes_trade_date_through(self):
+        asyncio.run(self.async_test_get_strategy_data_passes_trade_date_through())
 
     # --- Cancel & Lifecycle ---
 
@@ -1079,6 +1159,77 @@ class TestDataProcessor(unittest.TestCase):
     def test_run_quality_scan_tier2(self):
         asyncio.run(self.async_test_run_quality_scan_tier2())
 
+    async def async_test_run_quality_scan_uses_latest_closed_trade_date_anchor(self):
+        """盘中深度扫描应以最近闭市日计算行情和财务新鲜度。"""
+        fixed_now = datetime.datetime(2025, 12, 2, 10, 0, 0)
+        anchor_date = datetime.date(2025, 12, 1)
+        stocks = [f"{i:06d}.SZ" for i in range(1, 4)]
+        cal_dates = pd.bdate_range(anchor_date - datetime.timedelta(days=14), anchor_date).strftime("%Y%m%d").tolist()
+
+        self.processor.get_latest_trade_date = AsyncMock(return_value=anchor_date)
+        self.mock_cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * len(stocks)}),
+        )
+        self.mock_cache.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": cal_dates, "is_open": [1] * len(cal_dates)}),
+        )
+
+        rows = []
+        for code in stocks:
+            for d in cal_dates:
+                rows.append({"ts_code": code, "trade_date": d, "close": 10.0, "vol": 1000})
+        self.mock_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(rows))
+
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20251201")
+        self.mock_cache.get_field_completeness = AsyncMock(
+            return_value={
+                "roe": 0.95,
+                "or_yoy": 0.95,
+                "netprofit_yoy": 0.95,
+                "dv_ttm": 0.95,
+                "pe_ttm": 0.95,
+                "pb": 0.95,
+                "debt_to_assets": 0.95,
+            },
+        )
+        self.mock_cache.quote_dao.get_field_completeness = self.mock_cache.get_field_completeness
+        self.mock_cache.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20250824"],
+                }
+            ),
+        )
+        self.mock_cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "global_trade_days": 750,
+                "tables": {
+                    "daily_quotes": {"ratio": 1.0, "type": "stock"},
+                    "daily_indicators": {"ratio": 1.0, "type": "stock"},
+                    "financial_reports": {"ratio": 0.95, "type": "stock"},
+                    "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
+                    "stock_basic": {"ratio": 1.0, "type": "global"},
+                },
+            }
+        )
+
+        with patch("data.mixins.health_mixin.get_now", return_value=fixed_now):
+            with patch("random.sample", side_effect=lambda pop, k: pop[:k]):
+                result = await self.processor.run_quality_scan(sample_size=3)
+
+        self.assertEqual(result["avg_lag"], 0)
+        self.assertTrue(result["fin_recency_ok"])
+        self.assertEqual(result["tier"], 3)
+        self.mock_cache.get_daily_quotes.assert_awaited_once_with(
+            ts_code_list=stocks,
+            start_date=datetime.date(2024, 12, 1),
+            end_date=datetime.date(2025, 12, 1),
+        )
+
+    def test_run_quality_scan_uses_latest_closed_trade_date_anchor(self):
+        asyncio.run(self.async_test_run_quality_scan_uses_latest_closed_trade_date_anchor())
+
     async def async_test_run_quality_scan_empty_stocks(self):
         """Test run_quality_scan when no active stocks exist"""
         self.mock_cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
@@ -1139,6 +1290,59 @@ class TestDataProcessor(unittest.TestCase):
 
     def test_run_quality_scan_low_fundamental(self):
         asyncio.run(self.async_test_run_quality_scan_low_fundamental())
+
+    async def async_test_run_quality_scan_missing_critical_financials(self):
+        """Test run_quality_scan uses comprehensive coverage and downgrades missing critical tables to CRITICAL"""
+        stocks = [f"{i:06d}.SZ" for i in range(1, 4)]
+        fixed_now = datetime.datetime(2025, 12, 1, 16, 0, 0)
+        cal_dates = [(fixed_now - datetime.timedelta(days=i)).strftime("%Y%m%d") for i in range(10)]
+
+        self.mock_cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * len(stocks)}),
+        )
+        self.mock_cache.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": cal_dates, "is_open": [1] * len(cal_dates)}),
+        )
+        rows = []
+        for code in stocks:
+            for d in cal_dates:
+                rows.append({"ts_code": code, "trade_date": d, "close": 10.0, "vol": 1000})
+        self.mock_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(rows))
+        self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20251201")
+        self.mock_cache.get_field_completeness = AsyncMock(
+            return_value={"roe": 0.9, "or_yoy": 0.9, "netprofit_yoy": 0.9},
+        )
+        self.mock_cache.quote_dao.get_field_completeness = self.mock_cache.get_field_completeness
+        self.mock_cache.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20251120"],
+                }
+            )
+        )
+        self.mock_cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "global_trade_days": 750,
+                "tables": {
+                    "daily_quotes": {"ratio": 1.0, "type": "stock"},
+                    "daily_indicators": {"ratio": 1.0, "type": "stock"},
+                    "financial_reports": {"ratio": 0.05, "type": "stock"},
+                    "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
+                    "stock_basic": {"ratio": 1.0, "type": "global"},
+                },
+            }
+        )
+
+        with patch("data.mixins.health_mixin.get_now", return_value=fixed_now):
+            with patch("random.sample", side_effect=lambda pop, k: pop[:k]):
+                result = await self.processor.run_quality_scan(sample_size=3)
+
+        self.assertEqual(result["tier"], 0)
+        self.assertEqual(self.processor._quality_tier, 0)
+
+    def test_run_quality_scan_missing_critical_financials(self):
+        asyncio.run(self.async_test_run_quality_scan_missing_critical_financials())
 
     async def async_test_run_quality_scan_cancellation(self):
         """Test run_quality_scan respects cancellation"""

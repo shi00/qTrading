@@ -447,52 +447,6 @@ class TestScreenerDao:
         result = await screener_dao.get_pending_reviews()
         assert len(result) == 1
 
-    async def test_update_screening_performance(self, screener_dao, clean_db):
-        """更新筛选表现"""
-        records = [
-            (
-                "RUN001",
-                "2024-03-21",
-                "oversold",
-                "000001.SZ",
-                "平安银行",
-                10.0,
-                2.0,
-                "银行",
-                1000000,
-                10000000,
-                1.5,
-                5.0,
-                0.5,
-                1.0,
-                2.0,
-                1000000000.0,
-                500000000.0,
-                12.0,
-                30.0,
-                80.0,
-                5.0,
-                8.0,
-                85,
-                "理由",
-                "思考",
-                None,
-            ),
-        ]
-        await screener_dao.save_screening_results(records)
-
-        history = await screener_dao.get_screening_history()
-        record_id = history["id"].iloc[0]
-
-        from data.constants import REVIEW_STATUS_T1_DONE
-
-        updates = [(10.5, 5.0, 11.0, 10.0, REVIEW_STATUS_T1_DONE, record_id)]
-        await screener_dao.update_screening_performance(updates)
-
-        result = await screener_dao.get_screening_history()
-        assert result["t1_price"].iloc[0] == 10.5
-        assert result["t1_pct"].iloc[0] == 5.0
-
     async def test_get_learning_examples(self, screener_dao, clean_db):
         """获取学习样本"""
         records = [
@@ -530,11 +484,21 @@ class TestScreenerDao:
         history = await screener_dao.get_screening_history()
         record_id = history["id"].iloc[0]
 
-        await screener_dao.update_prediction_result(record_id, 5.0, "WIN")
+        await screener_dao.update_prediction_result(
+            record_id,
+            5.0,
+            "WIN",
+            t1_price=10.5,
+            t5_pct=12.0,
+            t5_price=11.2,
+            index_pct=1.2,
+            alpha=3.8,
+        )
 
         wins, losses = await screener_dao.get_learning_examples(limit=3)
         assert len(wins) == 1
         assert wins["prediction_result"].iloc[0] == "WIN"
+        assert wins["alpha"].iloc[0] == 3.8
 
     async def test_save_screening_results_sets_review_status_pending(self, screener_dao, clean_db):
         """保存筛选结果时，review_status 应自动设为 PENDING"""
@@ -621,8 +585,65 @@ class TestScreenerDao:
         assert history_updated["review_status"].iloc[0] == REVIEW_STATUS_T1_DONE
         assert history_updated["t1_price"].iloc[0] == 10.5
 
+    async def test_update_prediction_result_sets_completed_with_t5_metrics(self, screener_dao, clean_db):
+        """T+5 指标就绪后应落库并推进到 COMPLETED"""
+        from data.constants import REVIEW_STATUS_COMPLETED
+
+        records = [
+            (
+                "RUN001",
+                "2024-03-21",
+                "oversold",
+                "000001.SZ",
+                "平安银行",
+                10.0,
+                2.0,
+                "银行",
+                1000000,
+                10000000,
+                1.5,
+                5.0,
+                0.5,
+                1.0,
+                2.0,
+                1000000000.0,
+                500000000.0,
+                12.0,
+                30.0,
+                80.0,
+                5.0,
+                8.0,
+                85,
+                "理由",
+                "思考",
+                None,
+            ),
+        ]
+        await screener_dao.save_screening_results(records)
+
+        history = await screener_dao.get_screening_history()
+        record_id = history["id"].iloc[0]
+
+        await screener_dao.update_prediction_result(
+            record_id,
+            5.0,
+            "WIN",
+            t1_price=10.5,
+            t5_pct=12.0,
+            t5_price=11.2,
+            index_pct=1.4,
+            alpha=3.6,
+        )
+
+        history_updated = await screener_dao.get_screening_history()
+        assert history_updated["review_status"].iloc[0] == REVIEW_STATUS_COMPLETED
+        assert history_updated["t5_price"].iloc[0] == 11.2
+        assert history_updated["t5_pct"].iloc[0] == 12.0
+        assert history_updated["index_pct"].iloc[0] == 1.4
+        assert history_updated["alpha"].iloc[0] == 3.6
+
     async def test_get_pending_reviews_filters_by_review_status(self, screener_dao, clean_db):
-        """get_pending_reviews 应只返回 review_status 为 PENDING 或 NULL 的记录"""
+        """get_pending_reviews 应返回未完成复盘的记录并排除 COMPLETED"""
 
         records_pending = [
             (
@@ -656,7 +677,7 @@ class TestScreenerDao:
         ]
         await screener_dao.save_screening_results(records_pending)
 
-        records_done = [
+        records_t1_done = [
             (
                 "RUN002",
                 "2024-03-21",
@@ -686,16 +707,60 @@ class TestScreenerDao:
                 None,
             ),
         ]
-        await screener_dao.save_screening_results(records_done)
+        await screener_dao.save_screening_results(records_t1_done)
+
+        records_completed = [
+            (
+                "RUN003",
+                "2024-03-21",
+                "oversold",
+                "000003.SZ",
+                "招商银行",
+                18.0,
+                1.5,
+                "银行",
+                1500000,
+                15000000,
+                1.8,
+                5.8,
+                0.7,
+                1.4,
+                2.2,
+                1500000000.0,
+                700000000.0,
+                14.0,
+                32.0,
+                70.0,
+                4.5,
+                7.5,
+                82,
+                "理由3",
+                "思考3",
+                None,
+            ),
+        ]
+        await screener_dao.save_screening_results(records_completed)
 
         history = await screener_dao.get_screening_history()
-        done_id = history[history["ts_code"] == "000002.SZ"]["id"].iloc[0]
-        await screener_dao.update_prediction_result(done_id, 3.0, "LOSS")
+        t1_done_id = history[history["ts_code"] == "000002.SZ"]["id"].iloc[0]
+        completed_id = history[history["ts_code"] == "000003.SZ"]["id"].iloc[0]
+        await screener_dao.update_prediction_result(t1_done_id, 3.0, "LOSS", t1_price=15.4)
+        await screener_dao.update_prediction_result(
+            completed_id,
+            4.0,
+            "WIN",
+            t1_price=18.5,
+            t5_pct=9.0,
+            t5_price=19.2,
+            index_pct=1.0,
+            alpha=3.0,
+        )
 
         pending = await screener_dao.get_pending_reviews()
         pending_codes = [r["ts_code"] for r in pending]
         assert "000001.SZ" in pending_codes
-        assert "000002.SZ" not in pending_codes
+        assert "000002.SZ" in pending_codes
+        assert "000003.SZ" not in pending_codes
 
     async def test_get_screening_data_complex_join(self, screener_dao, clean_db, setup_stock_data):
         """测试复杂 JOIN 查询获取筛选数据"""
@@ -721,6 +786,8 @@ class TestScreenerDao:
                 "t1_pct",
                 "t5_price",
                 "t5_pct",
+                "index_pct",
+                "alpha",
                 "prediction_result",
                 "review_status",
             },

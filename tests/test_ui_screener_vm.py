@@ -18,6 +18,27 @@ class TestScreenerViewModel(unittest.TestCase):
         self.vm.strategy_mgr = MagicMock()
         self.vm.review_mgr = AsyncMock()
 
+    def test_dispose_clears_large_references_and_callbacks(self):
+        self.vm.on_update = MagicMock()
+        self.vm.on_log = MagicMock()
+        self.vm.on_status = MagicMock()
+        self.vm.on_progress = MagicMock()
+        self.vm.on_log_stream_start = MagicMock()
+        self.vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        self.vm._ai_buffer = [{"ts_code": "000001.SZ"}]
+        self.vm._realtime_snapshot = {"ts_code": "000001.SZ"}
+
+        self.vm.dispose()
+
+        self.assertIsNone(self.vm.on_update)
+        self.assertIsNone(self.vm.on_log)
+        self.assertIsNone(self.vm.on_status)
+        self.assertIsNone(self.vm.on_progress)
+        self.assertIsNone(self.vm.on_log_stream_start)
+        self.assertIsNone(self.vm._full_results)
+        self.assertEqual(self.vm._ai_buffer, [])
+        self.assertIsNone(self.vm._realtime_snapshot)
+
     def test_pagination(self):
         # Setup dummy data
         df = pd.DataFrame({"A": range(100)})

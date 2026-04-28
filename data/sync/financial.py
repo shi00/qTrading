@@ -15,7 +15,7 @@ from data.sync.base import ISyncStrategy, SyncResult
 from ui.i18n import I18n
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,20 @@ class FinancialSyncStrategy(ISyncStrategy):
             for task in self._active_tasks:
                 if not task.done():
                     task.cancel()
+
+    async def _get_effective_trade_date(self) -> datetime.date:
+        """Prefer the latest closed trade date for default sync windows."""
+        try:
+            trade_date = await self.context.processor.get_latest_trade_date()  # type: ignore[attr-defined]
+            if isinstance(trade_date, datetime.datetime):
+                return trade_date.date()
+            if isinstance(trade_date, datetime.date):
+                return trade_date
+            if trade_date:
+                return parse_date(str(trade_date))
+        except Exception as e:
+            logger.debug(f"[FinancialSync] Effective trade date fallback: {e}")
+        return get_now().date()
 
     async def run(
         self,
@@ -204,9 +218,9 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         completed_count = skipped_count
 
-        end_date = get_now().date()
+        end_date = await self._get_effective_trade_date()
         years = ConfigHandler.get_init_history_years()
-        rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
+        rough_start_date = end_date - datetime.timedelta(days=int(250 * years * 2.0))
         all_dates = await self.context.processor.get_trade_dates(  # type: ignore
             start_date=rough_start_date,
             end_date=end_date,
@@ -214,12 +228,10 @@ class FinancialSyncStrategy(ISyncStrategy):
         start_date = (
             all_dates[-(250 * years)]
             if len(all_dates) >= (250 * years)
-            else (all_dates[0] if all_dates else (get_now().date() - datetime.timedelta(days=365 * years)))
+            else (all_dates[0] if all_dates else (end_date - datetime.timedelta(days=365 * years)))
         )
 
         all_dates = []
-        from utils.time_utils import parse_date
-
         curr_dt = parse_date(start_date)
         end_dt_obj = parse_date(end_date)
         while curr_dt <= end_dt_obj:

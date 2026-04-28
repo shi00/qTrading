@@ -113,6 +113,7 @@ class TestGetLearningContext(unittest.TestCase):
             {
                 "ts_code": ["000001.SZ"],
                 "name": ["平安银行"],
+                "alpha": [4.2],
                 "t1_pct": [5.5],
                 "ai_score": [85],
                 "ai_reason": ["技术突破"],
@@ -123,6 +124,7 @@ class TestGetLearningContext(unittest.TestCase):
             {
                 "ts_code": ["000002.SZ"],
                 "name": ["万科A"],
+                "alpha": [-2.1],
                 "t1_pct": [-3.2],
                 "ai_score": [70],
                 "ai_reason": ["市场下跌"],
@@ -143,6 +145,8 @@ class TestGetLearningContext(unittest.TestCase):
             self.assertIn("history_context", result)
             self.assertIn("复盘参考 - 正向样本", result)
             self.assertIn("复盘参考 - 负向样本", result)
+            self.assertIn("Alpha +4.2%", result)
+            self.assertIn("Alpha -2.1%", result)
             self.assertNotIn("Learn from these", result)
             self.assertNotIn("Do NOT repeat", result)
 
@@ -207,8 +211,15 @@ class TestUpdateResult(unittest.TestCase):
         manager = ReviewManager()
 
         async def run_test():
-            await manager._update_result(1, 5.5, "WIN", 1.0)
+            await manager._update_result(1, 5.5, "WIN", 1.0, 10.5, 12.0, 11.2, 4.5)
             mock_screener_dao.update_prediction_result.assert_called_once()
+            _, _, _, t1_price = mock_screener_dao.update_prediction_result.call_args[0]
+            kwargs = mock_screener_dao.update_prediction_result.call_args.kwargs
+            self.assertEqual(t1_price, 10.5)
+            self.assertEqual(kwargs["t5_pct"], 12.0)
+            self.assertEqual(kwargs["t5_price"], 11.2)
+            self.assertEqual(kwargs["index_pct"], 1.0)
+            self.assertEqual(kwargs["alpha"], 4.5)
 
         asyncio.run(run_test())
 
@@ -362,6 +373,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_screener_dao.update_prediction_result.assert_called_once()
             call_args = mock_screener_dao.update_prediction_result.call_args[0]
             self.assertEqual(call_args[2], "WIN")
+            self.assertEqual(mock_screener_dao.update_prediction_result.call_args.kwargs["alpha"], 4.0)
 
         asyncio.run(run_test())
 
@@ -407,6 +419,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_screener_dao.update_prediction_result.assert_called_once()
             call_args = mock_screener_dao.update_prediction_result.call_args[0]
             self.assertEqual(call_args[2], "LOSS")
+            self.assertEqual(mock_screener_dao.update_prediction_result.call_args.kwargs["alpha"], -7.0)
 
         asyncio.run(run_test())
 
@@ -452,6 +465,48 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_screener_dao.update_prediction_result.assert_called_once()
             call_args = mock_screener_dao.update_prediction_result.call_args[0]
             self.assertEqual(call_args[2], "DRAW")
+            self.assertAlmostEqual(mock_screener_dao.update_prediction_result.call_args.kwargs["alpha"], 0.2)
+
+        asyncio.run(run_test())
+
+    def test_review_persists_t5_metrics_when_available(self):
+        """T+5 数据可用时应一并持久化"""
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240315"],
+                }
+            )
+        )
+        mock_screener_dao.update_prediction_result = AsyncMock()
+
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240315", "20240318", "20240319", "20240320", "20240321", "20240322"],
+                    "close": [10.0, 10.5, 10.6, 10.7, 10.9, 11.2],
+                    "pct_chg": [1.0, 5.0, 1.0, 1.0, 2.0, 12.0],
+                }
+            )
+        )
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            kwargs = mock_screener_dao.update_prediction_result.call_args.kwargs
+            self.assertEqual(kwargs["t5_pct"], 12.0)
+            self.assertEqual(kwargs["t5_price"], 11.2)
+            self.assertEqual(kwargs["index_pct"], 1.0)
+            self.assertEqual(kwargs["alpha"], 4.0)
 
         asyncio.run(run_test())
 

@@ -397,6 +397,23 @@ class TestAIStrategyMixinRunAnalysis:
             assert result["ts_code"].iloc[0] == "000001.SZ"
 
     @pytest.mark.asyncio
+    async def test_run_ai_analysis_uses_context_trade_date_for_capital_prefetch(self, mock_strategy, mock_context):
+        """历史回测场景应优先使用 context.trade_date，避免拉取最新资金数据。"""
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = False
+            mock_ai.return_value = mock_ai_instance
+
+            mock_context["trade_date"] = "20240118"
+            candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.0]})
+
+            await mock_strategy.run_ai_analysis(candidates, mock_context)
+
+            mock_context["data_processor"].cache.get_moneyflow.assert_awaited_once_with(trade_date="20240118")
+            mock_context["data_processor"].cache.get_top_list.assert_awaited_once_with(trade_date="20240118")
+            mock_context["data_processor"].cache.get_northbound.assert_awaited_once_with(trade_date="20240118")
+
+    @pytest.mark.asyncio
     async def test_run_with_cancellation(self, mock_strategy, mock_context):
         """取消操作"""
         with patch("strategies.ai_mixin.AIService") as mock_ai:

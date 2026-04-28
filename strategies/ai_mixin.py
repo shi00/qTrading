@@ -161,6 +161,21 @@ class AIStrategyMixin:
         """
         return ""  # Default: no additional context
 
+    @staticmethod
+    def _normalize_trade_date_for_cache(value):
+        """Normalize context trade_date for cache APIs that expect YYYYMMDD strings."""
+        if value is None:
+            return None
+        if isinstance(value, pd.Timestamp):
+            return value.strftime("%Y%m%d")
+        if hasattr(value, "strftime"):
+            try:
+                return value.strftime("%Y%m%d")
+            except Exception:
+                pass
+        raw = str(value).strip()
+        return raw or None
+
     async def run_ai_analysis(
         self,
         candidates_df: pd.DataFrame,
@@ -282,9 +297,10 @@ class AIStrategyMixin:
 
         # --- Batch Pre-Fetch: Capital Flow Data (Moneyflow, TopList, Northbound) ---
         # Fetch once for the trade date, filter per-stock in the loop (0ms per stock)
-        trade_date = None
+        trade_date = self._normalize_trade_date_for_cache(context.get("trade_date"))
         try:
-            trade_date = await dp.get_latest_trade_date()  # type: ignore
+            if trade_date is None:
+                trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to get latest trade date: {e}")
 

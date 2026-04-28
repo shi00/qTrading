@@ -45,6 +45,20 @@ class HolderSyncStrategy(ISyncStrategy):
         self._cancelled = True
         logger.debug("[HolderSync] Stop | Cancellation requested.")
 
+    async def _get_effective_trade_date(self) -> datetime.date:
+        """Prefer the latest closed trade date for default snapshot anchoring."""
+        try:
+            processor = getattr(self.context, "processor", None)
+            if processor is not None:
+                trade_date = await processor.get_latest_trade_date()  # type: ignore[attr-defined]
+                if isinstance(trade_date, datetime.datetime):
+                    return trade_date.date()
+                if isinstance(trade_date, datetime.date):
+                    return trade_date
+        except Exception as e:
+            logger.debug(f"[HolderSync] Effective trade date fallback: {e}")
+        return get_now().date()
+
     @log_async_operation(
         operation_name="HolderSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
@@ -105,7 +119,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     result.added += count
                     await self.context.cache.update_sync_status(
                         "pledge_stat",
-                        actual_date or get_now().date(),
+                        actual_date or await self._get_effective_trade_date(),
                         count,
                     )
 
@@ -368,7 +382,7 @@ class HolderSyncStrategy(ISyncStrategy):
         Returns (row_count, actual_end_date) on success, (-1, None) on error.
         """
         try:
-            today = get_now().date()
+            today = await self._get_effective_trade_date()
             days_since_friday = (today.weekday() - 4) % 7
             last_friday = today - datetime.timedelta(days=days_since_friday)
 

@@ -80,6 +80,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
+    async def _get_effective_trade_date(self) -> datetime.date:
+        """Prefer the latest closed trade date for default sync operations."""
+        try:
+            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore
+            if trade_date is not None:
+                return trade_date
+        except Exception:
+            pass
+        return get_now().date()
+
     @log_async_operation(
         operation_name="HistoricalSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
@@ -101,9 +111,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             await self._run_historical_sync(days, progress_callback, result)
 
             if result.status in ["success", "partial"]:
-                end_date = get_now().date()
+                end_date = await self._get_effective_trade_date()
                 calendar_days = int(days * 365 / 250) + 30
-                start_date = (get_now() - datetime.timedelta(days=calendar_days)).date()
+                start_date = end_date - datetime.timedelta(days=calendar_days)
                 try:
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=start_date,
@@ -152,9 +162,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # Reset any loop-local cancellation state so direct calls remain reusable.
         self._shutdown_event.clear()
 
-        end_date = get_now().date()
+        end_date = await self._get_effective_trade_date()
         calendar_days = int(days * 365 / 250) + 30
-        start_date = (get_now() - datetime.timedelta(days=calendar_days)).date()
+        start_date = end_date - datetime.timedelta(days=calendar_days)
 
         try:
             trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore
@@ -652,7 +662,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 is_save_failed = result_status == SYNC_RESULT_SAVE_FAILED
                 await cache.update_sync_status(
                     table_name,
-                    trade_date or datetime.date.today(),
+                    trade_date or get_now().date(),
                     0,
                     status="save_failed" if is_save_failed else "fetch_failed",
                     last_result_status=result_status
@@ -712,7 +722,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     async def sync_moneyflow(self, trade_date: datetime.date | None = None):
         """Sync money flow for a specific date (Standalone)."""
         if trade_date is None:
-            trade_date = get_now().date()
+            trade_date = await self._get_effective_trade_date()
 
         try:
             df = await self.context.api.get_moneyflow(trade_date=trade_date)
@@ -739,7 +749,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     async def sync_northbound(self, trade_date: datetime.date | None = None):
         """Sync northbound holding for a specific date (Standalone)."""
         if trade_date is None:
-            trade_date = get_now().date()
+            trade_date = await self._get_effective_trade_date()
 
         try:
             df = await self.context.api.get_hk_hold(trade_date=trade_date)

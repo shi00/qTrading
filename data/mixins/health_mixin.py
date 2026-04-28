@@ -51,7 +51,8 @@ def _compute_tier(
       2. BRONZE  (1): Quotes lag > TIER_QUOTE_FRESHNESS_DAYS
       3. SILVER  (2): Quotes fresh but field-level fundamental completeness < TIER_FUNDAMENTAL_LOW_THRESHOLD (insufficient for fundamental strategies)
       4. GOLD    (3): All fresh AND (fin_fresh_ratio > 0.9 OR fin_lag < TIER_FINANCIAL_FRESHNESS_DAYS)
-                      AND field-level fundamental completeness > TIER_FUNDAMENTAL_HIGH_THRESHOLD (when available)
+                      AND field-level fundamental completeness > TIER_FUNDAMENTAL_HIGH_THRESHOLD (must be available)
+                      When avg_fundamental is None (fast-path), GOLD is conservatively unreachable.
       5. SILVER  (2): Default for fresh quotes but not meeting GOLD criteria
 
     Note: The CRITICAL tier for extreme lag (> HEALTH_THRESHOLD_MARKET_LAG_DAYS) is
@@ -82,7 +83,7 @@ def _compute_tier(
         fin_ok_for_gold = fin_fresh_ratio > 0.9
 
     if fin_ok_for_gold:
-        if avg_fundamental is None or avg_fundamental > TIER_FUNDAMENTAL_HIGH_THRESHOLD:
+        if avg_fundamental is not None and avg_fundamental > TIER_FUNDAMENTAL_HIGH_THRESHOLD:
             return 3
 
     if fin_fresh_ratio > 0.5:
@@ -433,41 +434,37 @@ class HealthCheckMixin:
                     f"[DataProcessor] QualityScan | ⚠️ Evaluation abnormal. Status={status}, Reasons={reasons}",
                 )
 
-            # Update Tier State
-            if status == "red":
-                self._quality_tier = 0
-            elif status == "yellow":
-                self._quality_tier = 1
-            else:
-                avg_fund = None
-                fin_lag_days = None
-                try:
-                    latest_td = await self.cache.get_latest_trade_date()
-                    if latest_td:
-                        fc = await self.cache.get_field_completeness(latest_td)
-                        if fc:
-                            valid_values = [v for v in fc.values() if v is not None]
-                            avg_fund = sum(valid_values) / len(valid_values) if valid_values else None
-                except Exception as e:
-                    logger.debug(f"[DataProcessor] HealthCheck | Field completeness check skipped: {e}")
-                try:
-                    sync_records = await self.cache.get_sync_status()
-                    if sync_records is not None and not sync_records.empty:
-                        fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
-                        if not fin_info.empty:
-                            fin_date_str = fin_info.iloc[0].get("last_data_date", "")
-                            if fin_date_str:
-                                fin_lag_days = (get_now() - parse_date(str(fin_date_str), "%Y%m%d")).days
-                except Exception:
-                    pass
+            # Tier uses the shared computation path even when status is yellow/red,
+            # so fast/deep/scan stay aligned on the same grading inputs.
+            avg_fund = None
+            fin_lag_days = None
+            try:
+                latest_td = await self.cache.get_latest_trade_date()
+                if latest_td:
+                    fc = await self.cache.get_field_completeness(latest_td)
+                    if fc:
+                        valid_values = [v for v in fc.values() if v is not None]
+                        avg_fund = sum(valid_values) / len(valid_values) if valid_values else None
+            except Exception as e:
+                logger.debug(f"[DataProcessor] HealthCheck | Field completeness check skipped: {e}")
+            try:
+                sync_records = await self.cache.get_sync_status()
+                if sync_records is not None and not sync_records.empty:
+                    fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
+                    if not fin_info.empty:
+                        fin_date_str = fin_info.iloc[0].get("last_data_date", "")
+                        if fin_date_str:
+                            fin_lag_days = (get_now() - parse_date(str(fin_date_str), "%Y%m%d")).days
+            except Exception:
+                pass
 
-                self._quality_tier = _compute_tier(
-                    lag_days=lag_days,
-                    fin_fresh_ratio=fin_fresh_ratio,
-                    missing_critical=bool(missing_critical),
-                    fin_lag_days=fin_lag_days,
-                    avg_fundamental=avg_fund,
-                )
+            self._quality_tier = _compute_tier(
+                lag_days=lag_days,
+                fin_fresh_ratio=fin_fresh_ratio,
+                missing_critical=bool(missing_critical),
+                fin_lag_days=fin_lag_days,
+                avg_fundamental=avg_fund,
+            )
 
             # Calculate overall system coverage (using financial as main proxy)
             sys_coverage = fin_fresh_ratio * 100
@@ -495,6 +492,7 @@ class HealthCheckMixin:
             result_dict = {
                 "status": status,
                 "msg": status_msg,
+                "tier": self._quality_tier,
                 "reasons": reasons,
                 "market": market_info,
                 "fundamentals": deep_health,
@@ -551,16 +549,47 @@ class HealthCheckMixin:
                 f"[DataProcessor] QualityScan | Commencing deep sweep on {len(sample)} random targets.",
             )
 
+            deep_health = {}
+            fin_fresh_ratio = 0.0
+            missing_critical = False
+            try:
+                deep_health = await self.cache.check_comprehensive_health()
+                tables = deep_health.get("tables", {}) if isinstance(deep_health, dict) else {}
+                fin_fresh_ratio = tables.get("financial_reports", {}).get("ratio", 0.0)
+                critical_tables = [
+                    name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
+                ]
+                missing_critical = any(tables.get(t, {}).get("ratio", 0.0) < 0.1 for t in critical_tables)
+            except Exception as e:
+                logger.debug(f"[DataProcessor] QualityScan | Coverage snapshot skipped: {e}")
+
             # 2. Prepare Context
             scan_results = {"continuity": [], "recency": [], "nulls": []}
+
+            # Align deep-scan recency to the latest closed trade date to avoid
+            # intraday false negatives before the market close snapshot exists.
+            try:
+                latest_closed_trade_date = await self.get_latest_trade_date()  # type: ignore
+                if isinstance(latest_closed_trade_date, datetime.datetime):
+                    end_date_obj = latest_closed_trade_date.date()
+                elif isinstance(latest_closed_trade_date, datetime.date):
+                    end_date_obj = latest_closed_trade_date
+                elif latest_closed_trade_date:
+                    end_date_obj = parse_date(str(latest_closed_trade_date))
+                else:
+                    end_date_obj = get_now().date()
+            except Exception as e:
+                logger.debug(f"[DataProcessor] QualityScan | Latest trade date fallback: {e}")
+                end_date_obj = get_now().date()
 
             # --- Architecture Optimization: One-Pass Batch Fetch ---
             # Fetch 1 year of data for all sampled stocks at once to avoid N+1 queries
             # and over-fetching entire 20-year history for single stocks.
-            start_date_obj = (get_now() - datetime.timedelta(days=365)).date()
+            start_date_obj = end_date_obj - datetime.timedelta(days=365)
 
             trade_cal_df = await self.trade_calendar.get_trade_cal_df(  # type: ignore
                 start_date=start_date_obj,
+                end_date=end_date_obj,
                 is_open=1,
             )
             if trade_cal_df is None or trade_cal_df.empty:
@@ -571,6 +600,7 @@ class HealthCheckMixin:
             batch_df = await self.cache.get_daily_quotes(
                 ts_code_list=sample,
                 start_date=start_date_obj,
+                end_date=end_date_obj,
             )
 
             # 3. Iterate Sample (DataFrame Slicing in Memory)
@@ -605,11 +635,11 @@ class HealthCheckMixin:
                         )
                         scan_results["continuity"].append(cont_res["coverage_ratio"])
 
-                    # Check Recency (vs today)
+                    # Check Recency against the latest closed trade date, not wall-clock today.
                     rec_res = DataQualityService.check_recency(
                         df_daily,
                         "trade_date",
-                        get_now().date(),
+                        end_date_obj,
                     )
                     scan_results["recency"].append(rec_res["lag_days"])
 
@@ -653,7 +683,7 @@ class HealthCheckMixin:
                         fin_date_str = fin_info.iloc[0].get("last_data_date", "")
                         if fin_date_str:
                             fin_dt = parse_date(str(fin_date_str), "%Y%m%d")
-                            fin_lag_days = (get_now() - fin_dt).days
+                            fin_lag_days = (end_date_obj - fin_dt).days
                             fin_recency_ok = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS
             except Exception:
                 pass
@@ -671,8 +701,8 @@ class HealthCheckMixin:
 
             tier = _compute_tier(
                 lag_days=int(avg_recency),
-                fin_fresh_ratio=0.5,
-                missing_critical=False,
+                fin_fresh_ratio=fin_fresh_ratio,
+                missing_critical=missing_critical,
                 fin_lag_days=fin_lag_days,
                 avg_fundamental=avg_fundamental if fundamental_completeness else None,
             )

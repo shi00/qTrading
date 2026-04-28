@@ -292,12 +292,19 @@ class TestComputeTier(unittest.TestCase):
     def test_gold_high_fin_ratio(self):
         from data.mixins.health_mixin import _compute_tier
 
-        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False), 3)
+        self.assertEqual(
+            _compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False, avg_fundamental=0.8), 3
+        )
 
     def test_gold_fresh_fin_date(self):
         from data.mixins.health_mixin import _compute_tier
 
-        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10), 3)
+        self.assertEqual(
+            _compute_tier(
+                lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10, avg_fundamental=0.8
+            ),
+            3,
+        )
 
     def test_silver_fresh_quotes_moderate_fin(self):
         from data.mixins.health_mixin import _compute_tier
@@ -322,7 +329,12 @@ class TestComputeTier(unittest.TestCase):
     def test_fast_path_gold_requires_both_fin_lag_and_ratio(self):
         from data.mixins.health_mixin import _compute_tier
 
-        self.assertEqual(_compute_tier(lag_days=0, fin_fresh_ratio=0.6, missing_critical=False, fin_lag_days=10), 3)
+        self.assertEqual(
+            _compute_tier(
+                lag_days=0, fin_fresh_ratio=0.6, missing_critical=False, fin_lag_days=10, avg_fundamental=0.8
+            ),
+            3,
+        )
 
     def test_bronze_low_fin_ratio_with_lag(self):
         from data.mixins.health_mixin import _compute_tier
@@ -382,6 +394,35 @@ class TestComputeTier(unittest.TestCase):
             ),
             2,
         )
+
+    def test_fast_path_no_gold_without_avg_fundamental(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(
+            _compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False, avg_fundamental=None),
+            2,
+        )
+
+    def test_fast_path_no_gold_without_avg_fundamental_even_with_fin_lag(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        self.assertEqual(
+            _compute_tier(
+                lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10, avg_fundamental=None
+            ),
+            2,
+        )
+
+    def test_tier_consistency_fast_vs_deep(self):
+        from data.mixins.health_mixin import _compute_tier
+
+        snapshot = dict(lag_days=0, fin_fresh_ratio=0.8, missing_critical=False, fin_lag_days=5)
+
+        fast_tier = _compute_tier(**snapshot, avg_fundamental=None)
+        deep_tier = _compute_tier(**snapshot, avg_fundamental=0.85)
+        self.assertLessEqual(fast_tier, deep_tier)
+        self.assertEqual(fast_tier, 2)
+        self.assertEqual(deep_tier, 3)
 
 
 if __name__ == "__main__":

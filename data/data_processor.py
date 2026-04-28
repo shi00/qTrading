@@ -201,6 +201,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             progress_callback=progress_callback,
         )
         self._quality_tier = None
+        self._health_cache = {"time": 0, "data": None}
         return result
 
     @log_async_operation(
@@ -220,6 +221,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             progress_callback=progress_callback,
         )
         self._quality_tier = None
+        self._health_cache = {"time": 0, "data": None}
         return result.added
 
     async def sync_comprehensive_fundamentals(
@@ -257,6 +259,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         )
 
         self._quality_tier = None
+        self._health_cache = {"time": 0, "data": None}
 
         # Clear caches to ensure fresh data visibility
         if hasattr(self, "_trade_date_cache"):
@@ -777,9 +780,22 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     # ... get_stock_history, get_strategy_data ...
     async def get_stock_history(self, ts_code, days=365):
-        end = get_now().date()
+        try:
+            latest_closed_trade_date = await self.get_latest_trade_date()
+            if isinstance(latest_closed_trade_date, datetime.datetime):
+                end = latest_closed_trade_date.date()
+            elif isinstance(latest_closed_trade_date, datetime.date):
+                end = latest_closed_trade_date
+            elif latest_closed_trade_date:
+                end = parse_date(str(latest_closed_trade_date))
+            else:
+                end = get_now().date()
+        except Exception as e:
+            logger.warning(f"[DataProcessor] get_stock_history fallback to natural date: {e}")
+            end = get_now().date()
+
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
-        rough_start = (get_now() - datetime.timedelta(days=int(days * 2.0))).date()
+        rough_start = end - datetime.timedelta(days=int(days * 2.0))
         all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end)
         start = all_dates[-days] if len(all_dates) >= days else (all_dates[0] if all_dates else rough_start)
         return await self.cache.get_daily_quotes(
@@ -788,8 +804,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             end_date=end,
         )
 
-    async def get_strategy_data(self):
-        return await self.prepare_screening_context()
+    async def get_strategy_data(self, trade_date=None):
+        return await self.prepare_screening_context(trade_date=trade_date)
 
     @staticmethod
     def _normalize_context_trade_date(value):
@@ -844,7 +860,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         operation_name="prepare_screening_context",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def prepare_screening_context(self):
+    async def prepare_screening_context(self, trade_date=None):
         """Prepare context for screening execution."""
 
         if self._quality_tier is None:
@@ -869,9 +885,14 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             "table_status": {},
         }
 
-        trade_date = await self.cache.get_latest_trade_date()
-        screening_data = await self.get_screening_data(trade_date)
-        resolved_trade_date = self._resolve_screening_trade_date(trade_date, screening_data)
+        context_trade_date = trade_date
+        if context_trade_date is None:
+            latest_closed_trade_date = await self.get_latest_trade_date()
+            context_trade_date = self._normalize_context_trade_date(latest_closed_trade_date)
+            if context_trade_date is None:
+                context_trade_date = await self.cache.get_latest_trade_date()
+        screening_data = await self.get_screening_data(context_trade_date)
+        resolved_trade_date = self._resolve_screening_trade_date(context_trade_date, screening_data)
 
         if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
             suspended_count = int((~screening_data["is_tradable"]).sum())

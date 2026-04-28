@@ -289,6 +289,8 @@ class TestOrmDaoAlignment:
             "t1_pct",
             "t5_price",
             "t5_pct",
+            "index_pct",
+            "alpha",
             "prediction_result",
             "review_status",
         }
@@ -296,16 +298,30 @@ class TestOrmDaoAlignment:
         missing = expected - dao_cols
         assert not missing, f"save_screening_results missing: {missing}"
 
+    def test_screening_history_review_fields_updated_by_review_path(self):
+        source = inspect.getsource(ScreenerDao.update_prediction_result)
+        required_fields = {
+            "t1_pct",
+            "prediction_result",
+            "t1_price",
+            "t5_pct",
+            "t5_price",
+            "index_pct",
+            "alpha",
+            "review_status",
+        }
+        missing = {field for field in required_fields if f'"{field}"' not in source}
+        assert not missing, f"update_prediction_result missing review fields: {missing}"
+
 
 class TestQfqCalculation:
-    """Test that qfq_* fields are correctly calculated."""
+    """Test that deprecated qfq_* fields are no longer persisted."""
 
-    def test_qfq_fields_in_save_cols(self):
+    def test_qfq_fields_are_not_in_save_cols(self):
         dao_cols = extract_cols_from_method(QuoteDao.save_daily_quotes)
         assert dao_cols is not None
         qfq_cols = {"qfq_open", "qfq_high", "qfq_low", "qfq_close"}
-        missing = qfq_cols - dao_cols
-        assert not missing, f"save_daily_quotes missing qfq columns: {missing}"
+        assert dao_cols.isdisjoint(qfq_cols), f"save_daily_quotes should not persist qfq columns: {dao_cols & qfq_cols}"
 
 
 class TestMoneyflowVolFields:

@@ -743,9 +743,6 @@ class CacheManager:
     async def get_pending_reviews(self):
         return await self.screener_dao.get_pending_reviews()
 
-    async def update_screening_performance(self, updates: list[tuple]):
-        return await self.screener_dao.update_screening_performance(updates)
-
     async def get_learning_examples(self, limit: int | None = 3):
         return await self.screener_dao.get_learning_examples(limit)
 

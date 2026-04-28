@@ -101,6 +101,50 @@ class TestCacheManager(TestDatabaseBase):
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["pe"], 10.0)
 
+    async def test_latest_indicators_default_is_quote_aligned(self):
+        """默认最新指标日期应与行情表最新日期对齐，避免前视偏差。"""
+        daily_quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20230101"],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.5],
+                "pre_close": [10.0],
+                "change": [0.5],
+                "pct_chg": [5.0],
+                "vol": [1000],
+                "amount": [10000],
+                "adj_factor": [1.0],
+            },
+        )
+        daily_indicators = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": ["20230101", "20230102"],
+                "pe": [10.0, 20.0],
+                "pe_ttm": [9.5, 19.5],
+                "pb": [1.2, 2.2],
+                "total_mv": [100000, 110000],
+                "circ_mv": [50000, 55000],
+                "total_share": [1000, 1000],
+                "float_share": [1000, 1000],
+                "free_share": [1000, 1000],
+                "turnover_rate": [1.0, 1.5],
+                "turnover_rate_f": [1.0, 1.5],
+            },
+        )
+
+        await self.cache.save_daily_quotes(daily_quotes)
+        await self.cache.save_daily_indicators(daily_indicators)
+
+        res = await self.cache.get_latest_indicators()
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res.iloc[0]["trade_date"], datetime.date(2023, 1, 1))
+        self.assertEqual(res.iloc[0]["pe"], 10.0)
+
     async def test_financial_reports(self):
         """Test financial reports operations"""
         df = pd.DataFrame(
@@ -306,10 +350,16 @@ class TestCacheManager(TestDatabaseBase):
         self.assertEqual(len(pending), 1)
         record_id = pending[0]["id"]
 
-        from data.constants import REVIEW_STATUS_T1_DONE
-
-        updates = [(11.0, 10.0, 12.0, 20.0, REVIEW_STATUS_T1_DONE, record_id)]
-        await self.cache.update_screening_performance(updates)
+        await self.cache.screener_dao.update_prediction_result(
+            record_id,
+            10.0,
+            "WIN",
+            t1_price=11.0,
+            t5_price=12.0,
+            t5_pct=20.0,
+            index_pct=1.0,
+            alpha=9.0,
+        )
 
         history_updated = await self.cache.get_screening_history("value")
         self.assertEqual(history_updated.iloc[0]["t1_price"], 11.0)

@@ -583,3 +583,34 @@ class TestFinancialDao:
         """空数据库查询最新指标返回空 DataFrame"""
         result = await financial_dao.get_latest_indicators()
         assert result.empty
+
+    async def test_get_latest_indicators_prefers_quote_aligned_date(self, financial_dao, test_engine, clean_db):
+        """未指定日期时，应避免返回晚于行情表最新日期的指标数据。"""
+        async with test_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO daily_quotes
+                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+                    VALUES
+                    ('000001.SZ', '2024-01-05', 10.0, 10.5, 9.8, 10.2, 10.0, 0.2, 2.0, 1000, 10000, 1.0)
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO daily_indicators
+                    (ts_code, trade_date, pe, pe_ttm, pb, total_mv, circ_mv, total_share, float_share, free_share)
+                    VALUES
+                    ('000001.SZ', '2024-01-05', 10.0, 9.5, 1.2, 100000, 50000, 1000, 900, 800),
+                    ('000001.SZ', '2024-01-08', 20.0, 19.5, 2.2, 110000, 55000, 1000, 900, 800)
+                    """
+                )
+            )
+
+        result = await financial_dao.get_latest_indicators()
+
+        assert len(result) == 1
+        assert result.iloc[0]["trade_date"] == datetime.date(2024, 1, 5)
+        assert result.iloc[0]["pe"] == 10.0

@@ -171,14 +171,3 @@ class DataQualityService:
                 issues.append(f"Rule '{name}' execution error: {e!s}")
 
         return issues
-
-    @staticmethod
-    def check_price_vs_factor(df_price: pd.DataFrame, df_adj: pd.DataFrame) -> dict[str, Any]:
-        """
-        Tier 3: Verify Price * AdjFactor consistency.
-        Requires a joined view of raw and adjusted prices.
-
-        Returns:
-            Empty dict (not yet implemented — requires adj_factor join in reporting pipeline).
-        """
-        return {}

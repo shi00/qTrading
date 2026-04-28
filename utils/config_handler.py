@@ -468,7 +468,7 @@ class ConfigHandler:
         except Exception as e:
             logger.warning(f"Failed to save db_password to keyring: {e}")
             try:
-                encrypted = SecurityManager.encrypt(password)
+                encrypted = SecurityManager.encrypt_data(password)
                 ConfigHandler.save_config({"db_password_encrypted": encrypted})
                 return True
             except Exception as e2:

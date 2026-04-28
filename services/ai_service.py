@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -637,17 +638,24 @@ class AIService:
             {"role": "user", "content": user_prompt},
         ]
 
-        # [FEATURE] Dump the exact constructed prompt to a dedicated markdown file
-        if logger.isEnabledFor(logging.INFO):
+        # Prompt dumps are debug-only and opt-in because they may contain sensitive strategy context.
+        if logger.isEnabledFor(logging.DEBUG) and ConfigHandler.get_setting("ai_prompt_dump_enabled", False):
             try:
                 import os
                 import re
+                import time
 
                 import config
                 from utils.time_utils import get_now
 
                 dump_dir = os.path.join(config.APP_ROOT, "logs", "ai_prompts")
                 os.makedirs(dump_dir, exist_ok=True)
+                cutoff_ts = time.time() - 24 * 60 * 60
+                for name in os.listdir(dump_dir):
+                    file_path = os.path.join(dump_dir, name)
+                    if os.path.isfile(file_path) and os.path.getmtime(file_path) < cutoff_ts:
+                        with contextlib.suppress(OSError):
+                            os.remove(file_path)
 
                 # Sanitize components against path traversal and Windows invalid chars
                 stock_code = str(stock_info.get("ts_code", "UNKNOWN"))

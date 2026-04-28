@@ -10,7 +10,6 @@ from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from ui.i18n import I18n
-from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
     @property
     def required_history_days(self):
-        return ConfigHandler.get_init_history_years() * 250
+        return 120
 
     def __init__(self):
         super().__init__("strategy_oversold_name", "strategy_oversold_desc")
@@ -146,7 +145,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         vol_ratio_threshold = params.get("vol_ratio_threshold", 1.5)
 
         # --- Phase 1: Math Filter ---
-        candidates = await self._math_filter(context, rsi_period, rsi_threshold)
+        candidates = await self._math_filter(context, rsi_period, rsi_threshold, vol_ratio_threshold)
 
         if candidates is None or candidates.empty:
             return pd.DataFrame()
@@ -164,7 +163,13 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         candidates = self._sort_for_ai(candidates)
         return await self.run_ai_analysis(candidates, context)
 
-    async def _math_filter(self, context: typing.Any, rsi_period: typing.Any, rsi_threshold: typing.Any):
+    async def _math_filter(
+        self,
+        context: typing.Any,
+        rsi_period: typing.Any,
+        rsi_threshold: typing.Any,
+        vol_ratio_threshold: typing.Any,
+    ):
         """
         Phase 1: Pure mathematical RSI filtering using Polars.
         Returns a Pandas DataFrame of candidates sorted by RSI ascending.
@@ -263,17 +268,25 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 period=rsi_period,
                 alias=rsi_col_name,
             )
+            vol_ratio_expr = (
+                pl.when(pl.col("vol").rolling_mean(5).over("ts_code") > 0)
+                .then(pl.col("vol") / pl.col("vol").rolling_mean(5).over("ts_code"))
+                .otherwise(None)
+                .alias("vol_ratio_5d")
+            )
 
             result_df = (
                 df_lazy.with_columns(
                     [
                         rsi_expr.over("ts_code"),
+                        vol_ratio_expr,
                         pl.col("close").count().over("ts_code").alias("day_count"),
                     ],
                 )
                 .filter(pl.col("trade_date") == end_date_value)
                 .filter(pl.col("day_count") >= rsi_period * 2)
                 .filter(pl.col(rsi_col_name) < rsi_threshold)
+                .filter(pl.col("vol_ratio_5d") >= float(vol_ratio_threshold))
                 .collect()
             )
 
@@ -282,7 +295,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 return pd.DataFrame()
 
             # Join with snapshot
-            rsi_pdf = result_df.select(["ts_code", rsi_col_name]).to_pandas()
+            rsi_pdf = result_df.select(["ts_code", rsi_col_name, "vol_ratio_5d"]).to_pandas()
             final_df = pd.merge(snapshot_df, rsi_pdf, on="ts_code", how="inner")
 
             # Sort by RSI ascending (most oversold first)

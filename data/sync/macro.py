@@ -59,6 +59,21 @@ class MacroSyncStrategy(ISyncStrategy):
         self._cancelled = True
         logger.debug("[MacroSync] Stop | Cancellation requested.")
 
+    async def _get_effective_trade_date(self) -> datetime.date:
+        """Prefer the latest closed trade date for default sync windows."""
+        try:
+            trade_date = await self.context.processor.get_latest_trade_date()  # type: ignore[attr-defined]
+            if isinstance(trade_date, datetime.datetime):
+                return trade_date.date()
+            if isinstance(trade_date, datetime.date):
+                return trade_date
+            if trade_date:
+                parsed = parse_date(str(trade_date))
+                return parsed.date() if hasattr(parsed, "date") else parsed
+        except Exception as e:
+            logger.debug(f"[MacroSync] Effective trade date fallback: {e}")
+        return get_now().date()
+
     @log_async_operation(
         operation_name="MacroSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
@@ -182,13 +197,13 @@ class MacroSyncStrategy(ISyncStrategy):
     async def _sync_shibor_daily(self, result: typing.Any):
         try:
             latest = await self.dao.get_shibor_latest_date()
-            today = get_now().date()
+            today = await self._get_effective_trade_date()
 
             if not latest:
                 from utils.config_handler import ConfigHandler
 
                 years = ConfigHandler.get_init_history_years()
-                rough_start_date = get_now().date() - datetime.timedelta(days=int(250 * years * 2.0))
+                rough_start_date = today - datetime.timedelta(days=int(250 * years * 2.0))
                 all_dates = await self.context.processor.get_trade_dates(  # type: ignore
                     start_date=rough_start_date,
                     end_date=today,
@@ -196,7 +211,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 start_date = (
                     all_dates[-(250 * years)]
                     if len(all_dates) >= (250 * years)
-                    else (all_dates[0] if all_dates else (get_now().date() - datetime.timedelta(days=365 * years)))
+                    else (all_dates[0] if all_dates else (today - datetime.timedelta(days=365 * years)))
                 )
             else:
                 try:
@@ -206,7 +221,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     logger.warning(
                         f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.",
                     )
-                    start_date = get_now().date() - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)
+                    start_date = today - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)
 
             if start_date > today:
                 logger.debug("[MacroSync] Shibor already up to date.")
@@ -237,8 +252,7 @@ class MacroSyncStrategy(ISyncStrategy):
             market_dao = self.context.cache.market_dao
             latest = await market_dao.get_latest_index_weight_date()
 
-            today = get_now()
-            today_date = today.date()
+            today_date = await self._get_effective_trade_date()
             should_update = False
 
             if not latest:
@@ -258,9 +272,10 @@ class MacroSyncStrategy(ISyncStrategy):
                 )
             else:
                 last_dt = parse_date(latest)
-                if (today - last_dt).days > 30:
+                last_date = last_dt.date() if hasattr(last_dt, "date") else last_dt
+                if (today_date - last_date).days > 30:
                     should_update = True
-                    start_date = last_dt.date() + datetime.timedelta(days=1)
+                    start_date = last_date + datetime.timedelta(days=1)
                 else:
                     start_date = today_date
 
@@ -269,7 +284,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 return
 
             start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else str(start_date)
-            end_date = today.strftime("%Y%m%d")
+            end_date = today_date.strftime("%Y%m%d")
             logger.debug(
                 f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",
             )

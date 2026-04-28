@@ -292,6 +292,63 @@ class TestMacroSyncStrategy:
 
         assert len(result.errors) > 0
 
+    @pytest.mark.asyncio
+    async def test_sync_shibor_prefers_latest_closed_trade_date(self, strategy, mock_context):
+        """Shibor 默认补数窗口应锚定最近闭市日。"""
+        anchor_date = datetime.date(2025, 3, 7)
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        mock_context.processor.get_latest_trade_date = AsyncMock(return_value=anchor_date)
+        mock_context.processor.get_trade_dates = AsyncMock(return_value=[datetime.date(2025, 3, 3), anchor_date])
+        mock_context.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20250307"], "on": [1.8]}))
+        mock_context.cache.update_sync_status = AsyncMock()
+        result = SyncResult()
+
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            await strategy._sync_shibor_daily(result)
+
+        mock_context.processor.get_trade_dates.assert_awaited_once_with(
+            start_date=anchor_date - datetime.timedelta(days=500),
+            end_date=anchor_date,
+        )
+        mock_context.api.get_shibor.assert_awaited_once_with(
+            start_date="20250303",
+            end_date="20250307",
+        )
+        mock_context.cache.update_sync_status.assert_awaited_once_with(
+            "shibor_daily",
+            anchor_date,
+            1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_index_weights_prefers_latest_closed_trade_date(self, strategy, mock_context):
+        """指数权重更新判断和结束日应锚定最近闭市日。"""
+        anchor_date = datetime.date(2025, 3, 7)
+        mock_context.processor.get_latest_trade_date = AsyncMock(return_value=anchor_date)
+        mock_context.cache.market_dao = AsyncMock()
+        mock_context.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="20250101")
+        mock_context.api.get_index_weight = AsyncMock(
+            return_value=pd.DataFrame({"index_code": ["000300.SH"], "trade_date": ["20250307"]})
+        )
+        mock_context.cache.save_index_weights = AsyncMock(return_value=2)
+        mock_context.cache.update_sync_status = AsyncMock()
+        result = SyncResult()
+
+        with patch("data.sync.macro.MAJOR_INDICES", ["000300.SH"]):
+            await strategy._sync_index_weights(result)
+
+        mock_context.api.get_index_weight.assert_awaited_once_with(
+            index_code="000300.SH",
+            start_date="20250102",
+            end_date="20250307",
+        )
+        mock_context.cache.update_sync_status.assert_awaited_once_with(
+            "index_weight",
+            anchor_date,
+            2,
+        )
+
 
 class TestHolderSyncStrategy:
     """测试股东数据同步策略"""
@@ -403,6 +460,19 @@ class TestHolderSyncStrategy:
 
         assert count == 1
         assert actual_date is not None
+
+    @pytest.mark.asyncio
+    async def test_sync_pledge_stat_prefers_latest_closed_trade_date(self, strategy, mock_context):
+        """盘中同步质押快照时，应从最近闭市日回推最近周五。"""
+        mock_context.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2025, 3, 10))
+        mock_context.api.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        mock_context.cache.save_pledge_stat = AsyncMock()
+
+        count, actual_date = await strategy._sync_pledge_stat()
+
+        assert count == 1
+        assert actual_date == datetime.date(2025, 3, 7)
+        mock_context.api.get_pledge_stat.assert_awaited_once_with(end_date="20250307")
 
     @pytest.mark.asyncio
     async def test_run_with_cancellation(self, strategy, mock_context):
@@ -916,9 +986,87 @@ class TestHistoricalSyncStrategy:
         mock_context.cache.update_sync_status = AsyncMock()
 
         await strategy.sync_daily_market_snapshot(datetime.date(2024, 1, 1), force=True)
-
         mock_context.cache.save_daily_quotes.assert_called_once()
         mock_context.cache.save_daily_indicators.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_moneyflow_prefers_latest_closed_trade_date(self, strategy, mock_context):
+        """独立同步未指定日期时，应优先使用最近闭市日。"""
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 1, 5))
+        mock_context.api.get_moneyflow = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240105"]})
+        )
+        mock_context.cache.save_moneyflow = AsyncMock(return_value=1)
+        mock_context.cache.update_sync_status = AsyncMock()
+
+        count = await strategy.sync_moneyflow()
+
+        assert count == 1
+        mock_context.api.get_moneyflow.assert_awaited_once_with(trade_date=datetime.date(2024, 1, 5))
+        mock_context.cache.update_sync_status.assert_awaited_once_with(
+            "moneyflow_daily",
+            datetime.date(2024, 1, 5),
+            1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_northbound_prefers_latest_closed_trade_date(self, strategy, mock_context):
+        """独立同步未指定日期时，应优先使用最近闭市日。"""
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 1, 5))
+        mock_context.api.get_hk_hold = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "00700.HK"],
+                    "trade_date": ["20240105", "20240105"],
+                }
+            )
+        )
+        mock_context.cache.save_northbound = AsyncMock(return_value=1)
+        mock_context.cache.update_sync_status = AsyncMock()
+
+        count = await strategy.sync_northbound()
+
+        assert count == 1
+        mock_context.api.get_hk_hold.assert_awaited_once_with(trade_date=datetime.date(2024, 1, 5))
+        mock_context.cache.update_sync_status.assert_awaited_once_with(
+            "northbound_holding",
+            datetime.date(2024, 1, 5),
+            1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_historical_sync_uses_latest_closed_trade_date_range(self, strategy, mock_context):
+        """批量历史同步应以最近闭市日作为窗口终点。"""
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 1, 5))
+        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[])
+
+        with patch("data.sync.historical.get_now", return_value=datetime.datetime(2024, 1, 8, 10, 0, 0)):
+            result = SyncResult()
+            await strategy._run_historical_sync(days=30, progress_callback=None, result=result)
+
+        mock_context.processor.trade_calendar.get_trade_dates.assert_awaited_once_with(
+            datetime.date(2023, 10, 24),
+            datetime.date(2024, 1, 5),
+        )
+        assert result.status == "failed"
+        assert "No trade dates found" in result.errors
+
+    @pytest.mark.asyncio
+    async def test_run_quality_report_uses_latest_closed_trade_date_range(self, strategy, mock_context):
+        """质量汇总范围应与最近闭市日对齐。"""
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 1, 5))
+        strategy._run_historical_sync = AsyncMock()
+        mock_context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={})
+
+        with patch("data.sync.historical.get_now", return_value=datetime.datetime(2024, 1, 8, 10, 0, 0)):
+            result = await strategy.run(days=30)
+
+        assert result.status == "success"
+        mock_context.cache.get_bulk_sync_quality_scores.assert_awaited_once_with(
+            start_date=datetime.date(2023, 10, 24),
+            end_date=datetime.date(2024, 1, 5),
+            tables=list(strategy.SYNCED_TABLES),
+        )
 
     @pytest.mark.asyncio
     async def test_sync_daily_market_snapshot_missing_adj_factor(self, strategy, mock_context):
@@ -1058,6 +1206,50 @@ class TestFinancialSyncStrategy:
             result = await strategy.run(force=True)
 
         assert result.updated == 1
+
+    @pytest.mark.asyncio
+    async def test_full_sync_prefers_latest_closed_trade_date_window(self, strategy, mock_context):
+        """全量财务同步应以最近闭市日作为默认结束日。"""
+        anchor_date = datetime.date(2025, 3, 7)
+        mock_context.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "list_status": ["L"],
+                }
+            )
+        )
+        mock_context.cache.get_completed_step4_stocks = AsyncMock(return_value=set())
+        mock_context.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
+        mock_context.cache.clear_step4_sync_status = AsyncMock()
+        mock_context.cache.mark_stock_step4_completed = AsyncMock()
+        mock_context.processor.get_latest_trade_date = AsyncMock(return_value=anchor_date)
+        mock_context.processor.get_trade_dates = AsyncMock(return_value=[datetime.date(2025, 3, 3), anchor_date])
+
+        strategy._fetch_comprehensive_financial_data = AsyncMock(
+            return_value=(pd.DataFrame(), {"mainbz": 0, "audit": 0})
+        )
+
+        with (
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+            patch("utils.config_handler.ConfigHandler.get_max_batch_rows", return_value=10),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
+        ):
+            result = await strategy.run(force=True)
+
+        assert result.status == "success"
+        mock_context.processor.get_trade_dates.assert_awaited_once_with(
+            start_date=datetime.date(2023, 11, 8),
+            end_date=anchor_date,
+        )
+        strategy._fetch_comprehensive_financial_data.assert_awaited_once_with(
+            "000001.SZ",
+            start_date=datetime.date(2025, 3, 3),
+            end_date=anchor_date,
+        )
 
 
 class TestSyncContextDataCleaning:

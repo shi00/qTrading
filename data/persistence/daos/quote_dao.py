@@ -120,11 +120,6 @@ class QuoteDao(BaseDao):
         priority: int | None = None,
         suppress_errors: bool = True,
     ):
-        df = df.copy()
-        if "adj_factor" in df.columns:
-            for col in ["open", "high", "low", "close"]:
-                if col in df.columns:
-                    df[f"qfq_{col}"] = df[col] * df["adj_factor"]
         cols = get_model_columns(DailyQuotes)
         pk_columns = get_model_pk_columns(DailyQuotes)
         return await self._save_upsert(

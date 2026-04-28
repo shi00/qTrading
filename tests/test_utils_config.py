@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -74,11 +75,21 @@ class TestConfigHandler(unittest.TestCase):
 
     def test_save_config_error(self):
         """Test handling of save error (e.g. permission denied)"""
-        from unittest.mock import patch
-
         with patch("builtins.open", side_effect=PermissionError("Denied")):
             result = ConfigHandler.save_config({"a": 1})
             self.assertFalse(result)
+
+    def test_save_db_password_falls_back_to_encrypt_data_when_keyring_unavailable(self):
+        """keyring 不可用时，应落盘加密密文。"""
+        with (
+            patch("utils.config_handler.keyring.set_password", side_effect=RuntimeError("keyring unavailable")),
+            patch("utils.config_handler.SecurityManager.encrypt_data", return_value="encrypted-secret") as mock_encrypt,
+        ):
+            result = ConfigHandler.save_db_password("secret")
+
+        self.assertTrue(result)
+        mock_encrypt.assert_called_once_with("secret")
+        self.assertEqual(ConfigHandler.load_config().get("db_password_encrypted"), "encrypted-secret")
 
 
 if __name__ == "__main__":

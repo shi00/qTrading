@@ -52,7 +52,11 @@ class FinancialDao(BaseDao):
         with_date = trade_date
         if not with_date:
             df = await self._read_db(
-                "SELECT MAX(trade_date) as max_td FROM daily_indicators",
+                """
+                SELECT MAX(trade_date) as max_td
+                FROM daily_indicators
+                WHERE trade_date <= (SELECT MAX(trade_date) FROM daily_quotes)
+                """,
             )
             if df is not None and not df.empty:
                 with_date = df["max_td"].iloc[0]

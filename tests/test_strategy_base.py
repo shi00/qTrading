@@ -116,6 +116,35 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         res = await s.filter(ctx)
         self.assertIn("000003.SZ", res["ts_code"].values)
 
+    async def test_oversold_volume_threshold_filters_candidates(self):
+        s = OversoldStrategy()
+        dp_mock = MagicMock()
+        dp_mock._quality_tier = 2
+        trade_calendar_mock = MagicMock()
+        trade_calendar_mock.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 30))
+        trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
+        dp_mock.trade_calendar = trade_calendar_mock
+
+        dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
+        history_data = []
+        for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [160], strict=True):
+            history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
+        history_df = pd.DataFrame(history_data)
+
+        cache_mock = MagicMock()
+        cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
+        dp_mock.cache = cache_mock
+
+        ctx = self.context.copy()
+        ctx["data_processor"] = dp_mock
+        ctx["params"] = {"vol_ratio_threshold": 1.5}
+        res_lo = await s.filter(ctx)
+        self.assertIn("000003.SZ", res_lo["ts_code"].values)
+
+        ctx["params"] = {"vol_ratio_threshold": 1.7}
+        res_hi = await s.filter(ctx)
+        self.assertTrue(res_hi.empty)
+
     async def test_institutional(self):
         lhb_data = pd.DataFrame(
             {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]},

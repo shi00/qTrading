@@ -1141,6 +1141,7 @@ class DataExplorerView(ft.Container):
         self.db_manager = DatabaseManager()
         self._ui_built = False  # Track if UI has been built
         self._pubsub_subscribed = False
+        self._mount_task = None
 
         # Start with a loading state to ensure instant tab switching
         self.loading_view = ft.Container(
@@ -1168,7 +1169,8 @@ class DataExplorerView(ft.Container):
         """
         # This method is called by Flet when the control is added to the page.
         # We delegate to an async method to handle the actual work.
-        self.page.run_task(self.did_mount_async)  # type: ignore
+        if self.page:
+            self._mount_task = self.page.run_task(self.did_mount_async)  # type: ignore
 
     def will_unmount(self):
         """Clean up subscriptions when view is detached"""
@@ -1178,6 +1180,9 @@ class DataExplorerView(ft.Container):
             except Exception:
                 pass
             self._pubsub_subscribed = False
+        if self._mount_task:
+            self._mount_task.cancel()
+            self._mount_task = None
 
     async def did_mount_async(self):
         import time as _time
