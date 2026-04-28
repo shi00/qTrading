@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import importlib
 import logging
 import os
 import threading
@@ -11,12 +12,14 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
-# Try importing llama_cpp, handle missing dependency gracefully
+# Try importing llama_cpp dynamically, handle missing dependency gracefully.
+# Dynamic import avoids hard static dependency for type check in CI.
 try:
-    from llama_cpp import Llama
-
+    llama_cpp_module = importlib.import_module("llama_cpp")
+    Llama = getattr(llama_cpp_module, "Llama")
     _HAS_LLAMA_CPP = True
-except ImportError:
+except (ImportError, AttributeError):
+    Llama = Any  # type: ignore[assignment]
     _HAS_LLAMA_CPP = False
     logger.warning(
         "llama-cpp-python not installed. Embedded AI features will be disabled.",
@@ -24,14 +27,16 @@ except ImportError:
 
 if _HAS_LLAMA_CPP:
     try:
-        from llama_cpp.llama_types import (
-            ChatCompletionRequestSystemMessage,
-            ChatCompletionRequestUserMessage,
-        )
-    except ImportError:
+        llama_types_module = importlib.import_module("llama_cpp.llama_types")
+        ChatCompletionRequestSystemMessage = getattr(llama_types_module, "ChatCompletionRequestSystemMessage")
+        ChatCompletionRequestUserMessage = getattr(llama_types_module, "ChatCompletionRequestUserMessage")
+    except (ImportError, AttributeError):
         # Fallback or handle older versions if strictly necessary, but requirements say >=0.3.2
         ChatCompletionRequestSystemMessage = dict
         ChatCompletionRequestUserMessage = dict
+else:
+    ChatCompletionRequestSystemMessage = dict
+    ChatCompletionRequestUserMessage = dict
 
 
 class LocalModelManager:
