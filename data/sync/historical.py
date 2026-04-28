@@ -142,6 +142,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
         We convert to calendar days using a ~1.46x multiplier (365/250)
         to ensure the date range covers enough trading days.
         """
+        # Reset any loop-local cancellation state so direct calls remain reusable.
+        self._shutdown_event.clear()
+
         end_date = get_now().date()
         calendar_days = int(days * 365 / 250) + 30
         start_date = (get_now() - datetime.timedelta(days=calendar_days)).date()
