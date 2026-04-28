@@ -122,10 +122,6 @@ def upgrade() -> None:
         sa.Column("vol", sa.Float(), nullable=True),
         sa.Column("amount", sa.Float(), nullable=True),
         sa.Column("adj_factor", sa.Float(), nullable=True),
-        sa.Column("qfq_open", sa.Float(), nullable=True),
-        sa.Column("qfq_high", sa.Float(), nullable=True),
-        sa.Column("qfq_low", sa.Float(), nullable=True),
-        sa.Column("qfq_close", sa.Float(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -295,6 +291,12 @@ def upgrade() -> None:
         "ix_financial_reports_ts_code_ann_date",
         "financial_reports",
         ["ts_code", "ann_date"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_financial_reports_ann_date",
+        "financial_reports",
+        ["ann_date"],
         unique=False,
     )
     op.create_table(
@@ -616,6 +618,7 @@ def upgrade() -> None:
     op.create_table(
         "screening_history",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("run_id", sa.String(16), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("strategy_name", sa.String(), nullable=False),
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -641,10 +644,14 @@ def upgrade() -> None:
         sa.Column("t1_pct", sa.Float(), nullable=True),
         sa.Column("t5_price", sa.Float(), nullable=True),
         sa.Column("t5_pct", sa.Float(), nullable=True),
+        sa.Column("index_pct", sa.Float(), nullable=True),
+        sa.Column("alpha", sa.Float(), nullable=True),
         sa.Column("ai_score", sa.Integer(), nullable=True),
         sa.Column("ai_reason", sa.String(), nullable=True),
         sa.Column("thinking", sa.String(), nullable=True),
         sa.Column("prediction_result", sa.String(), nullable=True),
+        sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
+        sa.Column("params_snapshot", sa.String(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(),
@@ -653,16 +660,27 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_screening_history")),
         sa.UniqueConstraint(
-            "trade_date",
-            "strategy_name",
+            "run_id",
             "ts_code",
-            name="uq_screening_history_date_strategy_code",
+            name="uq_screening_history_run_code",
         ),
     )
     op.create_index(
         "idx_sh_date_strategy",
         "screening_history",
         ["trade_date", "strategy_name"],
+        unique=False,
+    )
+    op.create_index(
+        "idx_sh_date_code",
+        "screening_history",
+        ["trade_date", "ts_code"],
+        unique=False,
+    )
+    op.create_index(
+        "idx_sh_run_id",
+        "screening_history",
+        ["run_id"],
         unique=False,
     )
     op.create_table(
@@ -814,6 +832,7 @@ def upgrade() -> None:
         sa.Column("last_data_date", sa.Date(), nullable=True),
         sa.Column("record_count", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(), nullable=True),
+        sa.Column("last_result_status", sa.String(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -959,6 +978,8 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_stk_holdernumber_end_date"), table_name="stk_holdernumber")
     op.drop_table("stk_holdernumber")
     op.drop_table("shibor_daily")
+    op.drop_index("idx_sh_run_id", table_name="screening_history")
+    op.drop_index("idx_sh_date_code", table_name="screening_history")
     op.drop_index("idx_sh_date_strategy", table_name="screening_history")
     op.drop_table("screening_history")
     op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")
@@ -981,6 +1002,7 @@ def downgrade() -> None:
     op.drop_table("index_dailybasic")
     op.drop_index(op.f("ix_index_daily_trade_date"), table_name="index_daily")
     op.drop_table("index_daily")
+    op.drop_index("ix_financial_reports_ann_date", table_name="financial_reports")
     op.drop_index("ix_financial_reports_ts_code_ann_date", table_name="financial_reports")
     op.drop_index(op.f("ix_financial_reports_end_date"), table_name="financial_reports")
     op.drop_table("financial_reports")
