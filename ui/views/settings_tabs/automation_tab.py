@@ -226,11 +226,15 @@ class AutomationTab(ft.Container):
 
     def did_mount(self):
         """组件挂载后订阅语言变更"""
+        if getattr(self, "_mounted", False):
+            return
+        self._mounted = True
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
         logger.debug("[AutomationTab] Subscribed to locale changes")
 
     def will_unmount(self):
         """组件卸载前取消订阅"""
+        self._mounted = False
         if self._locale_subscription_id:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
@@ -429,11 +433,15 @@ class NotificationsTab(ft.Container):
 
     def did_mount(self):
         """组件挂载后订阅语言变更"""
+        if getattr(self, "_mounted2", False):
+            return
+        self._mounted2 = True
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
         logger.debug("[NotificationsTab] Subscribed to locale changes")
 
     def will_unmount(self):
         """组件卸载前取消订阅"""
+        self._mounted2 = False
         if self._locale_subscription_id:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None

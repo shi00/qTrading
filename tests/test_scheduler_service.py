@@ -166,6 +166,7 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(mo
 
     sched_mod.SchedulerService._reset_singleton()
     service = sched_mod.SchedulerService()
+    service._last_update_date = None
 
     fake_now = datetime.datetime(2026, 4, 23, 16, 30, 0)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
@@ -219,6 +220,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
 
     sched_mod.SchedulerService._reset_singleton()
     service = sched_mod.SchedulerService()
+    service._last_pred_date = None
 
     fake_now = datetime.datetime(2026, 4, 23, 20, 30, 0)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
@@ -292,6 +294,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
 
     sched_mod.SchedulerService._reset_singleton()
     service = sched_mod.SchedulerService()
+    service._last_pred_date = None
 
     fake_now = datetime.datetime(2026, 4, 23, 20, 30, 0)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)

@@ -136,6 +136,17 @@ DECLARATIONS: list[DataDeclaration] = []
 
 def _init_declarations() -> list[DataDeclaration]:
     """初始化数据声明列表"""
+    from data.persistence.models import (
+        Dividend,
+        FinaAudit,
+        FinaMainbz,
+        MacroEconomy,
+        PledgeStat,
+        ShiborDaily,
+        StkHoldernumber,
+        Top10Holders,
+    )
+
     return [
         DataDeclaration(
             name="multi_period_roe",
@@ -150,42 +161,42 @@ def _init_declarations() -> list[DataDeclaration]:
         DataDeclaration(
             name="audit_opinion",
             prompt_claim="审计意见",
-            injector=lambda: check_table_has_data("fina_audit"),
+            injector=lambda: check_table_has_data(FinaAudit.__tablename__),
         ),
         DataDeclaration(
             name="dividend_history",
             prompt_claim="分红记录",
-            injector=lambda: check_table_has_data("dividend"),
+            injector=lambda: check_table_has_data(Dividend.__tablename__),
         ),
         DataDeclaration(
             name="pledge_ratio",
             prompt_claim="质押比例",
-            injector=lambda: check_table_has_data("pledge_stat"),
+            injector=lambda: check_table_has_data(PledgeStat.__tablename__),
         ),
         DataDeclaration(
             name="macro_economy",
             prompt_claim="宏观经济指标",
-            injector=lambda: check_table_has_data("cn_m"),
+            injector=lambda: check_table_has_data(MacroEconomy.__tablename__),
         ),
         DataDeclaration(
             name="shibor_rates",
             prompt_claim="Shibor利率",
-            injector=lambda: check_table_has_data("shibor_daily"),
+            injector=lambda: check_table_has_data(ShiborDaily.__tablename__),
         ),
         DataDeclaration(
             name="top10_holders",
             prompt_claim="前十大股东",
-            injector=lambda: check_table_has_data("top10_holders"),
+            injector=lambda: check_table_has_data(Top10Holders.__tablename__),
         ),
         DataDeclaration(
             name="holder_number",
             prompt_claim="股东人数",
-            injector=lambda: check_table_has_data("stk_holdernumber"),
+            injector=lambda: check_table_has_data(StkHoldernumber.__tablename__),
         ),
         DataDeclaration(
             name="main_business",
             prompt_claim="主营业务构成",
-            injector=lambda: check_table_has_data("fina_mainbz"),
+            injector=lambda: check_table_has_data(FinaMainbz.__tablename__),
         ),
     ]
 

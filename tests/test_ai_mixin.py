@@ -401,7 +401,10 @@ class TestAIStrategyMixinRunAnalysis:
         """历史回测场景应优先使用 context.trade_date，避免拉取最新资金数据。"""
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai_instance = MagicMock()
-            mock_ai_instance.is_cloud_available.return_value = False
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
             mock_ai.return_value = mock_ai_instance
 
             mock_context["trade_date"] = "20240118"

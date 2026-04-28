@@ -10,7 +10,7 @@ from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -169,15 +169,28 @@ class ReviewManager:
 
     async def _get_pending_predictions(self):
         """
-        Get predictions from last 10 days that have no result yet.
-        Corner cases handled:
-        - Empty DB: Returns empty DataFrame
-        - Missing columns: Uses safe column access
-        - Date edge cases: Uses 10-day lookback window
+        Get predictions from last 10 trade days that have no result yet.
+        Uses trade calendar for accurate lookback instead of natural days.
         """
-        date_threshold = (get_now() - datetime.timedelta(days=10)).date()
-
         try:
+            end_date = await self.cache.get_latest_trade_date()
+            if not end_date:
+                date_threshold = (get_now() - datetime.timedelta(days=14)).date()
+            else:
+                end_dt = parse_date(str(end_date))
+                start_dt = end_dt - datetime.timedelta(days=30)
+                trade_cal_df = await self.cache.get_trade_cal(
+                    start_date=start_dt.strftime("%Y%m%d"),
+                    end_date=end_dt.strftime("%Y%m%d"),
+                    is_open=1,
+                )
+                if trade_cal_df is not None and not trade_cal_df.empty and len(trade_cal_df) >= 10:
+                    date_threshold = trade_cal_df.iloc[-10]["cal_date"]
+                elif trade_cal_df is not None and not trade_cal_df.empty:
+                    date_threshold = trade_cal_df.iloc[0]["cal_date"]
+                else:
+                    date_threshold = (get_now() - datetime.timedelta(days=14)).date()
+
             return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore
 
         except Exception as e:
@@ -353,11 +366,16 @@ class ReviewManager:
             run_id = uuid.uuid4().hex[:16]
 
         if params_snapshot is None:
-            params_snapshot_str = None
-        elif isinstance(params_snapshot, str):
-            params_snapshot_str = params_snapshot
+            params_snapshot_value = None
+        elif isinstance(params_snapshot, dict):
+            params_snapshot_value = params_snapshot
         else:
-            params_snapshot_str = json.dumps(params_snapshot, ensure_ascii=False, sort_keys=True)
+            try:
+                params_snapshot_value = (
+                    json.loads(params_snapshot) if isinstance(params_snapshot, str) else params_snapshot
+                )
+            except (json.JSONDecodeError, TypeError):
+                params_snapshot_value = {"raw": str(params_snapshot)}
 
         # Helpers to safely extract fields
         def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):
@@ -381,7 +399,6 @@ class ReviewManager:
             if not ts_code:
                 continue
 
-            # Extract AI fields with NaN safety
             ai_score = row.get("ai_score", 0)
             try:
                 ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore
@@ -397,38 +414,34 @@ class ReviewManager:
                 thinking = ""
 
             records.append(
-                (
-                    run_id,
-                    effective_date,
-                    strategy_name,
-                    ts_code,
-                    _s(row, "name"),
-                    _f(row, "close"),
-                    _f(row, "pct_chg"),
-                    # Market data snapshot
-                    _s(row, "industry"),
-                    _f(row, "vol"),
-                    _f(row, "amount"),
-                    _f(row, "turnover_rate"),
-                    # Valuation snapshot
-                    _f(row, "pe_ttm"),
-                    _f(row, "pb"),
-                    _f(row, "ps_ttm"),
-                    _f(row, "dv_ttm"),
-                    _f(row, "total_mv"),
-                    _f(row, "circ_mv"),
-                    # Financial snapshot
-                    _f(row, "roe"),
-                    _f(row, "grossprofit_margin"),
-                    _f(row, "debt_to_assets"),
-                    _f(row, "or_yoy"),
-                    _f(row, "netprofit_yoy"),
-                    # AI analysis
-                    ai_score,
-                    str(ai_reason),
-                    str(thinking),
-                    params_snapshot_str,
-                ),
+                {
+                    "run_id": run_id,
+                    "trade_date": effective_date,
+                    "strategy_name": strategy_name,
+                    "ts_code": ts_code,
+                    "name": _s(row, "name"),
+                    "close": _f(row, "close"),
+                    "pct_chg": _f(row, "pct_chg"),
+                    "industry": _s(row, "industry"),
+                    "vol": _f(row, "vol"),
+                    "amount": _f(row, "amount"),
+                    "turnover_rate": _f(row, "turnover_rate"),
+                    "pe_ttm": _f(row, "pe_ttm"),
+                    "pb": _f(row, "pb"),
+                    "ps_ttm": _f(row, "ps_ttm"),
+                    "dv_ttm": _f(row, "dv_ttm"),
+                    "total_mv": _f(row, "total_mv"),
+                    "circ_mv": _f(row, "circ_mv"),
+                    "roe": _f(row, "roe"),
+                    "grossprofit_margin": _f(row, "grossprofit_margin"),
+                    "debt_to_assets": _f(row, "debt_to_assets"),
+                    "or_yoy": _f(row, "or_yoy"),
+                    "netprofit_yoy": _f(row, "netprofit_yoy"),
+                    "ai_score": ai_score,
+                    "ai_reason": str(ai_reason),
+                    "thinking": str(thinking),
+                    "params_snapshot": params_snapshot_value,
+                }
             )
 
         if not records:

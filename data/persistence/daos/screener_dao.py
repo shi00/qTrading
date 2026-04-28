@@ -281,7 +281,7 @@ class ScreenerDao(BaseDao):
             is_many=False,
         )
 
-    async def save_screening_results(self, records: list):
+    async def save_screening_results(self, records: list[dict | tuple]):
         if not records:
             return
 
@@ -306,9 +306,12 @@ class ScreenerDao(BaseDao):
 
         enriched_records = []
         for r in records:
-            d = dict(zip(all_cols, r, strict=True))
-            d["review_status"] = REVIEW_STATUS_PENDING
-            enriched_records.append(tuple(d[c] for c in all_cols_with_review))
+            if isinstance(r, dict):
+                row = dict(r)
+            else:
+                row = dict(zip(all_cols, r, strict=False))
+            row["review_status"] = REVIEW_STATUS_PENDING
+            enriched_records.append(tuple(row.get(c) for c in all_cols_with_review))
 
         df = pd.DataFrame(enriched_records, columns=all_cols_with_review)
 

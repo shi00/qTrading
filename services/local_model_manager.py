@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Dynamic import avoids hard static dependency for type check in CI.
 try:
     llama_cpp_module = importlib.import_module("llama_cpp")
-    Llama = getattr(llama_cpp_module, "Llama")
+    Llama = llama_cpp_module.Llama  # type: ignore[attr-defined]
     _HAS_LLAMA_CPP = True
 except (ImportError, AttributeError):
     Llama = Any  # type: ignore[assignment]
@@ -28,10 +28,9 @@ except (ImportError, AttributeError):
 if _HAS_LLAMA_CPP:
     try:
         llama_types_module = importlib.import_module("llama_cpp.llama_types")
-        ChatCompletionRequestSystemMessage = getattr(llama_types_module, "ChatCompletionRequestSystemMessage")
-        ChatCompletionRequestUserMessage = getattr(llama_types_module, "ChatCompletionRequestUserMessage")
+        ChatCompletionRequestSystemMessage = llama_types_module.ChatCompletionRequestSystemMessage  # type: ignore[attr-defined]
+        ChatCompletionRequestUserMessage = llama_types_module.ChatCompletionRequestUserMessage  # type: ignore[attr-defined]
     except (ImportError, AttributeError):
-        # Fallback or handle older versions if strictly necessary, but requirements say >=0.3.2
         ChatCompletionRequestSystemMessage = dict
         ChatCompletionRequestUserMessage = dict
 else:

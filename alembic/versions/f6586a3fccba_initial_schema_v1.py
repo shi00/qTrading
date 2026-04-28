@@ -467,6 +467,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
         sa.UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
     )
+    op.create_index(op.f("ix_market_news_publish_time"), "market_news", ["publish_time"], unique=False)
+    op.create_index(op.f("ix_market_news_source"), "market_news", ["source"], unique=False)
     op.create_table(
         "moneyflow_daily",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -651,7 +653,7 @@ def upgrade() -> None:
         sa.Column("thinking", sa.String(), nullable=True),
         sa.Column("prediction_result", sa.String(), nullable=True),
         sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
-        sa.Column("params_snapshot", sa.String(), nullable=True),
+        sa.Column("params_snapshot", sa.JSON(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(),
@@ -682,6 +684,9 @@ def upgrade() -> None:
         "screening_history",
         ["run_id"],
         unique=False,
+    )
+    op.execute(
+        "CREATE INDEX idx_sh_prediction_result ON screening_history (prediction_result) WHERE prediction_result IS NOT NULL"
     )
     op.create_table(
         "shibor_daily",
@@ -833,6 +838,8 @@ def upgrade() -> None:
         sa.Column("record_count", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(), nullable=True),
         sa.Column("last_result_status", sa.String(), nullable=True),
+        sa.Column("error_message", sa.String(), nullable=True),
+        sa.Column("error_count", sa.Integer(), nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),

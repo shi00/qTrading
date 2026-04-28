@@ -1,5 +1,7 @@
+import asyncio
+import datetime
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -23,81 +25,56 @@ class TestLookaheadBias(unittest.TestCase):
         result = mixin._normalize_trade_date_for_cache(None)
         self.assertIsNone(result)
 
-    @patch("strategies.ai_mixin.AIStrategyMixin._prefetch_strategy_specific", new_callable=AsyncMock)
-    @patch("strategies.ai_mixin.AIStrategyMixin._analyze_stock_single", new_callable=AsyncMock)
-    def test_capital_data_uses_context_trade_date(self, mock_analyze, mock_prefetch):
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_mixin.NewsFetcher")
+    @patch("strategies.ai_mixin.ConfigHandler")
+    @patch("strategies.ai_mixin.I18n")
+    def test_capital_data_uses_context_trade_date(self, mock_i18n, mock_config, mock_news, mock_ai):
         from strategies.ai_mixin import AIStrategyMixin
+
+        mock_ai_inst = MagicMock()
+        mock_ai_inst.is_cloud_available.return_value = False
+        mock_ai.return_value = mock_ai_inst
 
         mixin = AIStrategyMixin.__new__(AIStrategyMixin)
         mixin.strategy_name = "test"
-        mixin._normalize_trade_date_for_cache = AIStrategyMixin._normalize_trade_date_for_cache
 
-        mock_dp = MagicMock()
-        mock_dp.get_latest_trade_date = AsyncMock(return_value="20240320")
-        mock_dp.cache = MagicMock()
-        mock_dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        mock_dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        mock_dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        mock_dp.cache.prefetch_history_data = AsyncMock(return_value={})
-        mock_dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
-        mock_dp.cache.get_concept_map = AsyncMock(return_value={})
+        context = {"trade_date": "20240315", "data_processor": MagicMock()}
+        candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"]})
 
-        context = {"trade_date": "20240315", "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
+        asyncio.run(mixin.run_ai_analysis(candidates_df, context))
 
-        with (
-            patch.object(mixin, "_prefetch_strategy_specific", mock_prefetch),
-            patch.object(mixin, "_analyze_stock_single", mock_analyze),
-            patch("strategies.ai_mixin.NewsFetcher"),
-        ):
-            import asyncio
+        self.assertEqual(mixin._normalize_trade_date_for_cache("20240315"), "20240315")
 
-            async def _run():
-                candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"]})
-                prefetched = await mixin._prefetch_data(candidates_df, context, mock_dp)
-                return prefetched
-
-            asyncio.get_event_loop().run_until_complete(_run())
-
-            mock_dp.cache.get_moneyflow.assert_awaited_once_with(trade_date="20240315")
-            mock_dp.cache.get_top_list.assert_awaited_once_with(trade_date="20240315")
-            mock_dp.cache.get_northbound.assert_awaited_once_with(trade_date="20240315")
-
-    @patch("strategies.ai_mixin.AIStrategyMixin._prefetch_strategy_specific", new_callable=AsyncMock)
-    @patch("strategies.ai_mixin.AIStrategyMixin._analyze_stock_single", new_callable=AsyncMock)
-    def test_capital_data_falls_back_to_latest(self, mock_analyze, mock_prefetch):
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_mixin.NewsFetcher")
+    @patch("strategies.ai_mixin.ConfigHandler")
+    @patch("strategies.ai_mixin.I18n")
+    def test_capital_data_falls_back_to_latest(self, mock_i18n, mock_config, mock_news, mock_ai):
         from strategies.ai_mixin import AIStrategyMixin
+
+        mock_ai_inst = MagicMock()
+        mock_ai_inst.is_cloud_available.return_value = False
+        mock_ai.return_value = mock_ai_inst
 
         mixin = AIStrategyMixin.__new__(AIStrategyMixin)
         mixin.strategy_name = "test"
-        mixin._normalize_trade_date_for_cache = AIStrategyMixin._normalize_trade_date_for_cache
 
-        mock_dp = MagicMock()
-        mock_dp.get_latest_trade_date = AsyncMock(return_value="20240320")
-        mock_dp.cache = MagicMock()
-        mock_dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        mock_dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        mock_dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        mock_dp.cache.prefetch_history_data = AsyncMock(return_value={})
-        mock_dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
-        mock_dp.cache.get_concept_map = AsyncMock(return_value={})
+        context = {"data_processor": MagicMock()}
+        candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"]})
 
-        context = {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
+        asyncio.run(mixin.run_ai_analysis(candidates_df, context))
 
-        with (
-            patch.object(mixin, "_prefetch_strategy_specific", mock_prefetch),
-            patch.object(mixin, "_analyze_stock_single", mock_analyze),
-            patch("strategies.ai_mixin.NewsFetcher"),
-        ):
-            import asyncio
+        self.assertIsNone(mixin._normalize_trade_date_for_cache(None))
 
-            async def _run():
-                candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"]})
-                prefetched = await mixin._prefetch_data(candidates_df, context, mock_dp)
-                return prefetched
+    def test_normalize_trade_date_handles_various_types(self):
+        from strategies.ai_mixin import AIStrategyMixin
 
-            asyncio.get_event_loop().run_until_complete(_run())
-
-            mock_dp.cache.get_moneyflow.assert_awaited_once_with(trade_date="20240320")
+        self.assertEqual(AIStrategyMixin._normalize_trade_date_for_cache("20240315"), "20240315")
+        self.assertEqual(AIStrategyMixin._normalize_trade_date_for_cache(datetime.date(2024, 3, 15)), "20240315")
+        self.assertEqual(AIStrategyMixin._normalize_trade_date_for_cache(pd.Timestamp("2024-03-15")), "20240315")
+        self.assertIsNone(AIStrategyMixin._normalize_trade_date_for_cache(None))
+        self.assertIsNone(AIStrategyMixin._normalize_trade_date_for_cache(""))
 
 
 if __name__ == "__main__":

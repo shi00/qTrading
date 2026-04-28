@@ -20,6 +20,9 @@ from data.constants import (
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
     SYNC_RESULT_EMPTY,
     TIER_FINANCIAL_FRESHNESS_DAYS,
+    TIER_FIN_FRESH_RATIO_GOLD,
+    TIER_FIN_FRESH_RATIO_MIN,
+    TIER_FIN_FRESH_RATIO_NEUTRAL,
     TIER_FUNDAMENTAL_HIGH_THRESHOLD,
     TIER_FUNDAMENTAL_LOW_THRESHOLD,
     TIER_QUOTE_FRESHNESS_DAYS,
@@ -78,18 +81,20 @@ def _compute_tier(
 
     fin_ok_for_gold = False
     if fin_lag_days is not None:
-        fin_ok_for_gold = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS and fin_fresh_ratio >= 0.5
+        fin_ok_for_gold = (
+            fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS and fin_fresh_ratio >= TIER_FIN_FRESH_RATIO_NEUTRAL
+        )
     else:
-        fin_ok_for_gold = fin_fresh_ratio > 0.9
+        fin_ok_for_gold = fin_fresh_ratio > TIER_FIN_FRESH_RATIO_GOLD
 
     if fin_ok_for_gold:
         if avg_fundamental is not None and avg_fundamental > TIER_FUNDAMENTAL_HIGH_THRESHOLD:
             return 3
 
-    if fin_fresh_ratio > 0.5:
+    if fin_fresh_ratio > TIER_FIN_FRESH_RATIO_NEUTRAL:
         return 2
 
-    if lag_days <= TIER_QUOTE_FRESHNESS_DAYS and fin_fresh_ratio >= 0.1:
+    if lag_days <= TIER_QUOTE_FRESHNESS_DAYS and fin_fresh_ratio >= TIER_FIN_FRESH_RATIO_MIN:
         return 2
 
     return 1
@@ -255,14 +260,14 @@ class HealthCheckMixin:
 
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
-                    fin_fresh_ratio=0.5,
+                    fin_fresh_ratio=TIER_FIN_FRESH_RATIO_NEUTRAL,
                     missing_critical=missing_critical,
                     fin_lag_days=fin_lag_days,
                 )
             else:
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
-                    fin_fresh_ratio=0.5,
+                    fin_fresh_ratio=TIER_FIN_FRESH_RATIO_NEUTRAL,
                     missing_critical=False,
                 )
 
@@ -543,7 +548,7 @@ class HealthCheckMixin:
             if basics is None or basics.empty:
                 return {"score": 0, "tier": 0, "details": {}}
 
-            active_stocks = basics[basics["list_status"] == "L"]["ts_code"].tolist()
+            active_stocks = basics[basics["list_status"].isin(["L", "D"])]["ts_code"].tolist()
             sample = random.sample(active_stocks, min(sample_size, len(active_stocks)))
 
             logger.debug(
@@ -684,7 +689,8 @@ class HealthCheckMixin:
                         fin_date_str = fin_info.iloc[0].get("last_data_date", "")
                         if fin_date_str:
                             fin_dt = parse_date(str(fin_date_str), "%Y%m%d")
-                            fin_lag_days = (end_date_obj - fin_dt).days
+                            fin_dt_date = fin_dt.date() if hasattr(fin_dt, "date") else fin_dt
+                            fin_lag_days = (end_date_obj - fin_dt_date).days
                             fin_recency_ok = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS
             except Exception:
                 pass
@@ -709,9 +715,10 @@ class HealthCheckMixin:
             )
 
             self._quality_tier = tier
+            fin_score_str = f"{fundamental_score:.0f}" if fundamental_score is not None else "N/A"
             logger.info(
                 f"[DataProcessor] QualityScan | ✅ Thorough evaluation complete. "
-                f"Composite={composite_score:.0f} (Quote={quote_score:.0f}, Fin={fundamental_score:.0f}, "
+                f"Composite={composite_score:.0f} (Quote={quote_score:.0f}, Fin={fin_score_str}, "
                 f"FinRecency={'OK' if fin_recency_ok else 'STALE'}). Tier={tier}",
             )
 

@@ -144,21 +144,26 @@ class QuoteDao(BaseDao):
             tables = _get_default_synced_tables()
 
         allowed_tables = set(_get_default_synced_tables())
+        safe_tables = []
         for table in tables:
             if table not in allowed_tables or not _is_safe_identifier(table):
                 logger.warning(f"[QuoteDao] Invalid table name rejected: {table}")
                 return False
-            try:
-                df = await self._read_db(
-                    f"SELECT 1 as val FROM {table} WHERE trade_date=$1 LIMIT 1",
-                    (trade_date,),
-                )
-                if df is None or df.empty:
-                    return False
-            except Exception:
-                return False
+            safe_tables.append(table)
 
-        return True
+        if not safe_tables:
+            return True
+
+        union_parts = [f"SELECT '{t}' as tbl, 1 as val FROM {t} WHERE trade_date=$1 LIMIT 1" for t in safe_tables]
+        sql = " UNION ALL ".join(union_parts)
+        try:
+            df = await self._read_db(sql, (trade_date,))
+            if df is None or df.empty:
+                return False
+            found_tables = set(df["tbl"].tolist())
+            return found_tables == set(safe_tables)
+        except Exception:
+            return False
 
     async def get_expected_stock_count(self, trade_date: datetime.date | str) -> int:
         """
@@ -836,7 +841,7 @@ class QuoteDao(BaseDao):
         field_sql = """
             SELECT
                 COUNT(*) AS total,
-                COUNT(i.trade_date) AS indicators_available,
+                COUNT(indicator_date) AS indicators_available,
                 COUNT(roe) AS roe_count,
                 COUNT(or_yoy) AS or_yoy_count,
                 COUNT(netprofit_yoy) AS netprofit_yoy_count,

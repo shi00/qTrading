@@ -401,6 +401,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     get_now().date(),
                     total_count,
                 )
+                self._quality_tier = None
+                self._health_cache = {"time": 0, "data": None}
                 logger.info(
                     f"[DataProcessor] Sync Basic | ✅ {active_count} active + {delisted_count} delisted = {total_count} total stocks",
                 )

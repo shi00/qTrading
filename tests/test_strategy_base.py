@@ -106,8 +106,9 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         dates = pd.date_range(end="20230101", periods=30).strftime("%Y%m%d").tolist()
         c_prices = list(range(35, 5, -1))
         history_data = []
-        for d, p in zip(dates, c_prices, strict=True):
-            history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0})
+        for i, (d, p) in enumerate(zip(dates, c_prices, strict=True)):
+            vol = 3000 if i == 29 else 1000
+            history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
         history_df = pd.DataFrame(history_data)
         cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
         dp_mock.cache = cache_mock
@@ -127,7 +128,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
 
         dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
         history_data = []
-        for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [160], strict=True):
+        for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [200], strict=True):
             history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
         history_df = pd.DataFrame(history_data)
 

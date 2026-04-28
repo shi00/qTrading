@@ -30,10 +30,12 @@ from data.persistence.models import (
     NorthboundHolding,
     PledgeStat,
     Repurchase,
+    ScreeningHistory,
     ShiborDaily,
     StkHoldernumber,
     StockBasic,
     SuspendD,
+    SyncStatus,
     Top10Holders,
     TopList,
     TradeCal,
@@ -363,6 +365,24 @@ class TestAlembicMigrationAlignment:
         assert not missing_in_alembic, f"Alembic missing columns for trade_cal: {missing_in_alembic}"
         assert not extra_in_alembic, f"Alembic has extra columns for trade_cal: {extra_in_alembic}"
 
+    def test_screening_history_alembic_alignment(self):
+        model_cols = get_model_columns(ScreeningHistory) - {"updated_at", "created_at"}
+        alembic_cols = self._extract_table_columns_from_migration("screening_history")
+        assert alembic_cols is not None, "Could not find screening_history in migration script"
+        missing_in_alembic = model_cols - alembic_cols
+        extra_in_alembic = alembic_cols - model_cols - {"updated_at", "created_at"}
+        assert not missing_in_alembic, f"Alembic missing columns for screening_history: {missing_in_alembic}"
+        assert not extra_in_alembic, f"Alembic has extra columns for screening_history: {extra_in_alembic}"
+
+    def test_sync_status_alembic_alignment(self):
+        model_cols = get_model_columns(SyncStatus) - {"updated_at", "created_at"}
+        alembic_cols = self._extract_table_columns_from_migration("sync_status")
+        assert alembic_cols is not None, "Could not find sync_status in migration script"
+        missing_in_alembic = model_cols - alembic_cols
+        extra_in_alembic = alembic_cols - model_cols - {"updated_at", "created_at"}
+        assert not missing_in_alembic, f"Alembic missing columns for sync_status: {missing_in_alembic}"
+        assert not extra_in_alembic, f"Alembic has extra columns for sync_status: {extra_in_alembic}"
+
 
 class TestOrmAlembicDaoConsistency:
     """Test that ORM models, Alembic migrations, and DataDictionary stay in sync."""
@@ -389,8 +409,10 @@ class TestOrmAlembicDaoConsistency:
         (FinaMainbz, "fina_mainbz"),
         (PledgeStat, "pledge_stat"),
         (Repurchase, "repurchase"),
+        (ScreeningHistory, "screening_history"),
         (ShiborDaily, "shibor_daily"),
         (StkHoldernumber, "stk_holdernumber"),
+        (SyncStatus, "sync_status"),
         (Top10Holders, "top10_holders"),
         (TradeCal, "trade_cal"),
     ]

@@ -195,6 +195,9 @@ class ScreenerView(ft.Container):
         self._setup_layout()
 
     def did_mount(self):
+        if getattr(self, "_mounted", False):
+            return
+        self._mounted = True
         if self.page:
             self.page.overlay.append(self.save_file_picker)
             self.page.update()

@@ -33,6 +33,9 @@ TIER_FUNDAMENTAL_LOW_THRESHOLD = (
     0.3  # Below this, fundamental fields insufficient for fundamental strategies (SILVER cap)
 )
 TIER_FUNDAMENTAL_HIGH_THRESHOLD = 0.7  # Above this, fundamental fields sufficient for GOLD qualification
+TIER_FIN_FRESH_RATIO_GOLD = 0.9  # Financial fresh ratio for GOLD (without fin_lag_days)
+TIER_FIN_FRESH_RATIO_NEUTRAL = 0.5  # Neutral financial fresh ratio (fast-path default)
+TIER_FIN_FRESH_RATIO_MIN = 0.1  # Minimum financial fresh ratio for SILVER
 
 # Financial Report Schema Columns (Unified for Income, Balance, Cashflow, Indicator)
 FINANCIAL_REPORT_SCHEMA_COLS = [

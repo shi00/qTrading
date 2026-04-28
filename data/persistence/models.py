@@ -13,7 +13,9 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
 from sqlalchemy.sql import func
@@ -174,6 +176,8 @@ class SyncStatus(Base):
     record_count = Column(Integer)
     status = Column(String)
     last_result_status = Column(String)
+    error_message = Column(String)
+    error_count = Column(Integer, default=0)
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
@@ -214,7 +218,7 @@ class ScreeningHistory(Base):
     thinking = Column(String)
     prediction_result = Column(String)
     review_status = Column(String, server_default="PENDING")
-    params_snapshot = Column(String)
+    params_snapshot = Column(JSONB)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
@@ -226,6 +230,7 @@ class ScreeningHistory(Base):
         Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
         Index("idx_sh_date_code", "trade_date", "ts_code"),
         Index("idx_sh_run_id", "run_id"),
+        Index("idx_sh_prediction_result", "prediction_result", postgresql_where=text("prediction_result IS NOT NULL")),
     )
 
 
@@ -252,7 +257,11 @@ class MarketNews(Base):
     source = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
-    __table_args__ = (UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),)
+    __table_args__ = (
+        UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
+        Index("ix_market_news_publish_time", "publish_time"),
+        Index("ix_market_news_source", "source"),
+    )
 
 
 class TradeCal(Base):

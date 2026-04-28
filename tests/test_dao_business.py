@@ -88,14 +88,14 @@ async def setup_stock_data(test_engine: AsyncEngine):
     async with test_engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status) "
-                "VALUES ('000001.SZ', '000001', '平安银行', '银行', 'L')"
+                "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date) "
+                "VALUES ('000001.SZ', '000001', '平安银行', '银行', 'L', '2020-01-01')"
             )
         )
         await conn.execute(
             text(
-                "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status) "
-                "VALUES ('000002.SZ', '000002', '万科A', '房地产', 'L')"
+                "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date) "
+                "VALUES ('000002.SZ', '000002', '万科A', '房地产', 'L', '2020-01-01')"
             )
         )
         await conn.execute(
@@ -307,34 +307,34 @@ class TestScreenerDao:
     async def test_save_and_get_screening_history(self, screener_dao, clean_db):
         """保存并查询筛选历史"""
         records = [
-            (
-                "RUN001",
-                "2024-03-21",
-                "oversold",
-                "000001.SZ",
-                "平安银行",
-                10.0,
-                2.0,
-                "银行",
-                1000000,
-                10000000,
-                1.5,
-                5.0,
-                0.5,
-                1.0,
-                2.0,
-                1000000000.0,
-                500000000.0,
-                12.0,
-                30.0,
-                80.0,
-                5.0,
-                8.0,
-                85,
-                "AI推荐理由",
-                "思考过程",
-                None,
-            )
+            {
+                "run_id": "RUN001",
+                "trade_date": "2024-03-21",
+                "strategy_name": "oversold",
+                "ts_code": "000001.SZ",
+                "name": "平安银行",
+                "close": 10.0,
+                "pct_chg": 2.0,
+                "industry": "银行",
+                "vol": 1000000,
+                "amount": 10000000,
+                "turnover_rate": 1.5,
+                "pe_ttm": 5.0,
+                "pb": 0.5,
+                "ps_ttm": 1.0,
+                "dv_ttm": 2.0,
+                "total_mv": 1000000000.0,
+                "circ_mv": 500000000.0,
+                "roe": 12.0,
+                "grossprofit_margin": 30.0,
+                "debt_to_assets": 80.0,
+                "or_yoy": 5.0,
+                "netprofit_yoy": 8.0,
+                "ai_score": 85,
+                "ai_reason": "AI推荐理由",
+                "thinking": "思考过程",
+                "params_snapshot": None,
+            }
         ]
         await screener_dao.save_screening_results(records)
 

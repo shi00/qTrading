@@ -68,12 +68,13 @@ class TestDataExplorerViewCleanup(unittest.TestCase):
         page.pubsub = MagicMock()
         view._Control__page = page  # type: ignore[attr-defined]
         view._pubsub_subscribed = True
-        view._mount_task = MagicMock()
+        mock_mount_task = MagicMock()
+        view._mount_task = mock_mount_task
 
         view.will_unmount()
 
         page.pubsub.unsubscribe.assert_called_once_with(view._on_broadcast_message)
-        view._mount_task.cancel.assert_called_once()
+        mock_mount_task.cancel.assert_called_once()
         self.assertFalse(view._pubsub_subscribed)
         self.assertIsNone(view._mount_task)
 

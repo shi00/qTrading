@@ -119,6 +119,24 @@ COMMON_COLUMNS = {
     "ai_reason": "col_ai_reason",
     "thinking": "col_thinking",
     "confidence": "col_confidence",
+    # Screening & Review
+    "strategy_name": "col_strategy_name",
+    "prediction_result": "col_prediction_result",
+    "review_status": "col_review_status",
+    "t1_price": "col_t1_price",
+    "t5_price": "col_t5_price",
+    "t1_pct": "col_t1_pct",
+    "t5_pct": "col_t5_pct",
+    "index_pct": "col_index_pct",
+    "alpha": "col_alpha",
+    "run_id": "col_run_id",
+    "params_snapshot": "col_params_snapshot",
+    # Sync Status
+    "table_name": "col_table_name",
+    "last_sync_date": "col_last_sync_date",
+    "last_data_date": "col_last_data_date",
+    "record_count": "col_record_count",
+    "last_result_status": "col_last_result_status",
     # Technical Indicators (dynamic columns)
     "rsi_6": "col_rsi_6",
 }
@@ -398,29 +416,11 @@ TABLE_DEFINITIONS = {
     "trade_cal": {"alias": "tab_trade_cal", "columns": {}},
     "screening_history": {
         "alias": "tab_screening_history",
-        "columns": {
-            "ai_score": "col_ai_score",
-            "ai_reason": "col_ai_reason",
-            "strategy_name": "col_strategy_name",
-            "prediction_result": "col_prediction_result",
-            "review_status": "col_review_status",
-            "t1_price": "col_t1_price",
-            "t5_price": "col_t5_price",
-            "t1_pct": "col_t1_pct",
-            "t5_pct": "col_t5_pct",
-            "run_id": "col_run_id",
-            "params_snapshot": "col_params_snapshot",
-        },
+        "columns": {},
     },
     "sync_status": {
         "alias": "tab_sync_status",
-        "columns": {
-            "table_name": "col_table_name",
-            "last_sync_date": "col_last_sync_date",
-            "last_data_date": "col_last_data_date",
-            "record_count": "col_record_count",
-            "last_result_status": "col_last_result_status",
-        },
+        "columns": {},
     },
     "stock_sync_status": {
         "alias": "tab_stock_sync_status",

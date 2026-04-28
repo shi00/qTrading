@@ -114,8 +114,10 @@ class TestAISelectionStrategy:
 
         strategy = AISelectionStrategy()
 
+        fundamental_df = pd.DataFrame([{"ts_code": "000001.SZ", "pe_ttm": 6.5}])
         context = {
             "screening_data": sample_screening_df,
+            "fundamental_screening_data": fundamental_df,
             "data_processor": mock_data_processor,
         }
 
@@ -192,10 +194,19 @@ class TestAISelectionStrategy:
 
         strategy = AISelectionStrategy()
 
+        fundamental_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "pe_ttm": 6.5},
+                {"ts_code": "600519.SH", "pe_ttm": 30.0},
+                {"ts_code": "300001.SZ", "pe_ttm": -10.0},
+            ]
+        )
+
         with patch.object(NewsFetcher, "get_us_major_moves", return_value=""):
             with patch.object(NewsFetcher, "get_stock_news", return_value=[]):
                 context = {
                     "screening_data": sample_screening_df,
+                    "fundamental_screening_data": fundamental_df,
                     "data_processor": mock_data_processor,
                 }
                 result = await strategy.filter(context)

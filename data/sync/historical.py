@@ -118,7 +118,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=start_date,
                         end_date=end_date,
-                        tables=list(self.SYNCED_TABLES),
+                        tables=list(self.CORE_RESUME_TABLES),
                     )
                     for date, quality in quality_results.items():
                         result.quality_scores[date] = quality.get("score", 0)
@@ -229,7 +229,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=dates_to_verify[0],
                         end_date=dates_to_verify[-1],
-                        tables=list(self.SYNCED_TABLES),
+                        tables=list(self.CORE_RESUME_TABLES),
                     )
 
                     for date in dates_to_verify:
@@ -278,7 +278,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         failed_dates = []
         consecutive_failures = 0
-        CB_THRESHOLD = min(50, max(10, int(total_days * 0.1) if total_days > 0 else 10))
+        CB_THRESHOLD = min(50, max(3, int(total_days * 0.2) if total_days > 0 else 3))
+        retry_round = 0
         abort_sync = False
         processed_count = 0
         BATCH_SIZE = 20
@@ -339,7 +340,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
 
-            # Cooperative yield: allow UI loop to process events like tab switching
+            batch_failures = sum(1 for d in batch if d in set(failed_dates))
+            if batch_failures > 0:
+                retry_round += 1
+                backoff = min(30, 2**retry_round)
+                logger.info(
+                    f"[HistoricalSync] Backoff | {batch_failures} failures in batch, waiting {backoff}s (round {retry_round})",
+                )
+                await asyncio.sleep(backoff)
+            else:
+                retry_round = 0
+
             await asyncio.sleep(0)
 
         # Smart Retry
@@ -559,6 +570,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     f"[HistoricalSync] DaySync | ⚠️ adj_factor column missing in quotes for {trade_date}. "
                     "This may affect price adjustment calculations.",
                 )
+                if sync_result is not None:
+                    sync_result.warnings.append(f"adj_factor missing for {trade_date}")
 
         df_basic = data_map.get("basic")
         if df_basic is not None and not df_basic.empty:

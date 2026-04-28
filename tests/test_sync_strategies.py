@@ -1242,7 +1242,7 @@ class TestFinancialSyncStrategy:
 
         assert result.status == "success"
         mock_context.processor.get_trade_dates.assert_awaited_once_with(
-            start_date=datetime.date(2023, 11, 8),
+            start_date=datetime.date(2023, 10, 24),
             end_date=anchor_date,
         )
         strategy._fetch_comprehensive_financial_data.assert_awaited_once_with(

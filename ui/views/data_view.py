@@ -314,11 +314,15 @@ class TableViewerTab(ft.Container):
         )
 
     def did_mount(self):
+        if getattr(self, "_mounted", False):
+            return
+        self._mounted = True
         if self.page:
             self.page.overlay.append(self.save_file_picker)
             self.page.update()
 
     def will_unmount(self):
+        self._mounted = False
         if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
             self.page.overlay.remove(self.save_file_picker)
             self.page.update()
@@ -1167,13 +1171,15 @@ class DataExplorerView(ft.Container):
         """
         Trigger lazy initialization.
         """
-        # This method is called by Flet when the control is added to the page.
-        # We delegate to an async method to handle the actual work.
+        if getattr(self, "_mounted", False):
+            return
+        self._mounted = True
         if self.page:
             self._mount_task = self.page.run_task(self.did_mount_async)  # type: ignore
 
     def will_unmount(self):
         """Clean up subscriptions when view is detached"""
+        self._mounted = False
         if self.page and getattr(self, "_pubsub_subscribed", False):
             try:
                 self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore

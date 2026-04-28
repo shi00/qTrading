@@ -406,22 +406,25 @@ class TestDataProcessor(unittest.TestCase):
     # ==========================================================
 
     async def async_test_assign_basic_tier_gold(self):
-        """Test _assign_basic_tier assigns GOLD (3) when both quotes and financials are fresh"""
+        """Test _assign_basic_tier assigns SILVER (2) in fast-path when all critical tables are fresh.
+
+        Note: GOLD (3) is unreachable in fast-path because field-level fundamental
+        completeness (avg_fundamental) is unavailable. Use check_data_health for GOLD.
+        """
+        today = get_now().strftime("%Y%m%d")
         self.mock_cache.get_sync_status = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "table_name": ["daily_quotes", "financial_reports"],
-                    "last_data_date": [
-                        get_now().strftime("%Y%m%d"),
-                        get_now().strftime("%Y%m%d"),
-                    ],
-                    "record_count": [1000, 500],
+                    "table_name": ["daily_quotes", "financial_reports", "daily_indicators", "moneyflow_daily"],
+                    "last_data_date": [today, today, today, today],
+                    "record_count": [1000, 500, 800, 600],
+                    "last_result_status": ["ok", "ok", "ok", "ok"],
                 },
             ),
         )
 
         await self.processor._assign_basic_tier()
-        self.assertEqual(self.processor._quality_tier, 3)
+        self.assertEqual(self.processor._quality_tier, 2)
 
     def test_assign_basic_tier_gold(self):
         asyncio.run(self.async_test_assign_basic_tier_gold())
@@ -843,6 +846,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""
         self.processor._quality_tier = 3
+        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame({"pe": [10], "trade_date": ["20230101"]}),
         )
@@ -881,6 +885,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context_resolves_trade_date_from_data(self):
         """当缓存 trade_date 缺失时，应从 screening_data 的唯一 trade_date 推导"""
         self.processor._quality_tier = 3
+        self.processor.get_latest_trade_date = AsyncMock(return_value=None)
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
@@ -1087,6 +1092,8 @@ class TestDataProcessor(unittest.TestCase):
         cst = ZoneInfo("Asia/Shanghai")
         fixed_now = dt.datetime(2025, 12, 1, tzinfo=cst)
 
+        self.processor.get_latest_trade_date = AsyncMock(return_value=dt.date(2025, 12, 1))
+
         # Mock stock basic
         stocks = [f"{i:06d}.SZ" for i in range(1, 6)]
         self.mock_cache.get_stock_basic = AsyncMock(
@@ -1134,6 +1141,18 @@ class TestDataProcessor(unittest.TestCase):
                     "last_data_date": ["20251120"],
                 }
             ),
+        )
+        self.mock_cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "global_trade_days": 750,
+                "tables": {
+                    "daily_quotes": {"ratio": 1.0, "type": "stock"},
+                    "daily_indicators": {"ratio": 1.0, "type": "stock"},
+                    "financial_reports": {"ratio": 0.95, "type": "stock"},
+                    "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
+                    "stock_basic": {"ratio": 1.0, "type": "global"},
+                },
+            }
         )
 
         progress_calls = []
@@ -1347,6 +1366,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_run_quality_scan_cancellation(self):
         """Test run_quality_scan respects cancellation"""
         stocks = [f"{i:06d}.SZ" for i in range(1, 20)]
+        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
         self.mock_cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {"ts_code": stocks, "list_status": ["L"] * len(stocks)},
@@ -1398,14 +1418,15 @@ class TestDataProcessor(unittest.TestCase):
     # ==========================================================
 
     async def async_test_assign_basic_tier_silver(self):
-        """Test _assign_basic_tier assigns SILVER (2) when quotes fresh but no financial data"""
-
+        """Test _assign_basic_tier assigns SILVER (2) when all critical tables fresh but fin_fresh_ratio=0.5"""
+        today = get_now().strftime("%Y%m%d")
         self.mock_cache.get_sync_status = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "table_name": ["daily_quotes"],
-                    "last_data_date": [get_now().strftime("%Y%m%d")],
-                    "record_count": [1000],
+                    "table_name": ["daily_quotes", "daily_indicators", "moneyflow_daily", "financial_reports"],
+                    "last_data_date": [today, today, today, today],
+                    "record_count": [1000, 800, 600, 500],
+                    "last_result_status": ["ok", "ok", "ok", "ok"],
                 },
             ),
         )
