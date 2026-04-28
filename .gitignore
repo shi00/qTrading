@@ -30,6 +30,7 @@ env/
 # IDE / Editor
 .idea/
 .vscode/
+.trae/
 
 # Build & Bundling tools
 *.spec
@@ -83,3 +84,6 @@ logs/
 *.h5
 *.parquet
 *.gguf
+
+# 5. docs
+docs/
