@@ -1,0 +1,9 @@
+# === Optional / Heavy Dependencies ===
+# Keep these outside the core CI install path so optional features do not mask
+# failures in the application's required dependency set.
+
+# Fast Brotli decompression support for urllib3.
+brotlicffi>=1.1.0.0
+
+# Browser automation for E2E tests and scraping helpers.
+playwright>=1.58.0

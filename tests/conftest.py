@@ -40,8 +40,11 @@ sys.modules["keyring"] = _create_mock_keyring()
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
 TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
-TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD", "123456")
-TEST_DB_NAME = "test_astock"
+# Allow CI to override the placeholder local password with a secret-backed value.
+TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD", "123456")
+TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "test_astock")
+if not TEST_DB_NAME.replace("_", "").isalnum():
+    raise ValueError("TEST_DB_NAME must contain only letters, digits, and underscores")
 
 TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
 TEST_DB_SYNC_URL = f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
@@ -110,12 +113,14 @@ async def _ensure_test_db():
             """
             SELECT pg_terminate_backend(pid)
             FROM pg_stat_activity
-            WHERE datname = 'test_astock'
+            WHERE datname = $1
               AND pid <> pg_backend_pid();
-            """
+            """,
+            TEST_DB_NAME,
         )
-        await conn.execute("DROP DATABASE IF EXISTS test_astock")
-        await conn.execute("CREATE DATABASE test_astock")
+        db_name_sql = TEST_DB_NAME.replace('"', '""')
+        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
+        await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
         _test_db_initialized = True
     finally:
         await conn.close()

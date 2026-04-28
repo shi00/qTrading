@@ -7,7 +7,8 @@
 #endif
 
 [Setup]
-AppId={{B1A2C3D4-E5F6-7890-ABCD-EF1234567890}
+; Stable AppId for in-place upgrades. Do not change after release.
+AppId={{7E6D0B44-BD44-4E46-8B5C-3A5F2D237C1A}
 AppName=AStockScreener
 AppVersion={#MyAppVersion}
 AppPublisher=QTrading
