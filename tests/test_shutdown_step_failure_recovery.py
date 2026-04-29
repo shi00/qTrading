@@ -70,9 +70,7 @@ class TestShutdownStepFailureRecovery:
         async def _blocking_step0():
             await real_sleep(0.2)
 
-        with (
-            patch.object(coordinator, "_step0_cancel_tasks", side_effect=_blocking_step0),
-        ):
+        with patch.object(coordinator, "_step0_cancel_tasks", side_effect=_blocking_step0):
             await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=0.01)
 
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")

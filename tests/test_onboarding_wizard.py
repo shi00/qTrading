@@ -868,7 +868,7 @@ class TestLocalModelManagerIntegration:
 
         LocalModelManager._reset_singleton()
 
-        LocalModelManager._instance = LocalModelManager.__new__(LocalModelManager)
+        LocalModelManager._instance = object.__new__(LocalModelManager)
         LocalModelManager._instance._llm = "mock_llm_instance"
         LocalModelManager._initialized = True
 

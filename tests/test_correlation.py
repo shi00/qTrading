@@ -109,7 +109,7 @@ class TestLoggerCorrelationIntegration:
             setup_logging()
 
             for handler in test_logger.handlers:
-                fmt_str = handler.formatter._fmt if handler.formatter else ""
+                fmt_str = handler.formatter._fmt if handler.formatter and handler.formatter._fmt is not None else ""
                 assert "%(correlation_id)s" in fmt_str, f"Handler {handler} missing correlation_id in format: {fmt_str}"
 
                 has_correlation_filter = any(

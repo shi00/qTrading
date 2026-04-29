@@ -35,7 +35,7 @@ class TestNewsSubscriptionStopNoClear:
             if in_stop:
                 if stripped and not stripped.startswith("#"):
                     current_indent = len(line) - len(stripped)
-                    if current_indent <= indent_level and stripped.startswith("def "):
+                    if indent_level is not None and current_indent <= indent_level and stripped.startswith("def "):
                         break
                     stop_lines.append(stripped)
                 elif stripped.startswith("#"):
