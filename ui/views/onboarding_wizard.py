@@ -1132,7 +1132,7 @@ class OnboardingWizard(ft.Container):
                 self.btn_sync_later.disabled = False
 
         except Exception as e:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(e, context="general")
             self.sync_status.value = error_info["message"]

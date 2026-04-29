@@ -537,7 +537,7 @@ class TestClassifyError:
         """Test that JSONDecodeError is classified correctly"""
         import json
 
-        from ui.i18n import classify_error
+        from utils.error_classifier import classify_error
 
         try:
             json.loads("{invalid json}")
@@ -547,7 +547,7 @@ class TestClassifyError:
 
     def test_classify_file_not_found_error(self):
         """Test that FileNotFoundError is classified correctly"""
-        from ui.i18n import classify_error
+        from utils.error_classifier import classify_error
 
         e = FileNotFoundError("File not found")
         result = classify_error(e)
@@ -555,7 +555,7 @@ class TestClassifyError:
 
     def test_classify_permission_error(self):
         """Test that PermissionError is classified correctly"""
-        from ui.i18n import classify_error
+        from utils.error_classifier import classify_error
 
         e = PermissionError("Permission denied")
         result = classify_error(e)
@@ -563,7 +563,7 @@ class TestClassifyError:
 
     def test_classify_os_error_disk_space(self):
         """Test that OSError with disk space is classified correctly"""
-        from ui.i18n import classify_error
+        from utils.error_classifier import classify_error
 
         e = OSError("No disk space left")
         result = classify_error(e)
@@ -571,7 +571,7 @@ class TestClassifyError:
 
     def test_classify_timeout_error(self):
         """Test that timeout errors are classified correctly"""
-        from ui.i18n import classify_error
+        from utils.error_classifier import classify_error
 
         e = TimeoutError("Connection timed out")
         result = classify_error(e)

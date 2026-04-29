@@ -313,7 +313,7 @@ class TushareConfigPanel(ft.Container):
             return True
 
         except Exception as e:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(e, context="token")
             self._show_error(error_info["message"])

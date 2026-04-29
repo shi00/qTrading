@@ -753,7 +753,7 @@ class LLMConfigPanel(ft.Container):
             self._show_success(I18n.get("llm_refresh_success", count=len(model_ids)))
 
         except Exception as ex:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(ex, context="llm")
             self._show_error(f"{I18n.get('llm_refresh_failed')}: {error_info['message']}")
@@ -866,7 +866,7 @@ class LLMConfigPanel(ft.Container):
                 self.on_save()
 
         except Exception as ex:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(ex, context="llm")
             self._show_error(f"{I18n.get('settings_save_failed')}: {error_info['message']}")

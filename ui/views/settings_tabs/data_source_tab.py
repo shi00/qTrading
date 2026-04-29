@@ -739,7 +739,7 @@ class DataSourceTab(ft.Container):
                     )
                 raise
             except Exception as ex:
-                from ui.i18n import classify_error
+                from utils.error_classifier import classify_error
 
                 error_info = classify_error(ex, context="general")
                 self.show_snack(
@@ -867,7 +867,7 @@ class DataSourceTab(ft.Container):
                     )
                 raise
             except Exception as ex:
-                from ui.i18n import classify_error
+                from utils.error_classifier import classify_error
 
                 error_info = classify_error(ex, context="general")
                 self.show_snack(
@@ -931,7 +931,7 @@ class DataSourceTab(ft.Container):
                     self.page.pubsub.send_all("cache_cleared")
                 return "缓存已清空"
             except Exception as ex:
-                from ui.i18n import classify_error
+                from utils.error_classifier import classify_error
 
                 error_info = classify_error(ex, context="general")
                 self.show_snack(I18n.get("ds_clean_fail").format(error=error_info["message"]))
@@ -1164,7 +1164,7 @@ class DataSourceTab(ft.Container):
             self.page.open(dlg)
 
         except Exception as ex:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(ex, context="general")
             self.show_snack(

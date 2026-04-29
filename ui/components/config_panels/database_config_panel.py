@@ -379,13 +379,13 @@ class DatabaseConfigPanel(ft.Container):
                 return False
 
         except ValueError as e:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(e, context="db")
             self._show_error(error_info["message"])
             return False
         except Exception as e:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(e, context="db")
             self._show_error(error_info["message"])
@@ -462,7 +462,7 @@ class DatabaseConfigPanel(ft.Container):
             return True
 
         except Exception as e:
-            from ui.i18n import classify_error
+            from utils.error_classifier import classify_error
 
             error_info = classify_error(e, context="db")
             self._show_error(error_info["message"])
