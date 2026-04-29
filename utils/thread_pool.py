@@ -233,4 +233,6 @@ def get_thread_pool_manager() -> ThreadPoolManager:
         with _manager_lock:
             if _manager is None:  # Double-check locking
                 _manager = ThreadPoolManager()
+
+    assert _manager is not None
     return _manager

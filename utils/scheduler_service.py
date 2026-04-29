@@ -467,6 +467,8 @@ def get_scheduler() -> SchedulerService:
         with _scheduler_lock:
             if _scheduler_instance is None:
                 _scheduler_instance = SchedulerService()
+
+    assert _scheduler_instance is not None
     return _scheduler_instance
 
 
