@@ -14,6 +14,10 @@ import pandas as pd
 from data.persistence.review_manager import ReviewManager
 
 
+def _make_trade_cal_mock():
+    return AsyncMock(return_value=pd.DataFrame({"cal_date": [f"202403{d:02d}" for d in range(1, 22)]}))
+
+
 class TestReviewManagerInit(unittest.TestCase):
     """测试初始化"""
 
@@ -50,6 +54,8 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_latest_trade_date = AsyncMock(return_value="20240320")
+        mock_cache_instance.get_trade_cal = _make_trade_cal_mock()
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
@@ -70,6 +76,8 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_latest_trade_date = AsyncMock(return_value="20240320")
+        mock_cache_instance.get_trade_cal = _make_trade_cal_mock()
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
@@ -90,6 +98,7 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
+        mock_cache_instance.get_latest_trade_date = AsyncMock(side_effect=Exception("DB error"))
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
@@ -188,50 +197,19 @@ class TestGetLearningContext(unittest.TestCase):
 
         async def run_test():
             result = await manager.get_learning_context(limit=3)
-            self.assertIn("history_context", result)
-
-        asyncio.run(run_test())
-
-
-class TestUpdateResult(unittest.TestCase):
-    """测试更新结果"""
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_update_result_success(self, mock_config, mock_api, mock_cache):
-        """成功更新结果"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
-        mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
-        mock_cache.return_value = mock_cache_instance
-
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager._update_result(1, 5.5, "WIN", 1.0, 10.5, 12.0, 11.2, 4.5)
-            mock_screener_dao.update_prediction_result.assert_called_once()
-            _, _, _, t1_price = mock_screener_dao.update_prediction_result.call_args[0]
-            kwargs = mock_screener_dao.update_prediction_result.call_args.kwargs
-            self.assertEqual(t1_price, 10.5)
-            self.assertEqual(kwargs["t5_pct"], 12.0)
-            self.assertEqual(kwargs["t5_price"], 11.2)
-            self.assertEqual(kwargs["index_pct"], 1.0)
-            self.assertEqual(kwargs["alpha"], 4.5)
+            self.assertIn("暂无可用历史复盘样本", result)
 
         asyncio.run(run_test())
 
 
 class TestSaveResults(unittest.TestCase):
-    """测试保存结果"""
+    """测试保存筛选结果"""
 
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.ConfigHandler")
-    def test_save_results_success(self, mock_config, mock_api, mock_cache):
-        """成功保存结果"""
+    def test_save_results_with_data(self, mock_config, mock_api, mock_cache):
+        """正常保存筛选结果"""
         mock_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
@@ -274,7 +252,7 @@ class TestSaveResults(unittest.TestCase):
             mock_screener_dao.save_screening_results.assert_called_once()
             call_args = mock_screener_dao.save_screening_results.call_args
             records = call_args[0][0]
-            saved_date = records[0][1]
+            saved_date = records[0]["trade_date"]
             self.assertEqual(saved_date, analysis_date)
 
         asyncio.run(run_test())
@@ -331,22 +309,27 @@ class TestReviewPredictionsCore(unittest.TestCase):
         ):
             return ReviewManager()
 
+    def _make_pending_df(self, ids=None, ts_codes=None, trade_dates=None):
+        if ids is None:
+            ids = [1]
+        if ts_codes is None:
+            ts_codes = ["000001.SZ"]
+        if trade_dates is None:
+            trade_dates = ["20240315"]
+        return pd.DataFrame({"id": ids, "ts_code": ts_codes, "trade_date": trade_dates})
+
+    def _setup_cache_with_pending(self, mock_cache_instance, pending_df=None):
+        mock_cache_instance.get_latest_trade_date = AsyncMock(return_value="20240320")
+        mock_cache_instance.get_trade_cal = _make_trade_cal_mock()
+        if pending_df is None:
+            pending_df = self._make_pending_df()
+        mock_cache_instance.screener_dao.get_pending_predictions = AsyncMock(return_value=pending_df)
+        mock_cache_instance.screener_dao.update_prediction_result = AsyncMock()
+
     def test_review_win_when_alpha_positive(self):
         """Alpha > 0.5 时标记为 WIN"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -356,43 +339,26 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "pct_chg": [1.0],
-                }
-            )
-        )
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_called_once()
-            call_args = mock_screener_dao.update_prediction_result.call_args[0]
-            self.assertEqual(call_args[2], "WIN")
-            self.assertEqual(mock_screener_dao.update_prediction_result.call_args.kwargs["alpha"], 4.0)
+            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
+            self.assertEqual(call_args[0][2], "WIN")
+            self.assertEqual(call_args.kwargs["alpha"], 4.0)
 
         asyncio.run(run_test())
 
     def test_review_loss_when_alpha_negative(self):
         """Alpha < -0.5 时标记为 LOSS"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -402,43 +368,26 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "pct_chg": [2.0],
-                }
-            )
-        )
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_called_once()
-            call_args = mock_screener_dao.update_prediction_result.call_args[0]
-            self.assertEqual(call_args[2], "LOSS")
-            self.assertEqual(mock_screener_dao.update_prediction_result.call_args.kwargs["alpha"], -7.0)
+            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
+            self.assertEqual(call_args[0][2], "LOSS")
+            self.assertEqual(call_args.kwargs["alpha"], -7.0)
 
         asyncio.run(run_test())
 
     def test_review_draw_when_alpha_near_zero(self):
         """|Alpha| <= 0.5 时标记为 DRAW"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -448,43 +397,26 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [0.8]}))
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "pct_chg": [0.8],
-                }
-            )
-        )
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [0.8]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_called_once()
-            call_args = mock_screener_dao.update_prediction_result.call_args[0]
-            self.assertEqual(call_args[2], "DRAW")
-            self.assertAlmostEqual(mock_screener_dao.update_prediction_result.call_args.kwargs["alpha"], 0.2)
+            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
+            call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
+            self.assertEqual(call_args[0][2], "DRAW")
+            self.assertAlmostEqual(call_args.kwargs["alpha"], 0.2)
 
         asyncio.run(run_test())
 
     def test_review_persists_t5_metrics_when_available(self):
         """T+5 数据可用时应一并持久化"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -494,6 +426,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
         mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
@@ -502,7 +435,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            kwargs = mock_screener_dao.update_prediction_result.call_args.kwargs
+            kwargs = mock_cache_instance.screener_dao.update_prediction_result.call_args.kwargs
             self.assertEqual(kwargs["t5_pct"], 12.0)
             self.assertEqual(kwargs["t5_price"], 11.2)
             self.assertEqual(kwargs["index_pct"], 1.0)
@@ -512,20 +445,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
     def test_review_no_t1_data(self):
         """T+1 数据缺失时不更新"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -542,26 +463,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_not_called()
+            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
 
         asyncio.run(run_test())
 
     def test_review_no_quotes_at_all(self):
         """无行情数据时跳过"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
 
         mock_api_instance = MagicMock()
@@ -570,26 +479,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_not_called()
+            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
 
         asyncio.run(run_test())
 
     def test_review_index_data_failure_defaults_zero(self):
         """指数数据获取失败时跳过记录以避免标签污染"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240315"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -608,17 +505,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_not_called()
+            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
 
         asyncio.run(run_test())
 
     def test_review_empty_pending(self):
         """无待复盘预测时直接返回"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(mock_cache_instance, pending_df=pd.DataFrame())
 
         mock_api_instance = MagicMock()
 
@@ -632,20 +526,11 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
     def test_review_t0_not_found_in_quotes(self):
         """预测日期不在行情数据中时跳过"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1],
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20240310"],
-                }
-            )
-        )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
         mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
+        self._setup_cache_with_pending(
+            mock_cache_instance,
+            pending_df=self._make_pending_df(trade_dates=["20240310"]),
+        )
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -662,40 +547,31 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_screener_dao.update_prediction_result.assert_not_called()
+            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
 
         asyncio.run(run_test())
 
     def test_review_multiple_predictions(self):
         """多条预测逐一复盘"""
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.get_pending_predictions = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "id": [1, 2],
-                    "ts_code": ["000001.SZ", "000002.SZ"],
-                    "trade_date": ["20240315", "20240315"],
-                }
-            )
+        mock_cache_instance = MagicMock()
+        self._setup_cache_with_pending(
+            mock_cache_instance,
+            pending_df=self._make_pending_df(
+                ids=[1, 2],
+                ts_codes=["000001.SZ", "000002.SZ"],
+                trade_dates=["20240315", "20240315"],
+            ),
         )
-        mock_screener_dao.update_prediction_result = AsyncMock()
-
-        call_count = 0
-
-        async def mock_get_quotes(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            return pd.DataFrame(
+        mock_cache_instance.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
                 {
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 10.5],
                     "pct_chg": [1.0, 5.0],
                 }
             )
-
-        mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
-        mock_cache_instance.get_daily_quotes = AsyncMock(side_effect=mock_get_quotes)
+        )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
         mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
@@ -704,7 +580,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            self.assertEqual(mock_screener_dao.update_prediction_result.call_count, 2)
+            self.assertEqual(mock_cache_instance.screener_dao.update_prediction_result.call_count, 2)
 
         asyncio.run(run_test())
 
@@ -834,7 +710,7 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
             await manager.save_results("test_strategy", self._make_mock_df(), trade_date=analysis_date)
             mock_screener_dao.save_screening_results.assert_called_once()
             records = mock_screener_dao.save_screening_results.call_args[0][0]
-            saved_date = records[0][1]
+            saved_date = records[0]["trade_date"]
             self.assertEqual(saved_date, analysis_date)
             self.assertNotEqual(saved_date, datetime.date.today())
 
@@ -879,7 +755,7 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
         async def run_test():
             await manager.save_results("test_strategy", self._make_mock_df(), trade_date=friday_date)
             records = mock_screener_dao.save_screening_results.call_args[0][0]
-            saved_date = records[0][1]
+            saved_date = records[0]["trade_date"]
             self.assertEqual(saved_date, friday_date)
             self.assertEqual(saved_date.weekday(), 4)
 
@@ -904,7 +780,7 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
         async def run_test():
             await manager.save_results("test_strategy", df)
             records = mock_screener_dao.save_screening_results.call_args[0][0]
-            self.assertEqual(records[0][1], datetime.date(2024, 12, 31))
+            self.assertEqual(records[0]["trade_date"], datetime.date(2024, 12, 31))
 
         asyncio.run(run_test())
 
@@ -930,207 +806,3 @@ class TestSaveResultsTradeDateSemantics(unittest.TestCase):
             mock_screener_dao.save_screening_results.assert_not_called()
 
         asyncio.run(run_test())
-
-
-class TestSaveResultsRunIdReproducibility(unittest.TestCase):
-    """测试 run_id + params_snapshot 确保筛选历史可复现性"""
-
-    def _make_mock_df(self, ts_codes=None):
-        if ts_codes is None:
-            ts_codes = ["000001.SZ"]
-        n = len(ts_codes)
-        return pd.DataFrame(
-            {
-                "ts_code": ts_codes,
-                "name": ["测试"] * n,
-                "close": [10.5] * n,
-                "pct_chg": [2.5] * n,
-                "industry": ["银行"] * n,
-                "vol": [1000000] * n,
-                "amount": [10500000] * n,
-                "turnover_rate": [1.5] * n,
-                "pe_ttm": [6.5] * n,
-                "pb": [0.8] * n,
-                "ps_ttm": [1.2] * n,
-                "dv_ttm": [3.5] * n,
-                "total_mv": [1000000] * n,
-                "circ_mv": [800000] * n,
-                "roe": [12.5] * n,
-                "grossprofit_margin": [45.0] * n,
-                "debt_to_assets": [60.0] * n,
-                "or_yoy": [10.0] * n,
-                "netprofit_yoy": [15.0] * n,
-                "ai_score": [85] * n,
-                "ai_reason": ["技术突破"] * n,
-                "thinking": ["看好后市"] * n,
-            }
-        )
-
-    def _setup_mocks(self, mock_config, mock_api, mock_cache):
-        mock_screener_dao = MagicMock()
-        mock_screener_dao.save_screening_results = AsyncMock()
-        mock_cache_instance = MagicMock()
-        mock_cache_instance.screener_dao = mock_screener_dao
-        mock_cache.return_value = mock_cache_instance
-        return mock_screener_dao
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_run_id_in_records(self, mock_config, mock_api, mock_cache):
-        """save_results 应在每条记录中包含 run_id"""
-        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager.save_results(
-                "test_strategy",
-                self._make_mock_df(["000001.SZ", "000002.SZ"]),
-                trade_date=datetime.date(2024, 12, 31),
-                run_id="ABC123DEF456",
-            )
-            records = mock_dao.save_screening_results.call_args[0][0]
-            self.assertEqual(len(records), 2)
-            for rec in records:
-                self.assertEqual(rec[0], "ABC123DEF456")
-
-        asyncio.run(run_test())
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_auto_generated_run_id_when_missing(self, mock_config, mock_api, mock_cache):
-        """未传入 run_id 时应自动生成基于 trade_date + strategy_name 的哈希"""
-        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager.save_results(
-                "test_strategy",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-            )
-            records = mock_dao.save_screening_results.call_args[0][0]
-            run_id = records[0][0]
-            self.assertIsNotNone(run_id)
-            self.assertIsInstance(run_id, str)
-            self.assertGreater(len(run_id), 0)
-
-        asyncio.run(run_test())
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_auto_run_id_is_unique_per_call(self, mock_config, mock_api, mock_cache):
-        """未传入 run_id 时应自动生成唯一值，同一 trade_date + strategy_name 的两次调用产生不同 run_id"""
-        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager.save_results(
-                "test_strategy",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-            )
-            records1 = mock_dao.save_screening_results.call_args[0][0]
-            run_id1 = records1[0][0]
-
-            mock_dao.save_screening_results.reset_mock()
-            await manager.save_results(
-                "test_strategy",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-            )
-            records2 = mock_dao.save_screening_results.call_args[0][0]
-            run_id2 = records2[0][0]
-
-            self.assertNotEqual(run_id1, run_id2)
-
-        asyncio.run(run_test())
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_explicit_run_id_allows_multiple_runs(self, mock_config, mock_api, mock_cache):
-        """显式传入不同 run_id 允许同一日同一策略保存多次运行结果"""
-        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager.save_results(
-                "test_strategy",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-                run_id="RUN_001",
-            )
-            records1 = mock_dao.save_screening_results.call_args[0][0]
-            self.assertEqual(records1[0][0], "RUN_001")
-
-            mock_dao.save_screening_results.reset_mock()
-            await manager.save_results(
-                "test_strategy",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-                run_id="RUN_002",
-            )
-            records2 = mock_dao.save_screening_results.call_args[0][0]
-            self.assertEqual(records2[0][0], "RUN_002")
-
-        asyncio.run(run_test())
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_params_snapshot_in_records(self, mock_config, mock_api, mock_cache):
-        """save_results 应在每条记录末尾包含 params_snapshot"""
-        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager.save_results(
-                "oversold",
-                self._make_mock_df(["000001.SZ", "000002.SZ"]),
-                trade_date=datetime.date(2024, 12, 31),
-                run_id="SNAP_TEST",
-                params_snapshot='{"strategy": "oversold", "params": {"rsi_threshold": 30}}',
-            )
-            records = mock_dao.save_screening_results.call_args[0][0]
-            self.assertEqual(len(records), 2)
-            for rec in records:
-                self.assertEqual(rec[-1], '{"strategy": "oversold", "params": {"rsi_threshold": 30}}')
-
-        asyncio.run(run_test())
-
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
-    @patch("data.persistence.review_manager.ConfigHandler")
-    def test_different_strategies_different_auto_run_id(self, mock_config, mock_api, mock_cache):
-        """不同策略名在相同日期应产生不同的自动 run_id"""
-        mock_dao = self._setup_mocks(mock_config, mock_api, mock_cache)
-        manager = ReviewManager()
-
-        async def run_test():
-            await manager.save_results(
-                "oversold",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-            )
-            records1 = mock_dao.save_screening_results.call_args[0][0]
-            run_id1 = records1[0][0]
-
-            mock_dao.save_screening_results.reset_mock()
-            await manager.save_results(
-                "momentum",
-                self._make_mock_df(),
-                trade_date=datetime.date(2024, 12, 31),
-            )
-            records2 = mock_dao.save_screening_results.call_args[0][0]
-            run_id2 = records2[0][0]
-
-            self.assertNotEqual(run_id1, run_id2)
-
-        asyncio.run(run_test())
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -20,6 +20,10 @@ class TaskType(Enum):
     CPU = auto()  # For Pandas (releasing GIL), specific Math. PURE PYTHON LOOPS SHOULD USE MULTIPROCESSING!
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class ThreadPoolManager:
     """
     Global Thread Pool Manager supporting Split IO/CPU pools.
@@ -54,18 +58,20 @@ class ThreadPoolManager:
             cls._initialized = False
 
     def __init__(self):
-        # Double-check locking optimization not needed for init if __new__ handles instance creation safely,
-        # but standard singleton pattern usually locks on creation.
-
         if self._initialized:
             return
 
         self._io_pool: concurrent.futures.ThreadPoolExecutor | None = None
         self._cpu_pool: concurrent.futures.ThreadPoolExecutor | None = None
+        self._shutdown_done = False  # S3-1 fix: Idempotent guard
 
         self._init_pools()
-        atexit.register(self.shutdown)
+        atexit.register(self._atexit_shutdown)
         self._initialized = True
+
+    def _atexit_shutdown(self):
+        """S3-1 fix: atexit handler with wait=False to avoid blocking on exit."""
+        self.shutdown(wait=False)
 
     def _init_pools(self):
         # 1. IO Pool Configuration
@@ -190,7 +196,12 @@ class ThreadPoolManager:
         Note: wait=True can block if tasks are stuck.
         For GUI apps on exit, we might want to wait briefly then force kill?
         For now, we trust the executor's shutdown mechanism.
+        S3-1 fix: Added idempotent guard to prevent double shutdown.
         """
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
         shutdown_performed = False
         if hasattr(self, "_io_pool") and self._io_pool:
             logger.info("Shutting down IO Pool...")

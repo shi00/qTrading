@@ -259,6 +259,19 @@ async def main(page: ft.Page):
         except Exception as e:
             logger.error(f"[Main] Database initialization failed: {e}", exc_info=True)
             show_toast(I18n.get("error_db_init_failed", default=f"数据库初始化失败: {e}"), "error")
+
+            async def on_retry_click(e):
+                page.clean()
+                await _init_services_and_start_app()
+
+            def on_skip_click(e):
+                page.clean()
+                show_toast(I18n.get("warning_skip_db", default="跳过数据库初始化，部分功能不可用"), "warning")
+                from ui.app_layout import AppLayout
+
+                app_layout = AppLayout(page)
+                app_layout.show()
+
             page.add(
                 ft.Container(
                     content=ft.Column(
@@ -270,6 +283,21 @@ async def main(page: ft.Page):
                                 weight=ft.FontWeight.BOLD,
                             ),
                             ft.Text(str(e)[:200], color=ft.colors.RED_400, size=14),
+                            ft.Row(
+                                [
+                                    ft.ElevatedButton(
+                                        I18n.get("retry", default="重试"),
+                                        icon=ft.icons.REFRESH,
+                                        on_click=lambda e: page.run_task(on_retry_click, e),
+                                    ),
+                                    ft.TextButton(
+                                        I18n.get("skip", default="跳过"),
+                                        on_click=on_skip_click,
+                                    ),
+                                ],
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                spacing=20,
+                            ),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         spacing=10,

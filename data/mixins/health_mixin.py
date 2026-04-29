@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _compute_tier(
     lag_days: int,
-    fin_fresh_ratio: float,
+    fin_fresh_ratio: float | None,
     missing_critical: bool = False,
     fin_lag_days: int | None = None,
     avg_fundamental: float | None = None,
@@ -65,7 +65,7 @@ def _compute_tier(
 
     Args:
         lag_days: Calendar days since latest quote data
-        fin_fresh_ratio: Financial data coverage ratio (0.0-1.0), 0.5 used as neutral when unknown
+        fin_fresh_ratio: Financial data coverage ratio (0.0-1.0), None when unknown (fast-path)
         missing_critical: Whether any critical table has < 10% coverage
         fin_lag_days: Calendar days since latest financial data (optional, used by fast-path)
         avg_fundamental: Field-level fundamental completeness (0.0-1.0), None when unavailable
@@ -78,6 +78,11 @@ def _compute_tier(
 
     if avg_fundamental is not None and avg_fundamental < TIER_FUNDAMENTAL_LOW_THRESHOLD:
         return 2
+
+    if fin_fresh_ratio is None:
+        if lag_days <= TIER_QUOTE_FRESHNESS_DAYS:
+            return 2
+        return 1
 
     fin_ok_for_gold = False
     if fin_lag_days is not None:
@@ -260,14 +265,14 @@ class HealthCheckMixin:
 
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
-                    fin_fresh_ratio=TIER_FIN_FRESH_RATIO_NEUTRAL,
+                    fin_fresh_ratio=None,
                     missing_critical=missing_critical,
                     fin_lag_days=fin_lag_days,
                 )
             else:
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
-                    fin_fresh_ratio=TIER_FIN_FRESH_RATIO_NEUTRAL,
+                    fin_fresh_ratio=None,
                     missing_critical=False,
                 )
 
@@ -318,20 +323,57 @@ class HealthCheckMixin:
             if not official_dates:
                 return {"status": "red", "msg": I18n.get("health_err_calendar")}
 
+            api_latest_official = None
+            try:
+                from data.external.tushare_client import TushareClient
+
+                tc = TushareClient()
+                api_cal_df = await tc.trade_cal(
+                    start_date=end_date_obj.strftime("%Y%m%d"),
+                    end_date=end_date_obj.strftime("%Y%m%d"),
+                    is_open="1",
+                )
+                if api_cal_df is not None and not api_cal_df.empty:
+                    api_latest = sorted(api_cal_df["cal_date"].tolist())[-1]
+                    if isinstance(api_latest, str):
+                        api_latest_official = api_latest
+                        if api_latest > str(official_dates[-1]):
+                            logger.warning(
+                                f"[DataProcessor] Health | Local trade_cal latest={official_dates[-1]}, "
+                                f"API latest={api_latest}. Local calendar may be stale. Using API as gold standard."
+                            )
+            except Exception as e:
+                logger.debug(f"[DataProcessor] Health | API trade_cal cross-check skipped: {e}")
+
             local_dates = await self.cache.get_cached_trade_dates()
 
             # 1. Market Health
             last_local = sorted(list(local_dates))[-1] if local_dates else None
 
+            # P1-7 fix: Use API trade_cal as gold standard for lag calculation
+            # when available, to avoid both trade_cal and daily_quotes being
+            # stale simultaneously and falsely reporting "no lag".
+            gold_standard_dates = official_dates
+            if api_latest_official and isinstance(api_latest_official, str):
+                try:
+                    from utils.time_utils import parse_date as _pd
+
+                    _pd(api_latest_official)
+                    local_latest_str = str(official_dates[-1]) if official_dates else ""
+                    if local_latest_str and api_latest_official > local_latest_str:
+                        gold_standard_dates = official_dates + [api_latest_official]
+                        logger.info(
+                            f"[DataProcessor] Health | P1-7: API extends official dates from {local_latest_str} to {api_latest_official}"
+                        )
+                except (ValueError, TypeError):
+                    pass
+
             lag_days = 0
-            # If latest official date is not in local cache, calculate lag
-            if official_dates and (not local_dates or official_dates[-1] > last_local):
+            if gold_standard_dates and (not local_dates or gold_standard_dates[-1] > last_local):
                 if local_dates and last_local:
-                    # Count business days lag
-                    lag_days = len([d for d in official_dates if d > last_local])
+                    lag_days = len([d for d in gold_standard_dates if d > last_local])
                 else:
-                    # No local data, lag is total days
-                    lag_days = len(official_dates)
+                    lag_days = len(gold_standard_dates)
 
             # 1.5 Concept Health
             try:

@@ -90,11 +90,15 @@ def _classify_api_error(e: Exception) -> dict:
     Returns:
         {"code": str, "message": str} where message is translated i18n text
     """
-    from ui.i18n import classify_error
+    from utils.error_classifier import classify_error
 
     return classify_error(e, context="llm")
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class AIService:
     """
     AI Service - 基于 LiteLLM 1.82+ 的统一 LLM 网关
@@ -299,6 +303,10 @@ class AIService:
         """Reload config when settings change"""
         self._setup_client()
         self._local_model_loaded = False
+        # S1-1 fix: Reset semaphore so new concurrency limit takes effect
+        from utils.loop_local import del_loop_local
+
+        del_loop_local("ai_semaphore")
 
     async def _chat_completion_litellm(
         self,
@@ -320,10 +328,16 @@ class AIService:
         llm_config = self._litellm_config
         request_params = self._build_litellm_params(llm_config, messages, **kwargs)
 
+        # S1-4 fix: Real-time reasoning support check for model switching
+        model_id = llm_config.get("model", "")
+        provider = llm_config.get("provider", "")
+        litellm_model = f"{provider}/{model_id}" if provider else model_id
+        supports_reasoning = _check_reasoning_support(litellm_model)
+
         stream = kwargs.get("stream", False) or on_chunk is not None
 
         if stream:
-            if self._supports_reasoning:
+            if supports_reasoning:
                 request_params["stream_options"] = {"include_usage": True}
 
             response = await acompletion(stream=True, **request_params)
@@ -343,7 +357,7 @@ class AIService:
 
                 delta = chunk.choices[0].delta
 
-                if self._supports_reasoning:
+                if supports_reasoning:
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
                         reasoning_content += reasoning

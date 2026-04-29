@@ -12,10 +12,11 @@ from typing import Any
 
 import pandas as pd
 
-from ui.i18n import I18n, classify_error
+from ui.i18n import I18n
+from utils.error_classifier import classify_error, classify_severity
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager
-from utils.time_utils import CST_TZ, get_now
+from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class AppTask:
     unique_key: str | None = None  # For deduplication
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class TaskManager:
     """
     Singleton service to manage, track, and execute all long-running asynchronous tasks.
@@ -150,6 +155,11 @@ class TaskManager:
     def unsubscribe(self, callback: Callable[[list[AppTask]], None]):
         if callback in self._subscribers:
             self._subscribers.remove(callback)
+
+    def reload_config(self):
+        """S1-1 fix: Reset semaphore so new concurrency limit takes effect on next _get_semaphore call."""
+        self._semaphore_instance = None
+        logger.info("[TaskManager] Semaphore reset, will reinitialize with new config on next task")
 
     def _notify_subscribers(self):
         """Broadcast current tasks snapshot to all listeners. Safe to call from UI tread if using page.run_task."""
@@ -355,6 +365,11 @@ class TaskManager:
         if task.status == TaskStatus.CANCELLED:
             return
 
+        # S5-3 fix: Set correlation_id for cross-module log tracing
+        from utils.correlation import set_correlation_id, clear_correlation_id
+
+        set_correlation_id(task_id[:8])
+
         # Ensure event exists on this loop
         if task._cancel_event is None:
             task._cancel_event = asyncio.Event()
@@ -391,11 +406,17 @@ class TaskManager:
         except Exception as e:
             task.status = TaskStatus.FAILED
             error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
             task.error = error_info["message"]
             task.description = I18n.get("task_failed_desc", "任务执行失败")
-            logger.error(
-                f"[TaskManager] Task {task.id} Failed: {e}\n{traceback.format_exc()}",
-            )
+            if severity == "system":
+                logger.critical(
+                    f"[TaskManager] Task {task.id} SYSTEM-LEVEL failure: {e}\n{traceback.format_exc()}",
+                )
+            else:
+                logger.error(
+                    f"[TaskManager] Task {task.id} Failed ({severity}): {e}\n{traceback.format_exc()}",
+                )
         finally:
             task._asyncio_task = None
             if task.completed_at is None:
@@ -403,15 +424,14 @@ class TaskManager:
             self._persist_task(task)
             self._notify_subscribers()
             self._auto_evict_old()
+            clear_correlation_id()
 
     # --- Persistence ---
 
     @staticmethod
     def _safe_dt(val) -> datetime.datetime | None:
         """
-        Safely parse datetime from DB value, handling NaN/None/invalid.
-
-        Returns a timezone-aware datetime in CST (Asia/Shanghai) to ensure
+        Parse a datetime value from DB. S1-6 fix: Assumes UTC storage, converts to CST.
         consistency with get_now() which returns timezone-aware datetimes.
         """
         if val is None:
@@ -420,9 +440,7 @@ class TaskManager:
             return None
         try:
             dt = datetime.datetime.fromisoformat(str(val))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=CST_TZ)
-            return dt
+            return from_utc_to_cst(dt)
         except (ValueError, TypeError):
             return None
 
@@ -497,9 +515,9 @@ class TaskManager:
             task.description,
             task.error,
             str(task.result)[:500] if task.result else None,
-            task.created_at.replace(tzinfo=None) if task.created_at else None,
-            task.started_at.replace(tzinfo=None) if task.started_at else None,
-            task.completed_at.replace(tzinfo=None) if task.completed_at else None,
+            to_utc_for_db(task.created_at),
+            to_utc_for_db(task.started_at),
+            to_utc_for_db(task.completed_at),
         )
         self._queue_persist_snapshot(snapshot)
 

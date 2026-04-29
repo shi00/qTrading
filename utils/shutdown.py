@@ -103,7 +103,7 @@ class ShutdownCoordinator:
         self._watchdog_started = False
         self._watchdog_cancel_event = None
 
-    async def do_cleanup(self, timeout_s: float = 8.0, step_timeout_s: float = 3.0) -> bool:
+    async def do_cleanup(self, timeout_s: float = 8.0, step_timeout_s: float = 5.0) -> bool:
         """
         Core cleanup coroutine. Stops all background services, flushes DB writes, closes pools.
 

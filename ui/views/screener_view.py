@@ -237,6 +237,9 @@ class ScreenerView(ft.Container):
                 pass  # Already removed
             self.detail_dialog = None
 
+        # U-1 fix: Reset mounted state for proper re-mount handling
+        self._mounted = False
+
     def _on_tasks_updated(self, tasks):
         """Monitor TaskManager for the currently running AI Strategy execution"""
         if not self.page:

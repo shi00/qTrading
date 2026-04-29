@@ -650,10 +650,9 @@ def upgrade() -> None:
         sa.Column("alpha", sa.Float(), nullable=True),
         sa.Column("ai_score", sa.Integer(), nullable=True),
         sa.Column("ai_reason", sa.String(), nullable=True),
-        sa.Column("thinking", sa.String(), nullable=True),
         sa.Column("prediction_result", sa.String(), nullable=True),
         sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
-        sa.Column("params_snapshot", sa.JSON(), nullable=True),
+        sa.Column("params_snapshot", sa.dialects.postgresql.JSONB(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(),
@@ -688,6 +687,17 @@ def upgrade() -> None:
     op.execute(
         "CREATE INDEX idx_sh_prediction_result ON screening_history (prediction_result) WHERE prediction_result IS NOT NULL"
     )
+    op.execute("CREATE INDEX idx_sh_pending ON screening_history (review_status) WHERE prediction_result IS NULL")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_sh_params_gin ON screening_history USING gin (params_snapshot)")
+    op.create_table(
+        "screening_thinking",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("history_id", sa.Integer(), nullable=False),
+        sa.Column("thinking", sa.String(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("idx_st_history_id", "screening_thinking", ["history_id"])
     op.create_table(
         "shibor_daily",
         sa.Column("date", sa.Date(), nullable=False),
@@ -989,6 +999,8 @@ def downgrade() -> None:
     op.drop_index("idx_sh_date_code", table_name="screening_history")
     op.drop_index("idx_sh_date_strategy", table_name="screening_history")
     op.drop_table("screening_history")
+    op.drop_index("idx_st_history_id", table_name="screening_thinking")
+    op.drop_table("screening_thinking")
     op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")
     op.drop_table("repurchase")
     op.drop_table("pledge_stat")

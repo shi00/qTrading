@@ -38,6 +38,10 @@ else:
     ChatCompletionRequestUserMessage = dict
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class LocalModelManager:
     """
     Manages the lifecycle of the embedded Llama.cpp model.

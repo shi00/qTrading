@@ -23,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from cachetools import TTLCache
+
 import pandas as pd
 
 from data.constants import TOP_LIST_NET_AMOUNT_UNIT, get_column_unit
@@ -93,9 +95,13 @@ class AIStrategyMixin:
 
     enable_ai_analysis: bool = True
 
+    _HISTORY_CACHE_MAX = 4
+    _HISTORY_CACHE_TTL = 120
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._context_builders: dict[str, ContextBuilder] = {}
+        self._history_cache: TTLCache = TTLCache(maxsize=self._HISTORY_CACHE_MAX, ttl=self._HISTORY_CACHE_TTL)
 
     def register_context_builder(self, name: str, builder: ContextBuilder) -> None:
         """
@@ -111,15 +117,35 @@ class AIStrategyMixin:
     def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Ensure candidates are sorted by relevance before AI analysis truncation.
+        P1-13 fix: Default sort by market cap (descending) or volume (descending)
+        to ensure high-quality candidates are prioritized when capped.
+
         Subclasses should override if the default sort order is not
         the best proxy for "most promising candidate first".
-
-        The default implementation preserves the order from Phase 1 filtering
-        (which already sorts by the strategy's primary metric).
         """
-        if len(df) > 1:
-            logger.debug(f"[{self.__class__.__name__}] Using default sort order for AI analysis ({len(df)} candidates)")
-        return df
+        if len(df) <= 1:
+            return df
+
+        sort_cols = []
+        if "total_mv" in df.columns:
+            sort_cols.append(("total_mv", False))
+        elif "circ_mv" in df.columns:
+            sort_cols.append(("circ_mv", False))
+        elif "amount" in df.columns:
+            sort_cols.append(("amount", False))
+        elif "vol" in df.columns:
+            sort_cols.append(("vol", False))
+
+        if sort_cols:
+            col, ascending = sort_cols[0]
+            df = df.sort_values(by=col, ascending=ascending, na_position="last")
+            logger.debug(
+                f"[{self.__class__.__name__}] Sorted {len(df)} candidates by {col} (descending) for AI analysis"
+            )
+        else:
+            logger.debug(f"[{self.__class__.__name__}] Using default order for AI analysis ({len(df)} candidates)")
+
+        return df.reset_index(drop=True)
 
     def get_context_blocks(self) -> list[str]:
         """Get list of context block names to build for this strategy."""
@@ -267,16 +293,22 @@ class AIStrategyMixin:
         prefetched_history = {}
         news_tasks = {}
         try:
-            # 1. O(1) DB Query for History
+            # 1. O(1) DB Query for History (with LRU cache)
             end_date = get_now().date()
 
             years = ConfigHandler.get_init_history_years()
             start_date = (get_now() - timedelta(days=365 * years + 30)).date()
-            bulk_history_df = await dp.cache.get_daily_quotes(  # type: ignore
-                ts_code_list=all_ts_codes,
-                start_date=start_date,
-                end_date=end_date,
-            )
+
+            cache_key = (frozenset(all_ts_codes), start_date, end_date)
+            bulk_history_df = self._history_cache.get(cache_key)
+
+            if bulk_history_df is None:
+                bulk_history_df = await dp.cache.get_daily_quotes(  # type: ignore
+                    ts_code_list=all_ts_codes,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                self._history_cache[cache_key] = bulk_history_df
             if bulk_history_df is not None and not bulk_history_df.empty:
                 for code, group in bulk_history_df.groupby("ts_code"):
                     prefetched_history[code] = group

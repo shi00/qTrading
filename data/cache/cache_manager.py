@@ -32,6 +32,10 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class CacheManager:
     _instance = None
     _initialized = False

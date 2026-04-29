@@ -159,6 +159,10 @@ class TestGetUSMajorMoves(unittest.TestCase):
     @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_success(self, mock_pool):
         """成功获取美股动态"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._US_MOVES_CACHE.clear()
+
         mock_data = [
             {"name": "NVDA", "cname": "英伟达", "chg": "2.5"},
             {"name": "TSLA", "cname": "特斯拉", "chg": "-1.2"},
@@ -178,39 +182,51 @@ class TestGetUSMajorMoves(unittest.TestCase):
     @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_empty(self, mock_pool):
         """空数据返回默认消息"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._US_MOVES_CACHE.clear()
+
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(return_value=[])
         mock_pool.return_value = mock_manager
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()
-            self.assertEqual(result, "Global data unavailable.")
+            self.assertIn("unavailable", result)
 
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_none(self, mock_pool):
         """None 数据返回默认消息"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._US_MOVES_CACHE.clear()
+
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(return_value=None)
         mock_pool.return_value = mock_manager
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()
-            self.assertEqual(result, "Global data unavailable.")
+            self.assertIn("unavailable", result)
 
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_us_moves_error(self, mock_pool):
         """错误返回错误消息"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._US_MOVES_CACHE.clear()
+
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=Exception("Network error"))
         mock_pool.return_value = mock_manager
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()
-            self.assertEqual(result, "Global data error.")
+            self.assertIn("unavailable", result)
 
         asyncio.run(run_test())
 

@@ -524,7 +524,7 @@ class SystemTab(ft.Container):
 
             ThreadPoolManager().submit(
                 TaskType.IO,
-                ProxyManager.apply_smart_proxy_policy,
+                ProxyManager.reapply_proxy_policy,
             )
 
         except Exception as ex:

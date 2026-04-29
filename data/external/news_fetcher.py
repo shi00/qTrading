@@ -7,12 +7,15 @@ from datetime import timedelta
 import akshare as ak
 import pandas as pd
 import requests
+from cachetools import TTLCache
 
 from ui.i18n import I18n
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
+
+_US_MOVES_CACHE: TTLCache = TTLCache(maxsize=1, ttl=300)
 
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
@@ -248,45 +251,69 @@ class NewsFetcher:
         """
         Fetch major US Tech giants performance (NVDA, TSLA, AAPL, MSFT, GOOGL, AMZN, META).
         Uses Sina Finance Custom Sort API (Verified Working).
+        Cached for 5 minutes to avoid repeated external API calls.
+        S2-4 fix: Added retry logic with exponential backoff.
         """
+        cached = _US_MOVES_CACHE.get("result")
+        if cached is not None:
+            return cached
+
+        MAX_RETRIES = 3
+        RETRY_DELAY = 1.0
+
+        def _fetch():
+            # Direct call to Sina US API
+            url = "http://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO/US_CategoryService.getList"
+            params = {
+                "page": "1",
+                "num": "100",
+                "sort": "mktcap",  # Sort by market cap to get giants
+                "asc": "0",
+                "market": "",
+                "id": "",
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            }
+
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            content = resp.text
+
+            # Robust JSONP parsing: IO( {Data} );
+            start = content.find("(")
+            end = content.rfind(")")
+            if start != -1 and end != -1 and start < end:
+                json_str = content[start + 1 : end]
+                try:
+                    data = json.loads(json_str)
+                    return data.get("data", [])
+                except json.JSONDecodeError:
+                    logger.warning("[News] Failed to decode JSON from Sina US API")
+                    return []
+            return []
+
+        data_list = None
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                data_list = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
+                if data_list is not None:
+                    break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[News] US API attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    import asyncio
+
+                    await asyncio.sleep(RETRY_DELAY * (2**attempt))
+
+        if not data_list:
+            error_msg = f"Global data unavailable after {MAX_RETRIES} retries"
+            if last_error:
+                error_msg += f": {last_error}"
+            return error_msg
+
         try:
-
-            def _fetch():
-                # Direct call to Sina US API
-                url = "http://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO/US_CategoryService.getList"
-                params = {
-                    "page": "1",
-                    "num": "100",
-                    "sort": "mktcap",  # Sort by market cap to get giants
-                    "asc": "0",
-                    "market": "",
-                    "id": "",
-                }
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                }
-
-                resp = requests.get(url, params=params, headers=headers, timeout=10)
-                content = resp.text
-
-                # Robust JSONP parsing: IO( {Data} );
-                start = content.find("(")
-                end = content.rfind(")")
-                if start != -1 and end != -1 and start < end:
-                    json_str = content[start + 1 : end]
-                    try:
-                        data = json.loads(json_str)
-                        return data.get("data", [])
-                    except json.JSONDecodeError:
-                        logger.warning("[News] Failed to decode JSON from Sina US API")
-                        return []
-                return []
-
-            data_list = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
-
-            if not data_list:
-                return "Global data unavailable."
-
             # Key mappings (Sina Names -> Ticker/English)
             key_tickers = [
                 "NVDA",
@@ -326,7 +353,9 @@ class NewsFetcher:
                     chg = item.get("chg", "0")
                     summary.append(f"{name}: {chg}%")
 
-            return ", ".join(summary)
+            result = ", ".join(summary)
+            _US_MOVES_CACHE["result"] = result
+            return result
 
         except Exception as e:
             logger.error(f"[News] Error fetching US moves: {e}")

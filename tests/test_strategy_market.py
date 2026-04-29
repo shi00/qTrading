@@ -12,7 +12,7 @@ import polars as pl
 from strategies.market import (
     BlockTradeStrategy,
     InstitutionalStrategy,
-    NorthboundStrategy,
+    NorthboundHoldingStrategy,
     TechnicalBreakoutStrategy,
 )
 
@@ -106,11 +106,11 @@ class TestTechnicalBreakoutStrategy(unittest.TestCase):
         self.assertEqual(pct_values, sorted(pct_values, reverse=True))
 
 
-class TestNorthboundStrategy(unittest.TestCase):
-    """测试北向资金策略"""
+class TestNorthboundHoldingStrategy(unittest.TestCase):
+    """测试北向持股策略"""
 
     def setUp(self):
-        self.strategy = NorthboundStrategy()
+        self.strategy = NorthboundHoldingStrategy()
         self.base_df = pd.DataFrame(
             [
                 {

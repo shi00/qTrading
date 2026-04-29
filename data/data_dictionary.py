@@ -418,9 +418,27 @@ TABLE_DEFINITIONS = {
         "alias": "tab_screening_history",
         "columns": {},
     },
+    "screening_thinking": {
+        "alias": "tab_screening_thinking",
+        "columns": {
+            "id": "col_id",
+            "history_id": "col_history_id",
+            "thinking": "col_thinking",
+            "created_at": "col_created_at",
+        },
+    },
     "sync_status": {
         "alias": "tab_sync_status",
-        "columns": {},
+        "columns": {
+            "table_name": "col_table_name",
+            "last_sync_date": "col_last_sync_date",
+            "last_data_date": "col_last_data_date",
+            "record_count": "col_record_count",
+            "status": "col_status",
+            "last_result_status": "col_last_result_status",
+            "error_message": "col_error_message",
+            "error_count": "col_error_count",
+        },
     },
     "stock_sync_status": {
         "alias": "tab_stock_sync_status",

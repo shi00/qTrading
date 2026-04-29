@@ -817,7 +817,6 @@ class TestScreenerDao:
             "netprofit_yoy",
             "ai_score",
             "ai_reason",
-            "thinking",
             "params_snapshot",
         ]
         assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
@@ -848,7 +847,6 @@ class TestScreenerDao:
                 8.0,
                 85,
                 "AI推荐理由",
-                "思考过程",
                 None,
             ),
         ]
@@ -864,7 +862,6 @@ class TestScreenerDao:
         assert result["industry"].iloc[0] == "银行"
         assert result["ai_score"].iloc[0] == 85
         assert result["ai_reason"].iloc[0] == "AI推荐理由"
-        assert result["thinking"].iloc[0] == "思考过程"
 
     async def test_get_fundamental_screening_data_includes_suspended(self, screener_dao, clean_db, setup_stock_data):
         """基本面筛选数据应包含无行情/停牌股票，且包含is_tradable列"""
@@ -1317,23 +1314,22 @@ class TestScreenerDaoDynamicCols:
 
         col_list = [c.strip() for c in cols_str.split(",")]
 
-        assert "thinking" not in col_list
-        assert "id" in col_list
-        assert "trade_date" in col_list
-        assert "ts_code" in col_list
-        assert "ai_score" in col_list
-        assert "prediction_result" in col_list
+        assert "sh.thinking" not in col_list
+        assert "sh.id" in col_list
+        assert "sh.trade_date" in col_list
+        assert "sh.ts_code" in col_list
+        assert "sh.ai_score" in col_list
+        assert "sh.prediction_result" in col_list
 
     def test_sh_full_cols_includes_thinking(self):
-        """Verify SH_FULL_COLS includes 'thinking' and 'params_snapshot'"""
+        """Verify SH_FULL_COLS includes 'thinking' via JOIN and 'params_snapshot'"""
         from data.persistence.daos.screener_dao import ScreenerDao
 
         dao = ScreenerDao.__new__(ScreenerDao)
         full_cols = dao.SH_FULL_COLS
 
-        assert "thinking" in full_cols
-        assert "params_snapshot" in full_cols
-        assert full_cols.endswith(", thinking, params_snapshot")
+        assert "st.thinking" in full_cols
+        assert "sh.params_snapshot" in full_cols
 
     def test_sh_base_cols_matches_model(self):
         """Verify SH_BASE_COLS count matches ScreeningHistory columns minus excluded fields"""
@@ -1345,7 +1341,7 @@ class TestScreenerDaoDynamicCols:
 
         expected_cols = get_model_columns(
             ScreeningHistory,
-            exclude={"updated_at", "created_at", "thinking", "params_snapshot"},
+            exclude={"updated_at", "created_at", "params_snapshot"},
         )
         assert len(col_list) == len(expected_cols)
 

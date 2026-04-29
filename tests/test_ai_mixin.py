@@ -923,3 +923,37 @@ class TestMacroContext:
         result = await AIStrategyMixin()._build_macro_context(mock_cache)
 
         assert result == ""
+
+
+class TestSortForAI:
+    """P1-13: _sort_for_ai 默认排序优化测试"""
+
+    def test_sort_by_total_mv_descending(self):
+        """按 total_mv 降序排序"""
+        df = pd.DataFrame({"ts_code": ["A", "B", "C"], "total_mv": [100, 500, 200]})
+        result = AIStrategyMixin()._sort_for_ai(df)
+        assert list(result["ts_code"]) == ["B", "C", "A"]
+
+    def test_sort_by_vol_when_no_mv(self):
+        """无 total_mv 时按 vol 降序排序"""
+        df = pd.DataFrame({"ts_code": ["A", "B", "C"], "vol": [1000, 5000, 2000]})
+        result = AIStrategyMixin()._sort_for_ai(df)
+        assert list(result["ts_code"]) == ["B", "C", "A"]
+
+    def test_single_row_unchanged(self):
+        """单行数据不变"""
+        df = pd.DataFrame({"ts_code": ["A"], "total_mv": [100]})
+        result = AIStrategyMixin()._sort_for_ai(df)
+        assert list(result["ts_code"]) == ["A"]
+
+    def test_empty_dataframe_returns_empty(self):
+        """空 DataFrame 返回空"""
+        df = pd.DataFrame()
+        result = AIStrategyMixin()._sort_for_ai(df)
+        assert result.empty
+
+    def test_no_sort_columns_returns_original(self):
+        """无排序列时返回原数据"""
+        df = pd.DataFrame({"ts_code": ["A", "B", "C"], "close": [10.0, 20.0, 15.0]})
+        result = AIStrategyMixin()._sort_for_ai(df)
+        assert list(result["ts_code"]) == ["A", "B", "C"]

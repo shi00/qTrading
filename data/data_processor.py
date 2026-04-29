@@ -26,6 +26,10 @@ from utils.time_utils import get_now, parse_date
 logger = logging.getLogger(__name__)
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class DataProcessor(HealthCheckMixin, CalendarMixin):
     """
     Main data processing class (Refactored Facade).
@@ -508,6 +512,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Atomic overwrite (refresh)
             count = await self.cache.overwrite_concepts(full_df)
+            self._quality_tier = None
+            self._health_cache = {"time": 0, "data": None}
             logger.info(
                 f"[DataProcessor] Sync Concepts | ✅ Saved {count} structured mappings",
             )

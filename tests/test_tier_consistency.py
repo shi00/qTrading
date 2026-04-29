@@ -143,6 +143,30 @@ class TestTierBoundaryValues(unittest.TestCase):
             2,
         )
 
+    def test_fin_fresh_ratio_none_fresh_quotes_is_silver(self):
+        self.assertEqual(
+            _compute_tier(lag_days=0, fin_fresh_ratio=None, missing_critical=False),
+            2,
+        )
+
+    def test_fin_fresh_ratio_none_stale_quotes_is_bronze(self):
+        self.assertEqual(
+            _compute_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1, fin_fresh_ratio=None, missing_critical=False),
+            1,
+        )
+
+    def test_fin_fresh_ratio_none_never_gold(self):
+        self.assertEqual(
+            _compute_tier(lag_days=0, fin_fresh_ratio=None, missing_critical=False, avg_fundamental=0.9),
+            2,
+        )
+
+    def test_fin_fresh_ratio_none_missing_critical_still_critical(self):
+        self.assertEqual(
+            _compute_tier(lag_days=0, fin_fresh_ratio=None, missing_critical=True),
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,30 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             f"RSI({period}) < {threshold}",
         ).format(period=period, threshold=threshold)
 
+    def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        rsi_col = None
+        for c in df.columns:
+            if c.startswith("rsi_"):
+                rsi_col = c
+                break
+        sort_cols = []
+        if rsi_col:
+            sort_cols.append((rsi_col, True))
+        if "amount" in df.columns:
+            sort_cols.append(("amount", False))
+        elif "vol" in df.columns:
+            sort_cols.append(("vol", False))
+        if "total_mv" in df.columns:
+            sort_cols.append(("total_mv", False))
+        if not sort_cols:
+            return df
+        return df.sort_values(
+            [c for c, _ in sort_cols],
+            ascending=[a for _, a in sort_cols],
+        )
+
     # ============================================================
     # AI Context Hook — tells the LLM WHY this stock was selected
     # ============================================================

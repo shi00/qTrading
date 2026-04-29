@@ -37,3 +37,28 @@ def parse_date(date_input, fmt="%Y%m%d") -> datetime.datetime:
 def get_today_str() -> str:
     """Get the current date as a YYYYMMDD string in CST."""
     return get_now().strftime("%Y%m%d")
+
+
+def to_utc_for_db(dt: datetime.datetime | None) -> datetime.datetime | None:
+    """
+    S1-6 fix: Convert datetime to UTC for database storage.
+    Removes timezone info after converting to UTC for DB compatibility.
+    Use this when writing datetime to database.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = CST_TZ.localize(dt)
+    return dt.astimezone(datetime.UTC).replace(tzinfo=None)
+
+
+def from_utc_to_cst(dt: datetime.datetime | None) -> datetime.datetime | None:
+    """
+    S1-6 fix: Convert UTC datetime from database to CST for display.
+    Use this when reading datetime from database.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.UTC)
+    return dt.astimezone(CST_TZ)

@@ -23,6 +23,10 @@ _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class SchedulerService:
     """
     Background scheduler for automatic data updates.
@@ -449,5 +453,33 @@ class SchedulerService:
         }
 
 
-# Global scheduler instance
-scheduler = SchedulerService()
+_scheduler_instance: SchedulerService | None = None
+_scheduler_lock = threading.Lock()
+
+
+def get_scheduler() -> SchedulerService:
+    """
+    S5-6 fix: Lazy initialization accessor for scheduler.
+    Prevents scheduler from being created at import time.
+    """
+    global _scheduler_instance
+    if _scheduler_instance is None:
+        with _scheduler_lock:
+            if _scheduler_instance is None:
+                _scheduler_instance = SchedulerService()
+    return _scheduler_instance
+
+
+# Backward compatibility: scheduler property that lazily initializes
+# This allows existing code to work, but triggers lazy init on first access
+class _SchedulerProxy:
+    """Proxy that lazily initializes the scheduler on first attribute access."""
+
+    def __getattr__(self, name):
+        return getattr(get_scheduler(), name)
+
+    def __bool__(self):
+        return bool(get_scheduler())
+
+
+scheduler = _SchedulerProxy()

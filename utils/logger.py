@@ -62,9 +62,13 @@ def setup_logging(name="astock_screener"):
 
     # Formatter
     formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s",
+        "%(asctime)s [%(levelname)s] [%(correlation_id)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    from utils.correlation import CorrelationFilter
+
+    correlation_filter = CorrelationFilter()
 
     # Load config limits
     try:
@@ -80,6 +84,7 @@ def setup_logging(name="astock_screener"):
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging_level)
         console_handler.setFormatter(formatter)
+        console_handler.addFilter(correlation_filter)
         logger.addHandler(console_handler)
 
     # 4. File Handler (DEBUG+, Rotating)
@@ -110,6 +115,7 @@ def setup_logging(name="astock_screener"):
             )
             file_handler.setLevel(logging_level)
             file_handler.setFormatter(formatter)
+            file_handler.addFilter(correlation_filter)
             logger.addHandler(file_handler)
         except Exception as e:
             sys.stderr.write(f"Failed to setup file logging: {e}\n")
@@ -140,6 +146,7 @@ def setup_logging(name="astock_screener"):
             )
             error_handler.setLevel(logging.ERROR)
             error_handler.setFormatter(formatter)
+            error_handler.addFilter(correlation_filter)
             logger.addHandler(error_handler)
         except Exception:
             pass

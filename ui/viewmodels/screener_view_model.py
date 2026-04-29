@@ -47,6 +47,7 @@ class ScreenerViewModel:
 
         # AI Stream Buffer
         self._ai_buffer = []
+        self._discarded_buffer = []  # U-3 fix: Buffer for discarded items during HISTORY mode
         self._last_ai_update = 0
         self.AI_UPDATE_INTERVAL = 0.5  # Seconds
         self._flush_pending = False
@@ -440,10 +441,14 @@ class ScreenerViewModel:
         try:
             if not self._ai_buffer:
                 return
-            # Race guard: discard buffer if user has switched to history mode
+            # U-3 fix: Race guard - save buffer to discarded_buffer if user has switched to history mode
             if self.mode != "REALTIME":
+                self._discarded_buffer.extend(self._ai_buffer)
                 self._ai_buffer = []
                 self._flush_pending = False
+                logger.debug(
+                    f"[ScreenerVM] Saved {len(self._discarded_buffer)} items to discarded_buffer during HISTORY mode"
+                )
                 return
 
             # Swap buffer to process safely
@@ -540,6 +545,11 @@ class ScreenerViewModel:
             self.sort_ascending = self._realtime_snapshot["sort_ascending"]
             self._ai_buffer = self._realtime_snapshot["ai_buffer"]
             self._realtime_snapshot = None
+            # U-3 fix: Merge discarded_buffer back to ai_buffer
+            if self._discarded_buffer:
+                self._ai_buffer.extend(self._discarded_buffer)
+                logger.debug(f"[ScreenerVM] Merged {len(self._discarded_buffer)} discarded items back to ai_buffer")
+                self._discarded_buffer = []
             self._update_pagination()
         self.mode = "REALTIME"
         logger.info("[ScreenerVM] Switched to REALTIME mode")

@@ -21,7 +21,7 @@ from strategies.fundamental import (
 from strategies.market import (
     BlockTradeStrategy,
     InstitutionalStrategy,
-    NorthboundStrategy,
+    NorthboundHoldingStrategy,
     TechnicalBreakoutStrategy,
 )
 from strategies.oversold_strategy import OversoldStrategy
@@ -87,7 +87,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
             {"ts_code": ["000001.SZ", "000002.SZ"], "ratio": [6.0, 1.0]},
         )
         ctx = {"northbound_data": nb_data, "screening_data": self.base_data}
-        s = NorthboundStrategy()
+        s = NorthboundHoldingStrategy()
         res = await s.filter(ctx)
         self.assertIn("000001.SZ", res["ts_code"].values)
         self.assertNotIn("000002.SZ", res["ts_code"].values)
@@ -190,14 +190,14 @@ class TestAIIntegration(unittest.TestCase):
         CashFlowStrategy,
         LargePEStrategy,
         TechnicalBreakoutStrategy,
-        NorthboundStrategy,
+        NorthboundHoldingStrategy,
         InstitutionalStrategy,
         BlockTradeStrategy,
     ]
 
     MARKET_STRATEGY_CLASSES = [
         TechnicalBreakoutStrategy,
-        NorthboundStrategy,
+        NorthboundHoldingStrategy,
         InstitutionalStrategy,
         BlockTradeStrategy,
     ]
@@ -427,7 +427,7 @@ class TestUtils(unittest.TestCase):
 
 class TestDependencyCheck(unittest.TestCase):
     def test_northbound_declares_dependencies(self):
-        s = NorthboundStrategy()
+        s = NorthboundHoldingStrategy()
         self.assertIn("northbound_data", s.required_context_keys)
         self.assertIn("northbound_holding", s.required_tables)
 
@@ -448,19 +448,19 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertNotIn("data_processor", s.required_context_keys)
 
     def test_check_dependencies_missing_key(self):
-        s = NorthboundStrategy()
+        s = NorthboundHoldingStrategy()
         result = s.check_dependencies({})
         self.assertEqual(result["status"], "unready")
         self.assertIn("northbound_data", result["missing_keys"])
 
     def test_check_dependencies_empty_key(self):
-        s = NorthboundStrategy()
+        s = NorthboundHoldingStrategy()
         result = s.check_dependencies({"northbound_data": pd.DataFrame()})
         self.assertEqual(result["status"], "degraded")
         self.assertIn("northbound_data", result["empty_keys"])
 
     def test_check_dependencies_ok(self):
-        s = NorthboundStrategy()
+        s = NorthboundHoldingStrategy()
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "ratio": [5.0]})
         result = s.check_dependencies({"northbound_data": df})
         self.assertEqual(result["status"], "ready")
@@ -507,7 +507,7 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertIn("fundamental_screening_data", s.required_context_keys)
 
     def test_check_dependencies_returns_missing_tables(self):
-        s = NorthboundStrategy()
+        s = NorthboundHoldingStrategy()
         result = s.check_dependencies({})
         self.assertIn("northbound_holding", result["missing_tables"])
 

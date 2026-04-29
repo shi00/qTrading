@@ -64,6 +64,43 @@ class TestI18nKeysCompleteness(unittest.TestCase):
                 f"Empty values in {locale}: {empty_keys[:10]}",
             )
 
+    def test_main_py_i18n_keys_exist(self):
+        """Verify all i18n keys used in main.py exist in both locale files."""
+        zh_keys = self._load_keys("zh_CN")
+        en_keys = self._load_keys("en_US")
+
+        required_keys = [
+            "error_db_init_failed",
+            "error_db_engine_missing",
+            "warning_skip_db",
+            "retry",
+            "skip",
+            "app_title",
+            "exit_confirm_title",
+            "exit_confirm_content",
+            "common_cancel",
+            "common_confirm",
+        ]
+
+        missing_zh = [k for k in required_keys if k not in zh_keys]
+        missing_en = [k for k in required_keys if k not in en_keys]
+
+        self.assertFalse(missing_zh, f"Missing main.py keys in zh_CN: {missing_zh}")
+        self.assertFalse(missing_en, f"Missing main.py keys in en_US: {missing_en}")
+
+    def test_deprecated_qfq_keys_removed(self):
+        """P0-1: col_qfq_* keys should be removed since qfq columns no longer exist in DB."""
+        zh_keys = self._load_keys("zh_CN")
+        en_keys = self._load_keys("en_US")
+
+        deprecated_keys = {"col_qfq_open", "col_qfq_high", "col_qfq_low", "col_qfq_close"}
+
+        remaining_zh = deprecated_keys & zh_keys
+        remaining_en = deprecated_keys & en_keys
+
+        self.assertFalse(remaining_zh, f"Deprecated qfq keys still in zh_CN: {remaining_zh}")
+        self.assertFalse(remaining_en, f"Deprecated qfq keys still in en_US: {remaining_en}")
+
 
 if __name__ == "__main__":
     unittest.main()

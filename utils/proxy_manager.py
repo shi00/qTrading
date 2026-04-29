@@ -29,14 +29,19 @@ class ProxyManager:
         # We append user configured domains to NO_PROXY to ensure they bypass any potential proxy.
 
         # Prepare list of domains to whitelist
-        # We start with existing NO_PROXY
-        current_no_proxy = os.environ.get("NO_PROXY", "")
-        if not current_no_proxy:
-            current_no_proxy = os.environ.get("no_proxy", "")
+        # S2-2 fix: Union both NO_PROXY and no_proxy environment variables
+        no_proxy_upper = os.environ.get("NO_PROXY", "")
+        no_proxy_lower = os.environ.get("no_proxy", "")
 
-        final_domains = (
-            set([d.strip() for d in current_no_proxy.split(",") if d.strip()]) if current_no_proxy else set()
-        )
+        final_domains: set[str] = set()
+
+        # Add domains from NO_PROXY
+        if no_proxy_upper:
+            final_domains.update([d.strip() for d in no_proxy_upper.split(",") if d.strip()])
+
+        # Add domains from no_proxy (case-insensitive merge)
+        if no_proxy_lower:
+            final_domains.update([d.strip() for d in no_proxy_lower.split(",") if d.strip()])
 
         # Load User Configured Domains ONLY
         target_domains = ConfigHandler.get_no_proxy_domains()
@@ -67,3 +72,12 @@ class ProxyManager:
             )
         else:
             logger.info("[ProxyManager] Configuration applied. No changes.")
+
+    @staticmethod
+    def reapply_proxy_policy():
+        """
+        S2-3 fix: Re-apply proxy policy at runtime when no_proxy_domains config changes.
+        This should be called after ConfigHandler settings are updated.
+        """
+        logger.info("[ProxyManager] Re-applying proxy configuration (runtime update)...")
+        ProxyManager.apply_smart_proxy_policy()

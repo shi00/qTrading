@@ -61,14 +61,20 @@ class TechnicalBreakoutStrategy(PolarsBaseStrategy):
         )
 
 
-@register_strategy("northbound")
-class NorthboundStrategy(PolarsBaseStrategy):
+@register_strategy("northbound_holding")
+class NorthboundHoldingStrategy(PolarsBaseStrategy):
+    """
+    P1-11 fix: Renamed from NorthboundStrategy to clarify semantics.
+    This strategy filters stocks by northbound (HK capital) HOLDING RATIO,
+    not by net capital flow. For net flow analysis, use NorthboundFlowStrategy.
+    """
+
     enable_ai_analysis = False
     required_context_keys = ["northbound_data"]
     required_tables = ["northbound_holding"]
 
     def __init__(self):
-        super().__init__("strategy_northbound_name", "strategy_northbound_desc")
+        super().__init__("strategy_northbound_holding_name", "strategy_northbound_holding_desc")
 
     def get_parameters(self):
         return [
@@ -104,6 +110,60 @@ class NorthboundStrategy(PolarsBaseStrategy):
                 )
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("ratio", descending=True)
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{self.name}] Logic error: {e}. Params: {context.get('params')}",
+                exc_info=True,
+            )
+            return lf.head(0)
+
+
+@register_strategy("northbound_flow")
+class NorthboundFlowStrategy(PolarsBaseStrategy):
+    """
+    P1-11 fix: New strategy for northbound NET CAPITAL FLOW analysis.
+    Uses moneyflow_hsgt.north_money to track daily net inflow/outflow.
+    Complements NorthboundHoldingStrategy which tracks holding ratio.
+    """
+
+    enable_ai_analysis = False
+    required_context_keys = ["northbound_flow_data"]
+    required_tables = ["moneyflow_hsgt"]
+
+    def __init__(self):
+        super().__init__("strategy_northbound_flow_name", "strategy_northbound_flow_desc")
+
+    def get_parameters(self):
+        return [
+            {
+                "name": "nb_flow_min",
+                "label_key": "param_nb_flow_min",
+                "type": "slider",
+                "min": 0,
+                "max": 200,
+                "default": 50,
+                "step": 10,
+            },
+        ]
+
+    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+        flow_df = context.get("northbound_flow_data")
+        p = context.get("params", {})
+        target_flow = p.get("nb_flow_min", 50)
+
+        if flow_df is None or flow_df.empty:
+            return lf.head(0)
+
+        try:
+            flow_lf = pl.from_pandas(flow_df).lazy()
+            base_lf = lf.select(["ts_code", "name", "industry", "pe_ttm", "total_mv"])
+
+            return (
+                flow_lf.drop_nulls(subset=["north_money"])
+                .filter(pl.col("north_money") > target_flow)
+                .join(base_lf, on="ts_code", how="inner")
+                .sort("north_money", descending=True)
             )
         except Exception as e:
             logger.warning(

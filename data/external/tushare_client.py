@@ -15,6 +15,10 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
+from utils.singleton_registry import register_singleton
+
+
+@register_singleton
 class TushareClient:
     """
     Enhanced Tushare API client with timeout, retry, trade calendar support, and TokenBucket Rate Limiting.
@@ -49,6 +53,42 @@ class TushareClient:
         with cls._lock:
             cls._instance = None
 
+    def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket]]:
+        """
+        S2-1 fix: Build rate limiters based on config.
+        Extracted to avoid code duplication between __init__ and set_token.
+        """
+        limit_per_min = ConfigHandler.get_tushare_api_limit()
+        if not limit_per_min or limit_per_min <= 0:
+            logger.info("[API] Rate Limiter disabled (No limit set)")
+            return None, {}
+
+        rate_per_sec = limit_per_min / 60.0
+        capacity = max(10, rate_per_sec * 5)
+        rate_limiter = TokenBucket(
+            start_tokens=capacity,
+            capacity=capacity,
+            rate=rate_per_sec,
+        )
+        logger.info(
+            f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
+        )
+
+        slow_api_limiters: dict[str, TokenBucket] = {}
+        for api_name, factor in self._SLOW_API_OVERRIDES.items():
+            slow_rate = rate_per_sec * factor
+            slow_capacity = max(5, slow_rate * 5)
+            slow_api_limiters[api_name] = TokenBucket(
+                start_tokens=slow_capacity,
+                capacity=slow_capacity,
+                rate=slow_rate,
+            )
+            logger.info(
+                f"[API] Slow API limiter for '{api_name}': {slow_rate * 60:.0f} req/min (factor={factor})",
+            )
+
+        return rate_limiter, slow_api_limiters
+
     def __init__(self, token: str | None = None):
         if self._initialized:
             if token and token != self.token:
@@ -67,38 +107,8 @@ class TushareClient:
             self.timeout = ConfigHandler.get_tushare_timeout()
             self.max_retries = ConfigHandler.get_request_max_retries()
 
-            # Initialize Rate Limiter
-            # Get limit per minute (default None)
-            limit_per_min = ConfigHandler.get_tushare_api_limit()
-
-            if limit_per_min and limit_per_min > 0:
-                rate_per_sec = limit_per_min / 60.0
-                capacity = max(10, rate_per_sec * 5)
-                self._rate_limiter = TokenBucket(
-                    start_tokens=capacity,
-                    capacity=capacity,
-                    rate=rate_per_sec,
-                )
-                logger.info(
-                    f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
-                )
-
-                self._slow_api_limiters: dict[str, TokenBucket] = {}
-                for api_name, factor in self._SLOW_API_OVERRIDES.items():
-                    slow_rate = rate_per_sec * factor
-                    slow_capacity = max(5, slow_rate * 5)
-                    self._slow_api_limiters[api_name] = TokenBucket(
-                        start_tokens=slow_capacity,
-                        capacity=slow_capacity,
-                        rate=slow_rate,
-                    )
-                    logger.info(
-                        f"[API] Slow API limiter for '{api_name}': {slow_rate * 60:.0f} req/min (factor={factor})",
-                    )
-            else:
-                self._rate_limiter = None
-                self._slow_api_limiters = {}
-                logger.info("[API] Rate Limiter disabled (No limit set)")
+            # S2-1 fix: Use shared rate limiter builder
+            self._rate_limiter, self._slow_api_limiters = self._build_rate_limiters()
 
             if self.token:
                 ts.set_token(self.token)
@@ -117,33 +127,8 @@ class TushareClient:
         ts.set_token(token)
         self.pro = ts.pro_api(timeout=self.timeout)
 
-        limit_per_min = ConfigHandler.get_tushare_api_limit()
-        if limit_per_min and limit_per_min > 0:
-            rate_per_sec = limit_per_min / 60.0
-            capacity = max(10, rate_per_sec * 5)
-            if self._rate_limiter:
-                self._rate_limiter.reconfigure(rate=rate_per_sec, capacity=capacity)
-                logger.info(f"[API] Rate Limiter updated: {limit_per_min} req/min")
-            else:
-                self._rate_limiter = TokenBucket(
-                    start_tokens=capacity,
-                    capacity=capacity,
-                    rate=rate_per_sec,
-                )
-                logger.info(f"[API] Rate Limiter created: {limit_per_min} req/min")
-
-            self._slow_api_limiters = {}
-            for api_name, factor in self._SLOW_API_OVERRIDES.items():
-                slow_rate = rate_per_sec * factor
-                slow_capacity = max(5, slow_rate * 5)
-                self._slow_api_limiters[api_name] = TokenBucket(
-                    start_tokens=slow_capacity,
-                    capacity=slow_capacity,
-                    rate=slow_rate,
-                )
-        else:
-            self._rate_limiter = None
-            self._slow_api_limiters = {}
+        # S2-1 fix: Use shared rate limiter builder
+        self._rate_limiter, self._slow_api_limiters = self._build_rate_limiters()
 
         logger.info(f"[API] Token updated. Client re-initialized with timeout={self.timeout}s")
 

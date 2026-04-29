@@ -336,7 +336,8 @@ class TestI18nBackwardCompatibility:
             "strategy_growth_name",
             "strategy_dividend_name",
             "strategy_tech_breakout_name",
-            "strategy_northbound_name",
+            "strategy_northbound_holding_name",
+            "strategy_northbound_flow_name",
             "strategy_oversold_name",
         ]
 

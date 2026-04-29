@@ -3,6 +3,15 @@ import os
 import sys
 from logging.config import fileConfig
 
+# S5-5 fix: Ensure alembic runs in UTC to match DB storage convention
+os.environ["TZ"] = "UTC"
+try:
+    import time
+
+    time.tzset()
+except AttributeError:
+    pass  # Windows doesn't have tzset
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection

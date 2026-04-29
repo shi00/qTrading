@@ -88,6 +88,7 @@ class TestAlembicMigrationAlignment:
             return None
 
         all_columns: set = set()
+        all_drops: set = set()
 
         for migration_file in self.migration_files:
             with open(migration_file, encoding="utf-8") as f:
@@ -123,7 +124,9 @@ class TestAlembicMigrationAlignment:
 
             drop_col_pattern = rf'op\.drop_column\(\s*"{table_name}"\s*,\s*"(\w+)"'
             drop_col_matches = re.findall(drop_col_pattern, upgrade_content)
-            all_columns -= set(drop_col_matches)
+            all_drops.update(drop_col_matches)
+
+        all_columns -= all_drops
 
         return all_columns if all_columns else None
 

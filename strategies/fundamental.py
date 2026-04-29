@@ -1,3 +1,4 @@
+import pandas as pd
 import polars as pl
 
 from data.persistence.quality_gate import QualityTier
@@ -311,3 +312,10 @@ class LargePEStrategy(PolarsBaseStrategy):
             .filter(pl.col("pe_ttm").is_between(0, pe_max))
             .sort("total_mv", descending=True)
         )
+
+    def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        if "pe_ttm" in df.columns:
+            return df.sort_values("pe_ttm", ascending=True)
+        return df

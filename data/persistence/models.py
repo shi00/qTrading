@@ -136,6 +136,13 @@ class MoneyflowDaily(Base):
 
 
 class NorthboundHolding(Base):
+    """港资持股比例 & 持股变动 (source: hk_hold & hk_hold_detail).
+
+    NOTE: This model stores *holding ratio* data, NOT net capital flow.
+    For northbound money flow (净流入), use `moneyflow_hsgt` via TushareClient.
+    See P1-11 in code-review.md for the strategy split plan.
+    """
+
     __tablename__ = "northbound_holding"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(Date, primary_key=True, index=True)
@@ -215,7 +222,6 @@ class ScreeningHistory(Base):
     alpha = Column(Float)
     ai_score = Column(Integer)
     ai_reason = Column(String)
-    thinking = Column(String)
     prediction_result = Column(String)
     review_status = Column(String, server_default="PENDING")
     params_snapshot = Column(JSONB)
@@ -231,7 +237,19 @@ class ScreeningHistory(Base):
         Index("idx_sh_date_code", "trade_date", "ts_code"),
         Index("idx_sh_run_id", "run_id"),
         Index("idx_sh_prediction_result", "prediction_result", postgresql_where=text("prediction_result IS NOT NULL")),
+        Index("idx_sh_pending", "review_status", postgresql_where=text("prediction_result IS NULL")),
+        Index("idx_sh_params_gin", "params_snapshot", postgresql_using="gin"),
     )
+
+
+class ScreeningThinking(Base):
+    __tablename__ = "screening_thinking"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    history_id = Column(Integer, nullable=False, index=True)
+    thinking = Column(String)
+    created_at = Column(DateTime(timezone=False), server_default=func.now())
+
+    __table_args__ = (Index("idx_st_history_id", "history_id"),)
 
 
 class BlockTrade(Base):
@@ -261,6 +279,7 @@ class MarketNews(Base):
         UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
         Index("ix_market_news_publish_time", "publish_time"),
         Index("ix_market_news_source", "source"),
+        Index("idx_market_news_pub_source", "publish_time", "source"),
     )
 
 
