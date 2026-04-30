@@ -7,14 +7,17 @@ so tests can call reset_all_singletons() to guarantee isolation.
 
 import logging
 import threading
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
-_registry: list[type] = []
+TClass = TypeVar("TClass", bound=type[object])
+
+_registry: list[type[object]] = []
 _lock = threading.Lock()
 
 
-def register_singleton(cls: type) -> type:
+def register_singleton(cls: TClass) -> TClass:
     """Class decorator that registers a singleton for unified reset."""
     with _lock:
         if cls not in _registry:
