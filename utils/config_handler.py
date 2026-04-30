@@ -129,6 +129,7 @@ class ConfigHandler:
         # Persisted scheduler idempotency keys
         "scheduler_last_daily_update": "",
         "scheduler_last_nightly_prediction": "",
+        "scheduler_last_doubao_refresh": "",
         # Local AI Advanced Settings
         "local_n_threads": 4,
         "local_n_batch": 512,
@@ -319,15 +320,21 @@ class ConfigHandler:
 
     @staticmethod
     def get_token():
-        # First try keyring
         kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
         if kr_token:
             return kr_token
 
-        # Fallback to legacy config
         config = ConfigHandler.load_config()
         token = config.get("ts_token", "")
-        return ConfigHandler._try_decrypt(token)
+        decrypted = ConfigHandler._try_decrypt(token)
+        if decrypted:
+            try:
+                keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", decrypted)
+                ConfigHandler.save_config({"ts_token": ""})
+                logger.info("Migrated ts_token from config to keyring and cleared legacy value")
+            except Exception:
+                pass
+        return decrypted
 
     @staticmethod
     def save_token(token):
@@ -473,6 +480,10 @@ class ConfigHandler:
             return True
         except Exception as e:
             logger.warning(f"Failed to save db_password to keyring: {e}")
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                keyring.delete_password(KEYRING_SERVICE_NAME, "db_password")
             try:
                 encrypted = SecurityManager.encrypt_data(password)
                 ConfigHandler.save_config({"db_password_encrypted": encrypted})
@@ -693,6 +704,13 @@ class ConfigHandler:
         if not api_key:
             encrypted = config.get("ai_api_key", "")
             api_key = ConfigHandler._try_decrypt(encrypted)
+            if api_key:
+                try:
+                    keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
+                    ConfigHandler.save_config({"ai_api_key": ""})
+                    logger.info("Migrated ai_api_key from config to keyring and cleared legacy value")
+                except Exception:
+                    pass
 
         provider = config.get("llm_provider", "deepseek")
         model = config.get("llm_model", "deepseek-chat")

@@ -62,3 +62,20 @@ class TestTimezoneConversion:
 
         assert CST_TZ is not None
         assert CST_TZ.zone == "Asia/Shanghai"
+
+    def test_to_yyyymmdd_str_normalizes_common_inputs(self):
+        from utils.time_utils import to_yyyymmdd_str
+
+        assert to_yyyymmdd_str("2024-03-15") == "20240315"
+        assert to_yyyymmdd_str("20240315") == "20240315"
+        assert to_yyyymmdd_str(datetime(2024, 3, 15, 10, 0, 0)) == "20240315"
+        assert to_yyyymmdd_str(None) is None
+        assert to_yyyymmdd_str("") is None
+
+    def test_to_date_normalizes_common_inputs(self):
+        from utils.time_utils import to_date
+        import datetime as _dt
+
+        assert to_date("20240315") == _dt.date(2024, 3, 15)
+        assert to_date("2024-03-15") == _dt.date(2024, 3, 15)
+        assert to_date(_dt.datetime(2024, 3, 15, 10, 0, 0)) == _dt.date(2024, 3, 15)

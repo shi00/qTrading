@@ -101,7 +101,15 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+    if sync_db_url and sync_db_url.startswith("sqlite"):
+        from sqlalchemy import create_engine as sync_create_engine
+
+        connectable = sync_create_engine(sync_db_url, poolclass=pool.NullPool)
+        with connectable.connect() as connection:
+            do_run_migrations(connection)
+        connectable.dispose()
+    else:
+        asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():

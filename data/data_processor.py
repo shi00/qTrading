@@ -21,7 +21,7 @@ from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now, parse_date
+from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
 logger = logging.getLogger(__name__)
 
@@ -788,17 +788,23 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             raise  # Re-raise so UI can catch and display
 
     # ... get_stock_history, get_strategy_data ...
-    async def get_stock_history(self, ts_code, days=365):
+    async def get_stock_history(self, ts_code, days=365, end_date=None):
         try:
-            latest_closed_trade_date = await self.get_latest_trade_date()
-            if isinstance(latest_closed_trade_date, datetime.datetime):
-                end = latest_closed_trade_date.date()
-            elif isinstance(latest_closed_trade_date, datetime.date):
-                end = latest_closed_trade_date
-            elif latest_closed_trade_date:
-                end = parse_date(str(latest_closed_trade_date))
+            if end_date is None:
+                latest_closed_trade_date = await self.get_latest_trade_date()
+                if isinstance(latest_closed_trade_date, datetime.datetime):
+                    end = latest_closed_trade_date.date()
+                elif isinstance(latest_closed_trade_date, datetime.date):
+                    end = latest_closed_trade_date
+                elif latest_closed_trade_date:
+                    end = parse_date(str(latest_closed_trade_date))
+                else:
+                    end = get_now().date()
             else:
-                end = get_now().date()
+                if hasattr(end_date, "year"):
+                    end = end_date if isinstance(end_date, datetime.date) else end_date.date()
+                else:
+                    end = parse_date(str(end_date))
         except Exception as e:
             logger.warning(f"[DataProcessor] get_stock_history fallback to natural date: {e}")
             end = get_now().date()
@@ -821,19 +827,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """Normalize trade_date values used in screening context to YYYYMMDD strings."""
         if value is None or pd.isna(value):
             return None
-        if isinstance(value, pd.Timestamp):
-            return value.strftime("%Y%m%d")
-        if isinstance(value, datetime.datetime):
-            return value.strftime("%Y%m%d")
-        if isinstance(value, datetime.date):
-            return value.strftime("%Y%m%d")
-        raw = str(value).strip()
-        if not raw:
-            return None
-        try:
-            return parse_date(raw).strftime("%Y%m%d")
-        except Exception:
-            return raw
+        return to_yyyymmdd_str(value)
 
     @classmethod
     def _resolve_screening_trade_date(cls, explicit_trade_date, screening_data: pd.DataFrame):
@@ -939,6 +933,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         auxiliary_tables = {
             "northbound_data": self.cache.get_northbound,
+            "northbound_flow_data": self.cache.get_moneyflow_hsgt,
             "moneyflow_data": self.cache.get_moneyflow,
             "top_list": self.cache.get_top_list,
             "block_trade": self.cache.get_block_trade,
@@ -950,9 +945,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             if data is not None:
                 context[key] = data
                 is_empty = hasattr(data, "empty") and data.empty
-                diagnostics["table_status"][key] = {"ready": not is_empty, "rows": len(data) if not is_empty else 0}
-                if is_empty:
-                    all_aux_ready = False
+                diagnostics["table_status"][key] = {"ready": True, "rows": len(data) if not is_empty else 0}
             else:
                 diagnostics["table_status"][key] = {"ready": False, "rows": 0}
                 all_aux_ready = False

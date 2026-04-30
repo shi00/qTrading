@@ -1,6 +1,7 @@
 # === Testing & Automation Framework ===
 pytest>=8.0.0
 pytest-asyncio>=0.23.5
+pytest-cov>=7.0.0
 
 # === Code Quality & Linting ===
 ruff>=0.1.0

@@ -1,8 +1,12 @@
 import asyncio
+import config
 import contextlib
 import json
 import logging
+import os
+import re
 import threading
+import time
 
 import httpx
 
@@ -148,8 +152,30 @@ class AIService:
 
         self._configure_litellm()
         self._setup_client()
+        self._cleanup_prompt_dumps()
 
         self._initialized = True
+
+    @staticmethod
+    def _get_prompt_dump_dir() -> str:
+        return os.path.join(config.APP_ROOT, "logs", "ai_prompts")
+
+    def _cleanup_prompt_dumps(self) -> None:
+        """Cleanup old prompt dump files; run outside analyze hot path."""
+        if not ConfigHandler.get_setting("ai_prompt_dump_enabled", False):
+            return
+        try:
+            dump_dir = self._get_prompt_dump_dir()
+            if not os.path.isdir(dump_dir):
+                return
+            cutoff_ts = time.time() - 24 * 60 * 60
+            for name in os.listdir(dump_dir):
+                file_path = os.path.join(dump_dir, name)
+                if os.path.isfile(file_path) and os.path.getmtime(file_path) < cutoff_ts:
+                    with contextlib.suppress(OSError):
+                        os.remove(file_path)
+        except Exception as e:
+            logger.debug(f"[AIService] Prompt dump cleanup skipped: {e}")
 
     def _configure_litellm(self):
         """配置 LiteLLM 全局参数 (1.82+ 优化)"""
@@ -303,7 +329,7 @@ class AIService:
         """Reload config when settings change"""
         self._setup_client()
         self._local_model_loaded = False
-        # S1-1 fix: Reset semaphore so new concurrency limit takes effect
+        # M-4: _cleanup_prompt_dumps moved out of hot path; only runs at init
         from utils.loop_local import del_loop_local
 
         del_loop_local("ai_semaphore")
@@ -655,21 +681,10 @@ class AIService:
         # Prompt dumps are debug-only and opt-in because they may contain sensitive strategy context.
         if logger.isEnabledFor(logging.DEBUG) and ConfigHandler.get_setting("ai_prompt_dump_enabled", False):
             try:
-                import os
-                import re
-                import time
-
-                import config
                 from utils.time_utils import get_now
 
-                dump_dir = os.path.join(config.APP_ROOT, "logs", "ai_prompts")
+                dump_dir = self._get_prompt_dump_dir()
                 os.makedirs(dump_dir, exist_ok=True)
-                cutoff_ts = time.time() - 24 * 60 * 60
-                for name in os.listdir(dump_dir):
-                    file_path = os.path.join(dump_dir, name)
-                    if os.path.isfile(file_path) and os.path.getmtime(file_path) < cutoff_ts:
-                        with contextlib.suppress(OSError):
-                            os.remove(file_path)
 
                 # Sanitize components against path traversal and Windows invalid chars
                 stock_code = str(stock_info.get("ts_code", "UNKNOWN"))

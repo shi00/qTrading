@@ -281,6 +281,60 @@ class TestScreenerViewModel(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_run_strategy_reports_degraded_context_status(self):
+        """N-2: context diagnostics.strategy_ready=False 时应提示降级状态。"""
+
+        async def run_test():
+            result_df = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "name": ["平安银行"],
+                    "close": [10.5],
+                    "pct_chg": [2.5],
+                }
+            )
+
+            mock_strategy = MagicMock()
+            mock_strategy.name = "test_strategy"
+            mock_strategy.filter = AsyncMock(return_value=result_df)
+            self.vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+
+            self.vm.data_processor.get_strategy_data = AsyncMock(
+                return_value={
+                    "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                    "trade_date": datetime.date(2024, 12, 31),
+                    "_diagnostics": {
+                        "strategy_ready": False,
+                        "table_status": {
+                            "northbound_data": {"ready": False, "rows": 0},
+                            "moneyflow_data": {"ready": True, "rows": 1},
+                        },
+                    },
+                }
+            )
+            self.vm.on_status = MagicMock()
+
+            submitted_coro = []
+
+            def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+                submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+                return "test_task_id"
+
+            with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+                mock_tm.return_value.update_progress = MagicMock()
+                mock_tm.return_value.submit_task = mock_submit_task
+                await self.vm.run_strategy("test_strategy", save_results=False)
+
+            self.assertEqual(len(submitted_coro), 1)
+            await submitted_coro[0]
+            status_calls = self.vm.on_status.call_args_list
+            self.assertTrue(
+                any(("策略降级运行" in (args[0] if args else "") and args[1] == "orange") for args, _ in status_calls),
+                "N-2: should report degraded strategy status in orange",
+            )
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

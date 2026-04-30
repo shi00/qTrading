@@ -171,6 +171,47 @@ class TestQfqCalculation(unittest.TestCase):
         self.assertAlmostEqual(result["close"].iloc[1], 11.0, places=2)
         self.assertAlmostEqual(result["close"].iloc[2], 12.0, places=2)
 
+    def test_qfq_adjusts_volume_consistently(self):
+        """拆分导致的原始量能跃迁应在复权口径下被消除。"""
+        df = pd.DataFrame(
+            [
+                {
+                    "trade_date": "20240101",
+                    "close": 10.0,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "vol": 100.0,
+                    "adj_factor": 1.0,
+                },
+                {
+                    "trade_date": "20240102",
+                    "close": 10.0,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "vol": 100.0,
+                    "adj_factor": 1.0,
+                },
+                {
+                    "trade_date": "20240103",
+                    "close": 10.0,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "vol": 200.0,
+                    "adj_factor": 2.0,
+                },
+            ]
+        )
+
+        result = TechnicalAnalysis._get_qfq_df(df)
+
+        self.assertIn("vol", result.columns)
+        self.assertAlmostEqual(result["vol"].iloc[0], 200.0, places=2)
+        self.assertAlmostEqual(result["vol"].iloc[1], 200.0, places=2)
+        self.assertAlmostEqual(result["vol"].iloc[2], 200.0, places=2)
+
 
 class TestMACD(unittest.TestCase):
     """测试 MACD 计算"""

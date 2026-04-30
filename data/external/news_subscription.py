@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import logging
 import threading
 import typing
+from collections import OrderedDict
 
 from data.cache.cache_manager import CacheManager
 from services.ai_service import AIService
@@ -69,9 +71,10 @@ class NewsSubscriptionService:
 
         self._current_fetch_task = None
         self._processing_task = None
+        self._queue_put_lock = None
 
         # P2-R4: Content hash dedup (LRU-style) to catch duplicates across restarts
-        self._seen_hashes = set()
+        self._seen_hashes: OrderedDict[str, None] = OrderedDict()
         self._MAX_SEEN = 200
 
         self._initialized = True
@@ -112,16 +115,53 @@ class NewsSubscriptionService:
         try:
             await asyncio.wait_for(self.processing_queue.put(item), timeout=1.0)
         except TimeoutError:
-            if self.processing_queue.full():
-                try:
-                    self.processing_queue.get_nowait()
-                    logger.warning("[NewsService] Queue full, dropped oldest item")
-                except asyncio.QueueEmpty:
-                    pass
+            # Serialize drop-then-put to avoid race window between multiple producers.
+            lock = self._queue_put_lock
+            if lock is None:
+                lock = asyncio.Lock()
+                self._queue_put_lock = lock
+
+            async with lock:
+                if self.processing_queue.full():
+                    try:
+                        self.processing_queue.get_nowait()
+                        logger.warning("[NewsService] Queue full, dropped oldest item")
+                    except asyncio.QueueEmpty:
+                        pass
                 try:
                     self.processing_queue.put_nowait(item)
                 except asyncio.QueueFull:
                     logger.warning("[NewsService] Queue still full after drop, skipping item")
+
+    async def stop_async(self, drain_timeout: float = 3.0):
+        """Stop service gracefully and drain processing queue before cancellation."""
+        self._running = False
+
+        if self._current_fetch_task and not self._current_fetch_task.done():
+            self._current_fetch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._current_fetch_task
+            self._current_fetch_task = None
+
+        if self.processing_queue is not None:
+            try:
+                await asyncio.wait_for(self.processing_queue.join(), timeout=drain_timeout)
+            except TimeoutError:
+                qsize = self.processing_queue.qsize()
+                logger.warning(f"[NewsService] stop_async drain timeout, remaining queue size={qsize}")
+
+        if self._processing_task:
+            if not self._processing_task.done():
+                self._processing_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._processing_task
+            self._processing_task = None
+
+        # 清理状态，确保下次 start() 时能正确执行首次同步
+        self._last_news_time = None
+        self._last_news_content = None
+
+        logger.info("[NewsService] Stopped news polling service (async graceful)")
 
     def start(self):
         """
@@ -137,6 +177,7 @@ class NewsSubscriptionService:
         # to avoid binding to the wrong loop when singleton is created before loop starts.
         # S1-2 fix: Add maxsize to prevent unbounded memory growth
         self.processing_queue = asyncio.Queue(maxsize=500)
+        self._queue_put_lock = asyncio.Lock()
 
         # Keep strong references to background tasks to prevent GC
         poll_task = asyncio.create_task(self._poll_loop())
@@ -151,7 +192,15 @@ class NewsSubscriptionService:
         logger.info("[NewsService] Started news polling service [STARTED]")
 
     def stop(self):
-        """Stop the service and reset state"""
+        """Stop the service and reset state."""
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(self.stop_async())
+                return
+        except RuntimeError:
+            pass
+
         self._running = False
 
         # Also cancel the detached fetch task if running
@@ -369,7 +418,9 @@ class NewsSubscriptionService:
                     for item in reversed(news_list):
                         h = get_hash(item)
                         if h not in self._seen_hashes:
-                            self._seen_hashes.add(h)
+                            self._seen_hashes[h] = None
+                            if len(self._seen_hashes) > self._MAX_SEEN:
+                                self._seen_hashes.popitem(last=False)
 
                             normalized = CacheManager.normalize_news_item(
                                 item,
@@ -378,9 +429,6 @@ class NewsSubscriptionService:
                             await self.cache.save_market_news(normalized)
 
                             await self._safe_queue_put(item)  # type: ignore
-
-                    if len(self._seen_hashes) > self._MAX_SEEN:
-                        self._seen_hashes = set(list(self._seen_hashes)[-self._MAX_SEEN :])
 
                     latest_item = news_list[0]
                     self._last_news_time = latest_item.get("time", "")
@@ -398,14 +446,11 @@ class NewsSubscriptionService:
                 for item in reversed(news_list):
                     h = get_hash(item)
                     if h not in self._seen_hashes:
-                        self._seen_hashes.add(h)
+                        self._seen_hashes[h] = None
+                        if len(self._seen_hashes) > self._MAX_SEEN:
+                            self._seen_hashes.popitem(last=False)
                         new_items_found = True
                         new_items.append(item)
-
-                        if len(self._seen_hashes) > self._MAX_SEEN:
-                            self._seen_hashes = set(
-                                list(self._seen_hashes)[-self._MAX_SEEN :],
-                            )
 
                         current_news_content = item.get("content", "")
                         current_news_time = item.get("time", "")

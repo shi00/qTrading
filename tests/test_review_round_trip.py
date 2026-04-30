@@ -84,6 +84,18 @@ class TestSaveResultsDictFormat(unittest.TestCase):
 
 
 class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
+    def test_t1_price_must_be_keyword_argument(self):
+        """O-1: 指标参数应使用命名传参，避免位置参数错位。"""
+        from data.persistence.daos.screener_dao import ScreenerDao
+
+        dao = ScreenerDao.__new__(ScreenerDao)
+        dao._write_db = AsyncMock()
+
+        import asyncio
+
+        with self.assertRaises(TypeError):
+            asyncio.run(dao.update_prediction_result(1, 5.0, "WIN", 10.5))
+
     def test_t1_only_gives_t1_done(self):
         from data.persistence.daos.screener_dao import ScreenerDao
 

@@ -70,6 +70,21 @@ class TestClassifySeverity:
         result = classify_severity(Exception("something went wrong"), context="general")
         assert result == "operational"
 
+    def test_value_error_with_space_word_is_not_system(self):
+        """H-1: 'space' substring on non-OSError must NOT be classified as system."""
+        from utils.error_classifier import classify_severity
+
+        assert classify_severity(ValueError("namespace conflict")) == "operational"
+        assert classify_severity(RuntimeError("workspace empty")) == "operational"
+        assert classify_severity(Exception("replace foo with bar")) == "operational"
+
+    def test_oserror_disk_or_space_still_system(self):
+        """Regression: real OSError with disk/space remains system."""
+        from utils.error_classifier import classify_severity
+
+        assert classify_severity(OSError("No space left on device")) == "system"
+        assert classify_severity(OSError("disk full")) == "system"
+
 
 class TestClassifySeverityIntegration:
     """Verify classify_severity is properly integrated in TaskManager error handling."""

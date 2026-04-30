@@ -280,10 +280,17 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 ffilled = pl.col("adj_factor").forward_fill().over("ts_code")
                 latest_factor = ffilled.last().over("ts_code").fill_null(1.0)
                 safe_latest = pl.when(latest_factor == 0).then(1.0).otherwise(latest_factor)
-                qfq_expr = (pl.col("close") * (ffilled.fill_null(safe_latest) / safe_latest)).alias("qfq_close")
-                df_lazy = df_lazy.with_columns(qfq_expr)
+                qfq_ratio_expr = (ffilled.fill_null(safe_latest) / safe_latest).alias("qfq_ratio")
+                qfq_close_expr = (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close")
+                qfq_vol_expr = (
+                    pl.when(pl.col("qfq_ratio") > 0)
+                    .then(pl.col("vol") / pl.col("qfq_ratio"))
+                    .otherwise(pl.col("vol"))
+                    .alias("qfq_vol")
+                )
+                df_lazy = df_lazy.with_columns([qfq_ratio_expr]).with_columns([qfq_close_expr, qfq_vol_expr])
             else:
-                df_lazy = df_lazy.with_columns(pl.col("close").alias("qfq_close"))
+                df_lazy = df_lazy.with_columns([pl.col("close").alias("qfq_close"), pl.col("vol").alias("qfq_vol")])
 
             # Calculate Dynamic RSI
             rsi_col_name = f"rsi_{rsi_period}"
@@ -293,8 +300,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 alias=rsi_col_name,
             )
             vol_ratio_expr = (
-                pl.when(pl.col("vol").rolling_mean(5).over("ts_code") > 0)
-                .then(pl.col("vol") / pl.col("vol").rolling_mean(5).over("ts_code"))
+                pl.when(pl.col("qfq_vol").rolling_mean(5).over("ts_code") > 0)
+                .then(pl.col("qfq_vol") / pl.col("qfq_vol").rolling_mean(5).over("ts_code"))
                 .otherwise(None)
                 .alias("vol_ratio_5d")
             )

@@ -116,3 +116,45 @@ class TestNewsSubscriptionCorrelationId:
         assert 'correlation_scope("news-fetch")' in fetch_source, (
             "_fetch_and_notify should use 'news-fetch' correlation scope"
         )
+
+
+class TestNewsSubscriptionLRU:
+    """H-5: _seen_hashes must preserve insertion order (OrderedDict-based LRU)."""
+
+    def test_seen_hashes_is_ordered_dict_not_set(self):
+        svc_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "data", "external", "news_subscription.py")
+        )
+        with open(svc_path, encoding="utf-8") as f:
+            source = f.read()
+        assert "self._seen_hashes: OrderedDict[str, None] = OrderedDict()" in source, (
+            "H-5: _seen_hashes must be OrderedDict, not set"
+        )
+
+    def test_seen_hashes_uses_popitem_not_set_slice(self):
+        svc_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "data", "external", "news_subscription.py")
+        )
+        with open(svc_path, encoding="utf-8") as f:
+            source = f.read()
+        assert "list(self._seen_hashes)" not in source, "H-5: must not convert dict to list for trimming"
+        assert ".pop(" in source or "popitem" in source, "H-5: must use dict.pop/popitem for LRU eviction"
+
+    def test_lru_eviction_preserves_recent_items(self):
+        from collections import OrderedDict
+
+        svc = object.__new__(
+            __import__("data.external.news_subscription", fromlist=["NewsSubscriptionService"]).NewsSubscriptionService
+        )
+        svc._MAX_SEEN = 5
+        svc._seen_hashes = OrderedDict()
+        for i in range(10):
+            h = f"hash_{i:03d}"
+            svc._seen_hashes[h] = None
+            if len(svc._seen_hashes) > svc._MAX_SEEN:
+                svc._seen_hashes.popitem(last=False)
+        assert len(svc._seen_hashes) == 5
+        keys = list(svc._seen_hashes.keys())
+        assert keys == ["hash_005", "hash_006", "hash_007", "hash_008", "hash_009"], (
+            f"H-5: LRU should keep most recent, got {keys}"
+        )

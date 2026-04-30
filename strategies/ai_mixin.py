@@ -34,7 +34,7 @@ from strategies.utils import fmt_val, safe_float
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
-from utils.time_utils import get_now
+from utils.time_utils import get_now, to_yyyymmdd_str
 
 logger = logging.getLogger(__name__)
 
@@ -190,17 +190,7 @@ class AIStrategyMixin:
     @staticmethod
     def _normalize_trade_date_for_cache(value):
         """Normalize context trade_date for cache APIs that expect YYYYMMDD strings."""
-        if value is None:
-            return None
-        if isinstance(value, pd.Timestamp):
-            return value.strftime("%Y%m%d")
-        if hasattr(value, "strftime"):
-            try:
-                return value.strftime("%Y%m%d")
-            except Exception:
-                pass
-        raw = str(value).strip()
-        return raw or None
+        return to_yyyymmdd_str(value)
 
     async def run_ai_analysis(
         self,
@@ -296,10 +286,19 @@ class AIStrategyMixin:
             # 1. O(1) DB Query for History (with LRU cache)
             end_date = get_now().date()
 
-            years = ConfigHandler.get_init_history_years()
-            start_date = (get_now() - timedelta(days=365 * years + 30)).date()
+            ctx_td = self._normalize_trade_date_for_cache(context.get("trade_date"))
+            if ctx_td:
+                try:
+                    import datetime as _dt
 
-            cache_key = (frozenset(all_ts_codes), start_date, end_date)
+                    end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()
+                except (ValueError, TypeError):
+                    pass
+
+            years = ConfigHandler.get_init_history_years()
+            start_date = end_date - timedelta(days=365 * years + 30)
+
+            cache_key = (frozenset(all_ts_codes), start_date, end_date, ctx_td)
             bulk_history_df = self._history_cache.get(cache_key)
 
             if bulk_history_df is None:
@@ -576,7 +575,8 @@ class AIStrategyMixin:
             # 1. History (60 trading days)
             if history_df is None or history_df.empty:
                 req_days = getattr(self, "required_history_days", 60)
-                history_df = await dp.get_stock_history(ts_code, days=req_days)
+                history_end_date = prefetched.trade_date if prefetched.trade_date else None
+                history_df = await dp.get_stock_history(ts_code, days=req_days, end_date=history_end_date)
 
             # 2. Technical Indicators (pointwise)
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)

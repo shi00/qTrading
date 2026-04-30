@@ -66,6 +66,113 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         asyncio.run(run_test())
 
+
+class TestReviewManagerIndexDailyType(unittest.TestCase):
+    """H-4: cache.get_index_daily must receive datetime.date, not string."""
+
+    def _make_manager_with_pending(self, mock_cache, mock_api):
+        from data.persistence.review_manager import ReviewManager
+
+        pending_df = pd.DataFrame(
+            [
+                {
+                    "id": 1,
+                    "ts_code": "000001.SZ",
+                    "strategy_name": "test",
+                    "trade_date": datetime.date(2024, 3, 15),
+                    "prediction_result": "WIN",
+                    "ai_score": 80.0,
+                }
+            ]
+        )
+        mock_cache.get_latest_trade_date = AsyncMock(return_value="20240318")
+        mock_cache.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "cal_date": [
+                        "20240308",
+                        "20240311",
+                        "20240312",
+                        "20240313",
+                        "20240314",
+                        "20240315",
+                        "20240318",
+                        "20240319",
+                        "20240320",
+                        "20240321",
+                    ],
+                    "is_open": [1] * 10,
+                }
+            )
+        )
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pending_df)
+        mock_cache.screener_dao.update_prediction_result = AsyncMock()
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
+                    "close": [10.0, 10.3],
+                    "pct_chg": [1.0, 3.0],
+                }
+            )
+        )
+        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        manager = ReviewManager()
+        manager.cache = mock_cache
+        manager.api = mock_api
+        return manager
+
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_cache_get_index_daily_receives_date_object(self, mock_config):
+        mock_cache = MagicMock()
+        mock_api = MagicMock()
+        manager = self._make_manager_with_pending(mock_cache, mock_api)
+
+        async def run_test():
+            await manager.run_review()
+            call_kwargs = mock_cache.get_index_daily.await_args.kwargs
+            assert isinstance(call_kwargs["trade_date"], datetime.date), (
+                f"H-4: cache.get_index_daily must receive datetime.date, got {type(call_kwargs['trade_date'])}"
+            )
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_api_get_index_daily_receives_string(self, mock_config):
+        mock_cache = MagicMock()
+        mock_api = MagicMock()
+        manager = self._make_manager_with_pending(mock_cache, mock_api)
+        mock_cache.get_index_daily = AsyncMock(return_value=None)
+
+        async def run_test():
+            await manager.run_review()
+            call_kwargs = mock_api.get_index_daily.await_args.kwargs
+            assert isinstance(call_kwargs["start_date"], str), (
+                f"H-4: api.get_index_daily must receive string, got {type(call_kwargs['start_date'])}"
+            )
+            # run_review queries benchmark return on T+1 date (not analysis day).
+            assert call_kwargs["start_date"] == "20240318"
+
+        asyncio.run(run_test())
+
+    @patch("data.persistence.review_manager.ConfigHandler")
+    def test_cache_index_lookup_failure_logs_warning(self, mock_config):
+        mock_cache = MagicMock()
+        mock_api = MagicMock()
+        manager = self._make_manager_with_pending(mock_cache, mock_api)
+        mock_cache.get_index_daily = AsyncMock(side_effect=RuntimeError("cache exploded"))
+
+        async def run_test():
+            with self.assertLogs("data.persistence.review_manager", level="WARNING") as cm:
+                await manager.run_review()
+            assert any("Cache index lookup failed" in message for message in cm.output), (
+                "H-4: cache index lookup failure must emit warning log"
+            )
+
+        asyncio.run(run_test())
+
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.ConfigHandler")
@@ -106,6 +213,29 @@ class TestGetPendingPredictions(unittest.TestCase):
         async def run_test():
             result = await manager._get_pending_predictions()
             self.assertTrue(result.empty)
+
+        asyncio.run(run_test())
+
+
+class TestReviewManagerUpdateResultStatusOverride(unittest.TestCase):
+    """M-2: _update_result should allow explicit review_status passthrough."""
+
+    def test_update_result_passes_explicit_review_status(self):
+        manager = ReviewManager.__new__(ReviewManager)
+        manager.cache = MagicMock()
+        manager.cache.screener_dao = MagicMock()
+        manager.cache.screener_dao.update_prediction_result = AsyncMock()
+
+        async def run_test():
+            await manager._update_result(
+                record_id=1,
+                pct=2.5,
+                label="WIN",
+                t1_price=10.5,
+                review_status="NO_INDEX_DATA",
+            )
+            kwargs = manager.cache.screener_dao.update_prediction_result.await_args.kwargs
+            self.assertEqual(kwargs["review_status"], "NO_INDEX_DATA")
 
         asyncio.run(run_test())
 

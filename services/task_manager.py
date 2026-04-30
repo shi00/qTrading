@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 import logging
 import threading
@@ -105,6 +106,8 @@ class TaskManager:
 
             self._tasks: dict[str, AppTask] = {}
             self._subscribers: list[Callable[[list[AppTask]], None]] = []
+            self._subscriber_error_counts: dict[Callable[[list[AppTask]], None], int] = {}
+            self._MAX_SUBSCRIBER_ERRORS: int = 3
             self._background_tasks = set()  # Strong references to prevent GC
 
             # Semaphore is created lazily inside the event loop to avoid
@@ -146,6 +149,7 @@ class TaskManager:
         """Register a UI callback to be notified when any task updates."""
         if callback not in self._subscribers:
             self._subscribers.append(callback)
+            self._subscriber_error_counts[callback] = 0
             # Instantly push current state
             try:
                 callback(self.get_all_tasks())
@@ -155,6 +159,7 @@ class TaskManager:
     def unsubscribe(self, callback: Callable[[list[AppTask]], None]):
         if callback in self._subscribers:
             self._subscribers.remove(callback)
+        self._subscriber_error_counts.pop(callback, None)
 
     def reload_config(self):
         """S1-1 fix: Reset semaphore so new concurrency limit takes effect on next _get_semaphore call."""
@@ -167,8 +172,18 @@ class TaskManager:
         for cb in self._subscribers[:]:  # Iterate copy
             try:
                 cb(tasks_snapshot)
+                self._subscriber_error_counts[cb] = 0
             except Exception as e:
-                logger.error(f"[TaskManager] Subscriber callback failed: {e}")
+                error_count = self._subscriber_error_counts.get(cb, 0) + 1
+                self._subscriber_error_counts[cb] = error_count
+                logger.error(
+                    f"[TaskManager] Subscriber callback failed ({error_count}/{self._MAX_SUBSCRIBER_ERRORS}): {e}"
+                )
+                if error_count >= self._MAX_SUBSCRIBER_ERRORS:
+                    with contextlib.suppress(ValueError):
+                        self._subscribers.remove(cb)
+                    self._subscriber_error_counts.pop(cb, None)
+                    logger.warning("[TaskManager] Subscriber disabled after repeated callback failures")
 
     def get_all_tasks(self) -> list[AppTask]:
         """Return a snapshot of all tracked tasks + loaded history, ordered by creation."""
@@ -441,7 +456,8 @@ class TaskManager:
         try:
             dt = datetime.datetime.fromisoformat(str(val))
             return from_utc_to_cst(dt)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.debug(f"[TaskManager] _safe_dt parse failed for value={val!r}: {e}")
             return None
 
     async def init_db(self):
@@ -514,12 +530,27 @@ class TaskManager:
             task.progress,
             task.description,
             task.error,
-            str(task.result)[:500] if task.result else None,
+            self._truncate_result_for_db(task.result),
             to_utc_for_db(task.created_at),
             to_utc_for_db(task.started_at),
             to_utc_for_db(task.completed_at),
         )
         self._queue_persist_snapshot(snapshot)
+
+    @staticmethod
+    def _truncate_result_for_db(result: Any, max_len: int = 500) -> str | None:
+        """Truncate task.result safely for DB storage."""
+        if result is None:
+            return None
+        text = str(result)
+        if len(text) <= max_len:
+            clipped = text
+        else:
+            clipped = text[:max_len]
+        try:
+            return clipped.encode("utf-8", "replace").decode("utf-8", "ignore")
+        except Exception:
+            return clipped
 
     def _queue_persist_snapshot(self, snapshot: tuple):
         """Schedule a tracked persistence write so shutdown can flush deterministically."""
@@ -595,10 +626,10 @@ class TaskManager:
             task.progress,
             task.description,
             task.error,
-            str(task.result)[:500] if task.result else None,
-            task.created_at.replace(tzinfo=None) if task.created_at else None,
-            task.started_at.replace(tzinfo=None) if task.started_at else None,
-            task.completed_at.replace(tzinfo=None) if task.completed_at else None,
+            self._truncate_result_for_db(task.result),
+            to_utc_for_db(task.created_at),
+            to_utc_for_db(task.started_at),
+            to_utc_for_db(task.completed_at),
         )
         await self._persist_snapshot(params)
 

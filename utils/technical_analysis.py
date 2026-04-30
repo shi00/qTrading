@@ -38,6 +38,11 @@ class TechnicalAnalysis:
             df_adj["high"] = df_adj["high"] * ratio
             df_adj["low"] = df_adj["low"] * ratio
             df_adj["open"] = df_adj["open"] * ratio
+            # Keep volume on the same basis as price after QFQ.
+            safe_ratio = ratio.where(ratio > 0, np.nan)
+            for vol_col in ("vol", "volume"):
+                if vol_col in df_adj.columns:
+                    df_adj[vol_col] = (df_adj[vol_col] / safe_ratio).where(safe_ratio.notna(), df_adj[vol_col])
 
             return df_adj
         except Exception:

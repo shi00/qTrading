@@ -169,6 +169,37 @@ class TestTaskManagerSubscribe(unittest.TestCase):
         for cb in callbacks:
             self.assertEqual(cb.call_count, 1)
 
+    def test_subscriber_disabled_after_repeated_callback_failures(self):
+        """O-7: 连续失败达到阈值后自动禁用订阅者，避免无限重试刷日志。"""
+        state = {"calls": 0}
+
+        def flaky_callback(_tasks):
+            state["calls"] += 1
+            if state["calls"] > 1:
+                raise RuntimeError("boom")
+
+        self.manager.subscribe(flaky_callback)  # first call succeeds on initial push
+
+        with self.assertLogs("services.task_manager", level="WARNING") as cm:
+            self.manager._notify_subscribers()  # fail 1
+            self.manager._notify_subscribers()  # fail 2
+            self.manager._notify_subscribers()  # fail 3 -> disabled
+
+        self.assertNotIn(flaky_callback, self.manager._subscribers)
+        self.assertTrue(any("Subscriber disabled" in msg for msg in cm.output))
+
+    def test_subscriber_error_count_resets_after_success(self):
+        """O-7: 失败后若恢复成功，应重置错误计数，避免误禁用。"""
+        callback = MagicMock(side_effect=[None, RuntimeError("tmp"), None, None])
+        self.manager.subscribe(callback)  # first None from side_effect
+
+        self.manager._notify_subscribers()  # RuntimeError -> count = 1
+        self.assertEqual(self.manager._subscriber_error_counts.get(callback), 1)
+        self.manager._notify_subscribers()  # success -> reset to 0
+
+        self.assertEqual(self.manager._subscriber_error_counts.get(callback), 0)
+        self.assertIn(callback, self.manager._subscribers)
+
 
 class TestTaskManagerGetTasks(unittest.TestCase):
     """测试任务管理器查询功能"""
@@ -373,6 +404,13 @@ class TestTaskManagerSafeDatetime(unittest.TestCase):
         result = TaskManager._safe_dt("invalid date")
         self.assertIsNone(result)
 
+    def test_safe_dt_invalid_string_logs_debug(self):
+        """O-6: 无效时间值应记录 debug 日志，便于排查时区兼容问题。"""
+        with self.assertLogs("services.task_manager", level="DEBUG") as cm:
+            result = TaskManager._safe_dt("invalid date")
+        self.assertIsNone(result)
+        self.assertTrue(any("_safe_dt parse failed" in msg for msg in cm.output))
+
 
 class TestTaskManagerSubmitTask(unittest.TestCase):
     """测试任务提交"""
@@ -462,3 +500,71 @@ class TestTaskManagerPersistenceFlush(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPersistTaskAsyncTimezone(unittest.TestCase):
+    """H-2: _persist_task_async must use to_utc_for_db instead of naive replace."""
+
+    def test_persist_converts_aware_datetime_to_utc(self):
+        import datetime as _dt
+        from unittest.mock import AsyncMock, patch
+        from services.task_manager import AppTask, TaskManager
+
+        TaskManager._instance = None
+        mgr = TaskManager()
+
+        aware_dt = _dt.datetime(2024, 6, 15, 8, 0, 0, tzinfo=_dt.timezone(_dt.timedelta(hours=8)))
+        task = AppTask(id="tz_test", name="tz", created_at=aware_dt, started_at=aware_dt)
+
+        with patch.object(mgr, "_persist_snapshot", new_callable=AsyncMock) as mock_snap:
+            asyncio.run(mgr._persist_task_async(task))
+            params = mock_snap.call_args[0][0]
+            stored_created = params[8]
+            stored_started = params[9]
+            assert stored_created.tzinfo is None, "H-2: stored datetime must be naive (UTC)"
+            assert stored_created == _dt.datetime(2024, 6, 15, 0, 0, 0), (
+                f"H-2: expected 2024-06-15 00:00:00, got {stored_created}"
+            )
+            assert stored_started.tzinfo is None
+
+    def test_persist_handles_naive_datetime(self):
+        import datetime as _dt
+        from unittest.mock import AsyncMock, patch
+        from services.task_manager import AppTask, TaskManager
+
+        TaskManager._instance = None
+        mgr = TaskManager()
+
+        naive_dt = _dt.datetime(2024, 6, 15, 8, 0, 0)
+        task = AppTask(id="naive_test", name="naive", created_at=naive_dt)
+
+        with patch.object(mgr, "_persist_snapshot", new_callable=AsyncMock) as mock_snap:
+            asyncio.run(mgr._persist_task_async(task))
+            params = mock_snap.call_args[0][0]
+            stored = params[8]
+            assert stored == _dt.datetime(2024, 6, 15, 0, 0, 0), (
+                f"H-2: naive datetime treated as CST, expected UTC 00:00, got {stored}"
+            )
+
+    def test_truncate_result_for_db_limits_length(self):
+        from services.task_manager import TaskManager
+
+        text = "A" * 800
+        out = TaskManager._truncate_result_for_db(text)
+        assert out is not None
+        assert len(out) == 500
+
+    def test_persist_uses_truncate_helper(self):
+        import datetime as _dt
+        from unittest.mock import AsyncMock, patch
+        from services.task_manager import AppTask, TaskManager
+
+        TaskManager._instance = None
+        mgr = TaskManager()
+        task = AppTask(id="truncate_test", name="truncate", created_at=_dt.datetime.now(), result="x" * 900)
+
+        with patch.object(mgr, "_persist_snapshot", new_callable=AsyncMock) as mock_snap:
+            asyncio.run(mgr._persist_task_async(task))
+            params = mock_snap.call_args[0][0]
+            assert params[7] is not None
+            assert len(params[7]) == 500

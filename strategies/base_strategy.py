@@ -46,6 +46,7 @@ class BaseStrategy(ABC):
 
     CONTEXT_KEY_TABLE_MAP: dict[str, str] = {
         "northbound_data": "northbound_holding",
+        "northbound_flow_data": "moneyflow_hsgt",
         "moneyflow_data": "moneyflow_daily",
         "top_list": "top_list",
         "block_trade": "block_trade",

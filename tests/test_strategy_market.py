@@ -12,6 +12,7 @@ import polars as pl
 from strategies.market import (
     BlockTradeStrategy,
     InstitutionalStrategy,
+    NorthboundFlowStrategy,
     NorthboundHoldingStrategy,
     TechnicalBreakoutStrategy,
 )
@@ -404,3 +405,56 @@ class TestBlockTradeStrategy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNorthboundFlowStrategy(unittest.TestCase):
+    def test_filter_returns_non_empty_when_context_has_flow_data(self):
+        flow_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "north_money": 120.0},
+                {"ts_code": "600000.SH", "north_money": 30.0},
+            ]
+        )
+        base_lf = pl.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
+                {"ts_code": "600000.SH", "name": "浦发银行", "industry": "银行", "pe_ttm": 4.5, "total_mv": 3000.0},
+            ]
+        ).lazy()
+
+        strat = NorthboundFlowStrategy()
+        ctx = {
+            "northbound_flow_data": flow_df,
+            "params": {"nb_flow_min": 50},
+            "screening_data": base_lf,
+        }
+        out = strat._filter_logic(base_lf, ctx).collect()
+        assert len(out) == 1
+        assert out["ts_code"][0] == "000001.SZ"
+
+    def test_filter_returns_empty_when_context_missing(self):
+        base_lf = pl.DataFrame(
+            [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 1.0, "total_mv": 1.0}]
+        ).lazy()
+        strat = NorthboundFlowStrategy()
+        out = strat._filter_logic(base_lf, {"params": {}}).collect()
+        assert len(out) == 0
+
+
+class TestContextKeyTableMap(unittest.TestCase):
+    def test_northbound_flow_data_mapped_to_moneyflow_hsgt(self):
+        from strategies.base_strategy import BaseStrategy
+
+        assert BaseStrategy.CONTEXT_KEY_TABLE_MAP.get("northbound_flow_data") == "moneyflow_hsgt", (
+            "S-1: missing CONTEXT_KEY_TABLE_MAP entry; check_dependencies will report wrong missing_tables"
+        )
+
+
+class TestPrepareScreeningContextWiresFlow(unittest.TestCase):
+    def test_auxiliary_tables_dict_includes_northbound_flow_data(self):
+        import inspect
+        from data import data_processor
+
+        src = inspect.getsource(data_processor.DataProcessor.prepare_screening_context)
+        assert '"northbound_flow_data"' in src, "S-1: prepare_screening_context must declare 'northbound_flow_data' key"
+        assert "get_moneyflow_hsgt" in src, "S-1: prepare_screening_context must call cache.get_moneyflow_hsgt"

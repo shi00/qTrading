@@ -10,7 +10,7 @@ from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now, parse_date
+from utils.time_utils import get_now, parse_date, to_date
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,9 @@ class ReviewManager:
                 t5_price: float | None = None
                 if len(df_quotes) > t0_idx + 1:  # type: ignore
                     t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
-                    t1_pct = float(t1_row["pct_chg"])
+                    raw_pct = t1_row["pct_chg"]
+                    if bool(pd.notna(raw_pct)):
+                        t1_pct = float(raw_pct)
                     if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
                         t1_price = float(t1_row["close"])
 
@@ -107,37 +109,50 @@ class ReviewManager:
                     )
 
                     t1_date_val = t1_row["trade_date"]
-                    if hasattr(t1_date_val, "strftime"):
-                        trade_date = t1_date_val.strftime("%Y%m%d")
+                    if hasattr(t1_date_val, "date") and callable(t1_date_val.date):
+                        t1_date_obj = t1_date_val.date()
+                    elif hasattr(t1_date_val, "year"):
+                        t1_date_obj = t1_date_val
                     else:
-                        trade_date = str(t1_date_val).replace("-", "")
+                        t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()
+                    trade_date_str = t1_date_obj.strftime("%Y%m%d")
 
                     index_pct = None
                     try:
                         df_idx_local = await self.cache.get_index_daily(
                             ts_code=index_code,
-                            trade_date=trade_date,
+                            trade_date=t1_date_obj,
                         )
                         if df_idx_local is not None and not df_idx_local.empty:
                             index_pct = float(df_idx_local.iloc[0]["pct_chg"])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            f"[Review] Cache index lookup failed for {index_code}@{trade_date_str}: {e}",
+                        )
 
                     if index_pct is None:
                         try:
                             df_idx = await self.api.get_index_daily(
                                 ts_code=index_code,
-                                start_date=trade_date,
-                                end_date=trade_date,
+                                start_date=trade_date_str,
+                                end_date=trade_date_str,
                             )
                             if df_idx is not None and not df_idx.empty:
                                 index_pct = float(df_idx.iloc[0]["pct_chg"])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                f"[Review] API index lookup failed for {index_code}@{trade_date_str}: {e}",
+                            )
 
                     if index_pct is None:
                         logger.warning(
-                            f"[Review] {ts_code}: Index return unavailable for {trade_date}, skipping to avoid label pollution",
+                            f"[Review] {ts_code}: Index return unavailable for {trade_date_str}, skipping to avoid label pollution",
+                        )
+                        continue
+
+                    if t1_pct is None:
+                        logger.warning(
+                            f"[Review] {ts_code}: T+1 pct_chg is NaN for {trade_date_str}, skipping",
                         )
                         continue
 
@@ -291,36 +306,25 @@ class ReviewManager:
         t5_pct: typing.Any = None,
         t5_price: typing.Any = None,
         alpha: typing.Any = None,
+        review_status: typing.Any = None,
     ):
         """Update DB with T+1/T+5 review metrics and review_status."""
         await self.cache.screener_dao.update_prediction_result(
             record_id,
             pct,
             label,
-            t1_price,
+            t1_price=t1_price,
             t5_pct=t5_pct,
             t5_price=t5_price,
             index_pct=index_pct,
             alpha=alpha,
+            review_status=review_status,
         )
 
     @staticmethod
     def _normalize_trade_date(value: typing.Any) -> datetime.date:
         """Normalize supported trade_date input types to datetime.date."""
-        if isinstance(value, pd.Timestamp):
-            return value.date()
-        if isinstance(value, datetime.datetime):
-            return value.date()
-        if isinstance(value, datetime.date):
-            return value
-        if isinstance(value, str):
-            raw = value.strip()
-            for fmt in ("%Y%m%d", "%Y-%m-%d"):
-                try:
-                    return datetime.datetime.strptime(raw, fmt).date()
-                except ValueError:
-                    continue
-        raise ValueError(f"Unsupported trade_date value: {value!r}")
+        return to_date(value)
 
     async def save_results(
         self,

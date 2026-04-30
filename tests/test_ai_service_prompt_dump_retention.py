@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import types
 import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -26,7 +25,7 @@ async def test_analyze_stock_does_not_dump_prompt_when_feature_disabled(monkeypa
     monkeypatch.setattr(service, "is_cloud_available", lambda: True)
     monkeypatch.setattr(service, "_chat_completion", AsyncMock(return_value={"score": 88, "reason": "ok"}))
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
-    monkeypatch.setitem(sys.modules, "config", types.SimpleNamespace(APP_ROOT=str(tmp_path)))
+    monkeypatch.setattr(ai_mod.config, "APP_ROOT", str(tmp_path), raising=False)
 
     result = await service.analyze_stock(
         stock_info={"ts_code": "000001.SZ", "name": "平安银行"},
@@ -40,8 +39,8 @@ async def test_analyze_stock_does_not_dump_prompt_when_feature_disabled(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_analyze_stock_cleans_old_prompt_dumps_when_enabled(monkeypatch, tmp_path):
-    """开启后仅保留 24 小时内文件，并写入新的 prompt dump。"""
+async def test_prompt_dump_cleanup_outside_hot_path(monkeypatch, tmp_path):
+    """M-4: 清理由独立 helper 触发，analyze 仅负责落盘。"""
     ai_mod.AIService._reset_singleton()
     service = ai_mod.AIService()
 
@@ -64,12 +63,14 @@ async def test_analyze_stock_cleans_old_prompt_dumps_when_enabled(monkeypatch, t
     monkeypatch.setattr(service, "is_cloud_available", lambda: True)
     monkeypatch.setattr(service, "_chat_completion", AsyncMock(return_value={"score": 90, "reason": "ok"}))
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
-    monkeypatch.setitem(sys.modules, "config", types.SimpleNamespace(APP_ROOT=str(tmp_path)))
+    monkeypatch.setattr(ai_mod.config, "APP_ROOT", str(tmp_path), raising=False)
     monkeypatch.setattr(time, "time", lambda: fake_now_ts)
     monkeypatch.setattr(
         os.path, "getmtime", lambda path: fake_now_ts - (25 * 60 * 60) if Path(path).name == "stale.md" else fake_now_ts
     )
     monkeypatch.setattr(time_utils, "get_now", lambda: datetime.datetime(2026, 4, 28, 12, 0, 0))
+
+    service._cleanup_prompt_dumps()
 
     result = await service.analyze_stock(
         stock_info={"ts_code": "000001.SZ", "name": "平安银行"},

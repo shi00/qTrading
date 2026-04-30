@@ -157,6 +157,18 @@ class ScreenerViewModel:
                 if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")
 
+                diagnostics = context.get("_diagnostics") if isinstance(context, dict) else None
+                if isinstance(diagnostics, dict) and diagnostics.get("strategy_ready") is False:
+                    table_status = diagnostics.get("table_status") or {}
+                    not_ready = [
+                        key
+                        for key, status in table_status.items()
+                        if isinstance(status, dict) and not status.get("ready", True)
+                    ]
+                    if self.on_status:
+                        detail = f": {', '.join(not_ready)}" if not_ready else ""
+                        self.on_status(f"{I18n.get('strategy_dep_degraded')}{detail}", "orange")
+
                 context["data_processor"] = self.data_processor
                 context["params"] = params or {}  # Dynamic strategy parameters from UI
 

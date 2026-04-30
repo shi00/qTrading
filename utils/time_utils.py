@@ -39,6 +39,48 @@ def get_today_str() -> str:
     return get_now().strftime("%Y%m%d")
 
 
+def to_yyyymmdd_str(value) -> str | None:
+    """Normalize date-like values to YYYYMMDD string."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y%m%d")
+    if isinstance(value, datetime.date):
+        return value.strftime("%Y%m%d")
+
+    raw = str(value).strip()
+    if not raw or raw.lower() in {"nan", "nat", "none"}:
+        return None
+
+    try:
+        return parse_date(raw).strftime("%Y%m%d")
+    except Exception:
+        pass
+
+    if len(raw) >= 8 and raw[:8].isdigit():
+        return raw[:8]
+    return raw
+
+
+def to_date(value) -> datetime.date:
+    """Normalize date-like values to datetime.date."""
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+
+    yyyymmdd = to_yyyymmdd_str(value)
+    if not yyyymmdd:
+        raise ValueError(f"Unsupported date value: {value!r}")
+    try:
+        return datetime.datetime.strptime(yyyymmdd[:8], "%Y%m%d").date()
+    except ValueError:
+        try:
+            return parse_date(str(value)).date()
+        except Exception as e:
+            raise ValueError(f"Unsupported date value: {value!r}") from e
+
+
 def to_utc_for_db(dt: datetime.datetime | None) -> datetime.datetime | None:
     """
     S1-6 fix: Convert datetime to UTC for database storage.

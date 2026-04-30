@@ -2,8 +2,10 @@ import datetime
 
 import polars as pl
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from utils.technical_analysis import TechnicalAnalysis
+from strategies.oversold_strategy import OversoldStrategy
 
 
 def _build_quotes_df(ts_code, dates, close_start, vol_base, vol_spike_at=None):
@@ -116,3 +118,48 @@ class TestOversoldVolumeThreshold:
 
         if result.height > 0:
             assert "000003.SZ" in result["ts_code"].to_list()
+
+    @pytest.mark.asyncio
+    async def test_split_artifact_volume_spike_should_not_pass_threshold(self):
+        """
+        N-7:
+        A split can double raw volume on the event day; strategy should use adjusted
+        volume basis so this synthetic spike does not pass vol_ratio threshold.
+        """
+        trade_dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(6)]
+        history_pdf = {
+            "ts_code": ["000001.SZ"] * 6,
+            "trade_date": trade_dates,
+            "open": [10.0] * 6,
+            "high": [10.2] * 6,
+            "low": [9.8] * 6,
+            "close": [10.0] * 6,
+            # Raw volume doubles on split day.
+            "vol": [100.0, 100.0, 100.0, 100.0, 100.0, 200.0],
+            # Latest factor=2.0 means earlier days ratio=0.5.
+            "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0, 2.0],
+        }
+
+        strategy = OversoldStrategy()
+        dp = MagicMock()
+        dp.cache = MagicMock()
+        dp.cache.get_daily_quotes = AsyncMock(return_value=__import__("pandas").DataFrame(history_pdf))
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=trade_dates[-1])
+        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=trade_dates[0])
+
+        snapshot = __import__("pandas").DataFrame([{"ts_code": "000001.SZ", "name": "demo"}])
+        context = {
+            "screening_data": snapshot,
+            "data_processor": dp,
+            "trade_date": trade_dates[-1],
+        }
+
+        out = await strategy._math_filter(
+            context=context,
+            rsi_period=2,
+            rsi_threshold=101,
+            vol_ratio_threshold=1.5,
+        )
+
+        assert out.empty, "Split-only raw volume spike should be neutralized by adjusted volume basis"

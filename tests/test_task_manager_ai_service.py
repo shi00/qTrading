@@ -5,8 +5,10 @@ S1-1: reload_config resets semaphore.
 S1-4: Real-time reasoning support detection.
 """
 
+import asyncio
 import os
 import sys
+from unittest.mock import patch
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -69,3 +71,36 @@ class TestReasoningSupportDetection:
         model = "gpt-4"
         is_reasoning = any(p in model.lower() for p in REASONING_PATTERNS)
         assert is_reasoning is False
+
+
+class TestAIServiceSemaphoreReloadIntegration:
+    """M-5: 配置热更新后，下一次并发获取应使用新值。"""
+
+    def test_reload_config_rebuilds_ai_semaphore_with_new_limit(self):
+        from services.ai_service import AIService
+        from utils.loop_local import clear_all_loop_locals
+
+        async def run_test():
+            clear_all_loop_locals()
+            service = AIService.__new__(AIService)
+            service._setup_client = lambda: None
+            service._cleanup_prompt_dumps = lambda: None
+
+            with patch(
+                "services.ai_service.ConfigHandler.get_ai_max_concurrent_analysis",
+                side_effect=[2, 4],
+            ):
+                sem_before = await service._get_semaphore()
+                # 未 reload 前应复用同一 semaphore
+                sem_before_again = await service._get_semaphore()
+                assert sem_before is sem_before_again
+                assert sem_before._value == 2
+
+                await service.reload_config()
+                sem_after = await service._get_semaphore()
+
+            assert sem_after is not sem_before
+            assert sem_after._value == 4
+            clear_all_loop_locals()
+
+        asyncio.run(run_test())

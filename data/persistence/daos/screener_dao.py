@@ -262,15 +262,18 @@ class ScreenerDao(BaseDao):
         record_id: int,
         pct: float,
         label: str,
-        t1_price: float | None = None,
         *,
+        t1_price: float | None = None,
         t5_pct: float | None = None,
         t5_price: float | None = None,
         index_pct: float | None = None,
         alpha: float | None = None,
+        review_status: str | None = None,
     ):
         """Update review metrics and advance review_status according to available horizons."""
-        review_status = REVIEW_STATUS_COMPLETED if t5_pct is not None else REVIEW_STATUS_T1_DONE
+        effective_status = review_status
+        if effective_status is None:
+            effective_status = REVIEW_STATUS_COMPLETED if t5_pct is not None else REVIEW_STATUS_T1_DONE
         sql = """
             UPDATE screening_history
             SET "t1_pct"=$1,
@@ -285,7 +288,7 @@ class ScreenerDao(BaseDao):
         """
         await self._write_db(
             sql,
-            (pct, label, t1_price, t5_pct, t5_price, index_pct, alpha, review_status, record_id),
+            (pct, label, t1_price, t5_pct, t5_price, index_pct, alpha, effective_status, record_id),
             is_many=False,
         )
 

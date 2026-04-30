@@ -10,7 +10,6 @@ on:
       - '**.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
-      - 'pytest.ini'
       - 'pyrightconfig.json'
       - 'alembic.ini'
       - 'AStockScreener.spec'
@@ -30,6 +29,9 @@ jobs:
   ci-checks:
     name: Code Quality & Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     
     services:
       postgres:
@@ -97,7 +99,69 @@ jobs:
           TEST_DB_PORT: 5432
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
-        run: python -m pytest tests/ -v --tb=short
+        run: |
+          set -e
+          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=60
+
+      - name: Extract Coverage Percentage
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("coverage.xml").getroot()
+          line_rate = float(root.attrib.get("line-rate", "0"))
+          percent = line_rate * 100
+          with open("coverage_percent.txt", "w", encoding="utf-8") as f:
+              f.write(f"{percent:.2f}")
+          PY
+          echo "COVERAGE_PERCENT=$(cat coverage_percent.txt)" >> "$GITHUB_ENV"
+
+      - name: Comment Coverage On PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          COVERAGE_PERCENT: ${{ env.COVERAGE_PERCENT }}
+        with:
+          script: |
+            const marker = '<!-- coverage-threshold-report -->';
+            const threshold = 60;
+            const coverage = Number(process.env.COVERAGE_PERCENT || '0');
+            const passed = coverage >= threshold;
+            const status = passed ? 'PASS' : 'FAIL';
+            const body = `${marker}
+            ### Coverage Report
+            - Total Coverage: **${coverage.toFixed(2)}%**
+            - Threshold: **${threshold}%**
+            - Gate Status: **${status}**
+            `;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.data.find(c =>
+              c.user?.type === 'Bot' && c.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})

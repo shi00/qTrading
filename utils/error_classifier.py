@@ -51,7 +51,7 @@ def classify_severity(e: Exception, context: str = "general") -> str:
     if error_type in SYSTEM_LEVEL_ERROR_TYPES or isinstance(e, SYSTEM_LEVEL_EXCEPTIONS):
         return "system"
 
-    if isinstance(e, (OSError,)) and "disk" in error_str or "space" in error_str:
+    if isinstance(e, (OSError,)) and ("disk" in error_str or "space" in error_str):
         return "system"
 
     if isinstance(e, PermissionError):
