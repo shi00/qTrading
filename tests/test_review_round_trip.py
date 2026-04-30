@@ -94,7 +94,7 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         import asyncio
 
         with self.assertRaises(TypeError):
-            asyncio.run(dao.update_prediction_result(1, 5.0, "WIN", 10.5))
+            asyncio.run(dao.update_prediction_result(1, 5.0, "WIN", 10.5))  # type: ignore[call-arg]
 
     def test_t1_only_gives_t1_done(self):
         from data.persistence.daos.screener_dao import ScreenerDao
