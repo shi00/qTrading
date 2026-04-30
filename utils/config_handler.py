@@ -103,11 +103,13 @@ class ConfigHandler:
         "llm_azure_deployment_name": "",  # Azure specific
         "llm_custom_models": {},  # User-defined model pool
         "llm_provider_extras": {},  # Provider-specific extras (nested structure)
+        "ai_api_key": "",
         # Local AI Configuration
         "local_model_path": "",
         "local_model_timeout": 90,
         "ai_system_prompt": DEFAULT_AI_PROMPT,
         "ai_news_prompt": DEFAULT_NEWS_PROMPT,
+        "ai_prompt_dump_enabled": False,
         "ai_max_candidates": 30,
         "strategy_min_turnover": 2.0,
         # Max parallel AI analysis tasks (Cloud API or Local Threads)
@@ -119,10 +121,14 @@ class ConfigHandler:
         "locale": "zh",
         "max_io_workers": 16,
         "max_cpu_workers": 4,
+        "max_concurrent_tasks": 0,
         "sync_request_delay_heavy": 0.0,
         "sync_request_delay_light": 0.0,
         "news_poll_interval": 60,
         "market_data_poll_interval": 30,
+        # Persisted scheduler idempotency keys
+        "scheduler_last_daily_update": "",
+        "scheduler_last_nightly_prediction": "",
         # Local AI Advanced Settings
         "local_n_threads": 4,
         "local_n_batch": 512,

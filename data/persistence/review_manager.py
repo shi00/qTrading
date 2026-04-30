@@ -93,9 +93,12 @@ class ReviewManager:
 
                 if len(df_quotes) > t0_idx + 5:  # type: ignore
                     t5_row = df_quotes.iloc[t0_idx + 5]  # type: ignore
-                    t5_pct = float(t5_row["pct_chg"])
                     if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
+                        t0_close = t0_row.iloc[0].get("close")
+                        if bool(pd.notna(t0_close)) and float(t0_close) != 0:
+                            # T+5 should represent cumulative return from analysis day to the fifth trading day.
+                            t5_pct = (t5_price / float(t0_close) - 1.0) * 100.0
 
                 if t1_pct is not None:
                     index_code = ConfigHandler.get_config(

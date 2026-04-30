@@ -313,6 +313,13 @@ class TestOrmDaoAlignment:
         missing = {field for field in required_fields if f'"{field}"' not in source}
         assert not missing, f"update_prediction_result missing review fields: {missing}"
 
+    def test_screening_history_pending_index_matches_review_status_query(self):
+        pending_index = next(idx for idx in ScreeningHistory.__table__.indexes if idx.name == "idx_sh_pending")
+        where_clause = str(pending_index.dialect_options["postgresql"]["where"])
+        assert "review_status" in where_clause
+        assert "PENDING" in where_clause
+        assert "T1_DONE" in where_clause
+
 
 class TestQfqCalculation:
     """Test that deprecated qfq_* fields are no longer persisted."""

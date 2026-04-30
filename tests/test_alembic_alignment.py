@@ -130,6 +130,13 @@ class TestAlembicMigrationAlignment:
 
         return all_columns if all_columns else None
 
+    def _get_all_migration_content(self) -> str:
+        contents = []
+        for migration_file in self.migration_files:
+            with open(migration_file, encoding="utf-8") as f:
+                contents.append(f.read())
+        return "\n".join(contents)
+
     def test_top_list_alembic_alignment(self):
         model_cols = get_model_columns(TopList) - {"updated_at", "created_at"}
         alembic_cols = self._extract_table_columns_from_migration("top_list")
@@ -183,6 +190,11 @@ class TestAlembicMigrationAlignment:
         extra_in_alembic = alembic_cols - model_cols - {"updated_at", "created_at"}
         assert not missing_in_alembic, f"Alembic missing columns for moneyflow_daily: {missing_in_alembic}"
         assert not extra_in_alembic, f"Alembic has extra columns for moneyflow_daily: {extra_in_alembic}"
+
+    def test_screening_history_pending_index_alignment(self):
+        content = self._get_all_migration_content()
+        assert "CREATE INDEX idx_sh_pending ON screening_history (review_status)" in content
+        assert "review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL" in content
 
     def test_stock_basic_alembic_alignment(self):
         model_cols = get_model_columns(StockBasic) - {"updated_at", "created_at"}

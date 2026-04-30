@@ -237,7 +237,11 @@ class ScreeningHistory(Base):
         Index("idx_sh_date_code", "trade_date", "ts_code"),
         Index("idx_sh_run_id", "run_id"),
         Index("idx_sh_prediction_result", "prediction_result", postgresql_where=text("prediction_result IS NOT NULL")),
-        Index("idx_sh_pending", "review_status", postgresql_where=text("prediction_result IS NULL")),
+        Index(
+            "idx_sh_pending",
+            "review_status",
+            postgresql_where=text("review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL"),
+        ),
         Index("idx_sh_params_gin", "params_snapshot", postgresql_using="gin"),
     )
 

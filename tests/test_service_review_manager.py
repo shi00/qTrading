@@ -414,15 +414,15 @@ class TestReviewPredictionsCore(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_review_persists_t5_metrics_when_available(self):
-        """T+5 数据可用时应一并持久化"""
+        """T+5 涨幅应使用分析日到第 5 个交易日的累计涨幅"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "trade_date": ["20240315", "20240318", "20240319", "20240320", "20240321", "20240322"],
-                    "close": [10.0, 10.5, 10.6, 10.7, 10.9, 11.2],
-                    "pct_chg": [1.0, 5.0, 1.0, 1.0, 2.0, 12.0],
+                    "close": [10.0, 10.5, 10.7, 10.8, 10.9, 11.0],
+                    "pct_chg": [1.0, 5.0, 1.9, 0.9, 0.9, 0.9],
                 }
             )
         )
@@ -436,8 +436,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
         async def run_test():
             await manager.run_review()
             kwargs = mock_cache_instance.screener_dao.update_prediction_result.call_args.kwargs
-            self.assertEqual(kwargs["t5_pct"], 12.0)
-            self.assertEqual(kwargs["t5_price"], 11.2)
+            self.assertAlmostEqual(kwargs["t5_pct"], 10.0)
+            self.assertEqual(kwargs["t5_price"], 11.0)
             self.assertEqual(kwargs["index_pct"], 1.0)
             self.assertEqual(kwargs["alpha"], 4.0)
 

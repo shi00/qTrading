@@ -1,6 +1,3 @@
-import datetime
-from unittest.mock import MagicMock
-
 import pytest
 
 
@@ -10,69 +7,74 @@ _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
 
 @pytest.mark.unit
 class TestSchedulerPersistentIdempotency:
-    def test_persist_daily_update(self):
-        mock_ch = MagicMock()
-        saved = []
-        mock_ch.save_config.side_effect = lambda payload: saved.append(payload)
+    def test_runtime_keys_survive_ensure_defaults_cleanup(self, monkeypatch, tmp_path):
+        import utils.config_handler as cfg_mod
 
-        mock_ch.save_config({_CFG_LAST_DAILY_UPDATE: "20260429"})
+        temp_config = tmp_path / "user_settings.json"
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
+        cfg_mod.ConfigHandler._config_cache = None
 
-        assert len(saved) == 1
-        assert saved[0][_CFG_LAST_DAILY_UPDATE] == "20260429"
-
-    def test_persist_nightly_prediction(self):
-        mock_ch = MagicMock()
-        saved = []
-        mock_ch.save_config.side_effect = lambda payload: saved.append(payload)
-
-        mock_ch.save_config({_CFG_LAST_NIGHTLY_PREDICTION: "20260429"})
-
-        assert len(saved) == 1
-        assert saved[0][_CFG_LAST_NIGHTLY_PREDICTION] == "20260429"
-
-    def test_restart_reads_persisted_key(self):
-        mock_ch = MagicMock()
-        mock_ch.get_setting.side_effect = lambda key, default=None: (
-            "20260428" if key == _CFG_LAST_DAILY_UPDATE else "20260427"
+        cfg_mod.ConfigHandler.save_config(
+            {
+                _CFG_LAST_DAILY_UPDATE: "20260429",
+                _CFG_LAST_NIGHTLY_PREDICTION: "20260428",
+                "ai_api_key": "encrypted-key",
+                "ai_prompt_dump_enabled": True,
+                "max_concurrent_tasks": 7,
+            },
+            replace=True,
         )
+        cfg_mod.ConfigHandler._config_cache = None
 
-        last_update = mock_ch.get_setting(_CFG_LAST_DAILY_UPDATE)
-        last_pred = mock_ch.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        config = cfg_mod.ConfigHandler.load_config()
 
-        assert last_update == "20260428"
-        assert last_pred == "20260427"
+        assert config[_CFG_LAST_DAILY_UPDATE] == "20260429"
+        assert config[_CFG_LAST_NIGHTLY_PREDICTION] == "20260428"
+        assert config["ai_api_key"] == "encrypted-key"
+        assert config["ai_prompt_dump_enabled"] is True
+        assert config["max_concurrent_tasks"] == 7
 
-    def test_persist_empty_string_on_none(self):
-        mock_ch = MagicMock()
-        saved = []
-        mock_ch.save_config.side_effect = lambda payload: saved.append(payload)
+    def test_scheduler_reads_persisted_keys_after_restart(self, monkeypatch, tmp_path):
+        import utils.config_handler as cfg_mod
+        import utils.scheduler_service as sched_mod
 
-        value = None
-        mock_ch.save_config({_CFG_LAST_DAILY_UPDATE: value or ""})
-
-        assert saved[0][_CFG_LAST_DAILY_UPDATE] == ""
-
-    def test_idempotency_prevents_duplicate_run(self):
-        mock_ch = MagicMock()
-        mock_ch.get_setting.side_effect = lambda key, default=None: (
-            "20260429" if key == _CFG_LAST_DAILY_UPDATE else None
+        temp_config = tmp_path / "user_settings.json"
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
+        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler.save_config(
+            {
+                _CFG_LAST_DAILY_UPDATE: "20260428",
+                _CFG_LAST_NIGHTLY_PREDICTION: "20260427",
+            },
+            replace=True,
         )
+        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler.ensure_defaults()
 
-        last_update_date = mock_ch.get_setting(_CFG_LAST_DAILY_UPDATE)
-        today_str = datetime.date(2026, 4, 29).strftime("%Y%m%d")
+        sched_mod.SchedulerService._reset_singleton()
+        service = sched_mod.SchedulerService()
 
-        assert last_update_date == today_str, "After restart, idempotency key should match today"
+        assert service._last_update_date == "20260428"
+        assert service._last_pred_date == "20260427"
 
-    def test_mark_done_sets_instance_and_persists(self):
-        mock_ch = MagicMock()
-        saved = []
-        mock_ch.save_config.side_effect = lambda payload: saved.append(payload)
+    def test_mark_done_sets_instance_and_persists(self, monkeypatch, tmp_path):
+        import utils.config_handler as cfg_mod
+        import utils.scheduler_service as sched_mod
 
-        last_update_date = None
-        today_str = "20260429"
-        last_update_date = today_str
-        mock_ch.save_config({_CFG_LAST_DAILY_UPDATE: today_str})
+        temp_config = tmp_path / "user_settings.json"
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
+        cfg_mod.ConfigHandler._config_cache = None
 
-        assert last_update_date == "20260429"
-        assert len(saved) == 1
-        assert saved[0][_CFG_LAST_DAILY_UPDATE] == "20260429"
+        sched_mod.SchedulerService._reset_singleton()
+        service = sched_mod.SchedulerService()
+        service._mark_daily_update_done("20260429")
+        service._mark_nightly_prediction_done("20260429")
+
+        cfg_mod.ConfigHandler._config_cache = None
+        config = cfg_mod.ConfigHandler.load_config()
+
+        assert service._last_update_date == "20260429"
+        assert service._last_pred_date == "20260429"
+        assert config[_CFG_LAST_DAILY_UPDATE] == "20260429"
+        assert config[_CFG_LAST_NIGHTLY_PREDICTION] == "20260429"

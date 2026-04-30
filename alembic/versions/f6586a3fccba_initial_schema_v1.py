@@ -687,7 +687,10 @@ def upgrade() -> None:
     op.execute(
         "CREATE INDEX idx_sh_prediction_result ON screening_history (prediction_result) WHERE prediction_result IS NOT NULL"
     )
-    op.execute("CREATE INDEX idx_sh_pending ON screening_history (review_status) WHERE prediction_result IS NULL")
+    op.execute(
+        "CREATE INDEX idx_sh_pending ON screening_history (review_status) "
+        "WHERE review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL"
+    )
     op.execute("CREATE INDEX IF NOT EXISTS idx_sh_params_gin ON screening_history USING gin (params_snapshot)")
     op.create_table(
         "screening_thinking",
