@@ -303,6 +303,22 @@ class TestNewsSubscriptionBoundaryConditions:
         notify_src = extract_method_source(self.source, "_notify_listeners")
         assert "param_count" in notify_src, "Must handle listeners with different parameter counts"
 
+    def test_alert_listeners_use_run_in_executor(self):
+        assert "run_in_executor" in self.source, "Alert listeners must use run_in_executor"
+        alert_lines = [line for line in self.source.split("\n") if "alert_listeners" in line and "for listener" in line]
+        if alert_lines:
+            block_start = self.source.split("\n").index(alert_lines[0])
+            block = "\n".join(self.source.split("\n")[block_start : block_start + 15])
+            assert "run_in_executor" in block, "Alert listener loop must use run_in_executor"
+
+    def test_alert_listeners_have_timeout(self):
+        alert_lines = [line for line in self.source.split("\n") if "alert_listeners" in line and "for listener" in line]
+        if alert_lines:
+            block_start = self.source.split("\n").index(alert_lines[0])
+            block = "\n".join(self.source.split("\n")[block_start : block_start + 15])
+            assert "wait_for" in block, "Alert listeners must have timeout"
+            assert "TimeoutError" in block, "Must handle TimeoutError for alert listeners"
+
 
 class TestI18nBoundaryConditions:
     """i18n 键缺失/回退边界条件"""
