@@ -251,6 +251,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 start_date=start_date_obj,
                 end_date=end_date_obj,
                 ts_code_list=valid_codes,
+                suppress_errors=False,
             )
 
             if history_pdf is None or history_pdf.empty:

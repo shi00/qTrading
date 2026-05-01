@@ -1117,6 +1117,43 @@ def _create_table_screening_thinking() -> None:
         op.create_index("idx_st_history_id", "screening_thinking", ["history_id"])
 
 
+_ALL_EXPECTED_TABLES = [
+    "block_trade",
+    "daily_indicators",
+    "daily_quotes",
+    "dividend",
+    "fina_audit",
+    "fina_forecast",
+    "fina_mainbz",
+    "financial_reports",
+    "index_daily",
+    "index_dailybasic",
+    "index_weight",
+    "limit_list",
+    "macro_economy",
+    "margin_daily",
+    "market_news",
+    "moneyflow_daily",
+    "moneyflow_hsgt",
+    "northbound_holding",
+    "pledge_stat",
+    "repurchase",
+    "screening_history",
+    "screening_thinking",
+    "shibor_daily",
+    "stk_holdernumber",
+    "stock_basic",
+    "stock_concepts",
+    "stock_sync_status",
+    "suspend_d",
+    "sync_status",
+    "task_history",
+    "top10_holders",
+    "top_list",
+    "trade_cal",
+]
+
+
 def upgrade() -> None:
     """Idempotent upgrade: works for both fresh DBs and pre-fix legacy DBs."""
     bind = op.get_bind()
@@ -1125,6 +1162,18 @@ def upgrade() -> None:
     if not _table_exists("daily_quotes"):
         _create_all_tables_fresh()
         return
+
+    existing_tables = set(insp.get_table_names(schema=_target_schema()))
+    missing_tables = [t for t in _ALL_EXPECTED_TABLES if t not in existing_tables]
+    if missing_tables:
+        import logging as _logging
+
+        _logging.getLogger("alembic.runtime.migration").warning(
+            "Legacy DB has daily_quotes but missing tables: %s. "
+            "Consider running 'alembic stamp head' on a fully-initialized DB, "
+            "or create a fresh DB to avoid schema drift.",
+            missing_tables,
+        )
 
     existing_dq = {c["name"] for c in insp.get_columns("daily_quotes")}
     for legacy in LEGACY_QFQ_COLS:

@@ -1,10 +1,13 @@
 import functools
 import inspect
 import logging
+import os
 import typing
 from enum import IntEnum
 
 logger = logging.getLogger(__name__)
+
+_STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "false").lower() in ("true", "1", "yes")
 
 
 class QualityTier(IntEnum):
@@ -46,10 +49,15 @@ def _find_processor(instance: typing.Any, args: typing.Any, kwargs: typing.Any):
 def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.Any):
     """Shared logic to verify quality tier."""
     if processor is None:
+        if _STRICT_QUALITY_GATE:
+            raise QualityGateError(
+                f"QualityGate STRICT mode: DataProcessor not found for {func_name}. "
+                f"Set STRICT_QUALITY_GATE=false to bypass (not recommended in production)."
+            )
         logger.warning(
             f"[QualityGate] Bypassed for {func_name}: DataProcessor not found in context. (Could be test env or context missing)",
         )
-        return  # Skip check if no processor found
+        return
     current_tier = getattr(processor, "_quality_tier", None)
     if current_tier is None:
         current_tier = 0  # Treat uninitialized as CRITICAL

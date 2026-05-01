@@ -163,9 +163,8 @@ class SecurityManager:
 
             return base64.b64encode(nonce + ciphertext).decode("utf-8")
         except Exception as e:
-            # We log but return empty to be fail-safe for UI
             logger.error(f"Encryption error: {e}")
-            return ""
+            raise DecryptionError(f"Encryption failed: {e}") from e
 
     @classmethod
     def decrypt_data(cls, encrypted_text):

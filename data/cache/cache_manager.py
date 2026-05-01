@@ -176,7 +176,8 @@ class CacheManager:
         """Dispose the engine"""
         logger.debug("[CacheManager] State | Disposing engine...")
         self._disposed = True
-        await self.engine.dispose()
+        if self.engine is not None:
+            await self.engine.dispose()
         try:
             from data.persistence.daos.base_dao import BaseDao
 
@@ -343,12 +344,14 @@ class CacheManager:
         start_date: str | None = None,
         end_date: str | None = None,
         ts_code_list: list | None = None,
+        suppress_errors: bool = True,
     ):
         return await self.quote_dao.get_daily_quotes(
             ts_code,
             start_date,
             end_date,
             ts_code_list,
+            suppress_errors=suppress_errors,
         )
 
     # --- Daily Indicators ---

@@ -53,7 +53,7 @@ class FinancialSyncStrategy(ISyncStrategy):
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync windows."""
         try:
-            trade_date = await self.context.processor.get_latest_trade_date()  # type: ignore[attr-defined]
+            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()
             if isinstance(trade_date, datetime.datetime):
                 return trade_date.date()
             if isinstance(trade_date, datetime.date):
@@ -221,7 +221,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         end_date = await self._get_effective_trade_date()
         years = ConfigHandler.get_init_history_years()
         rough_start_date = end_date - datetime.timedelta(days=int(250 * years * 2.0))
-        all_dates = await self.context.processor.get_trade_dates(  # type: ignore
+        all_dates = await self.context.processor.trade_calendar.get_trade_dates(
             start_date=rough_start_date,
             end_date=end_date,
         )

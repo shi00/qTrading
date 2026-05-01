@@ -130,7 +130,9 @@ class QuoteDao(BaseDao):
             suppress_errors=suppress_errors,
         )
 
-    async def check_data_exists(self, trade_date: datetime.date | str, tables: list | None = None) -> bool:
+    async def check_data_exists(
+        self, trade_date: datetime.date | str, tables: list | None = None, raise_on_error: bool = False
+    ) -> bool:
         """
         Check if data exists for all synced tables on a given trade_date.
         This is used for reliable breakpoint resume - only skip a date if ALL
@@ -138,6 +140,8 @@ class QuoteDao(BaseDao):
 
         :param trade_date: The trade date to check
         :param tables: List of table names to check. If None, uses tables from HistoricalSyncStrategy.SYNCED_TABLES.
+        :param raise_on_error: If True, raise on DB errors instead of returning False.
+            Use True for critical paths where "query failed" must not be confused with "data missing".
         :return: True if all tables have data for the given date
         """
         if tables is None:
@@ -157,12 +161,14 @@ class QuoteDao(BaseDao):
         union_parts = [f"SELECT '{t}' as tbl, 1 as val FROM {t} WHERE trade_date=$1 LIMIT 1" for t in safe_tables]
         sql = " UNION ALL ".join(union_parts)
         try:
-            df = await self._read_db(sql, (trade_date,))
+            df = await self._read_db(sql, (trade_date,), suppress_errors=not raise_on_error)
             if df is None or df.empty:
                 return False
             found_tables = set(df["tbl"].tolist())
             return found_tables == set(safe_tables)
         except Exception:
+            if raise_on_error:
+                raise
             return False
 
     async def get_expected_stock_count(self, trade_date: datetime.date | str) -> int:
@@ -228,6 +234,7 @@ class QuoteDao(BaseDao):
         start_date: str | None = None,
         end_date: str | None = None,
         ts_code_list: list | None = None,
+        suppress_errors: bool = True,
     ):
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
@@ -266,7 +273,7 @@ class QuoteDao(BaseDao):
                     chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
                     chunk_params = base_params + chunk
 
-                    df_chunk = await self._read_db(chunk_sql, chunk_params)
+                    df_chunk = await self._read_db(chunk_sql, chunk_params, suppress_errors=suppress_errors)
                     if not df_chunk.empty:
                         all_results.append(df_chunk)
 
@@ -279,7 +286,7 @@ class QuoteDao(BaseDao):
             sql += f" AND ts_code IN ({placeholders})"
             params.extend(ts_code_list)
 
-        return await self._read_db(sql, params)
+        return await self._read_db(sql, params, suppress_errors=suppress_errors)
 
     async def get_latest_trade_date(self):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")

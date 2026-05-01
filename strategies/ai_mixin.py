@@ -293,7 +293,11 @@ class AIStrategyMixin:
 
                     end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()
                 except (ValueError, TypeError):
-                    pass
+                    if context.get("is_backtest"):
+                        raise ValueError(
+                            f"Cannot parse trade_date for backtest: {ctx_td!r}. "
+                            f"Refusing to fall back to current date to prevent lookahead bias."
+                        ) from None
 
             years = ConfigHandler.get_init_history_years()
             start_date = end_date - timedelta(days=365 * years + 30)
@@ -306,6 +310,7 @@ class AIStrategyMixin:
                     ts_code_list=all_ts_codes,
                     start_date=start_date,
                     end_date=end_date,
+                    suppress_errors=False,
                 )
                 self._history_cache[cache_key] = bulk_history_df
             if bulk_history_df is not None and not bulk_history_df.empty:

@@ -256,7 +256,7 @@ class TushareClient:
                     raise e
 
                 await asyncio.sleep(1)
-        return None
+        raise RuntimeError(f"[tushare_api] All {self.max_retries} retries exhausted for {api_name}")
 
     async def _handle_api_call_paginated(self, func: typing.Callable, max_pages: int = 100, **kwargs: typing.Any):
         import pandas as pd
@@ -271,9 +271,13 @@ class TushareClient:
             kwargs["offset"] = offset
             try:
                 df = await self._handle_api_call(func, **kwargs)
-            except Exception:
+            except Exception as exc:
                 if page == 0:
                     raise
+                logger.warning(
+                    f"[API] Pagination failed on page {page} (offset={offset}): {exc}. "
+                    f"Returning {len(df_list)} partial pages already fetched."
+                )
                 break
 
             if df is None or df.empty:

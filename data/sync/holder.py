@@ -50,7 +50,7 @@ class HolderSyncStrategy(ISyncStrategy):
         try:
             processor = getattr(self.context, "processor", None)
             if processor is not None:
-                trade_date = await processor.get_latest_trade_date()  # type: ignore[attr-defined]
+                trade_date = await processor.trade_calendar.get_latest_trade_date()
                 if isinstance(trade_date, datetime.datetime):
                     return trade_date.date()
                 if isinstance(trade_date, datetime.date):

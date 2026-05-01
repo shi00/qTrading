@@ -328,7 +328,7 @@ class NewsSubscriptionService:
                     )
                     await self.cache.save_market_news(normalized, wait=True)
 
-                    self._notify_listeners(
+                    await self._notify_listeners(
                         update_type=NewsUpdateType.TAG_UPDATE,
                         data={"content": content, "tags": tags},
                     )
@@ -349,7 +349,7 @@ class NewsSubscriptionService:
                 # Prevent tight error loop logging
                 await asyncio.sleep(5.0)
 
-    def _notify_listeners(
+    async def _notify_listeners(
         self,
         listeners: typing.Any = None,
         update_type: typing.Any = None,
@@ -362,18 +362,41 @@ class NewsSubscriptionService:
         if not hasattr(self, "_listener_errors"):
             self._listener_errors = {}
 
+        loop = asyncio.get_running_loop()
         for listener in list(target):
             try:
                 sig = inspect.signature(listener)
                 param_count = len(sig.parameters)
-                if param_count >= 2:
-                    listener(update_type, data)
-                elif param_count == 1:
-                    listener(update_type)
+                if inspect.iscoroutinefunction(listener):
+                    if param_count >= 2:
+                        await asyncio.wait_for(listener(update_type, data), timeout=5.0)
+                    elif param_count == 1:
+                        await asyncio.wait_for(listener(update_type), timeout=5.0)
+                    else:
+                        await asyncio.wait_for(listener(), timeout=5.0)
                 else:
-                    listener()
+                    if param_count >= 2:
+                        _l, _ut, _d = listener, update_type, data
+                        await asyncio.wait_for(
+                            loop.run_in_executor(None, lambda _l=_l, _ut=_ut, _d=_d: _l(_ut, _d)),
+                            timeout=5.0,
+                        )
+                    elif param_count == 1:
+                        _l, _ut = listener, update_type
+                        await asyncio.wait_for(
+                            loop.run_in_executor(None, lambda _l=_l, _ut=_ut: _l(_ut)),
+                            timeout=5.0,
+                        )
+                    else:
+                        _l = listener
+                        await asyncio.wait_for(
+                            loop.run_in_executor(None, lambda _l=_l: _l()),
+                            timeout=5.0,
+                        )
                 if listener in self._listener_errors:
                     del self._listener_errors[listener]
+            except TimeoutError:
+                logger.warning(f"[NewsService] Listener {listener} timed out (5s)")
             except Exception as e:
                 count = self._listener_errors.get(listener, 0) + 1
                 self._listener_errors[listener] = count
@@ -438,7 +461,7 @@ class NewsSubscriptionService:
                         "[NewsService] Initial sync complete, queued for AI processing...",
                     )
 
-                    self._notify_listeners(update_type=NewsUpdateType.INITIAL)
+                    await self._notify_listeners(update_type=NewsUpdateType.INITIAL)
                     return
 
                 new_items_found = False
@@ -481,7 +504,7 @@ class NewsSubscriptionService:
                                     logger.error(f"[NewsService] Alert listener error: {e}")
 
                 if new_items_found:
-                    self._notify_listeners(
+                    await self._notify_listeners(
                         update_type=NewsUpdateType.NEW_ITEM,
                         data=new_items,
                     )

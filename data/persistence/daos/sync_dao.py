@@ -76,16 +76,19 @@ class SyncDao(BaseDao):
             return None
         return await self._read_db("SELECT * FROM sync_status")
 
-    async def get_completed_step4_stocks(self, sync_version: int = 1):
+    async def get_completed_step4_stocks(self, sync_version: int = 1, raise_on_error: bool = False):
         try:
             df = await self._read_db(
                 "SELECT ts_code FROM stock_sync_status WHERE sync_version >= $1",
                 (sync_version,),
+                suppress_errors=not raise_on_error,
             )
             if df is not None and not df.empty:
                 return set(df["ts_code"])
             return set()
         except Exception:
+            if raise_on_error:
+                raise
             return set()
 
     async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):

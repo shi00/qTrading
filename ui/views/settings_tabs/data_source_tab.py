@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import inspect
 import logging
 import time
 
@@ -792,7 +793,7 @@ class DataSourceTab(ft.Container):
                 if not self.page:
                     return
                 self.page.close(dialog)
-                if asyncio.iscoroutinefunction(on_confirm_callback):
+                if inspect.iscoroutinefunction(on_confirm_callback):
                     self.page.run_task(on_confirm_callback)
                 else:
                     on_confirm_callback()

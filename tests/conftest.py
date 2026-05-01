@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import tempfile
@@ -7,6 +8,14 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    if sys.platform == "win32":
+        return asyncio.WindowsSelectorEventLoopPolicy()
+    return asyncio.DefaultEventLoopPolicy()
+
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -40,11 +49,33 @@ sys.modules["keyring"] = _create_mock_keyring()
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
 TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
-# Allow CI to override the placeholder local password with a secret-backed value.
-TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD", "123456")
+TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD")
+if not TEST_DB_PASSWORD:
+    # Try to extract password from .env DATABASE_URL for local dev consistency
+    _env_file = os.path.join(PROJECT_ROOT, ".env")
+    if os.path.exists(_env_file):
+        with open(_env_file, encoding="utf-8") as _f:
+            for _line in _f:
+                if _line.startswith("DATABASE_URL="):
+                    try:
+                        from urllib.parse import urlparse
+
+                        _parsed = urlparse(_line.split("=", 1)[1].strip())
+                        if _parsed.password:
+                            TEST_DB_PASSWORD = _parsed.password
+                    except Exception:
+                        pass
+                    break
+    if not TEST_DB_PASSWORD:
+        TEST_DB_PASSWORD = "astock_test_local_2024"
 TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "test_astock")
+if not TEST_DB_NAME.startswith("test_"):
+    raise ValueError(f"TEST_DB_NAME must start with 'test_' for safety, got: {TEST_DB_NAME!r}")
 if not TEST_DB_NAME.replace("_", "").isalnum():
     raise ValueError("TEST_DB_NAME must contain only letters, digits, and underscores")
+_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "postgres"}
+if TEST_DB_HOST not in _ALLOWED_HOSTS:
+    raise ValueError(f"TEST_DB_HOST must be one of {_ALLOWED_HOSTS} for safety, got: {TEST_DB_HOST!r}")
 
 TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
 TEST_DB_SYNC_URL = f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
@@ -58,6 +89,9 @@ def pytest_configure(config):
     Hook that runs before any test collection or import.
     Patch CONFIG_FILE and DATABASE_URL before any modules are imported.
     """
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
@@ -108,7 +142,6 @@ async def _ensure_test_db():
         timeout=5.0,  # type: ignore
     )
     try:
-        # 强制断开其他连接，防止 ObjectInUseError
         await conn.execute(
             """
             SELECT pg_terminate_backend(pid)

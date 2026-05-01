@@ -71,7 +71,10 @@ class ThreadPoolManager:
 
     def _atexit_shutdown(self):
         """S3-1 fix: atexit handler with wait=False to avoid blocking on exit."""
-        self.shutdown(wait=False)
+        try:
+            self.shutdown(wait=False)
+        except ValueError:
+            pass
 
     def _init_pools(self):
         # 1. IO Pool Configuration
@@ -204,19 +207,28 @@ class ThreadPoolManager:
 
         shutdown_performed = False
         if hasattr(self, "_io_pool") and self._io_pool:
-            logger.info("Shutting down IO Pool...")
+            try:
+                logger.info("Shutting down IO Pool...")
+            except ValueError:
+                pass
             self._io_pool.shutdown(wait=wait, cancel_futures=True)
             self._io_pool = None
             shutdown_performed = True
 
         if hasattr(self, "_cpu_pool") and self._cpu_pool:
-            logger.info("Shutting down CPU Pool...")
+            try:
+                logger.info("Shutting down CPU Pool...")
+            except ValueError:
+                pass
             self._cpu_pool.shutdown(wait=False, cancel_futures=True)
             self._cpu_pool = None
             shutdown_performed = True
 
         if shutdown_performed:
-            logger.info("Thread Pools shut down.")
+            try:
+                logger.info("Thread Pools shut down.")
+            except ValueError:
+                pass
 
 
 # Global Accessor

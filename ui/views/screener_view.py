@@ -1105,8 +1105,7 @@ class ScreenerView(ft.Container):
         self.page.run_task(_do_toggle)
 
     def _on_virtual_sort(self, col_id, ascending):
-        # Trigger sorting via ViewModel
-        self.page.run_task(self.vm.sort_data, col_id)  # type: ignore
+        self.page.run_task(self.vm.sort_data, col_id, ascending)
 
     async def _on_export_click(self, e):
         """Export current results"""

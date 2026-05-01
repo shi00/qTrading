@@ -421,7 +421,7 @@ class BaseDao:
 
         return val
 
-    async def _read_db(self, sql: typing.Any, params: typing.Any = None):
+    async def _read_db(self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = True):
         """Generic Read returning DataFrame (Offloaded CSV conversion)"""
         if self.engine is None:
             raise RuntimeError(
@@ -496,4 +496,6 @@ class BaseDao:
             logger.warning(
                 f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
             )
+            if not suppress_errors:
+                raise
             return pd.DataFrame()

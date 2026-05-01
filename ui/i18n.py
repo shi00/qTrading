@@ -192,6 +192,7 @@ class I18n:
 
 # S5-1 fix: classify_error moved to utils/error_classifier.py
 # Re-export for backward compatibility
+from utils.error_classifier import classify_error  # noqa: F401
 
 
 _STRATEGY_NAME_MAP = {

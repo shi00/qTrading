@@ -2,6 +2,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 
 import keyring
 from readerwriterlock import rwlock
@@ -351,8 +352,12 @@ class ConfigHandler:
             logger.warning(
                 f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager.",
             )
-            encrypted = SecurityManager.encrypt_data(token)
-            return ConfigHandler.save_config({"ts_token": encrypted})
+            try:
+                encrypted = SecurityManager.encrypt_data(token)
+                return ConfigHandler.save_config({"ts_token": encrypted})
+            except Exception as enc_err:
+                logger.error(f"Failed to encrypt ts_token: {enc_err}")
+                return False
 
     @staticmethod
     def is_onboarding_complete():
@@ -451,7 +456,12 @@ class ConfigHandler:
         import config as sys_config
 
         user_config = ConfigHandler.load_config()
-        return user_config.get("db_url", sys_config.DB_URL)
+        url = user_config.get("db_url", sys_config.DB_URL)
+        if url and "****" in url:
+            password = ConfigHandler.get_db_password()
+            if password:
+                url = url.replace("****", password, 1)
+        return url
 
     @staticmethod
     def get_db_password():
@@ -518,7 +528,7 @@ class ConfigHandler:
                 "db_port": port,
                 "db_user": user,
                 "db_name": database,
-                "db_url": db_url,
+                "db_url": re.sub(r"://([^:]+):([^@]+)@", r"://\1:****@", db_url),
             }
         )
 
@@ -672,8 +682,11 @@ class ConfigHandler:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                 except Exception as e:
                     logger.warning(f"Keyring save failed: {e}. Falling back to SecurityManager.")
-                    encrypted_key = SecurityManager.encrypt_data(api_key)
-                    ConfigHandler.save_config({"ai_api_key": encrypted_key})
+                    try:
+                        encrypted_key = SecurityManager.encrypt_data(api_key)
+                        ConfigHandler.save_config({"ai_api_key": encrypted_key})
+                    except Exception as enc_err:
+                        logger.error(f"Failed to encrypt ai_api_key: {enc_err}")
             else:
                 with contextlib.suppress(Exception):
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")

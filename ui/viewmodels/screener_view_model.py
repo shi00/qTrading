@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Callable
@@ -196,7 +197,7 @@ class ScreenerViewModel:
                     I18n.get("task_executing_strategy", name=strategy.name),
                 )
 
-                if asyncio.iscoroutinefunction(strategy.filter):
+                if inspect.iscoroutinefunction(strategy.filter):
                     result_df = await strategy.filter(context)
                 else:
                     result_df = await ThreadPoolManager().run_async(
@@ -316,17 +317,19 @@ class ScreenerViewModel:
 
     # --- Sorting & Pagination ---
 
-    async def sort_data(self, column_key: str):
+    async def sort_data(self, column_key: str, ascending: bool | None = None):
         """Sort data using ThreadPool to avoid blocking UI"""
         if self._full_results is None or self._full_results.empty:
             return
 
-        # Toggle sort order
-        if self.sort_column == column_key:
+        if ascending is not None:
+            self.sort_column = column_key
+            self.sort_ascending = ascending
+        elif self.sort_column == column_key:
             self.sort_ascending = not self.sort_ascending
         else:
             self.sort_column = column_key
-            self.sort_ascending = False  # Default desc for numbers usually
+            self.sort_ascending = True
 
         if self.on_progress:
             self.on_progress(True)

@@ -156,6 +156,7 @@ class ShutdownCoordinator:
         finally:
             self._cleanup_done = True
             self._cleanup_task = None
+            self.cancel_watchdog()
             for handler in logging.root.handlers:
                 try:
                     handler.flush()
