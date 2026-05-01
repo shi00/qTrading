@@ -25,47 +25,44 @@ class TestNotifyListenersAsync:
 class TestAlertListenersAsync:
     """NewsSubscription alert_listeners 异步调用机制"""
 
-    def test_alert_listeners_use_run_in_executor(self):
-        source = inspect.getsource(NewsSubscriptionService._processing_loop)
+    def _extract_alert_block(self, source: str) -> str:
+        """Extract the code block related to _alert_listeners invocation."""
         alert_block = []
         in_alert = False
+        indent_level = None
         for line in source.split("\n"):
-            if "alert_listeners" in line:
+            if "_alert_listeners" in line:
                 in_alert = True
+                # Determine the indent level of the for-loop that iterates alert_listeners
+                stripped = line.lstrip()
+                if stripped.startswith("for listener in list(self._alert_listeners):"):
+                    indent_level = len(line) - len(stripped)
             if in_alert:
                 alert_block.append(line)
-                if "except Exception" in line and len(alert_block) > 3:
-                    break
-        alert_src = "\n".join(alert_block)
+                # Stop when we encounter a line that is dedented back to or below the for-loop level
+                # and is not empty/whitespace, indicating the block has ended
+                if indent_level is not None:
+                    stripped = line.lstrip()
+                    if stripped and (len(line) - len(stripped)) <= indent_level:
+                        # If this line is the for-loop line itself, don't stop yet
+                        if not stripped.startswith("for listener in list(self._alert_listeners):"):
+                            break
+        return "\n".join(alert_block)
+
+    def test_alert_listeners_use_run_in_executor(self):
+        source = inspect.getsource(NewsSubscriptionService._fetch_and_notify)
+        alert_src = self._extract_alert_block(source)
         assert "run_in_executor" in alert_src, "Alert listeners must use run_in_executor to avoid blocking event loop"
 
     def test_alert_listeners_lambda_closure_safe(self):
-        source = inspect.getsource(NewsSubscriptionService._processing_loop)
-        alert_block = []
-        in_alert = False
-        for line in source.split("\n"):
-            if "alert_listeners" in line:
-                in_alert = True
-            if in_alert:
-                alert_block.append(line)
-                if "except Exception" in line and len(alert_block) > 3:
-                    break
-        alert_src = "\n".join(alert_block)
+        source = inspect.getsource(NewsSubscriptionService._fetch_and_notify)
+        alert_src = self._extract_alert_block(source)
         for line in alert_src.split("\n"):
             if "lambda" in line:
                 assert "_l=" in line, f"Lambda must use default-arg binding: {line.strip()}"
 
     def test_alert_listeners_have_timeout(self):
-        source = inspect.getsource(NewsSubscriptionService._processing_loop)
-        alert_block = []
-        in_alert = False
-        for line in source.split("\n"):
-            if "alert_listeners" in line:
-                in_alert = True
-            if in_alert:
-                alert_block.append(line)
-                if "except Exception" in line and len(alert_block) > 3:
-                    break
-        alert_src = "\n".join(alert_block)
+        source = inspect.getsource(NewsSubscriptionService._fetch_and_notify)
+        alert_src = self._extract_alert_block(source)
         assert "wait_for" in alert_src, "Alert listeners must have timeout via asyncio.wait_for"
         assert "TimeoutError" in alert_src, "Must handle TimeoutError for alert listeners"
