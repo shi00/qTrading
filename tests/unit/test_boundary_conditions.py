@@ -13,7 +13,7 @@ def read_source(rel_path):
 def extract_method_source(source, method_name):
     lines = source.split("\n")
     start = None
-    indent_level = None
+    indent_level = 0
     in_signature = False
     result = []
     for i, line in enumerate(lines):
