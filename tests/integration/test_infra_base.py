@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from data.cache.cache_manager import CacheManager
 from data.persistence.models import Base
 
-TEST_DB_URL = "postgresql+asyncpg://postgres:123456@localhost:5432/test_astock"
+_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
+_DB_PORT = os.environ.get("TEST_DB_PORT", "5432")
+_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
+_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD") or "123456"
+_DB_NAME = os.environ.get("TEST_DB_NAME", "test_astock")
+TEST_DB_URL = f"postgresql+asyncpg://{_DB_USER}:{_DB_PASSWORD}@{_DB_HOST}:{_DB_PORT}/{_DB_NAME}"
 
 _SESSION_ENGINE: AsyncEngine | None = None
 _TABLES_INITIALIZED = False

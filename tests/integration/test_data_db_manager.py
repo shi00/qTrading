@@ -18,7 +18,12 @@ class TestDatabaseManager(TestDatabaseBase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
 
-        config.DB_URL_SYNC = "postgresql://postgres:123456@localhost:5432/test_astock"
+        _db_host = os.environ.get("TEST_DB_HOST", "localhost")
+        _db_port = os.environ.get("TEST_DB_PORT", "5432")
+        _db_user = os.environ.get("TEST_DB_USER", "postgres")
+        _db_password = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD") or "123456"
+        _db_name = os.environ.get("TEST_DB_NAME", "test_astock")
+        config.DB_URL_SYNC = f"postgresql://{_db_user}:{_db_password}@{_db_host}:{_db_port}/{_db_name}"
         self.db_manager = DatabaseManager()
 
         self._ddl_engine = create_async_engine(TEST_DB_URL, echo=False)
