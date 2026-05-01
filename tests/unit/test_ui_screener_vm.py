@@ -79,25 +79,14 @@ class TestScreenerViewModel(unittest.TestCase):
             await self.vm.sort_data("A")
 
             self.assertEqual(self.vm.sort_column, "A")
-            self.assertFalse(self.vm.sort_ascending)  # First click sets desc usually?
-            # Wait, implementation says: if col==sort_col toggle, else sort_col=new, asc=False
-            # Let's check implementation:
-            # if self.sort_column == column_key:
-            #    self.sort_ascending = not self.sort_ascending
-            # else:
-            #    self.sort_column = column_key
-            #    self.sort_ascending = False
+            self.assertTrue(self.vm.sort_ascending)  # First click on new column sets asc (matches View default)
 
-            # Implementation sets False (Descending) on first click?
-            # Let's check: self.sort_column starts as None.
-            # So first click -> asc=False (Desc). Correct.
-
-            self.assertEqual(self.vm._full_results.iloc[0]["A"], 3)
-
-            # Sort by A again (toggle -> Ascending)
-            await self.vm.sort_data("A")
-            self.assertTrue(self.vm.sort_ascending)
             self.assertEqual(self.vm._full_results.iloc[0]["A"], 1)
+
+            # Sort by A again (toggle -> Descending)
+            await self.vm.sort_data("A")
+            self.assertFalse(self.vm.sort_ascending)
+            self.assertEqual(self.vm._full_results.iloc[0]["A"], 3)
 
         asyncio.run(run_test())
 

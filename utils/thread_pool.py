@@ -71,6 +71,17 @@ class ThreadPoolManager:
 
     def _atexit_shutdown(self):
         """S3-1 fix: atexit handler with wait=False to avoid blocking on exit."""
+
+        for handler in logger.handlers[:]:
+            try:
+                handler.flush()
+                if hasattr(handler, "stream") and hasattr(handler.stream, "closed") and handler.stream.closed:
+                    logger.removeHandler(handler)
+            except (ValueError, OSError):
+                try:
+                    logger.removeHandler(handler)
+                except Exception:
+                    pass
         try:
             self.shutdown(wait=False)
         except ValueError:
@@ -209,7 +220,7 @@ class ThreadPoolManager:
         if hasattr(self, "_io_pool") and self._io_pool:
             try:
                 logger.info("Shutting down IO Pool...")
-            except ValueError:
+            except (ValueError, OSError):
                 pass
             self._io_pool.shutdown(wait=wait, cancel_futures=True)
             self._io_pool = None
@@ -218,7 +229,7 @@ class ThreadPoolManager:
         if hasattr(self, "_cpu_pool") and self._cpu_pool:
             try:
                 logger.info("Shutting down CPU Pool...")
-            except ValueError:
+            except (ValueError, OSError):
                 pass
             self._cpu_pool.shutdown(wait=False, cancel_futures=True)
             self._cpu_pool = None
@@ -227,7 +238,7 @@ class ThreadPoolManager:
         if shutdown_performed:
             try:
                 logger.info("Thread Pools shut down.")
-            except ValueError:
+            except (ValueError, OSError):
                 pass
 
 
