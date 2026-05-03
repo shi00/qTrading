@@ -641,21 +641,23 @@ class QuoteDao(BaseDao):
                       AND is_open = 1
                       AND exchange = 'SSE'
                 ),
-                stock_counts AS (
+                alive_ranges AS (
                     SELECT
-                        t.trade_date,
-                        COUNT(s.ts_code) as expected_count
-                    FROM trading_days t
-                    LEFT JOIN stock_basic s ON s.list_date <= t.trade_date
-                        AND (
-                            (s.list_status = 'L' AND (s.delist_date IS NULL OR s.delist_date > t.trade_date))
-                            OR
-                            (s.list_status = 'D' AND s.delist_date IS NOT NULL AND s.delist_date > t.trade_date)
-                        )
-                    GROUP BY t.trade_date
+                        list_date AS start_date,
+                        COALESCE(delist_date, '2099-12-31'::date) AS end_date
+                    FROM stock_basic
+                    WHERE list_date IS NOT NULL
+                      AND list_date <= $2
+                      AND (
+                          (list_status = 'L' AND COALESCE(delist_date, '2099-12-31'::date) > $1)
+                          OR (list_status = 'D' AND delist_date IS NOT NULL AND delist_date > $1)
+                      )
                 )
-                SELECT trade_date, expected_count FROM stock_counts
-                ORDER BY trade_date
+                SELECT t.trade_date, COUNT(a.start_date) as expected_count
+                FROM trading_days t
+                LEFT JOIN alive_ranges a ON a.start_date <= t.trade_date AND a.end_date > t.trade_date
+                GROUP BY t.trade_date
+                ORDER BY t.trade_date
                 """,
                 (start_date, end_date),
             )
