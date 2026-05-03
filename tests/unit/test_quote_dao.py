@@ -490,6 +490,51 @@ class TestQuoteDaoGetBulkExpectedStockCounts:
         result = await dao.get_bulk_expected_stock_counts("20240614", "20240615")
         assert result == {}
 
+    @pytest.mark.asyncio
+    async def test_sql_uses_alive_ranges_cte(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_bulk_expected_stock_counts("20240101", "20240601")
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "alive_ranges" in sql
+        assert "COALESCE" in sql
+        assert "start_date" in sql
+        assert "end_date" in sql
+
+    @pytest.mark.asyncio
+    async def test_sql_params_order(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_bulk_expected_stock_counts("20240101", "20240601")
+        call_args = dao._read_db.call_args
+        params = call_args[0][1]
+        assert params[0] == "20240101"
+        assert params[1] == "20240601"
+
+    @pytest.mark.asyncio
+    async def test_date_normalization(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": [datetime.date(2024, 6, 15)],
+                    "expected_count": [5000],
+                }
+            )
+        )
+        result = await dao.get_bulk_expected_stock_counts("20240615", "20240615")
+        assert datetime.date(2024, 6, 15) in result
+
+    @pytest.mark.asyncio
+    async def test_alive_ranges_prefilters_by_date_range(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_bulk_expected_stock_counts("20240101", "20240601")
+        sql = dao._read_db.call_args[0][0]
+        assert "list_date <= $2" in sql
+        assert "COALESCE(delist_date, '2099-12-31'::date) > $1" in sql
+
 
 class TestQuoteDaoGetSyncQualityScore:
     @pytest.mark.asyncio
