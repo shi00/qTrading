@@ -1032,6 +1032,11 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("cal_date", name=op.f("pk_trade_cal")),
     )
+    op.create_index(
+        "idx_trade_cal_date_open_exchange",
+        "trade_cal",
+        ["cal_date", "is_open", "exchange"],
+    )
     # ### end Alembic commands ###
 
 
