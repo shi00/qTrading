@@ -160,12 +160,6 @@ def _create_all_tables_fresh() -> None:
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_index(
-        op.f("ix_daily_indicators_trade_date"),
-        "daily_indicators",
-        ["trade_date"],
-        unique=False,
-    )
     op.create_table(
         "daily_quotes",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -200,7 +194,6 @@ def _create_all_tables_fresh() -> None:
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_index(op.f("ix_daily_quotes_trade_date"), "daily_quotes", ["trade_date"], unique=False)
     op.create_table(
         "dividend",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -384,7 +377,6 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_daily")),
     )
-    op.create_index(op.f("ix_index_daily_trade_date"), "index_daily", ["trade_date"], unique=False)
     op.create_index("idx_index_daily_date_code", "index_daily", ["trade_date", "ts_code"])
     op.create_table(
         "index_dailybasic",
@@ -1260,7 +1252,6 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_index_weight_trade_date"), table_name="index_weight")
     op.drop_table("index_weight")
     op.drop_table("index_dailybasic")
-    op.drop_index(op.f("ix_index_daily_trade_date"), table_name="index_daily")
     op.drop_table("index_daily")
     op.drop_index("ix_financial_reports_ann_date", table_name="financial_reports")
     op.drop_index("ix_financial_reports_ts_code_ann_date", table_name="financial_reports")
@@ -1273,10 +1264,8 @@ def downgrade() -> None:
     op.drop_table("fina_audit")
     op.drop_index(op.f("ix_dividend_ann_date"), table_name="dividend")
     op.drop_table("dividend")
-    op.drop_index(op.f("ix_daily_quotes_trade_date"), table_name="daily_quotes")
     op.drop_index("ix_daily_quotes_date_code", table_name="daily_quotes")
     op.drop_table("daily_quotes")
-    op.drop_index(op.f("ix_daily_indicators_trade_date"), table_name="daily_indicators")
     op.drop_index("ix_daily_indicators_date_code", table_name="daily_indicators")
     op.drop_table("daily_indicators")
     op.drop_table("block_trade")

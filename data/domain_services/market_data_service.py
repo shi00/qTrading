@@ -204,6 +204,8 @@ class MarketDataService:
 
     async def _get_indices_batch(self, codes: list[str], date: str) -> list[dict]:
         """批量获取指数数据 - 1次DB/API调用替代N次"""
+        if not codes:
+            return []
         code_to_key = {code: key for code, key in self.INDICES_CONFIG}
         df = await self.cache.get_index_daily_range(codes, start_date=date, end_date=date)
 
@@ -220,7 +222,7 @@ class MarketDataService:
                 c = self._safe_float(row.get("pct_chg"))
                 v = self._safe_float(row.get("close"))
                 name_key = code_to_key.get(ts_code, "")
-                color = "red" if c >= 0 else "green"
+                color = "red" if c > 0 else "green" if c < 0 else "grey"
                 result_map[ts_code] = {
                     "name": I18n.get(name_key),
                     "value": f"{v:.2f}",

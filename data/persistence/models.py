@@ -65,7 +65,7 @@ class StockConcepts(Base):
 class DailyQuotes(Base):
     __tablename__ = "daily_quotes"
     ts_code = Column(String, primary_key=True)
-    trade_date = Column(Date, primary_key=True, index=True)
+    trade_date = Column(Date, primary_key=True)
     open = Column(Float)
     high = Column(Float)
     low = Column(Float)
@@ -85,7 +85,7 @@ class DailyQuotes(Base):
 class DailyIndicators(Base):
     __tablename__ = "daily_indicators"
     ts_code = Column(String, primary_key=True)
-    trade_date = Column(Date, primary_key=True, index=True)
+    trade_date = Column(Date, primary_key=True)
     pe = Column(Float)
     pe_ttm = Column(Float)
     pb = Column(Float)
@@ -332,7 +332,7 @@ class IndexDaily(Base):
     __tablename__ = "index_daily"
     __table_args__ = (Index("idx_index_daily_date_code", "trade_date", "ts_code"),)
     ts_code = Column(String, primary_key=True)
-    trade_date = Column(Date, primary_key=True, index=True)
+    trade_date = Column(Date, primary_key=True)
     close = Column(Float)
     open = Column(Float)
     high = Column(Float)

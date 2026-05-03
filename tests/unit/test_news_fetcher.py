@@ -1,4 +1,3 @@
-import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -638,36 +637,47 @@ class TestGetHotConceptsTimeout:
     @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_timeout_returns_empty(self, mock_tpm, mock_run):
-        async def _slow_run(*args, **kwargs):
-            await asyncio.sleep(20)
-            return None
-
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = _slow_run
+        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
 
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                mock_tpm_instance.run_async("IO", lambda: None),
-                timeout=0.1,
-            )
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_within_timeout_succeeds(self, mock_tpm, mock_run):
-        df = MagicMock()
-        df.empty = False
-        df.columns = ["板块", "涨跌幅"]
-        df.__bool__ = lambda self: True
-        df.sort_values = MagicMock(return_value=df)
-        row = MagicMock()
-        row.get = lambda k: "AI" if k == "板块" else 3.0
-        df.head = MagicMock(return_value=MagicMock(iterrows=lambda: [(0, row)]))
-
+        df = pd.DataFrame(
+            {
+                "板块": ["AI", "芯片"],
+                "涨跌幅": [3.0, -1.5],
+            }
+        )
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=df)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["color"] == "red"
+        assert result[1]["color"] == "green"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_zero_change_is_grey(self, mock_tpm, mock_run):
+        df = pd.DataFrame(
+            {
+                "板块": ["平盘板块"],
+                "涨跌幅": [0.0],
+            }
+        )
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert len(result) == 1
+        assert result[0]["color"] == "grey"

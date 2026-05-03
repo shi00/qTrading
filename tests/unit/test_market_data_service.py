@@ -143,7 +143,7 @@ class TestMarketDataServiceGetIndicesBatch:
         assert len(result) == 3
         assert result[0]["color"] == "red"
         assert result[1]["color"] == "green"
-        assert result[2]["color"] == "red"
+        assert result[2]["color"] == "grey"
 
     @pytest.mark.asyncio
     async def test_cache_miss_falls_back_to_api(self):
@@ -211,6 +211,74 @@ class TestMarketDataServiceGetIndicesBatch:
         result = await svc._get_indices_batch(codes, "20240614")
         assert len(result) == 1
         assert result[0]["color"] == "red"
+
+    @pytest.mark.asyncio
+    async def test_nan_pct_chg_treated_as_zero(self):
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [float("nan")],
+                "close": [3000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_none_pct_chg_treated_as_zero(self):
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [None],
+                "close": [3000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_empty_codes_returns_empty(self):
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=None)
+        result = await svc._get_indices_batch([], "20240614")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_i18n_name_in_result(self):
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [1.0],
+                "close": [3000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["name"] != ""
+        assert result[0]["change"] == "+1.00%"
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_gets_grey(self):
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=None)
+        svc.api = MagicMock()
+        svc.api.get_index_daily = AsyncMock(return_value=None)
+        codes = ["999999.XX"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["color"] == "grey"
+        assert result[0]["value"] == "-"
 
 
 class TestMarketDataServiceFetchMarketDataIntegration:

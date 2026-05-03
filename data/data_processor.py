@@ -544,6 +544,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         Get market overview data for Home Screen.
         Returns Indices (SH, SZ, CYB) and Northbound Money Flow.
         优先从缓存获取，缓存无数据时调用 API。
+        Uses batch query for indices to reduce DB/API round trips.
         """
         try:
             now = get_now()
@@ -552,24 +553,47 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             latest_date = await self.trade_calendar.get_latest_trade_date()
             date = latest_date or today_date
 
-            async def get_idx(code, name_key):
-                df = await self.cache.get_index_daily(ts_code=code, trade_date=date)
+            INDICES_CONFIG = [
+                ("000001.SH", "home_index_sh"),
+                ("399001.SZ", "home_index_sz"),
+                ("399006.SZ", "home_index_cyb"),
+            ]
+
+            async def get_indices_batch():
+                codes = [code for code, _ in INDICES_CONFIG]
+                code_to_key = {code: key for code, key in INDICES_CONFIG}
+                date_str = date.strftime("%Y%m%d") if isinstance(date, datetime.date) else str(date)
+                df = await self.cache.get_index_daily_range(codes, start_date=date_str, end_date=date_str)
 
                 if df is None or df.empty:
-                    df = await self.api.get_index_daily(ts_code=code, trade_date=date)
+                    df = await self.api.get_index_daily(trade_date=date_str)
 
-                name = I18n.get(name_key)
+                result_map: dict[str, dict] = {}
                 if df is not None and not df.empty:
-                    row = df.iloc[0]
-                    c = row.get("pct_chg", 0)
-                    v = row.get("close", 0)
-                    return {
-                        "name": name,
-                        "value": f"{v:.2f}",
-                        "change": f"{c:+.2f}%",
-                        "color": "red" if c >= 0 else "green",
-                    }
-                return {"name": name, "value": "-", "change": "-", "color": "grey"}
+                    for ts_code in codes:
+                        row_df = df[df["ts_code"] == ts_code]
+                        if row_df.empty:
+                            continue
+                        row = row_df.iloc[0]
+                        c = row.get("pct_chg", 0)
+                        v = row.get("close", 0)
+                        name_key = code_to_key.get(ts_code, "")
+                        color = "red" if c > 0 else "green" if c < 0 else "grey"
+                        result_map[ts_code] = {
+                            "name": I18n.get(name_key),
+                            "value": f"{v:.2f}",
+                            "change": f"{c:+.2f}%",
+                            "color": color,
+                        }
+
+                indices = []
+                for code in codes:
+                    if code in result_map:
+                        indices.append(result_map[code])
+                    else:
+                        name_key = code_to_key.get(code, "")
+                        indices.append({"name": I18n.get(name_key), "value": "-", "change": "-", "color": "grey"})
+                return indices
 
             async def get_hsgt():
                 df = await self.cache.get_moneyflow_hsgt(trade_date=date)
@@ -592,18 +616,16 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             hot_concepts_task = NewsFetcher.get_hot_concepts(limit=8)
 
             results = await asyncio.gather(
-                get_idx("000001.SH", "home_index_sh"),
-                get_idx("399001.SZ", "home_index_sz"),
-                get_idx("399006.SZ", "home_index_cyb"),
+                get_indices_batch(),
                 get_hsgt(),
                 hot_concepts_task,
             )
 
             return {
                 "date": date,
-                "indices": results[:3],
-                "hsgt": results[3],
-                "hot_concepts": results[4],
+                "indices": results[0],
+                "hsgt": results[1],
+                "hot_concepts": results[2],
             }
 
         except Exception as e:

@@ -489,6 +489,63 @@ class TestDataProcessorGetMarketOverview:
         finally:
             _cleanup(dp)
 
+    @pytest.mark.asyncio
+    async def test_batch_query_success(self):
+        dp = _make_dp()
+        try:
+            dp.trade_calendar = MagicMock()
+            dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+            index_df = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SH", "399001.SZ", "399006.SZ"],
+                    "pct_chg": [1.5, -2.0, 0.0],
+                    "close": [3000.0, 10000.0, 2000.0],
+                }
+            )
+            dp.cache.get_index_daily_range = AsyncMock(return_value=index_df)
+            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+            dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+            with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
+                with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+                    result = await dp.get_market_overview()
+            assert result is not None
+            assert len(result["indices"]) == 3
+            assert result["indices"][0]["color"] == "red"
+            assert result["indices"][1]["color"] == "green"
+            assert result["indices"][2]["color"] == "grey"
+            dp.cache.get_index_daily_range.assert_called_once()
+        finally:
+            _cleanup(dp)
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_falls_back_to_api(self):
+        dp = _make_dp()
+        try:
+            dp.trade_calendar = MagicMock()
+            dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+            dp.cache.get_index_daily_range = AsyncMock(return_value=None)
+            api_df = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SH"],
+                    "pct_chg": [0.5],
+                    "close": [3100.0],
+                }
+            )
+            dp.api.get_index_daily = AsyncMock(return_value=api_df)
+            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+            dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+            with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
+                with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+                    result = await dp.get_market_overview()
+            assert result is not None
+            assert len(result["indices"]) == 3
+            assert result["indices"][0]["color"] == "red"
+            assert result["indices"][1]["color"] == "grey"
+            assert result["indices"][2]["color"] == "grey"
+            dp.api.get_index_daily.assert_called_once()
+        finally:
+            _cleanup(dp)
+
 
 class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
