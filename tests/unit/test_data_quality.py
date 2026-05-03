@@ -1,3 +1,4 @@
+import pytest
 import pandas as pd
 
 from data.persistence.data_quality import DataQualityService
@@ -83,3 +84,91 @@ class TestDataQualityServiceCheckRecency:
     def test_constants(self):
         assert DataQualityService.LAG_DEFAULT == 9999
         assert DataQualityService.LAG_ERROR == -1
+
+    def test_datetime_column(self):
+        df = pd.DataFrame({"date": pd.to_datetime(["2024-01-10"])})
+        result = DataQualityService.check_recency(df, "date", "2024-01-10")
+        assert result["lag_days"] == 0
+        assert result["latest_data_date"] == "20240110"
+
+
+class TestDataQualityServiceCheckNulls:
+    def test_empty_df(self):
+        result = DataQualityService.check_nulls(pd.DataFrame())
+        assert result == {}
+
+    def test_no_nulls(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        result = DataQualityService.check_nulls(df)
+        assert result["a"] == 0.0
+        assert result["b"] == 0.0
+
+    def test_some_nulls(self):
+        df = pd.DataFrame({"a": [1, None, 3], "b": [4, 5, 6]})
+        result = DataQualityService.check_nulls(df)
+        assert result["a"] == pytest.approx(1 / 3)
+        assert result["b"] == 0.0
+
+    def test_specific_columns(self):
+        df = pd.DataFrame({"a": [1, None], "b": [None, None], "c": [1, 2]})
+        result = DataQualityService.check_nulls(df, columns=["a", "c"])
+        assert "b" not in result
+        assert result["a"] == 0.5
+        assert result["c"] == 0.0
+
+
+class TestDataQualityServiceCheckCrossValidation:
+    def test_none_df(self):
+        result = DataQualityService.check_cross_validation(None, [])
+        assert result == []
+
+    def test_empty_df(self):
+        result = DataQualityService.check_cross_validation(pd.DataFrame(), [])
+        assert result == []
+
+    def test_no_rules(self):
+        df = pd.DataFrame({"vol": [100], "buy_vol": [60], "sell_vol": [40]})
+        result = DataQualityService.check_cross_validation(df, [])
+        assert result == []
+
+    def test_passing_rule(self):
+        df = pd.DataFrame({"vol": [100], "buy_vol": [60], "sell_vol": [40]})
+        rules = [("VolCheck", "vol - (buy_vol + sell_vol)", 0.05)]
+        result = DataQualityService.check_cross_validation(df, rules)
+        assert result == []
+
+    def test_failing_rule(self):
+        df = pd.DataFrame({"vol": [100], "buy_vol": [30], "sell_vol": [30]})
+        rules = [("VolCheck", "vol - (buy_vol + sell_vol)", 0.05)]
+        result = DataQualityService.check_cross_validation(df, rules)
+        assert len(result) == 1
+        assert "VolCheck" in result[0]
+
+    def test_execution_error(self):
+        df = pd.DataFrame({"a": [1]})
+        rules = [("BadRule", "nonexistent_col * 2", 0.1)]
+        result = DataQualityService.check_cross_validation(df, rules)
+        assert len(result) == 1
+        assert "BadRule" in result[0]
+        assert "error" in result[0].lower()
+
+
+class TestDataQualityServiceCheckContinuityExtended:
+    def test_all_nan_dates(self):
+        df = pd.DataFrame({"date": [None, None]})
+        trade_cal = pd.DataFrame({"cal_date": ["20240102"], "is_open": [1]})
+        result = DataQualityService.check_continuity(df, "date", trade_cal)
+        assert result["missing_count"] == 0
+        assert result["coverage_ratio"] == 0.0
+
+    def test_trade_cal_with_datetime(self):
+        df = pd.DataFrame({"date": pd.date_range("2024-01-02", periods=3, freq="B")})
+        trade_cal = pd.DataFrame(
+            {
+                "cal_date": pd.date_range("2024-01-02", periods=5, freq="B"),
+                "is_open": [1, 1, 1, 1, 1],
+            }
+        )
+        result = DataQualityService.check_continuity(df, "date", trade_cal)
+        assert result["missing_count"] >= 0
+        assert result["coverage_ratio"] <= 1.0

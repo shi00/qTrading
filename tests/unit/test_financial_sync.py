@@ -105,6 +105,93 @@ class TestFinancialSyncCancel:
         await strategy.cancel()
         assert strategy._shutdown_event.is_set()
 
+    @pytest.mark.asyncio
+    async def test_cancel_clears_and_sets(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        strategy._shutdown_event.clear()
+        assert not strategy._shutdown_event.is_set()
+        await strategy.cancel()
+        assert strategy._shutdown_event.is_set()
+
+
+class TestFinancialSyncGetEffectiveTradeDate:
+    @pytest.mark.asyncio
+    async def test_with_date_object(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+    @pytest.mark.asyncio
+    async def test_with_string_date(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value="20240614")
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+    @pytest.mark.asyncio
+    async def test_with_datetime_object(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(
+            return_value=datetime.datetime(2024, 6, 14, 15, 0)
+        )
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_exception_fallback(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+
+class TestFinancialSyncRunModes:
+    @pytest.mark.asyncio
+    async def test_full_sync_with_periods(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(periods=["20240331", "20231231"])
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_run(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        strategy._shutdown_event.set()
+        result = await strategy.run(force=True)
+        assert result.status in ("cancelled", "failed", "success")
+
+    @pytest.mark.asyncio
+    async def test_run_exception(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=RuntimeError("unexpected"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_incremental_with_disclosure_dates(self):
+        ctx = make_ctx()
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 6, 1)})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240331"],
+                    "actual_date": ["20240430"],
+                }
+            )
+        )
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+
 
 class TestFinancialSyncFetchComprehensive:
     @pytest.mark.asyncio

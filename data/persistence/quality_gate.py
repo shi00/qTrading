@@ -75,6 +75,9 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
         raise QualityGateError(msg)
 
 
+_CallableT = typing.TypeVar("_CallableT", bound=typing.Callable)
+
+
 def require_quality(min_tier: QualityTier):
     """
     Decorator to enforce data quality requirements.
@@ -90,7 +93,7 @@ def require_quality(min_tier: QualityTier):
             ...
     """
 
-    def decorator(func: typing.Callable):
+    def decorator(func: _CallableT) -> _CallableT:
         if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
@@ -99,7 +102,7 @@ def require_quality(min_tier: QualityTier):
                 _check_tier(processor, min_tier, func.__name__)
                 return await func(self, *args, **kwargs)
 
-            return async_wrapper
+            return typing.cast(_CallableT, async_wrapper)
 
         @functools.wraps(func)
         def sync_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
@@ -107,6 +110,6 @@ def require_quality(min_tier: QualityTier):
             _check_tier(processor, min_tier, func.__name__)
             return func(self, *args, **kwargs)
 
-        return sync_wrapper
+        return typing.cast(_CallableT, sync_wrapper)
 
     return decorator

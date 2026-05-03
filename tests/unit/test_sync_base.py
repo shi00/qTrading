@@ -1,7 +1,9 @@
 import datetime
 from unittest.mock import MagicMock
 
-from data.sync.base import SyncContext, SyncResult
+import pandas as pd
+
+from data.sync.base import ISyncStrategy, SyncContext, SyncResult
 
 
 class TestSyncContext:
@@ -77,3 +79,174 @@ class TestSyncResult:
         r2 = SyncResult(table_stats={"daily": {"count": 5}})
         r1.merge(r2)
         assert r1.table_stats["daily"]["count"] == 15
+
+
+class TestSyncResultMergeStatus:
+    def test_merge_both_success(self):
+        r1 = SyncResult(status="success")
+        r2 = SyncResult(status="success")
+        r1.merge(r2)
+        assert r1.status == "success"
+
+    def test_merge_one_failed(self):
+        r1 = SyncResult(status="success")
+        r2 = SyncResult(status="failed")
+        r1.merge(r2)
+        assert r1.status == "partial"
+
+    def test_merge_both_failed(self):
+        r1 = SyncResult(status="failed")
+        r2 = SyncResult(status="failed")
+        r1.merge(r2)
+        assert r1.status == "failed"
+
+    def test_merge_cancelled_overrides(self):
+        r1 = SyncResult(status="success")
+        r2 = SyncResult(status="cancelled")
+        r1.merge(r2)
+        assert r1.status == "cancelled"
+
+    def test_merge_cancelled_self(self):
+        r1 = SyncResult(status="cancelled")
+        r2 = SyncResult(status="success")
+        r1.merge(r2)
+        assert r1.status == "cancelled"
+
+    def test_merge_partial_and_failed(self):
+        r1 = SyncResult(status="partial")
+        r2 = SyncResult(status="failed")
+        r1.merge(r2)
+        assert r1.status == "partial"
+
+    def test_merge_success_and_partial(self):
+        r1 = SyncResult(status="success")
+        r2 = SyncResult(status="partial")
+        r1.merge(r2)
+        assert r1.status == "partial"
+
+
+class TestSyncResultToSummary:
+    def test_default(self):
+        r = SyncResult()
+        assert "status=success" in r.to_summary()
+
+    def test_with_added(self):
+        r = SyncResult(added=10)
+        assert "added=10" in r.to_summary()
+
+    def test_with_updated(self):
+        r = SyncResult(updated=5)
+        assert "updated=5" in r.to_summary()
+
+    def test_with_skipped(self):
+        r = SyncResult(skipped=3)
+        assert "skipped=3" in r.to_summary()
+
+    def test_with_errors(self):
+        r = SyncResult(errors=["e1", "e2"])
+        assert "errors=2" in r.to_summary()
+
+    def test_with_warnings(self):
+        r = SyncResult(warnings=["w1"])
+        assert "warnings=1" in r.to_summary()
+
+    def test_with_message(self):
+        r = SyncResult(message="test msg")
+        assert "message=test msg" in r.to_summary()
+
+    def test_empty_counts_omitted(self):
+        r = SyncResult()
+        summary = r.to_summary()
+        assert "added" not in summary
+        assert "updated" not in summary
+        assert "skipped" not in summary
+
+
+class TestSyncResultToDict:
+    def test_default(self):
+        d = SyncResult().to_dict()
+        assert d["status"] == "success"
+        assert d["added"] == 0
+        assert d["updated"] == 0
+        assert d["skipped"] == 0
+        assert d["errors"] == []
+        assert d["warnings"] == []
+
+    def test_with_values(self):
+        r = SyncResult(added=5, updated=3, status="partial", errors=["e1"])
+        d = r.to_dict()
+        assert d["added"] == 5
+        assert d["status"] == "partial"
+        assert d["errors"] == ["e1"]
+
+    def test_returns_copy(self):
+        r = SyncResult(errors=["e1"])
+        d = r.to_dict()
+        d["errors"].append("e2")
+        assert len(r.errors) == 1
+
+    def test_quality_scores_copy(self):
+        r = SyncResult(quality_scores={datetime.date(2024, 1, 1): 0.9})
+        d = r.to_dict()
+        d["quality_scores"][datetime.date(2024, 1, 2)] = 0.8
+        assert len(r.quality_scores) == 1
+
+
+class TestSyncResultMergeExpectedBases:
+    def test_merge_expected_bases(self):
+        r1 = SyncResult(expected_bases={datetime.date(2024, 1, 1): 100})
+        r2 = SyncResult(expected_bases={datetime.date(2024, 1, 2): 200})
+        r1.merge(r2)
+        assert len(r1.expected_bases) == 2
+
+    def test_merge_expected_bases_string_keys(self):
+        r1 = SyncResult(expected_bases={})
+        r2 = SyncResult(expected_bases={"20240101": 100})
+        r1.merge(r2)
+        assert datetime.date(2024, 1, 1) in r1.expected_bases
+
+
+class TestSyncResultMergeWarnings:
+    def test_merge_warnings(self):
+        r1 = SyncResult(warnings=["w1"])
+        r2 = SyncResult(warnings=["w2"])
+        r1.merge(r2)
+        assert r1.warnings == ["w1", "w2"]
+
+
+class TestISyncStrategyCleanNullValues:
+    def test_none_df(self):
+        assert ISyncStrategy._clean_null_values(None) is None
+
+    def test_empty_string(self):
+        df = pd.DataFrame({"col": ["", "hello"]})
+        result = ISyncStrategy._clean_null_values(df)
+        assert pd.isna(result.iloc[0]["col"])
+
+    def test_none_string(self):
+        df = pd.DataFrame({"col": ["None", "hello"]})
+        result = ISyncStrategy._clean_null_values(df)
+        assert pd.isna(result.iloc[0]["col"])
+
+    def test_nan_string(self):
+        df = pd.DataFrame({"col": ["nan", "hello"]})
+        result = ISyncStrategy._clean_null_values(df)
+        assert pd.isna(result.iloc[0]["col"])
+
+    def test_normal_values_preserved(self):
+        df = pd.DataFrame({"col": ["hello", "world"]})
+        result = ISyncStrategy._clean_null_values(df)
+        assert list(result["col"]) == ["hello", "world"]
+
+    def test_object_without_replace(self):
+        assert ISyncStrategy._clean_null_values(42) == 42
+
+
+class TestSyncContextConfig:
+    def test_config_default_none(self):
+        ctx = SyncContext(api="api", cache="cache")
+        assert ctx.config is None
+
+    def test_config_set(self):
+        ctx = SyncContext(api="api", cache="cache", config="cfg")
+        assert ctx.config == "cfg"

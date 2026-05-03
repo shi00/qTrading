@@ -459,3 +459,122 @@ class TestQuoteDaoSaveIndexDailybasic:
         dao = QuoteDao(MagicMock())
         result = await dao.save_index_dailybasic(pd.DataFrame())
         assert result == 0
+
+
+class TestQuoteDaoGetBulkExpectedStockCounts:
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": ["20240615", "20240614"],
+                    "expected_count": [5000, 4990],
+                }
+            )
+        )
+        result = await dao.get_bulk_expected_stock_counts("20240614", "20240615")
+        assert len(result) == 2
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_bulk_expected_stock_counts("20240614", "20240615")
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_error(self):
+        dao = QuoteDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=Exception("DB Error"))
+        result = await dao.get_bulk_expected_stock_counts("20240614", "20240615")
+        assert result == {}
+
+
+class TestQuoteDaoGetSyncQualityScore:
+    @pytest.mark.asyncio
+    async def test_with_string_date(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={datetime.date(2024, 6, 15): {"score": 80, "expected_base": 5000, "tables": {}, "issues": []}}
+        )
+        result = await dao.get_sync_quality_score("20240615")
+        assert result["score"] == 80
+
+    @pytest.mark.asyncio
+    async def test_with_date_object(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={datetime.date(2024, 6, 15): {"score": 90, "expected_base": 5000, "tables": {}, "issues": []}}
+        )
+        result = await dao.get_sync_quality_score(datetime.date(2024, 6, 15))
+        assert result["score"] == 90
+
+    @pytest.mark.asyncio
+    async def test_no_result(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_sync_quality_scores = AsyncMock(return_value={})
+        result = await dao.get_sync_quality_score("20240615")
+        assert result["score"] == 0
+
+
+class TestQuoteDaoGetBulkSyncQualityScores:
+    @pytest.mark.asyncio
+    async def test_no_expected_bases(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={})
+        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+            result = await dao.get_bulk_sync_quality_scores("20240614", "20240615")
+            assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_with_zero_expected_base(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 0})
+        dao.get_bulk_table_counts = AsyncMock(return_value={})
+        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            assert datetime.date(2024, 6, 15) in result
+            assert result[datetime.date(2024, 6, 15)]["score"] == 0
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            assert datetime.date(2024, 6, 15) in result
+            assert result[datetime.date(2024, 6, 15)]["score"] > 0
+
+    @pytest.mark.asyncio
+    async def test_with_low_frequency_tables(self):
+        dao = QuoteDao(MagicMock())
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_default_synced_tables",
+                return_value=["daily_quotes", "limit_list"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10, "limit_list": 2},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            assert result[datetime.date(2024, 6, 15)]["tables"]["limit_list"].get("exempt") is True

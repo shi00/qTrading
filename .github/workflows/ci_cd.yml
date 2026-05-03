@@ -101,7 +101,7 @@ jobs:
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
         run: |
           set -e
-          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=60
+          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
       - name: Extract Coverage Percentage
         if: always() && github.event_name == 'pull_request'
@@ -124,7 +124,7 @@ jobs:
         with:
           script: |
             const marker = '<!-- coverage-threshold-report -->';
-            const threshold = 60;
+            const threshold = 80;
             const coverage = Number(process.env.COVERAGE_PERCENT || '0');
             const passed = coverage >= threshold;
             const status = passed ? 'PASS' : 'FAIL';

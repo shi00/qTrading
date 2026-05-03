@@ -1,10 +1,15 @@
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch, MagicMock
+
+import pandas as pd
 
 from strategies.prompt_validator import (
     DataDeclaration,
     validate_prompt_declarations,
     generate_declaration_report,
+    check_multi_period_data,
+    check_field_exists,
+    check_table_has_data,
 )
 
 
@@ -64,3 +69,97 @@ class TestGenerateDeclarationReport:
         ]
         report = generate_declaration_report(decls)
         assert "❌" in report
+
+
+class TestCheckMultiPeriodData:
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_no_stock_basic(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"roe": [10.0]}))
+        mock_cm_cls.return_value = mock_cache
+        result = await check_multi_period_data("roe")
+        assert result is True
+
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_with_stock_basic(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+        )
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"roe": [10.0, 12.0]}))
+        mock_cm_cls.return_value = mock_cache
+        result = await check_multi_period_data("roe")
+        assert result is True
+
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_all_empty(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=None)
+        mock_cm_cls.return_value = mock_cache
+        result = await check_multi_period_data("roe")
+        assert result is False
+
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_exception(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(side_effect=Exception("DB error"))
+        mock_cm_cls.return_value = mock_cache
+        result = await check_multi_period_data("roe")
+        assert result is False
+
+
+class TestCheckFieldExists:
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_field_present(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"n_cashflow_act": [500.0]}))
+        mock_cm_cls.return_value = mock_cache
+        result = await check_field_exists("n_cashflow_act")
+        assert result is True
+
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_field_absent(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"other_field": [1.0]}))
+        mock_cm_cls.return_value = mock_cache
+        result = await check_field_exists("n_cashflow_act")
+        assert result is False
+
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_exception(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.get_stock_basic = AsyncMock(side_effect=Exception("DB error"))
+        mock_cm_cls.return_value = mock_cache
+        result = await check_field_exists("n_cashflow_act")
+        assert result is False
+
+
+class TestCheckTableHasData:
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_has_data(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.check_table_has_data = AsyncMock(return_value=True)
+        mock_cm_cls.return_value = mock_cache
+        result = await check_table_has_data("fina_audit")
+        assert result is True
+
+    @pytest.mark.asyncio
+    @patch("data.cache.cache_manager.CacheManager")
+    async def test_no_data(self, mock_cm_cls):
+        mock_cache = MagicMock()
+        mock_cache.check_table_has_data = AsyncMock(return_value=False)
+        mock_cm_cls.return_value = mock_cache
+        result = await check_table_has_data("fina_audit")
+        assert result is False

@@ -28,15 +28,8 @@ class TestSecurityManagerGetKey:
     @patch("utils.security_utils.os.path.exists")
     def test_load_existing_key(self, mock_exists):
         key_bytes = b"existing_key_32bytes_long!!"
-        base64.b64encode(key_bytes)
 
-        call_count = [0]
-
-        def exists_side_effect(path):
-            call_count[0] += 1
-            return call_count[0] <= 1
-
-        mock_exists.side_effect = exists_side_effect
+        mock_exists.side_effect = lambda p: p == SecurityManager.KEY_FILE
         SecurityManager._key = None
 
         with (
@@ -51,15 +44,7 @@ class TestSecurityManagerGetKey:
         key_bytes = b"backup_key_32bytes_long!!!"
         SecurityManager._key = None
 
-        call_count = [0]
-
-        def exists_side_effect(path):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return True
-            return call_count[0] == 2
-
-        mock_exists.side_effect = exists_side_effect
+        mock_exists.side_effect = lambda p: p in (SecurityManager.KEY_FILE, SecurityManager.KEY_FILE_BAK)
 
         with (
             patch.object(SecurityManager, "_load_key_file", side_effect=[Exception("corrupt"), key_bytes]),
@@ -81,15 +66,7 @@ class TestSecurityManagerGetKey:
     def test_key_file_exists_but_unreadable_no_backup(self, mock_exists):
         SecurityManager._key = None
 
-        call_count = [0]
-
-        def exists_side_effect(path):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return True
-            return call_count[0] != 2
-
-        mock_exists.side_effect = exists_side_effect
+        mock_exists.side_effect = lambda p: p == SecurityManager.KEY_FILE
 
         with patch.object(SecurityManager, "_load_key_file", side_effect=Exception("unreadable")):
             with pytest.raises(RuntimeError, match="unreadable"):
@@ -150,6 +127,7 @@ class TestSecurityManagerSaveKey:
             SecurityManager._save_key(b"test_key_32bytes_long_enough!!!")
 
     def test_save_key_cleanup_on_failure(self):
+        tmp_file = SecurityManager.KEY_FILE + ".tmp"
         with (
             patch("builtins.open", side_effect=OSError("write error")),
             patch("utils.security_utils.os.path.exists", return_value=True),
@@ -157,7 +135,7 @@ class TestSecurityManagerSaveKey:
         ):
             with pytest.raises(OSError, match="write error"):
                 SecurityManager._save_key(b"test_key_32bytes_long_enough!!!")
-            mock_remove.assert_called_once()
+            mock_remove.assert_any_call(tmp_file)
 
 
 class TestSecurityManagerCopyFile:

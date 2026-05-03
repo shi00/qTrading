@@ -133,7 +133,7 @@ class TestTushareClientGetTradeDates:
             mock_ch.get_request_max_retries.return_value = 3
             mock_ch.get_tushare_api_limit.return_value = 0
             client = TushareClient()
-            with pytest.raises(RuntimeError):
+            with pytest.raises(Exception, match="Tushare Token not set"):
                 client.get_trade_dates("20240101", "20240630")
 
     def test_success(self):

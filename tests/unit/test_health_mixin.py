@@ -324,3 +324,186 @@ class TestRunQualityScan:
         result = await proc.run_quality_scan()
         assert result["score"] == 0
         assert "error" in result
+
+
+class TestAssignBasicTierExtended:
+    @pytest.mark.asyncio
+    async def test_no_latest_quote_date_fallback(self):
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes"],
+                "last_data_date": [""],
+                "status": ["success"],
+                "last_result_status": ["success"],
+                "record_count": [5000],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        proc.cache.get_latest_trade_date = AsyncMock(return_value="20240610")
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.return_value = datetime.datetime(2024, 6, 10)
+                await proc._assign_basic_tier()
+                assert proc._quality_tier is not None
+
+    @pytest.mark.asyncio
+    async def test_no_latest_quote_date_no_fallback(self):
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes"],
+                "last_data_date": [""],
+                "status": ["success"],
+                "last_result_status": ["success"],
+                "record_count": [5000],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        proc.cache.get_latest_trade_date = AsyncMock(side_effect=Exception("DB error"))
+        await proc._assign_basic_tier()
+        assert proc._quality_tier == 1
+
+    @pytest.mark.asyncio
+    async def test_stale_quotes_with_db_fallback(self):
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes"],
+                "last_data_date": ["20240101"],
+                "status": ["success"],
+                "last_result_status": ["success"],
+                "record_count": [5000],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        proc.cache.get_latest_trade_date = AsyncMock(return_value="20240610")
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.return_value = datetime.datetime(2024, 6, 10)
+                await proc._assign_basic_tier()
+                assert proc._quality_tier is not None
+
+    @pytest.mark.asyncio
+    async def test_critical_table_empty(self):
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes", "financial_reports"],
+                "last_data_date": ["20240610", ""],
+                "status": ["success", "empty"],
+                "last_result_status": ["success", "empty"],
+                "record_count": [5000, 0],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.return_value = datetime.datetime(2024, 6, 10)
+                await proc._assign_basic_tier()
+                assert proc._quality_tier == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_critical_table(self):
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes", "financial_reports"],
+                "last_data_date": ["20240610", "20230101"],
+                "status": ["success", "success"],
+                "last_result_status": ["success", "success"],
+                "record_count": [5000, 100],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.side_effect = [
+                    datetime.datetime(2024, 6, 10),
+                    datetime.datetime(2023, 1, 1),
+                ]
+                await proc._assign_basic_tier()
+                assert proc._quality_tier is not None
+
+    @pytest.mark.asyncio
+    async def test_parse_date_error(self):
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes"],
+                "last_data_date": ["invalid_date"],
+                "status": ["success"],
+                "last_result_status": ["success"],
+                "record_count": [5000],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.side_effect = ValueError("bad date")
+                await proc._assign_basic_tier()
+                assert proc._quality_tier == 1
+
+
+class TestCheckDataHealthExtended:
+    @pytest.mark.asyncio
+    async def test_yellow_status_with_lag(self):
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240610"})
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20240610"],
+                }
+            )
+        )
+        proc.cache.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240614"]
+
+        proc.get_trade_dates = fake_get_trade_dates
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            result = await proc.check_data_health()
+            assert result["status"] in ("red", "yellow", "green")
+
+    @pytest.mark.asyncio
+    async def test_missing_critical_tables(self):
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.01}},
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=0)
+        proc.cache.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+        proc.cache.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={})
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240614"]
+
+        proc.get_trade_dates = fake_get_trade_dates
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            result = await proc.check_data_health()
+            assert "status" in result

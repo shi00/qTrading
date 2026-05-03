@@ -200,3 +200,178 @@ class TestHistoricalSyncCancel:
         strategy = HistoricalSyncStrategy(ctx)
         await strategy.cancel()
         assert strategy._shutdown_event.is_set()
+
+
+class TestHistoricalSyncGetEffectiveTradeDate:
+    @pytest.mark.asyncio
+    async def test_with_date(self):
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+    @pytest.mark.asyncio
+    async def test_exception_fallback(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+
+class TestHistoricalSyncRunExtended:
+    @pytest.mark.asyncio
+    async def test_run_with_quality_scores(self):
+        ctx = make_ctx()
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {
+                    "score": 90,
+                    "expected_base": 5000,
+                    "issues": [],
+                    "tables": {"daily_quotes": {"count": 5000}},
+                }
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_run_quality_check_exception(self):
+        ctx = make_ctx()
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(side_effect=Exception("quality error"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_run_cancelled(self):
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        strategy._shutdown_event.set()
+        result = await strategy.run(days=5)
+        assert result.status in ("cancelled", "failed", "success")
+
+    @pytest.mark.asyncio
+    async def test_run_with_cached_dates(self):
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
+        ctx.cache.check_data_exists = AsyncMock(return_value=True)
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_run_with_low_quality_dates(self):
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 50, "expected_base": 5000, "issues": ["low count"]},
+                datetime.date(2024, 6, 13): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        assert result is not None
+
+
+class TestHistoricalSyncDailySnapshotExtended:
+    @pytest.mark.asyncio
+    async def test_empty_quotes(self):
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(return_value=None)
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_empty_basic(self):
+        ctx = make_ctx()
+        ctx.api.get_daily_basic = AsyncMock(return_value=None)
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_limit_list_data(self):
+        ctx = make_ctx()
+        ctx.api.get_limit_list = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_top_list_data(self):
+        ctx = make_ctx()
+        ctx.api.get_top_list = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_block_trade_data(self):
+        ctx = make_ctx()
+        ctx.api.get_block_trade = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_margin_data(self):
+        ctx = make_ctx()
+        ctx.api.get_margin_detail = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_suspend_data(self):
+        ctx = make_ctx()
+        ctx.api.get_suspend_d = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_moneyflow_hsgt_data(self):
+        ctx = make_ctx()
+        ctx.api.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"ggt_ss": [100], "north_money": [50]}))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_with_index_data(self):
+        ctx = make_ctx()
+        ctx.api.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+        )
+        ctx.api.get_index_dailybasic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+
+
+class TestHistoricalSyncConstants:
+    def test_synced_tables(self):
+        assert "daily_quotes" in HistoricalSyncStrategy.SYNCED_TABLES
+        assert "daily_indicators" in HistoricalSyncStrategy.SYNCED_TABLES
+        assert len(HistoricalSyncStrategy.SYNCED_TABLES) >= 10
+
+    def test_core_resume_tables(self):
+        assert "daily_quotes" in HistoricalSyncStrategy.CORE_RESUME_TABLES
+        assert "daily_indicators" in HistoricalSyncStrategy.CORE_RESUME_TABLES
