@@ -426,7 +426,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     @log_async_operation(
         operation_name="sync_concepts",
-        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+        threshold_ms=PerfThreshold.GLOBAL_INIT,
     )
     async def sync_concepts(self):
         """Sync stock concepts from Tushare."""

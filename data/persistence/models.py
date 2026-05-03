@@ -330,6 +330,7 @@ class FinancialReports(Base):
 
 class IndexDaily(Base):
     __tablename__ = "index_daily"
+    __table_args__ = (Index("idx_index_daily_date_code", "trade_date", "ts_code"),)
     ts_code = Column(String, primary_key=True)
     trade_date = Column(Date, primary_key=True, index=True)
     close = Column(Float)

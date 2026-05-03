@@ -385,6 +385,7 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_daily")),
     )
     op.create_index(op.f("ix_index_daily_trade_date"), "index_daily", ["trade_date"], unique=False)
+    op.create_index("idx_index_daily_date_code", "index_daily", ["trade_date", "ts_code"])
     op.create_table(
         "index_dailybasic",
         sa.Column("ts_code", sa.String(), nullable=False),

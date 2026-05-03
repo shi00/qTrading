@@ -1,4 +1,5 @@
 import pytest
+import pandas as pd
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from data.domain_services.market_data_service import MarketDataService
@@ -107,53 +108,112 @@ class TestMarketDataServiceSafeFloat:
         assert MarketDataService._safe_float(0) == 0.0
 
 
-class TestMarketDataServiceProcessFetchResults:
-    def test_all_success(self):
-        indices_config = [("000001.SH", "home_index_sh"), ("399001.SZ", "home_index_sz")]
-        results = [
-            {"name": "上证", "value": "3000.00", "change": "+1.00%", "color": "red"},
-            {"name": "深证", "value": "10000.00", "change": "-0.50%", "color": "green"},
-            {"name": "北向", "value": "50亿", "sub": "流入", "color": "red"},
-            [{"name": "AI"}],
-        ]
-        data = MarketDataService._process_fetch_results(results, "20240614", indices_config)
-        assert data["date"] == "20240614"
-        assert len(data["indices"]) == 2
-        assert data["hsgt"]["name"] == "北向"
-        assert len(data["hot_concepts"]) == 1
+class TestMarketDataServiceGetIndicesBatch:
+    def setup_method(self):
+        MarketDataService._reset_singleton()
 
-    def test_index_exception(self):
-        indices_config = [("000001.SH", "home_index_sh")]
-        results = [
-            Exception("API error"),
-            {"name": "北向", "value": "-", "sub": "-", "color": "grey"},
-            [],
-        ]
-        data = MarketDataService._process_fetch_results(results, "20240614", indices_config)
-        assert data["indices"][0]["color"] == "grey"
+    def teardown_method(self):
+        MarketDataService._reset_singleton()
 
-    def test_hsgt_exception(self):
-        indices_config = [("000001.SH", "home_index_sh")]
-        results = [
-            {"name": "上证", "value": "3000.00", "change": "+1.00%", "color": "red"},
-            Exception("API error"),
-            [],
-        ]
-        data = MarketDataService._process_fetch_results(results, "20240614", indices_config)
-        assert data["hsgt"]["color"] == "grey"
+    def _make_svc(self):
+        with (
+            patch("data.domain_services.market_data_service.TushareClient"),
+            patch("data.domain_services.market_data_service.CacheManager") as mock_cm_cls,
+            patch("data.domain_services.market_data_service.TradeCalendarService"),
+        ):
+            mock_cache = MagicMock()
+            mock_cm_cls.return_value = mock_cache
+            svc = MarketDataService()
+            svc.cache = mock_cache
+            return svc
 
-    def test_hot_concepts_exception(self):
-        indices_config = [("000001.SH", "home_index_sh")]
-        results = [
-            {"name": "上证", "value": "3000.00", "change": "+1.00%", "color": "red"},
-            {"name": "北向", "value": "-", "sub": "-", "color": "grey"},
-            Exception("API error"),
-        ]
-        data = MarketDataService._process_fetch_results(results, "20240614", indices_config)
-        assert data["hot_concepts"] == []
+    @pytest.mark.asyncio
+    async def test_cache_hit_all_indices(self):
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH", "399001.SZ", "399006.SZ"],
+                "pct_chg": [1.5, -2.0, 0.0],
+                "close": [3000.0, 10000.0, 2000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH", "399001.SZ", "399006.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 3
+        assert result[0]["color"] == "red"
+        assert result[1]["color"] == "green"
+        assert result[2]["color"] == "red"
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_falls_back_to_api(self):
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=None)
+        api_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH", "399001.SZ"],
+                "pct_chg": [0.5, -1.0],
+                "close": [3100.0, 9500.0],
+            }
+        )
+        svc.api = MagicMock()
+        svc.api.get_index_daily = AsyncMock(return_value=api_df)
+        codes = ["000001.SH", "399001.SZ", "399006.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 3
+        assert result[0]["color"] == "red"
+        assert result[1]["color"] == "green"
+        assert result[2]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_both_miss_returns_grey(self):
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=None)
+        svc.api = MagicMock()
+        svc.api.get_index_daily = AsyncMock(return_value=None)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["color"] == "grey"
+        assert result[0]["value"] == "-"
+
+    @pytest.mark.asyncio
+    async def test_partial_data_fills_missing_with_grey(self):
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [1.0],
+                "close": [3000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH", "399001.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 2
+        assert result[0]["color"] == "red"
+        assert result[1]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_empty_cache_df_falls_back(self):
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
+        api_df = pd.DataFrame(
+            {
+                "ts_code": ["399006.SZ"],
+                "pct_chg": [3.0],
+                "close": [2100.0],
+            }
+        )
+        svc.api = MagicMock()
+        svc.api.get_index_daily = AsyncMock(return_value=api_df)
+        codes = ["399006.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["color"] == "red"
 
 
-class TestMarketDataServiceGetIndex:
+class TestMarketDataServiceFetchMarketDataIntegration:
     def setup_method(self):
         MarketDataService._reset_singleton()
 
@@ -161,59 +221,122 @@ class TestMarketDataServiceGetIndex:
         MarketDataService._reset_singleton()
 
     @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
-    async def test_cache_hit(self, mock_tc, mock_cache_cls, mock_api):
+    async def test_fetch_builds_cached_data(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
         mock_cache = MagicMock()
-        mock_cache.get_index_daily = AsyncMock(
-            return_value=MagicMock(
-                empty=False,
-                iloc=MagicMock(return_value=MagicMock(get=lambda k: {"pct_chg": 1.5, "close": 3000.0}.get(k))),
-            )
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
+        svc = MarketDataService()
+        svc.cache = mock_cache
+        svc.api = mock_tc
+
+        index_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH", "399001.SZ", "399006.SZ"],
+                "pct_chg": [1.0, -0.5, 2.0],
+                "close": [3000.0, 10000.0, 2000.0],
+            }
         )
-        mock_cache_cls.return_value = mock_cache
-        svc = MarketDataService()
-        df = MagicMock()
-        df.empty = False
-        df.iloc = [MagicMock()]
-        df.iloc[0].get = lambda k: {"pct_chg": 1.5, "close": 3000.0}.get(k)
-        mock_cache.get_index_daily = AsyncMock(return_value=df)
-        result = await svc._get_index("000001.SH", "home_index_sh", "20240614")
-        assert result["color"] == "red"
-        assert "+" in result["change"]
+        svc.cache.get_index_daily_range = AsyncMock(return_value=index_df)
+
+        hsgt_df = MagicMock()
+        hsgt_df.empty = False
+        hsgt_df.iloc = [MagicMock()]
+        hsgt_df.iloc[0].get = lambda k: 500.0 if k == "north_money" else 0
+        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=hsgt_df)
+
+        mock_news.get_hot_concepts = AsyncMock(return_value=[{"name": "AI", "change": "+3%", "color": "red"}])
+
+        with patch("data.domain_services.market_data_service.TradeCalendarService") as mock_cal_cls:
+            mock_cal = MagicMock()
+            mock_cal.get_latest_trade_date = AsyncMock(return_value=None)
+            mock_cal_cls.return_value = mock_cal
+            svc.trade_calendar = mock_cal
+
+            await svc._fetch_market_data()
+
+        assert svc._cached_data is not None
+        assert svc._cached_data["date"] is not None
+        assert len(svc._cached_data["indices"]) == 3
+        assert svc._cached_data["hsgt"] is not None
+        assert len(svc._cached_data["hot_concepts"]) == 1
 
     @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
-    async def test_negative_change(self, mock_tc, mock_cache_cls, mock_api):
+    async def test_fetch_index_exception_fills_grey(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
         mock_cache = MagicMock()
-        mock_cache_cls.return_value = mock_cache
-        df = MagicMock()
-        df.empty = False
-        df.iloc = [MagicMock()]
-        df.iloc[0].get = lambda k: {"pct_chg": -2.0, "close": 2900.0}.get(k)
-        mock_cache.get_index_daily = AsyncMock(return_value=df)
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
         svc = MarketDataService()
-        result = await svc._get_index("000001.SH", "home_index_sh", "20240614")
-        assert result["color"] == "green"
+        svc.cache = mock_cache
+        svc.api = mock_tc
+
+        svc._get_indices_batch = AsyncMock(side_effect=Exception("DB error"))
+        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        svc.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        mock_news.get_hot_concepts = AsyncMock(return_value=[])
+
+        with patch("data.domain_services.market_data_service.TradeCalendarService") as mock_cal_cls:
+            mock_cal = MagicMock()
+            mock_cal.get_latest_trade_date = AsyncMock(return_value=None)
+            mock_cal_cls.return_value = mock_cal
+            svc.trade_calendar = mock_cal
+
+            await svc._fetch_market_data()
+
+        assert svc._cached_data is not None
+        assert len(svc._cached_data["indices"]) == 3
+        assert all(idx["color"] == "grey" for idx in svc._cached_data["indices"])
 
     @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
-    async def test_empty_returns_grey(self, mock_tc, mock_cache_cls, mock_api):
+    async def test_fetch_notifies_listeners(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
         mock_cache = MagicMock()
-        mock_cache_cls.return_value = mock_cache
-        mock_cache.get_index_daily = AsyncMock(return_value=None)
-        mock_api_inst = MagicMock()
-        mock_api_inst.get_index_daily = AsyncMock(return_value=None)
-        mock_tc.return_value = mock_api_inst
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
         svc = MarketDataService()
-        svc.api = mock_api_inst
-        result = await svc._get_index("000001.SH", "home_index_sh", "20240614")
-        assert result["color"] == "grey"
+        svc.cache = mock_cache
+        svc.api = mock_tc
+
+        index_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [1.0],
+                "close": [3000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=index_df)
+        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        svc.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        mock_news.get_hot_concepts = AsyncMock(return_value=[])
+
+        listener = MagicMock()
+        svc.add_listener(listener)
+
+        with patch("data.domain_services.market_data_service.TradeCalendarService") as mock_cal_cls:
+            mock_cal = MagicMock()
+            mock_cal.get_latest_trade_date = AsyncMock(return_value=None)
+            mock_cal_cls.return_value = mock_cal
+            svc.trade_calendar = mock_cal
+
+            await svc._fetch_market_data()
+
+        listener.assert_called_once()
 
 
 class TestMarketDataServiceGetHsgt:

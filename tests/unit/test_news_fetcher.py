@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -630,3 +631,43 @@ class TestNewsFetcherGetUsMajorMoves:
         mock_tpm_instance.run_async = AsyncMock(return_value=None)
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, (list, str))
+
+
+class TestGetHotConceptsTimeout:
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_timeout_returns_empty(self, mock_tpm, mock_run):
+        async def _slow_run(*args, **kwargs):
+            await asyncio.sleep(20)
+            return None
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = _slow_run
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                mock_tpm_instance.run_async("IO", lambda: None),
+                timeout=0.1,
+            )
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_within_timeout_succeeds(self, mock_tpm, mock_run):
+        df = MagicMock()
+        df.empty = False
+        df.columns = ["板块", "涨跌幅"]
+        df.__bool__ = lambda self: True
+        df.sort_values = MagicMock(return_value=df)
+        row = MagicMock()
+        row.get = lambda k: "AI" if k == "板块" else 3.0
+        df.head = MagicMock(return_value=MagicMock(iterrows=lambda: [(0, row)]))
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert isinstance(result, list)

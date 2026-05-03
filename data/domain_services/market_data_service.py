@@ -18,7 +18,6 @@ from data.external.tushare_client import TushareClient
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -167,24 +166,34 @@ class MarketDataService:
         else:
             date = today_date.strftime("%Y%m%d")
 
-        # 构建所有任务
-        tasks = [self._get_index(code, key, date) for code, key in self.INDICES_CONFIG]
-        tasks.append(self._get_hsgt(date))
-        tasks.append(NewsFetcher.get_hot_concepts(limit=self.HOT_CONCEPTS_LIMIT))  # type: ignore
+        index_codes = [code for code, _ in self.INDICES_CONFIG]
+        index_task = self._get_indices_batch(index_codes, date)
+        hsgt_task = self._get_hsgt(date)
+        concepts_task = NewsFetcher.get_hot_concepts(limit=self.HOT_CONCEPTS_LIMIT)
 
-        # 并行执行
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(index_task, hsgt_task, concepts_task, return_exceptions=True)
 
-        # 将结果处理逻辑放入线程池，避免阻塞事件循环
-        self._cached_data = await ThreadPoolManager().run_async(
-            TaskType.CPU,
-            self._process_fetch_results,
-            results,
-            date,
-            self.INDICES_CONFIG,
+        indices = (
+            results[0]
+            if not isinstance(results[0], Exception)
+            else [MarketDataService._get_empty_index_data_static(key) for _, key in self.INDICES_CONFIG]
         )
+        if isinstance(results[0], Exception):
+            logger.warning(f"[MarketDataService] Indices batch fetch failed: {results[0]}")
+        hsgt = results[1] if not isinstance(results[1], Exception) else MarketDataService._get_empty_hsgt_data_static()
+        if isinstance(results[1], Exception):
+            logger.warning(f"[MarketDataService] HSGT fetch failed: {results[1]}")
+        hot_concepts = results[2] if not isinstance(results[2], Exception) else []
+        if isinstance(results[2], Exception):
+            logger.warning(f"[MarketDataService] Hot concepts fetch failed: {results[2]}")
 
-        # 通知 UI 更新
+        self._cached_data = {
+            "date": date,
+            "indices": indices,
+            "hsgt": hsgt,
+            "hot_concepts": hot_concepts,
+        }
+
         listener_count = len(self._listeners)
         if listener_count > 0:
             for listener in list(self._listeners):
@@ -193,57 +202,40 @@ class MarketDataService:
                 except Exception as e:
                     logger.error(f"[MarketDataService] Listener error: {e}")
 
-    @staticmethod
-    def _process_fetch_results(results: typing.Any, date: str, indices_config: typing.Any):
-        """
-        静态处理方法，可在线程中运行。
-        解析 asyncio.gather 的结果并构建最终数据字典。
-        """
-        # 处理指数结果 (前N个任务)
-        indices = []
-        for i, (code, key) in enumerate(indices_config):
-            res = results[i]
-            if isinstance(res, Exception):
-                logger.warning(f"[MarketDataService] Index {code} fetch failed: {res}")
-                indices.append(MarketDataService._get_empty_index_data_static(key))
-            else:
-                indices.append(res)
-
-        # 处理北向资金 (倒数第2个)
-        hsgt_res = results[-2]
-        hsgt = hsgt_res if not isinstance(hsgt_res, Exception) else MarketDataService._get_empty_hsgt_data_static()
-
-        # 处理热门概念 (最后1个)
-        hot_res = results[-1]
-        hot_concepts = hot_res if not isinstance(hot_res, Exception) else []
-
-        return {
-            "date": date,
-            "indices": indices,
-            "hsgt": hsgt,
-            "hot_concepts": hot_concepts,
-        }
-
-    async def _get_index(self, code: str, name_key: str, date: str) -> dict:
-        """获取指数数据 - 优先从缓存获取，缓存无数据时调用 API"""
-        df = await self.cache.get_index_daily(ts_code=code, trade_date=date)
+    async def _get_indices_batch(self, codes: list[str], date: str) -> list[dict]:
+        """批量获取指数数据 - 1次DB/API调用替代N次"""
+        code_to_key = {code: key for code, key in self.INDICES_CONFIG}
+        df = await self.cache.get_index_daily_range(codes, start_date=date, end_date=date)
 
         if df is None or df.empty:
-            df = await self.api.get_index_daily(ts_code=code, trade_date=date)
+            df = await self.api.get_index_daily(trade_date=date)
 
+        result_map: dict[str, dict] = {}
         if df is not None and not df.empty:
-            row = df.iloc[0]
-            c = self._safe_float(row.get("pct_chg"))
-            v = self._safe_float(row.get("close"))
+            for ts_code in codes:
+                row_df = df[df["ts_code"] == ts_code]
+                if row_df.empty:
+                    continue
+                row = row_df.iloc[0]
+                c = self._safe_float(row.get("pct_chg"))
+                v = self._safe_float(row.get("close"))
+                name_key = code_to_key.get(ts_code, "")
+                color = "red" if c >= 0 else "green"
+                result_map[ts_code] = {
+                    "name": I18n.get(name_key),
+                    "value": f"{v:.2f}",
+                    "change": f"{c:+.2f}%",
+                    "color": color,
+                }
 
-            color = "red" if c >= 0 else "green"
-            return {
-                "name": I18n.get(name_key),
-                "value": f"{v:.2f}",
-                "change": f"{c:+.2f}%",
-                "color": color,
-            }
-        return MarketDataService._get_empty_index_data_static(name_key)
+        indices = []
+        for code in codes:
+            if code in result_map:
+                indices.append(result_map[code])
+            else:
+                name_key = code_to_key.get(code, "")
+                indices.append(MarketDataService._get_empty_index_data_static(name_key))
+        return indices
 
     @staticmethod
     def _get_empty_index_data_static(name_key: str) -> dict:

@@ -378,8 +378,11 @@ class NewsFetcher:
                     logger.warning(f"[News] Sina Concept Boards failed: {e}")
                     return None
 
-            # Use Global IO Pool
-            df = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
+            # Use Global IO Pool with timeout to prevent hanging on unresponsive API
+            df = await asyncio.wait_for(
+                ThreadPoolManager().run_async(TaskType.IO, _fetch),
+                timeout=10.0,
+            )
 
             if df is None or df.empty:
                 return []
