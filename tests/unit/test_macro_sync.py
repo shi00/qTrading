@@ -1,0 +1,480 @@
+import pytest
+import datetime
+from unittest.mock import patch, MagicMock, AsyncMock
+import pandas as pd
+
+from data.sync.macro import MacroSyncStrategy, _parse_period
+from data.sync.base import SyncContext, SyncResult
+
+
+class TestParsePeriod:
+    def test_valid_yyyymm(self):
+        assert _parse_period("202406") == "2024-06-01"
+
+    def test_nan_returns_none(self):
+        assert _parse_period(float("nan")) is None
+
+    def test_none_returns_none(self):
+        assert _parse_period(None) is None
+
+    def test_non_yyyymm_returns_original(self):
+        assert _parse_period("2024-06-01") == "2024-06-01"
+
+    def test_short_string_returns_original(self):
+        assert _parse_period("2024") == "2024"
+
+
+class TestMacroSyncCancel:
+    @pytest.mark.asyncio
+    async def test_cancel(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        assert not strategy._cancelled
+        await strategy.cancel()
+        assert strategy._cancelled
+
+
+class TestMacroSyncGetEffectiveTradeDate:
+    @pytest.mark.asyncio
+    async def test_with_processor(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.datetime(2024, 6, 14))
+        strategy = MacroSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert result == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("test error"))
+        strategy = MacroSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+
+class TestMacroSyncMergeMacroData:
+    def test_all_none(self):
+        result = MacroSyncStrategy._merge_macro_data(None, None, None)
+        assert result is None
+
+    def test_m2_only(self):
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0], "m2_yoy": [5.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None)
+        assert result is not None
+        assert "m2" in result.columns
+
+    def test_merge_all(self):
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        df_cpi = pd.DataFrame({"period": ["202406"], "cpi": [2.0]})
+        df_ppi = pd.DataFrame({"period": ["202406"], "ppi": [1.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, df_ppi)
+        assert result is not None
+        assert "m2" in result.columns
+        assert "cpi" in result.columns
+        assert "ppi" in result.columns
+
+    def test_merge_missing_period_in_indicator(self):
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        df_cpi = pd.DataFrame({"value": [2.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, None)
+        assert result is not None
+        assert "cpi" not in result.columns
+
+    def test_merge_missing_target_col(self):
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        df_cpi = pd.DataFrame({"period": ["202406"], "other": [2.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, None)
+        assert result is not None
+
+
+class TestMacroSyncMergeIndicator:
+    def test_none_df(self):
+        df = pd.DataFrame({"period": ["202406"], "cpi": [2.0]})
+        result = MacroSyncStrategy._merge_indicator(None, df, "cpi")
+        assert result is not None
+        assert "cpi" in result.columns
+
+    def test_empty_df(self):
+        merged = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        result = MacroSyncStrategy._merge_indicator(merged, pd.DataFrame(), "cpi")
+        assert "cpi" not in result.columns
+
+    def test_none_merged(self):
+        result = MacroSyncStrategy._merge_indicator(None, None, "cpi")
+        assert result is None
+
+    def test_missing_target_col(self):
+        merged = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        df = pd.DataFrame({"period": ["202406"], "other": [2.0]})
+        result = MacroSyncStrategy._merge_indicator(merged, df, "cpi")
+        assert "cpi" not in result.columns
+
+    def test_missing_period_in_df(self):
+        merged = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        df = pd.DataFrame({"cpi": [2.0]})
+        result = MacroSyncStrategy._merge_indicator(merged, df, "cpi")
+        assert "cpi" not in result.columns
+
+
+class TestMacroSyncSyncMacroMonthly:
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100.0]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_macro_economy = AsyncMock(return_value=1)
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert result.added >= 0
+
+    @pytest.mark.asyncio
+    async def test_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(side_effect=Exception("API error"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert len(result.errors) > 0
+
+
+class TestMacroSyncSyncShiborDaily:
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "shibor": [2.0]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+            assert result.added >= 0
+
+    @pytest.mark.asyncio
+    async def test_already_up_to_date(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value="2024-06-15")
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        await strategy._sync_shibor_daily(result)
+        assert result.added == 0
+
+    @pytest.mark.asyncio
+    async def test_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(side_effect=Exception("DB error"))
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        await strategy._sync_shibor_daily(result)
+        assert len(result.errors) > 0
+
+
+class TestMacroSyncSyncIndexWeights:
+    @pytest.mark.asyncio
+    async def test_already_up_to_date(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-01")
+        ctx.cache.update_sync_status = AsyncMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        await strategy._sync_index_weights(result)
+        assert result.added == 0
+
+    @pytest.mark.asyncio
+    async def test_no_latest_date(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=1)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"index_code": ["399300.SZ"]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+
+    @pytest.mark.asyncio
+    async def test_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(side_effect=Exception("DB error"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        await strategy._sync_index_weights(result)
+        assert len(result.errors) > 0
+
+
+class TestMacroSyncRun:
+    @pytest.mark.asyncio
+    async def test_run_success(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._sync_macro_monthly = AsyncMock()
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_run_cancelled_after_monthly(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+
+        async def mock_monthly(result):
+            strategy._cancelled = True
+
+        strategy._sync_macro_monthly = mock_monthly
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_run_exception(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+
+        async def mock_monthly(result):
+            raise Exception("test error")
+
+        strategy._sync_macro_monthly = mock_monthly
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result.status == "failed"
+
+
+class TestMacroMergeIndicator:
+    def test_none_df(self):
+        result = MacroSyncStrategy._merge_indicator(None, None, "cpi")
+        assert result is None
+
+    def test_empty_df(self):
+        result = MacroSyncStrategy._merge_indicator(None, pd.DataFrame(), "cpi")
+        assert result is None
+
+    def test_missing_target_col(self):
+        df = pd.DataFrame({"period": ["202406"], "other": [1.0]})
+        result = MacroSyncStrategy._merge_indicator(None, df, "cpi")
+        assert result is None
+
+    def test_missing_period_col(self):
+        df = pd.DataFrame({"cpi": [2.1]})
+        result = MacroSyncStrategy._merge_indicator(None, df, "cpi")
+        assert result is None
+
+    def test_valid_indicator_new(self):
+        df = pd.DataFrame({"period": ["202406"], "cpi": [2.1]})
+        result = MacroSyncStrategy._merge_indicator(None, df, "cpi")
+        assert result is not None
+        assert "cpi" in result.columns
+
+    def test_valid_indicator_merge(self):
+        merged = pd.DataFrame({"period": ["202406"], "m2": [100]})
+        df_cpi = pd.DataFrame({"period": ["202406"], "cpi": [2.1]})
+        result = MacroSyncStrategy._merge_indicator(merged, df_cpi, "cpi")
+        assert "m2" in result.columns
+        assert "cpi" in result.columns
+
+
+class TestMacroMergeMacroData:
+    @patch("data.sync.macro.MacroDao")
+    def test_all_none(self, mock_dao):
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        result = MacroSyncStrategy._merge_macro_data(None, None, None)
+        assert result is None
+
+    @patch("data.sync.macro.MacroDao")
+    def test_m2_only(self, mock_dao):
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100], "m2_yoy": [5.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None)
+        assert result is not None
+        assert "m2" in result.columns
+
+    @patch("data.sync.macro.MacroDao")
+    def test_merge_all(self, mock_dao):
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100], "m2_yoy": [5.0]})
+        df_cpi = pd.DataFrame({"period": ["202406"], "cpi": [2.1]})
+        df_ppi = pd.DataFrame({"period": ["202406"], "ppi": [-1.5]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, df_ppi)
+        assert result is not None
+        assert "m2" in result.columns
+        assert "cpi" in result.columns
+        assert "ppi" in result.columns
+
+    @patch("data.sync.macro.MacroDao")
+    def test_no_period_column(self, mock_dao):
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        df_m2 = pd.DataFrame({"m2": [100]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None)
+        assert result is None
+
+
+class TestMacroSyncStrategyRun:
+    @pytest.mark.asyncio
+    @patch("data.sync.macro.MacroDao")
+    async def test_run_cancelled_after_monthly(self, mock_dao):
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._cancelled = True
+        mock_dao_instance = MagicMock()
+        mock_dao_instance.get_macro_latest_date = AsyncMock(return_value=None)
+        mock_dao_instance.save_macro_economy = AsyncMock(return_value=0)
+        strategy.dao = mock_dao_instance
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(return_value=None)
+        result = await strategy.run()
+        assert isinstance(result, SyncResult)
+
+    @pytest.mark.asyncio
+    @patch("data.sync.macro.MacroDao")
+    async def test_run_exception(self, mock_dao):
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        mock_dao_instance = MagicMock()
+        mock_dao_instance.get_macro_latest_date = AsyncMock(return_value=None)
+        mock_dao_instance.save_macro_economy = AsyncMock(return_value=0)
+        mock_dao_instance.get_shibor_latest_date = AsyncMock(side_effect=RuntimeError("fatal db error"))
+        strategy.dao = mock_dao_instance
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(return_value=None)
+        ctx.api.get_shibor = AsyncMock(side_effect=RuntimeError("fatal db error"))
+        result = await strategy.run()
+        assert result.status == "failed" or len(result.errors) > 0
+
+
+class TestMacroSyncStrategySyncIndexWeights:
+    @pytest.mark.asyncio
+    @patch("data.sync.macro.MacroDao")
+    async def test_index_weights_already_uptodate(self, mock_dao):
+        import datetime
+
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        today = datetime.date(2024, 6, 15)
+        strategy._get_effective_trade_date = AsyncMock(return_value=today)
+        mock_market_dao = MagicMock()
+        mock_market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-10")
+        ctx.cache.market_dao = mock_market_dao
+        result = SyncResult()
+        await strategy._sync_index_weights(result)
+        assert result.added == 0
+
+
+class TestMacroSyncStrategySyncShibor:
+    @pytest.mark.asyncio
+    @patch("data.sync.macro.MacroDao")
+    async def test_shibor_already_uptodate(self, mock_dao):
+        import datetime
+
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        mock_dao_instance = MagicMock()
+        today = datetime.date(2024, 6, 15)
+        mock_dao_instance.get_shibor_latest_date = AsyncMock(return_value="20240616")
+        strategy.dao = mock_dao_instance
+        strategy._get_effective_trade_date = AsyncMock(return_value=today)
+        result = SyncResult()
+        await strategy._sync_shibor_daily(result)
+        assert len(result.errors) == 0
+
+    @pytest.mark.asyncio
+    @patch("utils.config_handler.ConfigHandler")
+    @patch("data.sync.macro.MacroDao")
+    async def test_shibor_no_latest(self, mock_dao, mock_ch):
+        import datetime
+
+        mock_ch.get_init_history_years.return_value = 1
+        ctx = MagicMock(spec=SyncContext)
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        mock_dao_instance = MagicMock()
+        mock_dao_instance.get_shibor_latest_date = AsyncMock(return_value=None)
+        mock_dao_instance.save_shibor_daily = AsyncMock(return_value=10)
+        strategy.dao = mock_dao_instance
+        today = datetime.date(2024, 6, 15)
+        strategy._get_effective_trade_date = AsyncMock(return_value=today)
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240615"], "on": [2.0]}))
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 1)])
+        result = SyncResult()
+        await strategy._sync_shibor_daily(result)
+        assert result.added == 10

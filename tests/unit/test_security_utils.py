@@ -1,57 +1,177 @@
 import base64
-
 import pytest
+from unittest.mock import patch, MagicMock
 
-from utils.security_utils import DecryptionError, SecurityManager
+from utils.security_utils import SecurityManager, DecryptionError
 
 
-class TestEncryptSuccess:
-    """SecurityManager.encrypt_data 正常路径"""
-
-    def test_encrypt_returns_ciphertext_on_success(self):
+class TestSecurityManagerGetKey:
+    def setup_method(self):
         SecurityManager._key = None
-        result = SecurityManager.encrypt_data("hello")
-        assert isinstance(result, str) and len(result) > 0
 
-    def test_encrypt_empty_string_returns_empty(self):
+    def test_cached_key_returned_immediately(self):
+        SecurityManager._key = b"cached_key_32bytes_long_enough!!"
+        result = SecurityManager.get_key()
+        assert result == b"cached_key_32bytes_long_enough!!"
+
+    @patch("utils.security_utils.os.path.exists")
+    @patch("utils.security_utils.AESGCM")
+    def test_generate_new_key_when_no_files(self, mock_aesgcm, mock_exists):
+        mock_exists.side_effect = lambda p: False
+        mock_aesgcm.generate_key.return_value = b"new_key_32bytes_generated!"
+        SecurityManager._key = None
+
+        with patch.object(SecurityManager, "_save_key"):
+            result = SecurityManager.get_key()
+            assert result == b"new_key_32bytes_generated!"
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_load_existing_key(self, mock_exists):
+        key_bytes = b"existing_key_32bytes_long!!"
+        base64.b64encode(key_bytes)
+
+        call_count = [0]
+
+        def exists_side_effect(path):
+            call_count[0] += 1
+            return call_count[0] <= 1
+
+        mock_exists.side_effect = exists_side_effect
+        SecurityManager._key = None
+
+        with (
+            patch.object(SecurityManager, "_load_key_file", return_value=key_bytes),
+            patch.object(SecurityManager, "_copy_file"),
+        ):
+            result = SecurityManager.get_key()
+            assert result == key_bytes
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_corrupt_key_recovers_from_backup(self, mock_exists):
+        key_bytes = b"backup_key_32bytes_long!!!"
+        SecurityManager._key = None
+
+        call_count = [0]
+
+        def exists_side_effect(path):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return True
+            return call_count[0] == 2
+
+        mock_exists.side_effect = exists_side_effect
+
+        with (
+            patch.object(SecurityManager, "_load_key_file", side_effect=[Exception("corrupt"), key_bytes]),
+            patch.object(SecurityManager, "_copy_file"),
+        ):
+            result = SecurityManager.get_key()
+            assert result == key_bytes
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_both_keys_corrupt_raises(self, mock_exists):
+        SecurityManager._key = None
+        mock_exists.return_value = True
+
+        with patch.object(SecurityManager, "_load_key_file", side_effect=Exception("corrupt")):
+            with pytest.raises(RuntimeError, match="CRITICAL"):
+                SecurityManager.get_key()
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_key_file_exists_but_unreadable_no_backup(self, mock_exists):
+        SecurityManager._key = None
+
+        call_count = [0]
+
+        def exists_side_effect(path):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return True
+            return call_count[0] != 2
+
+        mock_exists.side_effect = exists_side_effect
+
+        with patch.object(SecurityManager, "_load_key_file", side_effect=Exception("unreadable")):
+            with pytest.raises(RuntimeError, match="unreadable"):
+                SecurityManager.get_key()
+
+
+class TestSecurityManagerEncryptDecrypt:
+    def setup_method(self):
+        SecurityManager._key = None
+
+    def test_encrypt_empty_string(self):
         result = SecurityManager.encrypt_data("")
         assert result == ""
 
-
-class TestEncryptFailure:
-    """SecurityManager.encrypt_data 异常路径"""
-
-    def test_encrypt_with_invalid_key_raises(self):
-        from unittest.mock import patch
-
-        with patch.object(SecurityManager, "get_key", return_value=b"short"):
-            with pytest.raises(DecryptionError):
-                SecurityManager.encrypt_data("test_data")
-
-
-class TestDecryptSuccess:
-    """SecurityManager.decrypt_data 正常路径"""
-
-    def test_decrypt_empty_string_returns_empty(self):
+    def test_decrypt_empty_string(self):
         result = SecurityManager.decrypt_data("")
         assert result == ""
 
     def test_encrypt_decrypt_roundtrip(self):
-        SecurityManager._key = None
-        plaintext = "test_roundtrip_测试中文"
-        encrypted = SecurityManager.encrypt_data(plaintext)
-        decrypted = SecurityManager.decrypt_data(encrypted)
-        assert decrypted == plaintext
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+        real_key = AESGCM.generate_key(bit_length=256)
+        SecurityManager._key = real_key
 
-class TestDecryptFailure:
-    """SecurityManager.decrypt_data 异常路径"""
+        with patch.object(SecurityManager, "get_key", return_value=real_key):
+            encrypted = SecurityManager.encrypt_data("hello world")
+            decrypted = SecurityManager.decrypt_data(encrypted)
+            assert decrypted == "hello world"
 
-    def test_decrypt_corrupted_data_raises(self):
-        with pytest.raises(DecryptionError):
-            SecurityManager.decrypt_data("not_valid_base64!!!")
+    def test_decrypt_invalid_base64(self):
+        SecurityManager._key = b"x" * 32
+        with pytest.raises(DecryptionError, match="Invalid Base64"):
+            SecurityManager.decrypt_data("!!!not-base64!!!")
 
-    def test_decrypt_too_short_data_raises(self):
-        short_data = base64.b64encode(b"short").decode("utf-8")
-        with pytest.raises(DecryptionError):
+    def test_decrypt_data_too_short(self):
+        SecurityManager._key = b"x" * 32
+        short_data = base64.b64encode(b"short").decode()
+        with pytest.raises(DecryptionError, match="too short"):
             SecurityManager.decrypt_data(short_data)
+
+    def test_encrypt_failure_raises_decryption_error(self):
+        SecurityManager._key = b"x" * 32
+        with patch.object(SecurityManager, "get_key", side_effect=Exception("key error")):
+            with pytest.raises(DecryptionError, match="Encryption failed"):
+                SecurityManager.encrypt_data("test")
+
+
+class TestSecurityManagerSaveKey:
+    def test_save_key_atomic_write(self):
+        SecurityManager._key = None
+        with (
+            patch("builtins.open", MagicMock()),
+            patch("utils.security_utils.os.replace"),
+            patch("utils.security_utils.os.fsync"),
+            patch.object(SecurityManager, "_copy_file"),
+            patch("utils.security_utils.os.path.exists", return_value=False),
+        ):
+            SecurityManager._save_key(b"test_key_32bytes_long_enough!!!")
+
+    def test_save_key_cleanup_on_failure(self):
+        with (
+            patch("builtins.open", side_effect=OSError("write error")),
+            patch("utils.security_utils.os.path.exists", return_value=True),
+            patch("utils.security_utils.os.remove") as mock_remove,
+        ):
+            with pytest.raises(OSError, match="write error"):
+                SecurityManager._save_key(b"test_key_32bytes_long_enough!!!")
+            mock_remove.assert_called_once()
+
+
+class TestSecurityManagerCopyFile:
+    def test_copy_file_success(self):
+        with patch("utils.security_utils.shutil.copy2"):
+            SecurityManager._copy_file("/src", "/dst")
+
+    def test_copy_file_failure_logs_warning(self):
+        with patch("utils.security_utils.shutil.copy2", side_effect=OSError("copy error")):
+            SecurityManager._copy_file("/src", "/dst")
+
+
+class TestDecryptionError:
+    def test_is_exception(self):
+        err = DecryptionError("test")
+        assert isinstance(err, Exception)
+        assert str(err) == "test"

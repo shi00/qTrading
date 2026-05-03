@@ -8,7 +8,7 @@ from unittest.mock import patch
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.logger import get_logger, setup_logging
+from utils.logger import get_logger, setup_logging, update_log_level
 
 
 class TestLogger(unittest.TestCase):
@@ -105,3 +105,56 @@ class TestLogger(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGetLogger:
+    def test_get_root_logger(self):
+        logger = get_logger()
+        assert logger is not None
+
+    def test_get_named_logger(self):
+        logger = get_logger("test_module")
+        assert logger.name == "test_module"
+
+
+class TestSetupLoggingNoisyLibs:
+    def test_noisy_libs_suppressed(self):
+        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+            setup_logging()
+        noisy_libs = ["urllib3", "requests", "flet", "apscheduler"]
+        for lib in noisy_libs:
+            assert logging.getLogger(lib).level >= logging.WARNING
+
+
+class TestUpdateLogLevel:
+    def setup_method(self):
+        self.root_logger = logging.getLogger()
+        self.original_handlers = self.root_logger.handlers[:]
+        self.root_logger.handlers = []
+
+    def teardown_method(self):
+        self.root_logger.handlers = self.original_handlers
+
+    def test_update_to_debug(self):
+        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+            setup_logging()
+        update_log_level("DEBUG")
+        assert logging.getLogger().level == logging.DEBUG
+
+    def test_update_to_warning(self):
+        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+            setup_logging()
+        update_log_level("WARNING")
+        assert logging.getLogger().level == logging.WARNING
+
+    def test_update_to_error(self):
+        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+            setup_logging()
+        update_log_level("ERROR")
+        assert logging.getLogger().level == logging.ERROR
+
+    def test_update_unknown_defaults_to_info(self):
+        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+            setup_logging()
+        update_log_level("UNKNOWN_LEVEL")
+        assert logging.getLogger().level == logging.INFO

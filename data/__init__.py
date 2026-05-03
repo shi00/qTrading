@@ -12,7 +12,17 @@ Data layer - 数据层
 - mixins: Mixin 类
 """
 
-from data.cache.cache_manager import CacheManager
-from data.data_processor import DataProcessor
+
+def __getattr__(name):
+    if name == "CacheManager":
+        from data.cache.cache_manager import CacheManager
+
+        return CacheManager
+    if name == "DataProcessor":
+        from data.data_processor import DataProcessor
+
+        return DataProcessor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = ["CacheManager", "DataProcessor"]

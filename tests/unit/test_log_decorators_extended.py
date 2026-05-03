@@ -14,11 +14,14 @@ import logging
 
 import pandas as pd
 import pytest
+from unittest.mock import patch
 
 from utils.log_decorators import (
     AsyncOperationLogger,
     log_async_operation,
     track_performance,
+    log_ui_action,
+    UILogger,
 )
 from utils.sanitizers import DataSanitizer
 
@@ -252,3 +255,46 @@ class TestAsyncOperationLogger:
         assert "[test_error] failed" in log_capture.text
         assert "RuntimeError" in log_capture.text
         assert 'attempts": 3' in log_capture.text
+
+
+class TestLogUiAction:
+    def test_sync_function(self):
+        @log_ui_action("TestComponent", "Click", "TestTarget")
+        def my_func():
+            return 42
+
+        with patch.object(UILogger._logger, "info"):
+            result = my_func()
+            assert result == 42
+
+    @pytest.mark.asyncio
+    async def test_async_function(self):
+        @log_ui_action("TestComponent", "Click", "TestTarget")
+        async def my_async_func():
+            return 99
+
+        with patch.object(UILogger._logger, "info"):
+            result = await my_async_func()
+            assert result == 99
+
+
+class TestUILogger:
+    def test_log_action_basic(self):
+        with patch.object(UILogger._logger, "info") as mock_info:
+            UILogger.log_action("Button", "Click")
+            mock_info.assert_called_once()
+            msg = mock_info.call_args[0][0]
+            assert "Button" in msg
+            assert "Click" in msg
+
+    def test_log_action_with_target(self):
+        with patch.object(UILogger._logger, "info") as mock_info:
+            UILogger.log_action("Button", "Click", "Submit")
+            msg = mock_info.call_args[0][0]
+            assert "target=Submit" in msg
+
+    def test_log_action_with_details(self):
+        with patch.object(UILogger._logger, "info") as mock_info:
+            UILogger.log_action("Button", "Click", details="extra info")
+            msg = mock_info.call_args[0][0]
+            assert "extra info" in msg
