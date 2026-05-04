@@ -2,9 +2,10 @@ import functools
 import logging
 
 import pandas as pd
+import sqlalchemy as sa
 
 from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
-from data.persistence.models import ScreeningHistory, get_model_columns
+from data.persistence.models import Base, ScreeningHistory, get_model_columns
 
 from .base_dao import BaseDao
 
@@ -230,8 +231,6 @@ class ScreenerDao(BaseDao):
         review_status: str | None = None,
     ):
         """Update review metrics and advance review_status according to available horizons."""
-        from data.persistence.models import Base
-
         effective_status = review_status
         if effective_status is None:
             effective_status = REVIEW_STATUS_COMPLETED if t5_pct is not None else REVIEW_STATUS_T1_DONE
@@ -240,8 +239,6 @@ class ScreenerDao(BaseDao):
         if table is None:
             logger.error("[ScreenerDao] Table screening_history not found in SQLAlchemy metadata.")
             return
-
-        import sqlalchemy as sa
 
         stmt = (
             sa.update(table)
