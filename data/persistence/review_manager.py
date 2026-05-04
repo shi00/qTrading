@@ -100,8 +100,7 @@ class ReviewManager:
                 if t0_row.empty:
                     continue
 
-                t0_idx = df_quotes.index.get_loc(t0_row.index[0])
-
+                t0_idx = int(df_quotes.index.get_loc(t0_row.index[0]))
                 t1_pct: float | None = None
                 t1_price: float | None = None
                 t5_pct: float | None = None

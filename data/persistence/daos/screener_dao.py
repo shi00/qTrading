@@ -110,7 +110,7 @@ class ScreenerDao(BaseDao):
         if df is not None and not df.empty:
             val = df["max_td"].iloc[0]
             if val is not None and not (isinstance(val, float) and val != val):
-                return val
+                return str(val)
         return None  # type: ignore
 
     # --- Screening Data Fetch for Logic ---
