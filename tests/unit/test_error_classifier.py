@@ -372,3 +372,36 @@ class TestClassifySeverityIntegration:
 
         source = inspect.getsource(TaskManager)
         assert "severity" in source, "TaskManager should reference severity in error handling"
+
+
+class TestClassifyErrorDBTypeMatching:
+    @patch("ui.i18n.I18n")
+    def test_asyncpg_invalid_password(self, mock_i18n_cls):
+        mock_i18n_cls.get.return_value = "认证失败"
+        import asyncpg
+
+        result = classify_error(asyncpg.InvalidPasswordError("bad password"), context="db")
+        assert result["code"] == "auth"
+
+    @patch("ui.i18n.I18n")
+    def test_asyncpg_invalid_catalog_name(self, mock_i18n_cls):
+        mock_i18n_cls.get.return_value = "数据库不存在"
+        import asyncpg
+
+        result = classify_error(asyncpg.InvalidCatalogNameError("no db"), context="db")
+        assert result["code"] == "not_found"
+
+    @patch("ui.i18n.I18n")
+    def test_asyncpg_type_takes_priority_over_string(self, mock_i18n_cls):
+        mock_i18n_cls.get.return_value = "认证失败"
+        import asyncpg
+
+        exc = asyncpg.InvalidPasswordError("bad password")
+        result = classify_error(exc, context="db")
+        assert result["code"] == "auth"
+
+    @patch("ui.i18n.I18n")
+    def test_string_fallback_still_works_without_asyncpg_type(self, mock_i18n_cls):
+        mock_i18n_cls.get.return_value = "认证失败"
+        result = classify_error(Exception("password authentication failed"), context="db")
+        assert result["code"] == "auth"

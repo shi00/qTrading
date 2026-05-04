@@ -199,3 +199,50 @@ class TestDatabaseMigratorAlembicUpgrade:
                 mock_command.stamp.assert_called_once()
                 call_args = mock_command.stamp.call_args
                 assert call_args[0][1] == "root_rev"
+
+
+class TestDatabaseMigratorGetRevision:
+    @pytest.mark.asyncio
+    async def test_get_current_revision_returns_revision(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+
+        def _sync_get_rev(c):
+            return "abc12345"
+
+        mock_conn.run_sync = AsyncMock(return_value="abc12345")
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect = MagicMock(return_value=mock_conn)
+
+        result = await DatabaseMigrator._get_current_revision(mock_engine)
+        assert result == "abc12345"
+
+    @pytest.mark.asyncio
+    async def test_get_current_revision_returns_none_on_error(self):
+        mock_engine = MagicMock()
+        mock_engine.connect = MagicMock(side_effect=Exception("connection error"))
+
+        result = await DatabaseMigrator._get_current_revision(mock_engine)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_init_db_logs_revision_after_upgrade(self):
+        mock_engine = _make_engine(has_alembic=False, has_old_schema=False)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=None)
+
+            with (
+                patch("data.persistence.db_migrator.command"),
+                patch("data.persistence.db_migrator.ScriptDirectory"),
+                patch("data.persistence.db_migrator.Config"),
+                patch.object(DatabaseMigrator, "_get_current_revision", new_callable=AsyncMock, return_value="rev_xyz"),
+            ):
+                with patch("data.persistence.db_migrator.logger") as mock_logger:
+                    await DatabaseMigrator.init_db(mock_engine)
+                    mock_logger.info.assert_called()
+                    log_msg = mock_logger.info.call_args[0][0]
+                    assert "rev_xyz" in log_msg

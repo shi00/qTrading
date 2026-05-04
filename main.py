@@ -13,7 +13,7 @@ from ui.views.onboarding_wizard import OnboardingWizard
 from utils.config_handler import ConfigHandler
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
-from utils.scheduler_service import scheduler
+from utils.scheduler_service import SchedulerService
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ async def main(page: ft.Page):
             show_toast(I18n.get("error_db_init_failed", default=f"TaskManager 初始化失败: {e}"), "error")
             return
 
-        scheduler.start()
+        SchedulerService().start()
 
         from ui.app_layout import AppLayout
 

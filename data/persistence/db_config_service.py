@@ -6,6 +6,7 @@ Provides database connection testing, creation, and configuration management.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import quote_plus, unquote_plus, urlparse
@@ -238,7 +239,10 @@ class DatabaseConfigService:
                 timeout=cls.CONNECTION_TIMEOUT,
             )
 
-            await conn.execute(f'CREATE DATABASE "{database}"')
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", database):
+                return False, f"Invalid database name: '{database}'"
+            safe_name = database.replace('"', '""')
+            await conn.execute(f'CREATE DATABASE "{safe_name}"')
             await conn.close()
 
             logger.info(f"Database '{database}' created successfully")

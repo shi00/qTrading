@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import sqlalchemy as sa
 
@@ -434,3 +434,83 @@ class TestExecuteSql:
         dm = _make_dm()
         result = dm.execute_sql("REVOKE ALL ON stock_basic FROM user")
         assert result["success"] is False
+
+
+class TestDatabaseConfigServiceSQLInjection:
+    @pytest.mark.asyncio
+    async def test_create_database_rejects_invalid_name_semicolon(self):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            mock_conn = AsyncMock()
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            mock_connect.return_value = mock_conn
+            ok, msg = await DatabaseConfigService.create_database(
+                "localhost", 5432, "user", "pass", "test; DROP TABLE stock_basic"
+            )
+            assert ok is False
+            assert "Invalid" in msg
+
+    @pytest.mark.asyncio
+    async def test_create_database_rejects_invalid_name_dash(self):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            mock_conn = AsyncMock()
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            mock_connect.return_value = mock_conn
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "test-db")
+            assert ok is False
+            assert "Invalid" in msg
+
+    @pytest.mark.asyncio
+    async def test_create_database_rejects_invalid_name_space(self):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            mock_conn = AsyncMock()
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            mock_connect.return_value = mock_conn
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "test db")
+            assert ok is False
+            assert "Invalid" in msg
+
+    @pytest.mark.asyncio
+    async def test_create_database_rejects_invalid_name_starts_with_digit(self):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            mock_conn = AsyncMock()
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            mock_connect.return_value = mock_conn
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "1test")
+            assert ok is False
+            assert "Invalid" in msg
+
+    @pytest.mark.asyncio
+    async def test_create_database_accepts_valid_name(self):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            mock_conn = AsyncMock()
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            mock_connect.return_value = mock_conn
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "astock")
+            assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_create_database_accepts_underscore_name(self):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            mock_conn = AsyncMock()
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            mock_connect.return_value = mock_conn
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "my_database_v2")
+            assert ok is True

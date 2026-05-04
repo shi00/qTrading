@@ -51,23 +51,14 @@ TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
 TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
 TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD")
 if not TEST_DB_PASSWORD:
-    # Try to extract password from .env DATABASE_URL for local dev consistency
-    _env_file = os.path.join(PROJECT_ROOT, ".env")
-    if os.path.exists(_env_file):
-        with open(_env_file, encoding="utf-8") as _f:
-            for _line in _f:
-                if _line.startswith("DATABASE_URL="):
-                    try:
-                        from urllib.parse import urlparse
+    TEST_DB_PASSWORD = "astock_test_local_2024"
+    import warnings
 
-                        _parsed = urlparse(_line.split("=", 1)[1].strip())
-                        if _parsed.password:
-                            TEST_DB_PASSWORD = _parsed.password
-                    except Exception:
-                        pass
-                    break
-    if not TEST_DB_PASSWORD:
-        TEST_DB_PASSWORD = "astock_test_local_2024"
+    warnings.warn(
+        "Using default test DB password. Set TEST_DB_PASSWORD env var for production CI.",
+        UserWarning,
+        stacklevel=2,
+    )
 TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "test_astock")
 if not TEST_DB_NAME.startswith("test_"):
     raise ValueError(f"TEST_DB_NAME must start with 'test_' for safety, got: {TEST_DB_NAME!r}")

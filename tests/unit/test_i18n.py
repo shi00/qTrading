@@ -431,3 +431,33 @@ class TestI18nReExport:
         mod = importlib.import_module("ui.i18n")
         assert hasattr(mod, "classify_error")
         assert callable(mod.classify_error)
+
+
+class TestSchedulerI18nKeys:
+    def test_doubao_i18n_keys_exist_in_zh_cn(self):
+        I18n._locale = "zh_CN"
+        I18n._initialized = False
+        I18n._strings_cache = {}
+        keys = [
+            "sched_doubao_clear_history",
+            "sched_doubao_task_name",
+            "sched_doubao_task_type",
+            "sched_doubao_done",
+        ]
+        for key in keys:
+            val = I18n.get(key)
+            assert val != key, f"I18n key '{key}' should have a zh_CN translation"
+
+    def test_doubao_i18n_keys_exist_in_en_us(self):
+        I18n._locale = "en_US"
+        I18n._initialized = False
+        I18n._strings_cache = {}
+        keys = [
+            "sched_doubao_clear_history",
+            "sched_doubao_task_name",
+            "sched_doubao_task_type",
+            "sched_doubao_done",
+        ]
+        for key in keys:
+            val = I18n.get(key)
+            assert val != key, f"I18n key '{key}' should have an en_US translation"

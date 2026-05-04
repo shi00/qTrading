@@ -36,6 +36,7 @@ class ScreenerDao(BaseDao):
         return await self._read_db(sql, p)
 
     async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
+        effective_limit = limit or 30
         sql = """
             SELECT run_id, trade_date, strategy_name, COUNT(*) as cnt
             FROM screening_history
@@ -45,7 +46,7 @@ class ScreenerDao(BaseDao):
         """
         return await self._read_db(
             sql,
-            ((limit or 30) * 5, offset),
+            (effective_limit, offset),
         )
 
     async def get_history_records(
@@ -107,74 +108,14 @@ class ScreenerDao(BaseDao):
     async def _get_latest_closed_trade_date(self) -> str:
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
-            return df["max_td"].iloc[0]
+            val = df["max_td"].iloc[0]
+            if val is not None and not (isinstance(val, float) and val != val):
+                return val
         return None  # type: ignore
 
     # --- Screening Data Fetch for Logic ---
-    async def get_screening_data(self, trade_date: str | None = None):
-        if not trade_date:
-            trade_date = await self._get_latest_closed_trade_date()
-
-        sql = """
-              SELECT b.ts_code,
-                     b.name,
-                     b.industry,
-                     b.list_date,
-                     b.list_status,
-                     q.trade_date,
-                     q.close,
-                     q.pct_chg,
-                     q.vol,
-                     q.amount,
-                     i.pe_ttm,
-                     i.pb,
-                     i.ps_ttm,
-                     i.dv_ttm,
-                     i.total_mv,
-                     i.circ_mv,
-                     i.turnover_rate,
-                     f.roe,
-                     f.grossprofit_margin,
-                     f.debt_to_assets,
-                     f.or_yoy,
-                     f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
-               FROM stock_basic b
-                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
-                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
-                        LEFT JOIN (SELECT f_inner.ts_code,
-                                          f_inner.roe,
-                                          f_inner.grossprofit_margin,
-                                          f_inner.debt_to_assets,
-                                          f_inner.or_yoy,
-                                          f_inner.netprofit_yoy
-                                   FROM (SELECT ts_code,
-                                                roe,
-                                                grossprofit_margin,
-                                                debt_to_assets,
-                                                or_yoy,
-                                                netprofit_yoy,
-                                                ROW_NUMBER() OVER (
-                                                    PARTITION BY ts_code
-                                                    ORDER BY ann_date DESC, end_date DESC
-                                                ) AS rn
-                                         FROM financial_reports
-                                         WHERE ann_date <= $3) f_inner
-                                   WHERE f_inner.rn = 1) f
-                                  ON b.ts_code = f.ts_code
-                        LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
-               WHERE q.close IS NOT NULL
-                 AND b.list_status = 'L'
-                 AND b.list_date <= $4
-                 AND (b.delist_date IS NULL OR b.delist_date > $5)
-              """
-        return await self._read_db(sql, (trade_date, trade_date, trade_date, trade_date, trade_date, trade_date))
-
-    async def get_fundamental_screening_data(self, trade_date: str | None = None):
-        if not trade_date:
-            trade_date = await self._get_latest_closed_trade_date()
-
-        sql = """
+    def _build_screening_sql(self, *, require_close: bool = True) -> str:
+        base_sql = """
               SELECT b.ts_code,
                      b.name,
                      b.industry,
@@ -226,7 +167,30 @@ class ScreenerDao(BaseDao):
                  AND b.list_date <= $4
                  AND (b.delist_date IS NULL OR b.delist_date > $5)
               """
-        return await self._read_db(sql, (trade_date, trade_date, trade_date, trade_date, trade_date, trade_date))
+        if require_close:
+            base_sql = base_sql.replace(
+                "WHERE b.list_status = 'L'",
+                "WHERE q.close IS NOT NULL\n                 AND b.list_status = 'L'",
+            )
+        return base_sql
+
+    async def get_screening_data(self, trade_date: str | None = None):
+        if not trade_date:
+            trade_date = await self._get_latest_closed_trade_date()
+        if not trade_date:
+            logger.warning("[ScreenerDao] No trade_date available for screening data query")
+            return pd.DataFrame()
+        sql = self._build_screening_sql(require_close=True)
+        return await self._read_db(sql, (trade_date,) * 6)
+
+    async def get_fundamental_screening_data(self, trade_date: str | None = None):
+        if not trade_date:
+            trade_date = await self._get_latest_closed_trade_date()
+        if not trade_date:
+            logger.warning("[ScreenerDao] No trade_date available for fundamental screening data query")
+            return pd.DataFrame()
+        sql = self._build_screening_sql(require_close=False)
+        return await self._read_db(sql, (trade_date,) * 6)
 
     # --- Review Manager Methods ---
 

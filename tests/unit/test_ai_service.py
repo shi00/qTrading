@@ -368,7 +368,7 @@ class TestAIServiceBuildLiteLLMParamsProviderPrefix:
 
 class TestAIServiceParseNewsResult:
     @patch("services.ai_service.ConfigHandler")
-    def test_with_l1_l2(self, mock_ch):
+    def test_with_l1_and_l2_codes(self, mock_ch):
         mock_ch.get_ai_provider.return_value = "cloud"
         mock_ch.get_llm_config.return_value = {
             "api_key": "key",
@@ -380,8 +380,13 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        result = svc._parse_news_result({"category_L1": "金融", "category_L2": "贵金属"})
-        assert result["category"] == "贵金属"
+        with patch("ui.i18n.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, default=None: {
+                "news_l1_finance": "金融核心",
+                "news_l2_precious_metals": "贵金属",
+            }.get(key, default if default is not None else key)
+            result = svc._parse_news_result({"category_L1": "finance", "category_L2": "precious_metals"})
+        assert result["category"] == "金融核心-贵金属"
 
     @patch("services.ai_service.ConfigHandler")
     def test_with_l1_only(self, mock_ch):
@@ -396,8 +401,12 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        result = svc._parse_news_result({"category_L1": "金融"})
-        assert result["category"] == "金融"
+        with patch("ui.i18n.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, default=None: {
+                "news_l1_finance": "金融核心",
+            }.get(key, default if default is not None else key)
+            result = svc._parse_news_result({"category_L1": "finance"})
+        assert result["category"] == "金融核心"
 
     @patch("services.ai_service.ConfigHandler")
     def test_defaults_emoji_sentiment(self, mock_ch):
@@ -412,9 +421,29 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        result = svc._parse_news_result({"category_L1": "Tech"})
+        with patch("ui.i18n.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, default=None: default if default is not None else key
+            result = svc._parse_news_result({"category_L1": "Tech"})
         assert result["emoji"] == "📰"
         assert result["sentiment"] == "Neutral"
+
+    @patch("services.ai_service.ConfigHandler")
+    def test_unknown_code_falls_back_to_code(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        with patch("ui.i18n.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, default=None: default if default is not None else key
+            result = svc._parse_news_result({"category_L1": "unknown_l1", "category_L2": "unknown_l2"})
+        assert result["category"] == "unknown_l1-unknown_l2"
 
 
 class TestAIServiceVerifyConnection:

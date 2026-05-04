@@ -32,6 +32,13 @@ RECOVERABLE_CODES = {
     "refused",
 }
 
+try:
+    import asyncpg  # pyright: ignore[reportMissingImports]
+
+    _ASYNCPG_AVAILABLE = True
+except ImportError:
+    _ASYNCPG_AVAILABLE = False
+
 
 def classify_severity(e: Exception, context: str = "general") -> str:
     """
@@ -67,16 +74,6 @@ def classify_severity(e: Exception, context: str = "general") -> str:
 
 
 def classify_error(e: Exception, context: str = "general") -> dict:
-    """
-    Classify exceptions into user-friendly i18n messages.
-
-    Args:
-        e: The exception to classify
-        context: Error context - "token", "db", "llm", "chart", "general"
-
-    Returns:
-        {"code": str, "message": str} where message is translated i18n text
-    """
     from ui.i18n import I18n
 
     error_str = str(e).lower()
@@ -125,6 +122,12 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                 "code": "format",
                 "message": I18n.get("db_err_format").format(error=error_str),
             }
+        if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.InvalidPasswordError):
+            return {"code": "auth", "message": I18n.get("db_err_auth")}
+        if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.InvalidCatalogNameError):
+            return {"code": "not_found", "message": I18n.get("db_err_not_found")}
+        if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.exceptions.PostgresConnectionError):
+            return {"code": "refused", "message": I18n.get("db_err_refused")}
         if "password" in error_str or "authentication" in error_str:
             return {"code": "auth", "message": I18n.get("db_err_auth")}
         if "timeout" in error_str:

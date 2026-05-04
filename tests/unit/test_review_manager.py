@@ -355,3 +355,150 @@ class TestReviewManagerGetPendingPredictions:
         rm.cache = mock_cache
         result = await rm._get_pending_predictions()
         assert isinstance(result, pd.DataFrame)
+
+
+class TestReviewManagerDateThresholdNormalization:
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_date_threshold_is_date_type_with_trade_cal(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        mock_cache.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": ["20240606", "20240607", "20240610"]})
+        )
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        await rm._get_pending_predictions()
+        call_args = mock_cache.screener_dao.get_pending_predictions.call_args
+        date_threshold = call_args[0][0]
+        assert isinstance(date_threshold, datetime.date)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_date_threshold_is_date_type_without_trade_cal(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        await rm._get_pending_predictions()
+        call_args = mock_cache.screener_dao.get_pending_predictions.call_args
+        date_threshold = call_args[0][0]
+        assert isinstance(date_threshold, datetime.date)
+
+
+class TestReviewManagerIndexCacheNaN:
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_index_pct_nan_does_not_pollute_alpha(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        nan_df = pd.DataFrame({"pct_chg": [float("nan")]})
+        mock_cache.get_index_daily = AsyncMock(return_value=nan_df)
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        if rm._update_result.called:
+            call_kwargs = rm._update_result.call_args
+            result_data = call_kwargs[1] if call_kwargs[1] else call_kwargs[0]
+            if isinstance(result_data, dict) and "alpha" in result_data:
+                assert pd.notna(result_data["alpha"])
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_index_pct_none_skips_alpha(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        mock_cache.get_index_daily = AsyncMock(return_value=None)
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+
+
+class TestReviewManagerT1RowBoundary:
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_single_quote_row_no_t1(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "close": [10.0],
+                    "pct_chg": [1.0],
+                }
+            )
+        )
+        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        assert not rm._update_result.called

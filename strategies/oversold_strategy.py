@@ -135,7 +135,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         ]
 
         if rsi_feature and "暂不解读" not in rsi_feature and "历史数据不足" not in rsi_feature:
-            context_parts.append(f"【形态反馈】{rsi_feature}")
+            context_parts.append(f"{I18n.get('ai_pattern_feedback')}{rsi_feature}")
 
         context_parts.append("请评估：这是「黄金坑」反弹机会（如恐慌急跌/钝化），还是基本面恶化导致的「无底洞」下跌？")
 

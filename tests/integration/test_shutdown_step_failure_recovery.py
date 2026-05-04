@@ -122,7 +122,7 @@ def mock_singletons():
     from data.domain_services.market_data_service import MarketDataService
     from services.local_model_manager import LocalModelManager
     from utils.thread_pool import ThreadPoolManager
-    from utils.scheduler_service import scheduler
+    from utils.scheduler_service import SchedulerService
 
     orig_tm = TaskManager._instance
     orig_news = NewsSubscriptionService._instance
@@ -130,8 +130,9 @@ def mock_singletons():
     orig_mds = MarketDataService._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
-    orig_scheduler_running = getattr(scheduler.scheduler, "running", None) if hasattr(scheduler, "scheduler") else None
-    orig_scheduler_stop = getattr(scheduler, "stop", None)
+    svc = SchedulerService()
+    orig_scheduler_running = getattr(svc.scheduler, "running", None) if hasattr(svc, "scheduler") else None
+    orig_scheduler_stop = getattr(svc, "stop", None)
 
     TaskManager._instance = AsyncMock()
     NewsSubscriptionService._instance = MagicMock()
@@ -140,13 +141,13 @@ def mock_singletons():
     LocalModelManager._instance = MagicMock()
     LocalModelManager._instance._llm = MagicMock()
     ThreadPoolManager._instance = MagicMock()
-    scheduler.scheduler = MagicMock()
-    scheduler.scheduler.running = True
-    scheduler.stop = MagicMock()
+    svc.scheduler = MagicMock()
+    svc.scheduler.running = True
+    svc.stop = MagicMock()
 
     yield {
         "TaskManager": TaskManager,
-        "scheduler": scheduler,
+        "scheduler": svc,
         "NewsSubscriptionService": NewsSubscriptionService,
         "DataProcessor": DataProcessor,
         "MarketDataService": MarketDataService,
@@ -161,6 +162,6 @@ def mock_singletons():
     LocalModelManager._instance = orig_llm
     ThreadPoolManager._instance = orig_tp
     if orig_scheduler_running is not None:
-        scheduler.scheduler.running = orig_scheduler_running
+        svc.scheduler.running = orig_scheduler_running
     if orig_scheduler_stop is not None:
-        scheduler.stop = orig_scheduler_stop
+        svc.stop = orig_scheduler_stop

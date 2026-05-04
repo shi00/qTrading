@@ -235,3 +235,36 @@ class TestScreenerDaoSaveScreeningResults:
         ]
         await dao.save_screening_results(records)
         dao._save_thinking.assert_called_once()
+
+
+class TestScreenerDaoBuildScreeningSql:
+    def test_build_sql_with_close_requirement(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql(require_close=True)
+        assert "q.close IS NOT NULL" in sql
+        assert "b.list_status = 'L'" in sql
+
+    def test_build_sql_without_close_requirement(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql(require_close=False)
+        assert "q.close IS NOT NULL" not in sql
+        assert "b.list_status = 'L'" in sql
+
+    def test_build_sql_contains_all_joins(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "LEFT JOIN daily_quotes q" in sql
+        assert "LEFT JOIN daily_indicators i" in sql
+        assert "LEFT JOIN suspend_d s" in sql
+        assert "financial_reports" in sql
+
+    def test_build_sql_contains_is_tradable(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "is_tradable" in sql
+
+    def test_build_sql_contains_financial_subquery(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "ROW_NUMBER() OVER" in sql
+        assert "PARTITION BY ts_code" in sql

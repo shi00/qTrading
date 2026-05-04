@@ -46,6 +46,7 @@ class CacheManager:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
 
     @classmethod
@@ -499,33 +500,42 @@ class CacheManager:
         # Filter for quality monitored tables
         monitored_tables = {k: v for k, v in TABLE_DEFINITIONS.items() if v.get("quality_config", {}).get("monitor")}
 
+        from data.persistence.models import Base as ModelsBase
+
         # === Step 2: Use single connection for table checks (no DAO calls inside) ===
         async with self.engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
 
             for table, meta in monitored_tables.items():
                 try:
-                    # Determine check type from explicit metadata field
-                    # Default to 'stock' if not specified
                     table_type = meta.get("type", "stock")
                     is_stock_table = table_type != "global"
 
+                    tbl = ModelsBase.metadata.tables.get(table)
+                    if tbl is None:
+                        logger.warning(f"[CacheManager] Health | Unknown table: {table}")
+                        results[table] = {
+                            "covered": 0,
+                            "ratio": 0,
+                            "fresh_ratio": 0,
+                            "depth_ratio": None,
+                            "breadth_ratio": None,
+                            "type": table_type,
+                        }
+                        continue
+
                     if not is_stock_table:
-                        # Global Check: Just ensure data exists (>0 rows)
-                        tbl = sa.table(table)
                         r = await conn.execute(
                             sa.select(sa.func.count()).select_from(tbl),
                         )
                         cnt = r.scalar() or 0
                         ratio = 1.0 if cnt > 0 else 0.0
-                        fresh_ratio = ratio  # Global: presence = fresh
+                        fresh_ratio = ratio
                     else:
-                        # Stock Coverage Check: Distinct Codes / Total Stocks
                         cols = meta.get("columns", {})
                         keys = meta.get("sync_config", {}).get("keys", [])
                         code_col = "con_code" if "con_code" in cols or "con_code" in keys else "ts_code"
 
-                        tbl = sa.table(table)
                         r = await conn.execute(
                             sa.select(
                                 sa.func.count(sa.distinct(sa.column(code_col))),
@@ -534,9 +544,7 @@ class CacheManager:
                         cnt = r.scalar() or 0
                         ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
 
-                        # Freshness Check: How recent is the latest data?
                         fresh_ratio = 0.0
-                        # Try sync_config.date_col first, then common date columns
                         date_col_candidates = []
                         configured_col = meta.get("sync_config", {}).get("date_col")
                         if configured_col:
@@ -548,32 +556,27 @@ class CacheManager:
                             max_date = None
                             for dc in date_col_candidates:
                                 try:
-                                    tbl_d = sa.table(table)
                                     r2 = await conn.execute(
                                         sa.select(
                                             sa.func.max(sa.column(dc)),
-                                        ).select_from(tbl_d),
+                                        ).select_from(tbl),
                                     )
                                     val = r2.scalar()
                                     if val:
                                         max_date = val
                                         break
                                 except Exception:
-                                    continue  # Column doesn't exist in this table
+                                    continue
                             if max_date:
                                 from utils.time_utils import parse_date
 
                                 max_dt = parse_date(max_date)
                                 age_days = (get_now() - max_dt).days
-                                # Fresh if within 7 days, decay linearly to 30 days
                                 if age_days <= 7:
                                     fresh_ratio = 1.0
                                 elif age_days <= 30:
                                     fresh_ratio = max(0.0, 1.0 - (age_days - 7) / 23.0)
-                                # else: 0.0 (stale)
 
-                            # Penalize freshness if coverage is trivial (< 1%)
-                            # This prevents "100% Fresh" when only 1 stock has data.
                             if ratio < 0.01:
                                 fresh_ratio = 0.0
                         except Exception:
@@ -581,7 +584,6 @@ class CacheManager:
                                 f"[CacheManager] Health | Freshness check skipped for {table}: no valid date column",
                             )
 
-                    # --- Depth (all stock tables, based on global trade days) ---
                     depth_ratio = None
                     if is_stock_table and global_trade_days > 0:
                         depth_ratio = min(
@@ -589,14 +591,12 @@ class CacheManager:
                             global_trade_days / get_health_depth_full_trade_days(),
                         )
 
-                    # --- Breadth (daily-frequency tables only) ---
                     breadth_ratio = None
                     is_daily_freq = meta.get("quality_config", {}).get("frequency") == "daily"
                     if is_daily_freq and global_expected_rows and global_expected_rows > 0:
                         try:
-                            tbl_b = sa.table(table)
                             r_total = await conn.execute(
-                                sa.select(sa.func.count()).select_from(tbl_b),
+                                sa.select(sa.func.count()).select_from(tbl),
                             )
                             actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
@@ -605,7 +605,6 @@ class CacheManager:
                                 f"[CacheManager] Health | Breadth calc failed for {table}",
                             )
 
-                    table_type = "stock" if is_stock_table else "global"
                     is_sparse = meta.get("quality_config", {}).get("sparse", False)
                     results[table] = {
                         "covered": cnt,
@@ -656,7 +655,7 @@ class CacheManager:
                         "fresh_ratio": 0,
                         "depth_ratio": None,
                         "breadth_ratio": None,
-                        "type": meta.get("type", "stock"),
+                        "type": table_type,
                     }
 
         return {"total_stocks": total_stocks, "tables": results, "global_trade_days": global_trade_days}
@@ -1011,8 +1010,12 @@ class CacheManager:
             return False
 
         try:
-            # 使用 SQLAlchemy Core 的 sa.table() 构建安全查询
-            tbl = sa.table(table_name)
+            from data.persistence.models import Base as ModelsBase
+
+            tbl = ModelsBase.metadata.tables.get(table_name)
+            if tbl is None:
+                logger.warning(f"[CacheManager] Unknown table in check_table_has_data: {table_name}")
+                return False
             async with self.engine.connect() as conn:
                 result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
                 return result.first() is not None

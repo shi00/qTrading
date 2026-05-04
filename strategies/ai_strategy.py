@@ -74,6 +74,8 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         return await self.run_ai_analysis(candidates, context)
 
     def get_ai_context(self, row: dict) -> str:
+        # NOTE: AI prompts are intentionally in Chinese (A-share analysis context).
+        # Do NOT internationalize these strings — they are LLM prompts, not UI text.
         """Strategy-specific context: explain WHY this stock was selected."""
         turnover = row.get("turnover_rate", "N/A")
         pe = row.get("pe_ttm", "N/A")

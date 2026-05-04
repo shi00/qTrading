@@ -93,10 +93,32 @@ class DatabaseMigrator:
 
         try:
             await ThreadPoolManager().run_async(TaskType.IO, run_alembic_upgrade)
-            logger.debug("[DatabaseMigrator] Database schema updated to latest version.")
+
+            current_rev = await cls._get_current_revision(engine)
+            if current_rev:
+                logger.info(f"[DatabaseMigrator] Database schema updated. Current revision: {current_rev}")
+            else:
+                logger.info("[DatabaseMigrator] Database schema updated to latest version.")
         except Exception as e:
             logger.error(
                 f"[DatabaseMigrator] Schema upgrade failed: {e}",
                 exc_info=True,
             )
             raise
+
+    @classmethod
+    async def _get_current_revision(cls, engine: typing.Any) -> str | None:
+        try:
+            async with engine.connect() as conn:
+
+                def _sync_get_rev(c: typing.Any):
+                    inspector = inspect(c)
+                    if "alembic_version" not in inspector.get_table_names():
+                        return None
+                    result = c.execute(__import__("sqlalchemy").text("SELECT version_num FROM alembic_version"))
+                    row = result.fetchone()
+                    return row[0] if row else None
+
+                return await conn.run_sync(_sync_get_rev)
+        except Exception:
+            return None

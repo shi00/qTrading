@@ -99,7 +99,23 @@ class BaseDao:
         suppress_errors: bool = True,
         conn: typing.Any = None,
     ):
-        """Generic Write using Driver SQL for '?' support"""
+        """Execute a single SQL statement. For bulk operations, use _save_upsert.
+
+        Note: is_many=True does NOT use executemany — it passes the full params
+        list to exec_driver_sql. Prefer _save_upsert for batch inserts/updates.
+
+        .. deprecated::
+            The ``is_many`` parameter is deprecated and will be removed in a
+            future version. Use ``_save_upsert`` for batch operations.
+        """
+        if is_many:
+            import warnings
+
+            warnings.warn(
+                "_write_db(is_many=True) is deprecated. Use _save_upsert for batch operations.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         if self.engine is None:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
@@ -296,28 +312,11 @@ class BaseDao:
         if not update_cols:
             stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
         else:
-            NULL_PROTECTED_COLUMNS = {
-                "n_cashflow_act",
-                "roe",
-                "roe_dt",
-                "grossprofit_margin",
-                "netprofit_margin",
-                "debt_to_assets",
-                "total_assets",
-                "total_liab",
-                "total_hldr_eqy_exc_min_int",
-                "total_revenue",
-                "revenue",
-                "n_income",
-                "n_income_attr_p",
-                "goodwill",
-                "or_yoy",
-                "netprofit_yoy",
-            }
+            null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
             update_dict = {}
             for c in update_cols:
                 excluded_val = getattr(stmt.excluded, c)
-                if c in NULL_PROTECTED_COLUMNS:
+                if c in null_protected:
                     update_dict[c] = sa.func.coalesce(excluded_val, table.c[c])
                 else:
                     update_dict[c] = excluded_val

@@ -1,9 +1,9 @@
 import asyncio
 import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
-from utils.scheduler_service import SchedulerService, get_scheduler, _SchedulerProxy
+from utils.scheduler_service import SchedulerService
 
 
 @pytest.fixture(autouse=True)
@@ -261,45 +261,37 @@ class TestSchedulerServiceGetStatus:
         assert "next_run" in status
 
 
-class TestGetScheduler:
-    def test_creates_instance(self):
-        with patch("utils.scheduler_service.SchedulerService") as mock_cls:
-            mock_instance = MagicMock()
-            mock_cls.return_value = mock_instance
-            mock_cls._instance = None
-            import utils.scheduler_service as mod
+class TestSchedulerServiceSingleton:
+    def test_singleton_returns_same_instance(self):
+        with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
+            mock_ch.get_setting.return_value = None
+            svc1 = SchedulerService()
+            svc2 = SchedulerService()
+            assert svc1 is svc2
 
-            mod._scheduler_instance = None
-            result = get_scheduler()
-            assert result is not None
+    def test_reset_singleton_allows_new_instance(self):
+        with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
+            mock_ch.get_setting.return_value = None
+            svc1 = SchedulerService()
+            SchedulerService._reset_singleton()
+            svc2 = SchedulerService()
+            assert svc1 is not svc2
 
-    def test_returns_existing(self):
-        import utils.scheduler_service as mod
+    def test_reset_singleton_shuts_down_running_scheduler(self):
+        with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
+            mock_ch.get_setting.return_value = None
+            svc = SchedulerService()
+            type(svc.scheduler).running = PropertyMock(return_value=True)
+            svc.scheduler.shutdown = MagicMock()
+            SchedulerService._reset_singleton()
+            svc.scheduler.shutdown.assert_called_once_with(wait=False)
 
-        mock_instance = MagicMock()
-        mod._scheduler_instance = mock_instance
-        result = get_scheduler()
-        assert result is mock_instance
-        mod._scheduler_instance = None
-
-
-class TestSchedulerProxy:
-    def test_getattr_delegates(self):
-        proxy = _SchedulerProxy()
-        with patch("utils.scheduler_service.get_scheduler") as mock_get:
-            mock_svc = MagicMock()
-            mock_get.return_value = mock_svc
-            proxy.start()
-            mock_get.assert_called_once()
-            mock_svc.start.assert_called_once()
-
-    def test_bool(self):
-        proxy = _SchedulerProxy()
-        with patch("utils.scheduler_service.get_scheduler") as mock_get:
-            mock_svc = MagicMock()
-            mock_get.return_value = mock_svc
-            result = bool(proxy)
-            assert result is True
+    def test_reset_singleton_sets_instance_to_none(self):
+        with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
+            mock_ch.get_setting.return_value = None
+            SchedulerService()
+            SchedulerService._reset_singleton()
+            assert SchedulerService._instance is None
 
 
 class TestGetStatusWithJob:

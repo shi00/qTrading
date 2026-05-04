@@ -731,7 +731,7 @@ class DataSourceTab(ft.Container):
                     I18n.get("snack_full_sync_done", total="全部"),
                     color=AppColors.SUCCESS,
                 )
-                return "日更完成"
+                return I18n.get("ds_daily_update_done")
             except asyncio.CancelledError:
                 if self.is_syncing:
                     self.show_snack(
@@ -850,7 +850,7 @@ class DataSourceTab(ft.Container):
             task = tm.get_task(task_id)
             cancel_event = getattr(task, "_cancel_event", None) if task else None
             try:
-                tm.update_progress(task_id, 0.05, "重启 Playwright 流水线并清空词库...")
+                tm.update_progress(task_id, 0.05, I18n.get("ds_doubao_rebuild_start"))
                 await self._processor.run_doubao_tagging(
                     task_id=task_id,
                     cancel_event=cancel_event,
@@ -859,7 +859,7 @@ class DataSourceTab(ft.Container):
                     I18n.get("snack_doubao_done", "AI概念已全部重建！"),
                     color=AppColors.SUCCESS,
                 )
-                return "重建完成"
+                return I18n.get("ds_doubao_rebuild_done")
             except asyncio.CancelledError:
                 if self.is_syncing:
                     self.show_snack(
@@ -879,7 +879,7 @@ class DataSourceTab(ft.Container):
 
         task_id = TaskManager().submit_task(
             name=I18n.get("task_name_doubao_rebuild", "AI概念重建"),
-            task_type="AI打标",
+            task_type=I18n.get("ds_task_type_ai_tagging"),
             coroutine_factory=_doubao_logic,
             cancellable=True,
             unique_key="doubao_sync",
@@ -930,7 +930,7 @@ class DataSourceTab(ft.Container):
                 self.show_snack(I18n.get("ds_cache_cleared"))
                 if self.page:
                     self.page.pubsub.send_all("cache_cleared")
-                return "缓存已清空"
+                return I18n.get("ds_cache_clear_done")
             except Exception as ex:
                 from utils.error_classifier import classify_error
 
@@ -942,7 +942,7 @@ class DataSourceTab(ft.Container):
 
         task_id = TaskManager().submit_task(
             name=I18n.get("task_name_clear_cache"),
-            task_type="系统维护",
+            task_type=I18n.get("ds_task_type_system"),
             coroutine_factory=_clear_logic,
             cancellable=False,
             unique_key="cache_clear",
@@ -1040,7 +1040,7 @@ class DataSourceTab(ft.Container):
                 else:
                     msg = I18n.get(
                         "ds_init_fail_fmt",
-                        error="内部系统错误，请检查系统日志。",
+                        error=I18n.get("ds_internal_error"),
                     )
                 logger.error(
                     f"[DataSourceTab] Sync | ❌ Init sync failed: {e}",

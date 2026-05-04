@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 
+from ui.i18n import I18n
+
 
 class TechnicalAnalysis:
     """
@@ -266,10 +268,10 @@ class TechnicalAnalysis:
         healthy_text = f"近{len(rsi)}日内未回到多头状态(>50)"
         panic_str = ""
         if days_since_healthy is not None:
-            panic_str = "【恐慌急跌】" if days_since_healthy <= 8 else "【阴跌耗损】"
+            panic_str = I18n.get("ai_panic_drop") if days_since_healthy <= 8 else I18n.get("ai_slow_decay")
             healthy_text = f"距上次多头状态(>50)已历经 {days_since_healthy} 天 {panic_str}"
 
-        stagnation_str = "【RSI 超卖钝化】" if stagnation_detected else ""
+        stagnation_str = I18n.get("ai_rsi_oversold_stagnation") if stagnation_detected else ""
 
         feature_text = f"近{len(rsi)}日观察: 已连续 {consecutive_days} 天处于超卖(<30)；{healthy_text}"
         if stagnation_str:

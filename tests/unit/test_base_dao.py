@@ -424,6 +424,83 @@ class TestBaseDaoWriteDbExtended:
             assert result == 1
 
 
+class TestNullProtectedFromMetadata:
+    def test_financial_reports_null_protected_columns(self):
+        from data.persistence.models import FinancialReports
+
+        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", False)}
+        expected = {
+            "roe",
+            "roe_dt",
+            "grossprofit_margin",
+            "netprofit_margin",
+            "debt_to_assets",
+            "total_assets",
+            "total_liab",
+            "total_hldr_eqy_exc_min_int",
+            "total_revenue",
+            "revenue",
+            "n_income",
+            "n_income_attr_p",
+            "goodwill",
+            "or_yoy",
+            "netprofit_yoy",
+            "n_cashflow_act",
+        }
+        assert null_protected == expected
+
+    def test_non_null_protected_columns_excluded(self):
+        from data.persistence.models import FinancialReports
+
+        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", False)}
+        assert "ts_code" not in null_protected
+        assert "end_date" not in null_protected
+        assert "ann_date" not in null_protected
+        assert "audit_result" not in null_protected
+
+    def test_save_upsert_uses_metadata_null_protected(self):
+        from data.persistence.models import FinancialReports
+
+        table = FinancialReports.__table__
+        null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
+        update_cols = [c.name for c in table.columns if c.name not in ("ts_code", "end_date")]
+        for c in update_cols:
+            if c in null_protected:
+                col = table.c[c]
+                assert col.info.get("null_protected") is True
+
+
+class TestScreeningThinkingModelConstraints:
+    def test_history_id_has_unique_constraint(self):
+        from data.persistence.models import ScreeningThinking
+
+        col = ScreeningThinking.__table__.c.history_id
+        assert col.unique is True, "history_id should have UNIQUE constraint for UPSERT"
+
+    def test_history_id_has_foreign_key(self):
+        from data.persistence.models import ScreeningThinking
+
+        fk = list(ScreeningThinking.__table__.c.history_id.foreign_keys)
+        assert len(fk) == 1, "history_id should have a foreign key to screening_history.id"
+        assert fk[0].target_fullname == "screening_history.id"
+
+    def test_history_id_not_nullable(self):
+        from data.persistence.models import ScreeningThinking
+
+        col = ScreeningThinking.__table__.c.history_id
+        assert col.nullable is False, "history_id should be NOT NULL"
+
+    def test_no_duplicate_index_on_history_id(self):
+        from data.persistence.models import ScreeningThinking
+
+        explicit_indexes = [
+            idx
+            for idx in ScreeningThinking.__table__.indexes
+            if list(idx.columns) == [ScreeningThinking.__table__.c.history_id]
+        ]
+        assert len(explicit_indexes) == 0, "history_id should not have a separate index (unique=True creates one)"
+
+
 class TestBaseDaoSaveUpsertExtended:
     @pytest.mark.asyncio
     async def test_upsert_success_with_conn(self):

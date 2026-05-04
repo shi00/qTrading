@@ -58,6 +58,8 @@ class ValueStrategy(PolarsBaseStrategy):
         ]
 
     def get_ai_context(self, row: dict) -> str:
+        # NOTE: AI prompts are intentionally in Chinese (A-share analysis context).
+        # Do NOT internationalize these strings — they are LLM prompts, not UI text.
         fv = fmt_val
         pe = fv(row.get("pe_ttm"))
         pb = fv(row.get("pb"))

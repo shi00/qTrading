@@ -225,11 +225,12 @@ class ShutdownCoordinator:
 
         from data.domain_services.market_data_service import MarketDataService
         from data.external.news_subscription import NewsSubscriptionService
-        from utils.scheduler_service import scheduler
+        from utils.scheduler_service import SchedulerService
 
-        if hasattr(scheduler, "scheduler") and scheduler.scheduler.running:
+        svc = SchedulerService()
+        if hasattr(svc, "scheduler") and svc.scheduler.running:
             logger.info("[Shutdown]   - Scheduler")
-            scheduler.stop()
+            svc.stop()
 
         if NewsSubscriptionService._instance is not None:
             logger.info("[Shutdown]   - NewsSubscriptionService")

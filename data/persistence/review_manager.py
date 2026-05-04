@@ -8,6 +8,7 @@ import pandas as pd
 
 from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
+from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_date
@@ -39,7 +40,6 @@ class ReviewManager:
         """
         logger.info("[Review] Starting daily review...")
 
-        # 1. Get all recent predictions without results
         pending_df = await self._get_pending_predictions()
         if pending_df.empty:
             logger.info("[Review] No pending predictions to review.")
@@ -47,67 +47,83 @@ class ReviewManager:
 
         updated_count = 0
 
-        # 2. Check each prediction
+        all_codes = pending_df["ts_code"].unique().tolist()
+        min_pred_date = str(pending_df["trade_date"].min())
+
+        bulk_quotes = await self.cache.get_daily_quotes(
+            ts_code_list=all_codes,
+            start_date=min_pred_date,
+        )
+        if bulk_quotes is None or bulk_quotes.empty:
+            logger.warning("[Review] Bulk quotes fetch returned empty.")
+            return
+        quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
+
+        index_code = ConfigHandler.get_config("benchmark_index", "000001.SH")
+        all_pred_dates = pending_df["trade_date"].unique().tolist()
+        index_cache: dict[str, float | None] = {}
+        for pred_d in all_pred_dates:
+            pred_d_str = str(pred_d).replace("-", "")[:8]
+            try:
+                dt_obj = datetime.datetime.strptime(pred_d_str, "%Y%m%d").date()
+            except Exception:
+                continue
+            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=dt_obj)
+            if df_idx is not None and not df_idx.empty:
+                raw_pct = df_idx.iloc[0]["pct_chg"]
+                index_cache[pred_d_str] = float(raw_pct) if pd.notna(raw_pct) else None
+            else:
+                try:
+                    df_idx_api = await self.api.get_index_daily(
+                        ts_code=index_code,
+                        start_date=pred_d_str,
+                        end_date=pred_d_str,
+                    )
+                    if df_idx_api is not None and not df_idx_api.empty:
+                        raw_pct = df_idx_api.iloc[0]["pct_chg"]
+                        index_cache[pred_d_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                    else:
+                        index_cache[pred_d_str] = None
+                except Exception:
+                    index_cache[pred_d_str] = None
+
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
-            pred_date = row["trade_date"]  # The date the prediction was made (Close)
+            pred_date = row["trade_date"]
 
-            # We need prices for T+1, T+2...
-            # Get next trading days from Tushare
-            # Since we assume 'pred_date' is the date of analysis (after close),
-            # T+1 is the NEXT trading day.
-
-            # Fetch prices since pred_date
-            df_quotes = await self.cache.get_daily_quotes(
-                start_date=pred_date,
-                ts_code=ts_code,
-            )
-            if df_quotes.empty:
-                # Try fetching from API if not in cache (e.g. today's close)
-                # In a real system, we assume sync_daily_market_snapshot has run.
+            df_quotes = quotes_by_code.get(ts_code)
+            if df_quotes is None or df_quotes.empty:
                 continue
 
-            df_quotes = df_quotes.sort_values("trade_date")
-
-            # Identify T+0 (Analysis Day), T+1, T+2...
-            # Note: df_quotes includes pred_date (T+0)
-
             try:
-                # Find the index of prediction date
                 t0_row = df_quotes[df_quotes["trade_date"].astype(object) == pred_date]
                 if t0_row.empty:
                     continue
 
                 t0_idx = df_quotes.index.get_loc(t0_row.index[0])
 
-                # Check T+1
                 t1_pct: float | None = None
                 t1_price: float | None = None
                 t5_pct: float | None = None
                 t5_price: float | None = None
-                if len(df_quotes) > t0_idx + 1:  # type: ignore
-                    t1_row = df_quotes.iloc[t0_idx + 1]  # type: ignore
+                t1_row = None
+                if len(df_quotes) > t0_idx + 1:
+                    t1_row = df_quotes.iloc[t0_idx + 1]
                     raw_pct = t1_row["pct_chg"]
                     if bool(pd.notna(raw_pct)):
                         t1_pct = float(raw_pct)
                     if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
                         t1_price = float(t1_row["close"])
 
-                if len(df_quotes) > t0_idx + 5:  # type: ignore
-                    t5_row = df_quotes.iloc[t0_idx + 5]  # type: ignore
+                if len(df_quotes) > t0_idx + 5:
+                    t5_row = df_quotes.iloc[t0_idx + 5]
                     if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
                         t0_close = t0_row.iloc[0].get("close")
                         if bool(pd.notna(t0_close)) and float(t0_close) != 0:
-                            # T+5 should represent cumulative return from analysis day to the fifth trading day.
                             t5_pct = (t5_price / float(t0_close) - 1.0) * 100.0
 
-                if t1_pct is not None:
-                    index_code = ConfigHandler.get_config(
-                        "benchmark_index",
-                        "000001.SH",
-                    )
-
+                if t1_pct is not None and t1_row is not None:
                     t1_date_val = t1_row["trade_date"]
                     if hasattr(t1_date_val, "date") and callable(t1_date_val.date):
                         t1_date_obj = t1_date_val.date()
@@ -117,42 +133,11 @@ class ReviewManager:
                         t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()
                     trade_date_str = t1_date_obj.strftime("%Y%m%d")
 
-                    index_pct = None
-                    try:
-                        df_idx_local = await self.cache.get_index_daily(
-                            ts_code=index_code,
-                            trade_date=t1_date_obj,
-                        )
-                        if df_idx_local is not None and not df_idx_local.empty:
-                            index_pct = float(df_idx_local.iloc[0]["pct_chg"])
-                    except Exception as e:
-                        logger.warning(
-                            f"[Review] Cache index lookup failed for {index_code}@{trade_date_str}: {e}",
-                        )
-
-                    if index_pct is None:
-                        try:
-                            df_idx = await self.api.get_index_daily(
-                                ts_code=index_code,
-                                start_date=trade_date_str,
-                                end_date=trade_date_str,
-                            )
-                            if df_idx is not None and not df_idx.empty:
-                                index_pct = float(df_idx.iloc[0]["pct_chg"])
-                        except Exception as e:
-                            logger.warning(
-                                f"[Review] API index lookup failed for {index_code}@{trade_date_str}: {e}",
-                            )
+                    index_pct = index_cache.get(trade_date_str)
 
                     if index_pct is None:
                         logger.warning(
                             f"[Review] {ts_code}: Index return unavailable for {trade_date_str}, skipping to avoid label pollution",
-                        )
-                        continue
-
-                    if t1_pct is None:
-                        logger.warning(
-                            f"[Review] {ts_code}: T+1 pct_chg is NaN for {trade_date_str}, skipping",
                         )
                         continue
 
@@ -209,6 +194,10 @@ class ReviewManager:
                 else:
                     date_threshold = (get_now() - datetime.timedelta(days=14)).date()
 
+            if date_threshold is not None:
+                from utils.time_utils import to_date
+
+                date_threshold = to_date(date_threshold)
             return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore
 
         except Exception as e:
@@ -275,23 +264,23 @@ class ReviewManager:
         xml = "<history_context>\n"
 
         if wins:
-            xml += "  [复盘参考 - 正向样本]\n"
+            xml += f"  [{I18n.get('review_ctx_positive')}]\n"
             for w in wins:
-                xml += (
-                    f"  - {w['code']} ({w['name']}): Alpha {w['alpha']:+.1f}%，次日 {w['pct']:+.1f}%，"
-                    f"当时归因摘要: {w['reason'] or '无'}\n"
-                )
+                alpha_str = f"{w['alpha']:+.1f}"
+                pct_str = f"{w['pct']:+.1f}"
+                reason = w["reason"] or I18n.get("review_ctx_no_reason")
+                xml += f"  - {I18n.get('review_ctx_win_detail', code=w['code'], name=w['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
 
         if losses:
-            xml += "  [复盘参考 - 负向样本]\n"
+            xml += f"  [{I18n.get('review_ctx_negative')}]\n"
             for loss in losses:
-                xml += (
-                    f"  - {loss['code']} ({loss['name']}): Alpha {loss['alpha']:+.1f}%，次日 {loss['pct']:+.1f}%，"
-                    f"当时归因摘要: {loss['reason'] or '无'}\n"
-                )
+                alpha_str = f"{loss['alpha']:+.1f}"
+                pct_str = f"{loss['pct']:+.1f}"
+                reason = loss["reason"] or I18n.get("review_ctx_no_reason")
+                xml += f"  - {I18n.get('review_ctx_loss_detail', code=loss['code'], name=loss['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
 
         if not wins and not losses:
-            xml += "  暂无可用历史复盘样本。\n"
+            xml += f"  {I18n.get('review_ctx_none')}\n"
 
         xml += "</history_context>"
         return xml

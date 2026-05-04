@@ -1364,3 +1364,21 @@ class TestCacheManagerSanitizeUrl:
         mgr = CacheManager.__new__(CacheManager)
         result = mgr._sanitize_url("sqlite:///test.db")
         assert "test.db" in result
+
+
+class TestCacheManagerUsesMetadataTables:
+    def test_check_table_has_data_uses_metadata_not_sa_table(self):
+        import inspect
+        from data.cache.cache_manager import CacheManager
+
+        source = inspect.getsource(CacheManager.check_table_has_data)
+        assert "ModelsBase.metadata.tables" in source
+        assert "sa.table(" not in source
+
+    def test_health_check_uses_metadata_not_sa_table(self):
+        import inspect
+        from data.cache.cache_manager import CacheManager
+
+        source = inspect.getsource(CacheManager.check_comprehensive_health)
+        assert "ModelsBase.metadata.tables" in source
+        assert "sa.table(" not in source

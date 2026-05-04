@@ -147,7 +147,7 @@ class TestShutdownCoordinatorCleanupSteps:
     async def test_step1_stop_services_no_instances(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
-            patch("utils.scheduler_service.scheduler") as mock_sched,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
@@ -160,7 +160,7 @@ class TestShutdownCoordinatorCleanupSteps:
     async def test_step1_stop_scheduler(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
-            patch("utils.scheduler_service.scheduler") as mock_sched,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
@@ -168,13 +168,13 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_news._instance = None
             mock_mds._instance = None
             await coord._step1_stop_services()
-            mock_sched.stop.assert_called_once()
+            mock_sched.return_value.stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_step1_stop_news_service(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
-            patch("utils.scheduler_service.scheduler") as mock_sched,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
@@ -189,7 +189,7 @@ class TestShutdownCoordinatorCleanupSteps:
     async def test_step1_stop_market_data(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
-            patch("utils.scheduler_service.scheduler") as mock_sched,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
@@ -342,7 +342,7 @@ class TestShutdownCoordinatorDoCleanup:
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
-            patch("utils.scheduler_service.scheduler") as mock_sched,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
             patch("data.data_processor.DataProcessor") as mock_dp,
@@ -366,7 +366,7 @@ class TestShutdownCoordinatorDoCleanup:
         coord._cleanup_started = True
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
-            patch("utils.scheduler_service.scheduler") as mock_sched,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
             patch("data.data_processor.DataProcessor") as mock_dp,

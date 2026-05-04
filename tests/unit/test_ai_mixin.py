@@ -543,3 +543,22 @@ class TestPrefetchStrategySpecific:
         pf = PreFetchedContext()
         result = await s._prefetch_strategy_specific(pd.DataFrame(), {}, pf)
         assert isinstance(result, PreFetchedContext)
+
+
+class TestMacroContextSimplifiedCheck:
+    def test_macro_context_default_is_empty_string(self):
+        pf = PreFetchedContext()
+        assert pf.macro_context == ""
+        assert not pf.macro_context
+
+    def test_macro_context_with_value_is_truthy(self):
+        pf = PreFetchedContext(macro_context="GDP growth 5.2%")
+        assert pf.macro_context
+        assert pf.macro_context == "GDP growth 5.2%"
+
+    def test_no_hasattr_needed_in_source(self):
+        import inspect
+        from strategies.ai_mixin import AIStrategyMixin
+
+        source = inspect.getsource(AIStrategyMixin.run_ai_analysis)
+        assert "hasattr" not in source or "macro_context" not in source.split("hasattr")[0].split("\n")[-1]

@@ -470,7 +470,7 @@ class AIStrategyMixin:
                 uncertainty = res.get("uncertainty_factors")
 
                 if confidence is not None:
-                    summary = f"[置信度: {confidence}%] {summary}"
+                    summary = f"[{I18n.get('ai_confidence_label')}: {confidence}%] {summary}"
                 if uncertainty:
                     if isinstance(uncertainty, list):
                         uncertainty_str = ", ".join(str(u) for u in uncertainty if u)
@@ -479,11 +479,11 @@ class AIStrategyMixin:
                     if uncertainty_str and uncertainty_str not in [
                         "",
                         "None",
-                        "无",
-                        "无。",
+                        I18n.get("ai_none_risk"),
+                        I18n.get("ai_none_risk_period"),
                         "[]",
                     ]:
-                        summary += f" (风险点: {uncertainty_str})"
+                        summary += f" ({I18n.get('ai_risk_label')}: {uncertainty_str})"
 
                 score_raw = res.get("score", 0)
                 row_dict["ai_score"] = min(100, max(0, int(score_raw))) if isinstance(score_raw, (int, float)) else 0
@@ -654,16 +654,20 @@ class AIStrategyMixin:
             auxiliary_text = await self._build_auxiliary_data_text(ts_code, dp.cache, prefetched.auxiliary_data)
 
             # 7c. Macro Context (Phase 1.3) - build once per batch
-            if not hasattr(prefetched, "macro_context") or not prefetched.macro_context:
+            if not prefetched.macro_context:
                 prefetched.macro_context = await self._build_macro_context(dp.cache)
 
             # Combine all financial context
             financials_parts = [base_financials]
-            invalid_texts = ["财务数据不足", "财务数据获取失败"]
+            invalid_texts = [I18n.get("ai_financial_insufficient"), I18n.get("ai_financial_fetch_failed")]
             if multi_period_text and multi_period_text not in invalid_texts:
-                financials_parts.append(f"\n【多期财务趋势】\n{multi_period_text}")
-            if auxiliary_text and auxiliary_text != "无辅助数据":
-                financials_parts.append(f"\n【辅助数据】\n{auxiliary_text}")
+                financials_parts.append(
+                    f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_multi_period_trend'))}\n{multi_period_text}"
+                )
+            if auxiliary_text and auxiliary_text != I18n.get("ai_no_auxiliary_data"):
+                financials_parts.append(
+                    f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_auxiliary_data'))}\n{auxiliary_text}"
+                )
             if prefetched.macro_context:
                 financials_parts.append(f"\n{prefetched.macro_context}")
 
@@ -725,9 +729,9 @@ class AIStrategyMixin:
         """
         result = {}
         if history_df is None or history_df.empty or len(history_df) < 5:
-            result["ma_alignment"] = "数据不足"
-            result["volume_trend"] = "数据不足"
-            result["price_trend_5d"] = "数据不足"
+            result["ma_alignment"] = I18n.get("ai_data_insufficient")
+            result["volume_trend"] = I18n.get("ai_data_insufficient")
+            result["price_trend_5d"] = I18n.get("ai_data_insufficient")
             return result
 
         try:
@@ -744,19 +748,25 @@ class AIStrategyMixin:
 
             if ma5 is not None and ma10 is not None and ma20 is not None:
                 if ma5 > ma10 > ma20:
-                    result["ma_alignment"] = f"多头排列 (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
+                    result["ma_alignment"] = (
+                        f"{I18n.get('ai_ma_bullish')} (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
+                    )
                 elif ma5 < ma10 < ma20:
-                    result["ma_alignment"] = f"空头排列 (MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f})"
+                    result["ma_alignment"] = (
+                        f"{I18n.get('ai_ma_bearish')} (MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f})"
+                    )
                 else:
-                    result["ma_alignment"] = f"交叉缠绕 (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
+                    result["ma_alignment"] = (
+                        f"{I18n.get('ai_ma_crossing')} (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
+                    )
 
                 if ma20 != 0:
                     deviation = ((current_price - ma20) / ma20) * 100
-                    result["price_vs_ma20"] = f"偏离 MA20 {deviation:+.1f}%"
+                    result["price_vs_ma20"] = f"{I18n.get('ai_ma20_deviation')} {deviation:+.1f}%"
                 else:
-                    result["price_vs_ma20"] = "MA20 为零"
+                    result["price_vs_ma20"] = I18n.get("ai_ma20_zero")
             else:
-                result["ma_alignment"] = "历史数据不足以计算均线"
+                result["ma_alignment"] = I18n.get("ai_ma_insufficient")
 
             # Volume Trend (last 5 days)
             if "vol" in df.columns and len(df) >= 10:
@@ -765,15 +775,21 @@ class AIStrategyMixin:
                 if vol_10d > 0:
                     vol_ratio = vol_5d / vol_10d
                     if vol_ratio < 0.7:
-                        result["volume_trend"] = f"缩量 (5日/10日比值: {vol_ratio:.2f})"
+                        result["volume_trend"] = (
+                            f"{I18n.get('ai_vol_shrink')} ({I18n.get('ai_5d_10d_ratio')}: {vol_ratio:.2f})"
+                        )
                     elif vol_ratio > vol_ratio_threshold:
-                        result["volume_trend"] = f"放量 (5日/10日比值: {vol_ratio:.2f})"
+                        result["volume_trend"] = (
+                            f"{I18n.get('ai_vol_expand')} ({I18n.get('ai_5d_10d_ratio')}: {vol_ratio:.2f})"
+                        )
                     else:
-                        result["volume_trend"] = f"平稳 (5日/10日比值: {vol_ratio:.2f})"
+                        result["volume_trend"] = (
+                            f"{I18n.get('ai_vol_stable')} ({I18n.get('ai_5d_10d_ratio')}: {vol_ratio:.2f})"
+                        )
                 else:
-                    result["volume_trend"] = "无成交量数据"
+                    result["volume_trend"] = I18n.get("ai_vol_no_data")
             else:
-                result["volume_trend"] = "数据不足"
+                result["volume_trend"] = I18n.get("ai_data_insufficient")
 
             # 5-day Price Trend
             if len(df) >= 5:
@@ -783,17 +799,19 @@ class AIStrategyMixin:
                 else:
                     pct_5d = 0.0
                 closes_5d = ", ".join([f"{c:.2f}" for c in close.tail(5).tolist()])
-                result["price_trend_5d"] = f"5日涨跌 {pct_5d:+.1f}% (收盘序列: {closes_5d})"
+                result["price_trend_5d"] = (
+                    f"{I18n.get('ai_price_trend_5d')} {pct_5d:+.1f}% ({I18n.get('ai_close_series')}: {closes_5d})"
+                )
             else:
-                result["price_trend_5d"] = "数据不足"
+                result["price_trend_5d"] = I18n.get("ai_data_insufficient")
 
         except Exception as e:
             logger.warning(
                 f"[AIStrategyMixin] Technical structure computation failed: {e}",
             )
-            result["ma_alignment"] = "计算错误"
-            result["volume_trend"] = "计算错误"
-            result["price_trend_5d"] = "计算错误"
+            result["ma_alignment"] = I18n.get("ai_calc_error")
+            result["volume_trend"] = I18n.get("ai_calc_error")
+            result["price_trend_5d"] = I18n.get("ai_calc_error")
 
         return result
 
@@ -855,7 +873,7 @@ class AIStrategyMixin:
                 df = df.tail(60).reset_index(drop=True)
 
             if len(df) < 5:
-                return "历史数据不足（少于5天）。"
+                return I18n.get("ai_history_insufficient")
 
             # 1. Extract Base Series
             close = df["close"]
@@ -894,7 +912,9 @@ class AIStrategyMixin:
                         else:
                             break
                 consec_str = (
-                    f"连续{'上涨' if sign_last > 0 else '下跌'} {consec_days} 天" if consec_days > 1 else "横盘整理"
+                    f"{I18n.get('ai_consecutive_up') if sign_last > 0 else I18n.get('ai_consecutive_down')} {consec_days} {I18n.get('ai_day_unit')}"
+                    if consec_days > 1
+                    else I18n.get("ai_sideways")
                 )
 
             # 3. Drawdown Factor
@@ -903,7 +923,7 @@ class AIStrategyMixin:
             mdd = drawdowns.min() * 100
 
             # 4. Volume Factor (graceful fallback if 'vol' column is missing)
-            vol_line = "- 成交量数据不可用。"
+            vol_line = f"- {I18n.get('ai_vol_unavailable')}"
             if has_vol:
                 vol = df["vol"]
                 vol_5d_avg = vol.tail(5).mean()
@@ -915,26 +935,44 @@ class AIStrategyMixin:
                     vol_older_avg = 0.0
                 vol_ratio_5d = vol_5d_avg / vol_older_avg if vol_older_avg > 0 else 1.0
                 vol_desc = (
-                    "显著放量" if vol_ratio_5d > vol_ratio_threshold else "显著缩量" if vol_ratio_5d < 0.7 else "平稳"
+                    I18n.get("ai_vol_significant_expand")
+                    if vol_ratio_5d > vol_ratio_threshold
+                    else I18n.get("ai_vol_significant_shrink")
+                    if vol_ratio_5d < 0.7
+                    else I18n.get("ai_vol_stable")
                 )
-                vol_line = f"- 成交量状态: {vol_desc}（相对历史基准），量比 = {vol_ratio_5d:.2f}。"
+                vol_line = I18n.get(
+                    "ai_vol_line_format",
+                    label=I18n.get("ai_vol_status_label"),
+                    desc=vol_desc,
+                    baseline=I18n.get("ai_vol_relative_base"),
+                    ratio_label=I18n.get("ai_vol_ratio_label"),
+                    ratio=f"{vol_ratio_5d:.2f}",
+                )
 
             limit_pct = AIStrategyMixin._get_limit_pct(ts_code, stock_name)
 
             lines = [
-                "【宏观周期】（配置基准线）",
-                f"- 长期: 总收益 {macro_cagr}，最大回撤 {macro_mdd}。",
+                I18n.get(
+                    "ai_macro_cycle_header", title=I18n.get("ai_macro_cycle"), baseline=I18n.get("ai_config_baseline")
+                ),
+                f"- {I18n.get('ai_long_term')}: {I18n.get('ai_total_return')} {macro_cagr}，{I18n.get('ai_max_drawdown')} {macro_mdd}。",
                 "",
-                f"【趋势与波动特征】（近 {len(df)} 个交易日）",
-                f"- 波动: 总收益 {pct_all:+.2f}%，最大回撤 {mdd:.2f}%。",
-                f"- 短期动量: 5日收益 {pct_5d:+.2f}%，当前 {consec_str}。",
-                f"- MA20 偏离: {bias_str}。",
+                I18n.get(
+                    "ai_trend_vol_header",
+                    title=I18n.get("ai_trend_volatility"),
+                    days=len(df),
+                    unit=I18n.get("ai_trading_days"),
+                ),
+                f"- {I18n.get('ai_volatility')}: {I18n.get('ai_total_return')} {pct_all:+.2f}%，{I18n.get('ai_max_drawdown')} {mdd:.2f}%。",
+                f"- {I18n.get('ai_short_momentum')}: {I18n.get('ai_5d_return')} {pct_5d:+.2f}%，{I18n.get('ai_current')} {consec_str}。",
+                f"- {I18n.get('ai_ma20_bias')}: {bias_str}。",
                 "",
-                "【量价配合】",
+                I18n.get("ai_section_wrapper", title=I18n.get("ai_volume_price")),
                 vol_line,
                 "",
-                "【近3日微观K线】",
-                "日期 | 收盘 | 涨跌幅 | 成交量",
+                I18n.get("ai_section_wrapper", title=I18n.get("ai_recent_3d_kline")),
+                I18n.get("ai_kline_header"),
             ]
 
             import datetime
@@ -954,9 +992,9 @@ class AIStrategyMixin:
                 limit_tag = ""
                 if not pd.isna(p_val):
                     if p_val >= limit_pct - 0.5:
-                        limit_tag = " 🔴涨停"
+                        limit_tag = f" 🔴{I18n.get('ai_limit_up')}"
                     elif p_val <= -(limit_pct - 0.5):
-                        limit_tag = " 🟢跌停"
+                        limit_tag = f" 🟢{I18n.get('ai_limit_down')}"
 
                 lines.append(f"{d} | {c} | {p}{limit_tag} | {v}")
 
@@ -964,7 +1002,7 @@ class AIStrategyMixin:
 
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to build history text: {e}")
-            return "提取价格行为特征时出错。"
+            return I18n.get("ai_history_extract_error")
 
     @staticmethod
     def _build_capital_flow_text(ts_code: str, prefetched: dict) -> str:
@@ -978,10 +1016,10 @@ class AIStrategyMixin:
             amount_yuan = amount * 10000 if source_unit == "wan_yuan" else amount
             abs_amount = abs(amount_yuan)
             if abs_amount >= 1e8:
-                return f"{amount_yuan / 1e8:.2f}亿元"
+                return f"{amount_yuan / 1e8:.2f}{I18n.get('ai_unit_billion')}"
             if abs_amount >= 1e4:
-                return f"{amount_yuan / 1e4:.2f}万元"
-            return f"{amount_yuan:.0f}元"
+                return f"{amount_yuan / 1e4:.2f}{I18n.get('ai_unit_ten_thousand')}"
+            return f"{amount_yuan:.0f}{I18n.get('ai_unit_yuan')}"
 
         # 1. Moneyflow (主力资金)
         mf_df = prefetched.get("moneyflow_df")
@@ -996,12 +1034,14 @@ class AIStrategyMixin:
                 sell_elg = sf(row.get("sell_elg_amount"))
                 net_main = (buy_lg + buy_elg) - (sell_lg + sell_elg)
                 net_total = sf(row.get("net_mf_amount"))
-                parts.append(f"主力净流入: {format_amount(net_main, 'wan_yuan')} (大单+超大单)")
-                parts.append(f"全市场净流入: {format_amount(net_total, 'wan_yuan')}")
+                parts.append(
+                    f"{I18n.get('ai_main_net_inflow')}: {format_amount(net_main, 'wan_yuan')} ({I18n.get('ai_large_extra_large')})"
+                )
+                parts.append(f"{I18n.get('ai_total_net_inflow')}: {format_amount(net_total, 'wan_yuan')}")
             else:
-                parts.append("个股资金流数据: 当日无记录")
+                parts.append(I18n.get("ai_stock_mf_no_record"))
         else:
-            parts.append("个股资金流数据: 暂不可用")
+            parts.append(I18n.get("ai_stock_mf_na"))
 
         # 2. Top List (龙虎榜)
         tl_df = prefetched.get("top_list_df")
@@ -1013,11 +1053,13 @@ class AIStrategyMixin:
                 reason = reason if reason and not (isinstance(reason, float) and reason != reason) else "N/A"
                 net_amt = sf(row.get("net_amount"))
                 net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
-                parts.append(f"龙虎榜: 是 (原因: {reason}, 净买入: {format_amount(net_amt, net_amount_unit)})")
+                parts.append(
+                    f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"
+                )
             else:
-                parts.append("龙虎榜: 当日未上榜")
+                parts.append(I18n.get("ai_top_list_no"))
         else:
-            parts.append("龙虎榜数据: 暂不可用")
+            parts.append(I18n.get("ai_top_list_na"))
 
         # 3. Northbound (北向资金)
         nb_df = prefetched.get("northbound_df")
@@ -1027,11 +1069,13 @@ class AIStrategyMixin:
                 row = stock_nb.iloc[0]
                 vol = sf(row.get("vol"))
                 ratio = sf(row.get("ratio"))
-                parts.append(f"北向持股: {vol:.0f}股, 占流通股比例: {ratio:.2f}%")
+                parts.append(
+                    f"{I18n.get('ai_north_holding')}: {vol:.0f}{I18n.get('ai_shares')}, {I18n.get('ai_circulating_ratio')}: {ratio:.2f}%"
+                )
             else:
-                parts.append("北向持股: 当日无持股记录")
+                parts.append(I18n.get("ai_north_no_record"))
         else:
-            parts.append("北向持股数据: 暂无")
+            parts.append(I18n.get("ai_north_na"))
 
         return "\n".join(parts)
 
@@ -1059,7 +1103,7 @@ class AIStrategyMixin:
                 df = await cache.get_financial_reports_history(ts_code, periods=8)
 
             if df is None or df.empty:
-                return "财务数据不足"
+                return I18n.get("ai_financial_insufficient")
 
             parts = []
 
@@ -1067,25 +1111,33 @@ class AIStrategyMixin:
                 roe_values = df["roe"].dropna().tolist()
                 if roe_values:
                     roe_str = ", ".join([f"{v:.2f}" for v in roe_values[:4]])
-                    parts.append(f"ROE趋势（近{len(roe_values)}季度）: {roe_str}")
+                    parts.append(
+                        I18n.get(
+                            "ai_roe_trend_format",
+                            label=I18n.get("ai_roe_trend"),
+                            count=len(roe_values),
+                            unit=I18n.get("ai_recent_quarters"),
+                            values=roe_str,
+                        )
+                    )
 
             if "grossprofit_margin" in df.columns:
                 margin_values = df["grossprofit_margin"].dropna().tolist()
                 if margin_values:
                     margin_str = ", ".join([f"{v:.2f}" for v in margin_values[:4]])
-                    parts.append(f"毛利率趋势: {margin_str}")
+                    parts.append(f"{I18n.get('ai_gross_margin_trend')}: {margin_str}")
 
             if "or_yoy" in df.columns:
                 or_yoy_values = df["or_yoy"].dropna().tolist()
                 if or_yoy_values:
                     or_yoy_str = ", ".join([f"{v:.2f}" for v in or_yoy_values[:4]])
-                    parts.append(f"营收增速趋势: {or_yoy_str}")
+                    parts.append(f"{I18n.get('ai_revenue_growth_trend')}: {or_yoy_str}")
 
             if "netprofit_yoy" in df.columns:
                 profit_yoy_values = df["netprofit_yoy"].dropna().tolist()
                 if profit_yoy_values:
                     profit_yoy_str = ", ".join([f"{v:.2f}" for v in profit_yoy_values[:4]])
-                    parts.append(f"净利润增速趋势: {profit_yoy_str}")
+                    parts.append(f"{I18n.get('ai_profit_growth_trend')}: {profit_yoy_str}")
 
             if "n_cashflow_act" in df.columns and "n_income_attr_p" in df.columns:
                 cf_values = df["n_cashflow_act"].dropna().tolist()
@@ -1095,13 +1147,13 @@ class AIStrategyMixin:
                     latest_profit = profit_values[0] if profit_values else 0
                     if latest_profit > 0:
                         cf_ratio = latest_cf / latest_profit
-                        parts.append(f"现金流/净利润: {cf_ratio:.2f}")
+                        parts.append(f"{I18n.get('ai_cf_profit_ratio')}: {cf_ratio:.2f}")
 
-            return "\n".join(parts) if parts else "财务数据不足"
+            return "\n".join(parts) if parts else I18n.get("ai_financial_insufficient")
 
         except Exception as e:
             logger.warning(f"[AIMixin] Failed to build multi-period financials for {ts_code}: {e}")
-            return "财务数据获取失败"
+            return I18n.get("ai_financial_fetch_failed")
 
     async def _build_auxiliary_data_text(
         self,
@@ -1135,8 +1187,8 @@ class AIStrategyMixin:
 
             if audit_df is not None and not audit_df.empty:
                 latest_audit = audit_df.iloc[0]
-                audit_result = latest_audit.get("audit_result", "未知")
-                lines.append(f"- 审计意见: {audit_result}")
+                audit_result = latest_audit.get("audit_result", I18n.get("ai_unknown"))
+                lines.append(f"- {I18n.get('ai_audit_opinion')}: {audit_result}")
                 has_data = True
 
             # 主营构成
@@ -1149,11 +1201,11 @@ class AIStrategyMixin:
                 if total_sales > 0:
                     biz_items = []
                     for _, row in top_business.head(3).iterrows():
-                        bz_name = row.get("bz_item", "未知")
+                        bz_name = row.get("bz_item", I18n.get("ai_unknown"))
                         bz_sales = row.get("bz_sales", 0)
                         ratio = (bz_sales / total_sales * 100) if total_sales > 0 else 0
                         biz_items.append(f"{bz_name}({ratio:.1f}%)")
-                    lines.append(f"- 主营构成: {', '.join(biz_items)}")
+                    lines.append(f"- {I18n.get('ai_main_business')}: {', '.join(biz_items)}")
                     has_data = True
 
             # 分红记录
@@ -1168,8 +1220,8 @@ class AIStrategyMixin:
                 for _, row in recent_div.iterrows():
                     end_date = str(row.get("end_date", ""))[:4]
                     div_proc = row.get("div_proc", "")
-                    div_items.append(f"{end_date}年{div_proc}")
-                lines.append(f"- 近年分红: {', '.join(div_items)}")
+                    div_items.append(f"{end_date}{I18n.get('ai_year_suffix')}{div_proc}")
+                lines.append(f"- {I18n.get('ai_recent_dividend')}: {', '.join(div_items)}")
                 has_data = True
 
             # 质押比例
@@ -1182,8 +1234,8 @@ class AIStrategyMixin:
                 latest_pledge = pledge_df.iloc[0]
                 pledge_ratio = latest_pledge.get("pledge_ratio", 0)
                 if pledge_ratio and pledge_ratio > 0:
-                    warning = " ⚠️ 质押比例较高" if pledge_ratio > 30 else ""
-                    lines.append(f"- 质押比例: {pledge_ratio:.1f}%{warning}")
+                    warning = f" ⚠️ {I18n.get('ai_pledge_high_warning')}" if pledge_ratio > 30 else ""
+                    lines.append(f"- {I18n.get('ai_pledge_ratio')}: {pledge_ratio:.1f}%{warning}")
                     has_data = True
 
             # 第一大股东
@@ -1195,9 +1247,11 @@ class AIStrategyMixin:
             if holders_df is not None and not holders_df.empty:
                 latest_holders = holders_df[holders_df["end_date"] == holders_df["end_date"].max()]
                 if not latest_holders.empty:
-                    top_holder = latest_holders.iloc[0].get("holder_name", "未知")
+                    top_holder = latest_holders.iloc[0].get("holder_name", I18n.get("ai_unknown"))
                     top_ratio = latest_holders.iloc[0].get("hold_ratio", 0)
-                    lines.append(f"- 第一大股东: {top_holder} (持股{top_ratio:.2f}%)")
+                    lines.append(
+                        f"- {I18n.get('ai_top_holder')}: {top_holder} ({I18n.get('ai_holder_share')}{top_ratio:.2f}%)"
+                    )
                     has_data = True
 
             # 股东人数
@@ -1212,14 +1266,16 @@ class AIStrategyMixin:
                 if curr_num:
                     if change_pct is not None and not pd.isna(change_pct):
                         if change_pct < -5:
-                            trend = "↓ 筹码集中"
+                            trend = f"↓ {I18n.get('ai_holder_concentrate')}"
                         elif change_pct > 5:
-                            trend = "↑ 筹码分散"
+                            trend = f"↑ {I18n.get('ai_holder_disperse')}"
                         else:
-                            trend = "→ 基本稳定"
-                        lines.append(f"- 股东人数: {int(curr_num):,}户 ({trend} {change_pct:+.1f}%)")
+                            trend = f"→ {I18n.get('ai_holder_stable')}"
+                        lines.append(
+                            f"- {I18n.get('ai_holder_count')}: {int(curr_num):,}{I18n.get('ai_households')} ({trend} {change_pct:+.1f}%)"
+                        )
                     else:
-                        lines.append(f"- 股东人数: {int(curr_num):,}户")
+                        lines.append(f"- {I18n.get('ai_holder_count')}: {int(curr_num):,}{I18n.get('ai_households')}")
                     has_data = True
 
         except Exception as e:
@@ -1227,7 +1283,7 @@ class AIStrategyMixin:
 
         if has_data:
             return "\n".join(lines) + "\n"
-        return "无辅助数据"
+        return I18n.get("ai_no_auxiliary_data")
 
     async def _build_macro_context(self, cache: typing.Any) -> str:
         """
@@ -1241,7 +1297,7 @@ class AIStrategyMixin:
         Returns:
             宏观经济环境文本
         """
-        lines = ["【宏观经济环境】"]
+        lines = [I18n.get("ai_section_wrapper", title=I18n.get("macro_env_title"))]
         has_data = False
 
         try:
@@ -1251,17 +1307,17 @@ class AIStrategyMixin:
 
                 m2_yoy = latest.get("m2_yoy")
                 if m2_yoy is not None:
-                    lines.append(f"- M2同比增速: {m2_yoy:.2f}%")
+                    lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
                     has_data = True
 
                 cpi = latest.get("cpi")
                 if cpi is not None:
-                    lines.append(f"- CPI: {cpi:.2f}")
+                    lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
                     has_data = True
 
                 ppi = latest.get("ppi")
                 if ppi is not None:
-                    lines.append(f"- PPI: {ppi:.2f}")
+                    lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
                     has_data = True
 
             shibor = await cache.get_shibor_latest()
@@ -1270,17 +1326,17 @@ class AIStrategyMixin:
 
                 on_rate = shibor_latest.get("on")
                 if on_rate is not None:
-                    lines.append(f"- Shibor隔夜: {on_rate:.2f}%")
+                    lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
                     has_data = True
 
                 w1_rate = shibor_latest.get("1w")
                 if w1_rate is not None:
-                    lines.append(f"- Shibor1周: {w1_rate:.2f}%")
+                    lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
                     has_data = True
 
                 m3_rate = shibor_latest.get("3m")
                 if m3_rate is not None:
-                    lines.append(f"- Shibor3个月: {m3_rate:.2f}%")
+                    lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
                     has_data = True
 
         except Exception as e:
@@ -1298,27 +1354,29 @@ class AIStrategyMixin:
         """
         parts = []
 
-        parts.append(f"PE(TTM): {fmt_val(row.get('pe_ttm'))}")
-        parts.append(f"PB: {fmt_val(row.get('pb'))}")
-        parts.append(f"ROE: {fmt_val(row.get('roe'), suffix='%')}")
-        parts.append(f"毛利率: {fmt_val(row.get('grossprofit_margin'), suffix='%')}")
-        parts.append(f"资产负债率: {fmt_val(row.get('debt_to_assets'), suffix='%')}")
-        parts.append(f"营收同比增长: {fmt_val(row.get('or_yoy'), suffix='%')}")
-        parts.append(f"净利润同比增长: {fmt_val(row.get('netprofit_yoy'), suffix='%')}")
+        parts.append(f"{I18n.get('ai_pe_ttm')}: {fmt_val(row.get('pe_ttm'))}")
+        parts.append(f"{I18n.get('ai_pb')}: {fmt_val(row.get('pb'))}")
+        parts.append(f"{I18n.get('ai_roe')}: {fmt_val(row.get('roe'), suffix='%')}")
+        parts.append(f"{I18n.get('ai_gross_margin')}: {fmt_val(row.get('grossprofit_margin'), suffix='%')}")
+        parts.append(f"{I18n.get('ai_debt_ratio')}: {fmt_val(row.get('debt_to_assets'), suffix='%')}")
+        parts.append(f"{I18n.get('ai_revenue_yoy')}: {fmt_val(row.get('or_yoy'), suffix='%')}")
+        parts.append(f"{I18n.get('ai_profit_yoy')}: {fmt_val(row.get('netprofit_yoy'), suffix='%')}")
 
         tmv = safe_float(row.get("total_mv"), default=None)  # type: ignore
-        parts.append(
-            f"总市值: {f'{tmv / 10000:.2f}亿元' if tmv is not None else 'N/A'}",
-        )
+        if tmv is not None:
+            tmv_str = f"{tmv / 10000:.2f}{I18n.get('ai_billion_yuan')}"
+        else:
+            tmv_str = "N/A"
+        parts.append(f"{I18n.get('ai_total_mv')}: {tmv_str}")
 
-        parts.append(f"股息率(TTM): {fmt_val(row.get('dv_ttm'), suffix='%')}")
+        parts.append(f"{I18n.get('ai_dividend_yield_ttm')}: {fmt_val(row.get('dv_ttm'), suffix='%')}")
 
         pe_val = safe_float(row.get("pe_ttm"), default=None)  # type: ignore
         growth_val = safe_float(row.get("netprofit_yoy"), default=None)  # type: ignore
         if pe_val is not None and growth_val is not None and growth_val > 0:
             peg = pe_val / growth_val
-            parts.append(f"PEG: {peg:.2f} (PE/净利润增速)")
+            parts.append(f"{I18n.get('ai_peg')}: {peg:.2f} ({I18n.get('ai_peg_pe_profit_growth')})")
         else:
-            parts.append("PEG: N/A (增速<=0或数据缺失)")
+            parts.append(I18n.get("ai_peg_na"))
 
         return "\n".join(parts)

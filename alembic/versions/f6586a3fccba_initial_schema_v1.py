@@ -753,8 +753,14 @@ def _create_all_tables_fresh() -> None:
         sa.Column("thinking", sa.String(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("history_id", name=op.f("uq_screening_thinking_history_id")),
+        sa.ForeignKeyConstraint(
+            ["history_id"],
+            ["screening_history.id"],
+            ondelete="CASCADE",
+            name=op.f("fk_screening_thinking_history_id_screening_history"),
+        ),
     )
-    op.create_index("idx_st_history_id", "screening_thinking", ["history_id"])
     op.create_table(
         "shibor_daily",
         sa.Column("date", sa.Date(), nullable=False),
@@ -1111,8 +1117,14 @@ def _create_table_screening_thinking() -> None:
             sa.Column("thinking", sa.String(), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.func.now()),
             sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint("history_id", name=op.f("uq_screening_thinking_history_id")),
+            sa.ForeignKeyConstraint(
+                ["history_id"],
+                ["screening_history.id"],
+                ondelete="CASCADE",
+                name=op.f("fk_screening_thinking_history_id_screening_history"),
+            ),
         )
-        op.create_index("idx_st_history_id", "screening_thinking", ["history_id"])
 
 
 _ALL_EXPECTED_TABLES = [
@@ -1232,7 +1244,6 @@ def downgrade() -> None:
     op.drop_index("idx_sh_date_code", table_name="screening_history")
     op.drop_index("idx_sh_date_strategy", table_name="screening_history")
     op.drop_table("screening_history")
-    op.drop_index("idx_st_history_id", table_name="screening_thinking")
     op.drop_table("screening_thinking")
     op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")
     op.drop_table("repurchase")

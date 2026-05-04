@@ -763,16 +763,27 @@ class AIService:
         """
         Helper to normalize news classification result.
         Handles the L1/L2 category logic to provide a clean 'category' string for UI.
+        L1/L2 codes are English enum values returned by the AI prompt,
+        translated to locale-specific display names via I18n.
         """
-        # We combine L1 and L2 for category to display "金融核心-贵金属"
-        l1 = raw_result.get("category_L1", "")
-        l2 = raw_result.get("category_L2", "")
-        # Prefer L2 if available, or L1-L2 combo
-        final_category = f"{l2}" if l2 else l1
+        from ui.i18n import I18n
 
-        # Store structured data back
+        l1_code = raw_result.get("category_L1", "")
+        l2_code = raw_result.get("category_L2", "")
+
+        l1_display = I18n.get(f"news_l1_{l1_code}", l1_code) if l1_code else ""
+        l2_display = I18n.get(f"news_l2_{l2_code}", l2_code) if l2_code else ""
+
+        if l2_display and l1_display:
+            final_category = f"{l1_display}-{l2_display}"
+        elif l2_display:
+            final_category = l2_display
+        elif l1_display:
+            final_category = l1_display
+        else:
+            final_category = ""
+
         raw_result["category"] = final_category
-        # Ensure emoji/sentiment exist
         if "emoji" not in raw_result:
             raw_result["emoji"] = "📰"
         if "sentiment" not in raw_result:

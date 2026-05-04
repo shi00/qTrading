@@ -57,7 +57,6 @@ class SchedulerService:
                 except Exception as e:
                     logger.warning(f"[Scheduler] Error during shutdown: {e}")
             cls._instance = None
-            cls._initialized = False
 
     def __init__(self):
         if self._initialized:
@@ -349,18 +348,18 @@ class SchedulerService:
             task = tm.get_task(task_id)
             cancel_event = task._cancel_event if task else None
             processor = DataProcessor()
-            tm.update_progress(task_id, 0.05, "清空历史AI概念...")
+            tm.update_progress(task_id, 0.05, I18n.get("sched_doubao_clear_history"))
             await processor.run_doubao_tagging(
                 task_id=task_id,
                 cancel_event=cancel_event,
             )
             self._last_doubao_date = today_str
             self._persist_run_date(_CFG_LAST_DOUBAO_REFRESH, today_str)
-            return "AI概念重建完成"
+            return I18n.get("sched_doubao_done")
 
         TaskManager().submit_task(
-            name="AI概念周度重建",
-            task_type="AI打标",
+            name=I18n.get("sched_doubao_task_name"),
+            task_type=I18n.get("sched_doubao_task_type"),
             coroutine_factory=_doubao_logic,
             cancellable=True,
             unique_key="doubao_sync",
@@ -467,37 +466,3 @@ class SchedulerService:
             "last_prediction": self._last_pred_date,
             "next_run": next_run,
         }
-
-
-_scheduler_instance: SchedulerService | None = None
-_scheduler_lock = threading.Lock()
-
-
-def get_scheduler() -> SchedulerService:
-    """
-    S5-6 fix: Lazy initialization accessor for scheduler.
-    Prevents scheduler from being created at import time.
-    """
-    global _scheduler_instance
-    if _scheduler_instance is None:
-        with _scheduler_lock:
-            if _scheduler_instance is None:
-                _scheduler_instance = SchedulerService()
-
-    assert _scheduler_instance is not None
-    return _scheduler_instance
-
-
-# Backward compatibility: scheduler property that lazily initializes
-# This allows existing code to work, but triggers lazy init on first access
-class _SchedulerProxy:
-    """Proxy that lazily initializes the scheduler on first attribute access."""
-
-    def __getattr__(self, name):
-        return getattr(get_scheduler(), name)
-
-    def __bool__(self):
-        return bool(get_scheduler())
-
-
-scheduler = _SchedulerProxy()

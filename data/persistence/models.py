@@ -9,6 +9,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -249,11 +250,14 @@ class ScreeningHistory(Base):
 class ScreeningThinking(Base):
     __tablename__ = "screening_thinking"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    history_id = Column(Integer, nullable=False, index=True)
+    history_id = Column(
+        Integer,
+        ForeignKey("screening_history.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
     thinking = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
-
-    __table_args__ = (Index("idx_st_history_id", "history_id"),)
 
 
 class BlockTrade(Base):
@@ -303,23 +307,23 @@ class FinancialReports(Base):
     end_date = Column(Date, primary_key=True, index=True)
     ann_date = Column(Date)
     report_type = Column(String)
-    total_revenue = Column(Float)
-    revenue = Column(Float)
-    n_income = Column(Float)
-    n_income_attr_p = Column(Float)
-    total_assets = Column(Float)
-    total_liab = Column(Float)
-    total_hldr_eqy_exc_min_int = Column(Float)
-    roe = Column(Float)
-    roe_dt = Column(Float)
-    grossprofit_margin = Column(Float)
-    netprofit_margin = Column(Float)
-    debt_to_assets = Column(Float)
-    or_yoy = Column(Float)
-    netprofit_yoy = Column(Float)
-    goodwill = Column(Float)
+    total_revenue = Column(Float, info={"null_protected": True})
+    revenue = Column(Float, info={"null_protected": True})
+    n_income = Column(Float, info={"null_protected": True})
+    n_income_attr_p = Column(Float, info={"null_protected": True})
+    total_assets = Column(Float, info={"null_protected": True})
+    total_liab = Column(Float, info={"null_protected": True})
+    total_hldr_eqy_exc_min_int = Column(Float, info={"null_protected": True})
+    roe = Column(Float, info={"null_protected": True})
+    roe_dt = Column(Float, info={"null_protected": True})
+    grossprofit_margin = Column(Float, info={"null_protected": True})
+    netprofit_margin = Column(Float, info={"null_protected": True})
+    debt_to_assets = Column(Float, info={"null_protected": True})
+    or_yoy = Column(Float, info={"null_protected": True})
+    netprofit_yoy = Column(Float, info={"null_protected": True})
+    goodwill = Column(Float, info={"null_protected": True})
     audit_result = Column(String)
-    n_cashflow_act = Column(Float)  # 经营活动产生的现金流量净额
+    n_cashflow_act = Column(Float, info={"null_protected": True})
     __table_args__ = (
         Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
         Index("ix_financial_reports_ann_date", "ann_date"),
@@ -594,79 +598,6 @@ class TaskHistory(Base):
     created_at = Column(DateTime(timezone=False), server_default=func.now(), nullable=False, index=True)
     started_at = Column(DateTime(timezone=False))
     completed_at = Column(DateTime(timezone=False))
-
-
-# --- Date Column Metadata Mapping ---
-# DEPRECATED: These dictionaries are no longer used by the codebase.
-# Date/DateTime columns are now automatically extracted from SQLAlchemy model metadata.
-# See base_dao.py for the implementation.
-# Kept here for documentation/reference purposes only.
-DATE_COLUMNS = {
-    "stock_basic": ["list_date", "delist_date"],
-    "daily_quotes": ["trade_date"],
-    "daily_indicators": ["trade_date"],
-    "moneyflow_daily": ["trade_date"],
-    "northbound_holding": ["trade_date"],
-    "top_list": ["trade_date"],
-    "screening_history": ["trade_date"],
-    "block_trade": ["trade_date"],
-    "trade_cal": ["cal_date", "pretrade_date"],
-    "financial_reports": ["end_date", "ann_date"],
-    "index_daily": ["trade_date"],
-    "index_dailybasic": ["trade_date"],
-    "margin_daily": ["trade_date"],
-    "suspend_d": ["trade_date"],
-    "limit_list": ["trade_date"],
-    "fina_forecast": ["end_date", "ann_date"],
-    "fina_mainbz": ["end_date"],
-    "pledge_stat": ["end_date"],
-    "repurchase": ["ann_date", "end_date", "exp_date"],
-    "dividend": ["end_date", "ann_date", "record_date", "ex_date"],
-    "fina_audit": ["end_date", "ann_date"],
-    "stk_holdernumber": ["end_date", "ann_date"],
-    "top10_holders": ["end_date", "ann_date"],
-    "index_weight": ["trade_date"],
-    "moneyflow_hsgt": ["trade_date"],
-    "shibor_daily": ["date"],
-    "macro_economy": ["period"],
-    "sync_status": ["last_sync_date", "last_data_date"],
-}
-
-DATETIME_COLUMNS = {
-    "market_news": ["publish_time", "created_at"],
-    "screening_history": ["created_at"],
-    "task_history": ["created_at", "started_at", "completed_at"],
-    "stock_sync_status": ["step4_completed_at", "updated_at", "created_at"],
-    "macro_economy": ["created_at"],
-    # 各表通用 updated_at + created_at 支持
-    "stock_basic": ["updated_at", "created_at"],
-    "stock_concepts": ["updated_at", "created_at"],
-    "daily_quotes": ["updated_at", "created_at"],
-    "daily_indicators": ["updated_at", "created_at"],
-    "moneyflow_daily": ["updated_at", "created_at"],
-    "northbound_holding": ["updated_at", "created_at"],
-    "top_list": ["updated_at", "created_at"],
-    "sync_status": ["updated_at", "created_at"],
-    "block_trade": ["updated_at", "created_at"],
-    "trade_cal": ["updated_at", "created_at"],
-    "financial_reports": ["updated_at", "created_at"],
-    "index_daily": ["updated_at", "created_at"],
-    "index_dailybasic": ["updated_at", "created_at"],
-    "margin_daily": ["updated_at", "created_at"],
-    "suspend_d": ["updated_at", "created_at"],
-    "limit_list": ["updated_at", "created_at"],
-    "fina_forecast": ["updated_at", "created_at"],
-    "fina_mainbz": ["updated_at", "created_at"],
-    "pledge_stat": ["updated_at", "created_at"],
-    "repurchase": ["updated_at", "created_at"],
-    "dividend": ["updated_at", "created_at"],
-    "fina_audit": ["updated_at", "created_at"],
-    "shibor_daily": ["updated_at", "created_at"],
-    "stk_holdernumber": ["updated_at", "created_at"],
-    "top10_holders": ["updated_at", "created_at"],
-    "index_weight": ["updated_at", "created_at"],
-    "moneyflow_hsgt": ["updated_at", "created_at"],
-}
 
 
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
