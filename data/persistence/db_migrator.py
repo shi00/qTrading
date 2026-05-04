@@ -12,7 +12,7 @@ import os
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from alembic import command
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -115,7 +115,7 @@ class DatabaseMigrator:
                     inspector = inspect(c)
                     if "alembic_version" not in inspector.get_table_names():
                         return None
-                    result = c.execute(__import__("sqlalchemy").text("SELECT version_num FROM alembic_version"))
+                    result = c.execute(text("SELECT version_num FROM alembic_version"))
                     row = result.fetchone()
                     return row[0] if row else None
 

@@ -115,7 +115,8 @@ class ScreenerDao(BaseDao):
 
     # --- Screening Data Fetch for Logic ---
     def _build_screening_sql(self, *, require_close: bool = True) -> str:
-        base_sql = """
+        close_condition = "q.close IS NOT NULL\n                 AND " if require_close else ""
+        return f"""
               SELECT b.ts_code,
                      b.name,
                      b.industry,
@@ -163,16 +164,10 @@ class ScreenerDao(BaseDao):
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
-               WHERE b.list_status = 'L'
+               WHERE {close_condition}b.list_status = 'L'
                  AND b.list_date <= $4
                  AND (b.delist_date IS NULL OR b.delist_date > $5)
               """
-        if require_close:
-            base_sql = base_sql.replace(
-                "WHERE b.list_status = 'L'",
-                "WHERE q.close IS NOT NULL\n                 AND b.list_status = 'L'",
-            )
-        return base_sql
 
     async def get_screening_data(self, trade_date: str | None = None):
         if not trade_date:
@@ -235,26 +230,40 @@ class ScreenerDao(BaseDao):
         review_status: str | None = None,
     ):
         """Update review metrics and advance review_status according to available horizons."""
+        from data.persistence.models import Base
+
         effective_status = review_status
         if effective_status is None:
             effective_status = REVIEW_STATUS_COMPLETED if t5_pct is not None else REVIEW_STATUS_T1_DONE
-        sql = """
-            UPDATE screening_history
-            SET "t1_pct"=$1,
-                "prediction_result"=$2,
-                "t1_price"=$3,
-                "t5_pct"=$4,
-                "t5_price"=$5,
-                "index_pct"=$6,
-                "alpha"=$7,
-                "review_status"=$8
-            WHERE "id"=$9
-        """
-        await self._write_db(
-            sql,
-            (pct, label, t1_price, t5_pct, t5_price, index_pct, alpha, effective_status, record_id),
-            is_many=False,
+
+        table = Base.metadata.tables.get("screening_history")
+        if table is None:
+            logger.error("[ScreenerDao] Table screening_history not found in SQLAlchemy metadata.")
+            return
+
+        import sqlalchemy as sa
+
+        stmt = (
+            sa.update(table)
+            .where(table.c.id == record_id)
+            .values(
+                t1_pct=pct,
+                prediction_result=label,
+                t1_price=t1_price,
+                t5_pct=t5_pct,
+                t5_price=t5_price,
+                index_pct=index_pct,
+                alpha=alpha,
+                review_status=effective_status,
+            )
         )
+
+        if self.engine is None:
+            raise RuntimeError("[ScreenerDao] Engine not initialized. Call CacheManager.init_db() first.")
+
+        await self._get_maintenance_event().wait()
+        async with self.engine.begin() as conn:
+            await conn.execute(stmt)
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:
