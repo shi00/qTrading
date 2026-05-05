@@ -67,6 +67,7 @@ class TestRunReviewE2E(unittest.TestCase):
         pending_df = self._pending_df("20240315")
         quotes_df = pd.DataFrame(
             {
+                "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
                 "close": [10.0, 10.5],
                 "pct_chg": [1.0, 5.0],
@@ -88,6 +89,7 @@ class TestRunReviewE2E(unittest.TestCase):
         pending_df = self._pending_df("20240308")
         quotes_df = pd.DataFrame(
             {
+                "ts_code": ["000001.SZ"] * 6,
                 "trade_date": [
                     datetime.date(2024, 3, 8),
                     datetime.date(2024, 3, 11),
@@ -116,6 +118,7 @@ class TestRunReviewE2E(unittest.TestCase):
         pending_df = self._pending_df("20240315")
         quotes_df = pd.DataFrame(
             {
+                "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
                 "close": [10.0, 10.5],
                 "pct_chg": [1.0, 5.0],
@@ -134,6 +137,7 @@ class TestRunReviewE2E(unittest.TestCase):
         pending_df = self._pending_df("20240315")
         quotes_df = pd.DataFrame(
             {
+                "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
                 "close": [0.0, 10.5],
                 "pct_chg": [0.0, 5.0],
@@ -154,6 +158,7 @@ class TestRunReviewE2E(unittest.TestCase):
         pending_df = self._pending_df("20240315")
         quotes_df = pd.DataFrame(
             {
+                "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
                 "close": [10.0, 10.5],
                 "pct_chg": [1.0, float("nan")],

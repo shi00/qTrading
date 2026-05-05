@@ -15,11 +15,7 @@ import pytest_asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
-TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
-TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
-TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD") or "123456"
-TEST_DB_NAME = "test_astock"
+from conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 
 
 @pytest.fixture

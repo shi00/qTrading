@@ -89,18 +89,21 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         from data.persistence.daos.screener_dao import ScreenerDao
 
         dao = ScreenerDao.__new__(ScreenerDao)
-        dao._write_db = AsyncMock()
 
         import asyncio
 
         with self.assertRaises(TypeError):
-            asyncio.run(dao.update_prediction_result(1, 5.0, "WIN", 10.5))  # type: ignore[call-arg]
+            asyncio.run(dao.update_prediction_result(1, 5.0, "WIN", 10.5))
 
     def test_t1_only_gives_t1_done(self):
         from data.persistence.daos.screener_dao import ScreenerDao
 
         dao = ScreenerDao.__new__(ScreenerDao)
-        dao._write_db = AsyncMock()
+        dao.engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao.engine.begin = MagicMock()
+        dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao.engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
 
         import asyncio
 
@@ -113,14 +116,20 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
             )
         )
 
-        call_args = dao._write_db.call_args[0][1]
-        self.assertEqual(call_args[7], REVIEW_STATUS_T1_DONE)
+        executed_stmt = mock_conn.execute.call_args[0][0]
+        compiled = executed_stmt.compile(compile_kwargs={"literal_binds": True})
+        sql_str = str(compiled)
+        self.assertIn("T1_DONE", sql_str)
 
     def test_t1_and_t5_gives_completed(self):
         from data.persistence.daos.screener_dao import ScreenerDao
 
         dao = ScreenerDao.__new__(ScreenerDao)
-        dao._write_db = AsyncMock()
+        dao.engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao.engine.begin = MagicMock()
+        dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao.engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
 
         import asyncio
 
@@ -137,8 +146,10 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
             )
         )
 
-        call_args = dao._write_db.call_args[0][1]
-        self.assertEqual(call_args[7], REVIEW_STATUS_COMPLETED)
+        executed_stmt = mock_conn.execute.call_args[0][0]
+        compiled = executed_stmt.compile(compile_kwargs={"literal_binds": True})
+        sql_str = str(compiled)
+        self.assertIn("COMPLETED", sql_str)
 
 
 class TestParamsSnapshotJsonb(unittest.TestCase):

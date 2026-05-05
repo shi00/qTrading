@@ -60,32 +60,7 @@ class ReviewManager:
         quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
 
         index_code = ConfigHandler.get_config("benchmark_index", "000001.SH")
-        all_pred_dates = pending_df["trade_date"].unique().tolist()
         index_cache: dict[str, float | None] = {}
-        for pred_d in all_pred_dates:
-            pred_d_str = str(pred_d).replace("-", "")[:8]
-            try:
-                dt_obj = datetime.datetime.strptime(pred_d_str, "%Y%m%d").date()
-            except Exception:
-                continue
-            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=dt_obj)
-            if df_idx is not None and not df_idx.empty:
-                raw_pct = df_idx.iloc[0]["pct_chg"]
-                index_cache[pred_d_str] = float(raw_pct) if pd.notna(raw_pct) else None
-            else:
-                try:
-                    df_idx_api = await self.api.get_index_daily(
-                        ts_code=index_code,
-                        start_date=pred_d_str,
-                        end_date=pred_d_str,
-                    )
-                    if df_idx_api is not None and not df_idx_api.empty:
-                        raw_pct = df_idx_api.iloc[0]["pct_chg"]
-                        index_cache[pred_d_str] = float(raw_pct) if pd.notna(raw_pct) else None
-                    else:
-                        index_cache[pred_d_str] = None
-                except Exception:
-                    index_cache[pred_d_str] = None
 
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
@@ -131,6 +106,29 @@ class ReviewManager:
                     else:
                         t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()
                     trade_date_str = t1_date_obj.strftime("%Y%m%d")
+
+                    if trade_date_str not in index_cache:
+                        try:
+                            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=t1_date_obj)
+                            if df_idx is not None and not df_idx.empty:
+                                raw_pct = df_idx.iloc[0]["pct_chg"]
+                                index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                            else:
+                                try:
+                                    df_idx_api = await self.api.get_index_daily(
+                                        ts_code=index_code,
+                                        start_date=trade_date_str,
+                                        end_date=trade_date_str,
+                                    )
+                                    if df_idx_api is not None and not df_idx_api.empty:
+                                        raw_pct = df_idx_api.iloc[0]["pct_chg"]
+                                        index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                                    else:
+                                        index_cache[trade_date_str] = None
+                                except Exception:
+                                    index_cache[trade_date_str] = None
+                        except Exception:
+                            index_cache[trade_date_str] = None
 
                     index_pct = index_cache.get(trade_date_str)
 
@@ -194,8 +192,6 @@ class ReviewManager:
                     date_threshold = (get_now() - datetime.timedelta(days=14)).date()
 
             if date_threshold is not None:
-                from utils.time_utils import to_date
-
                 date_threshold = to_date(date_threshold)
             return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore
 
@@ -289,7 +285,7 @@ class ReviewManager:
         record_id: typing.Any,
         pct: typing.Any,
         label: typing.Any,
-        index_pct: typing.Any = 0.0,
+        index_pct: typing.Any = None,
         t1_price: typing.Any = None,
         t5_pct: typing.Any = None,
         t5_price: typing.Any = None,

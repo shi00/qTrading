@@ -9,48 +9,47 @@ import unittest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from conftest import TEST_DB_URL
 from data.cache.cache_manager import CacheManager
 from data.persistence.models import Base
-
-_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
-_DB_PORT = os.environ.get("TEST_DB_PORT", "5432")
-_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
-_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD") or "123456"
-_DB_NAME = os.environ.get("TEST_DB_NAME", "test_astock")
-TEST_DB_URL = f"postgresql+asyncpg://{_DB_USER}:{_DB_PASSWORD}@{_DB_HOST}:{_DB_PORT}/{_DB_NAME}"
 
 _SESSION_ENGINE: AsyncEngine | None = None
 _TABLES_INITIALIZED = False
 
 TABLE_NAMES = [
-    "daily_quotes",
-    "index_daily",
-    "index_dailybasic",
     "block_trade",
-    "limit_list",
-    "top_list",
-    "margin_daily",
-    "suspend_d",
-    "moneyflow_daily",
-    "northbound_holding",
-    "trade_cal",
-    "stock_basic",
-    "stock_concepts",
-    "financial_reports",
     "daily_indicators",
+    "daily_quotes",
+    "dividend",
+    "fina_audit",
     "fina_forecast",
     "fina_mainbz",
-    "fina_audit",
+    "financial_reports",
+    "index_daily",
+    "index_dailybasic",
+    "index_weight",
+    "limit_list",
+    "macro_economy",
+    "margin_daily",
+    "market_news",
+    "moneyflow_daily",
+    "moneyflow_hsgt",
+    "northbound_holding",
     "pledge_stat",
     "repurchase",
-    "dividend",
-    "screener_predictions",
-    "screener_results",
-    "news_raw",
-    "news_processed",
-    "macro_china_ppi",
-    "macro_china_cpi",
-    "macro_china_m",
+    "screening_history",
+    "screening_thinking",
+    "shibor_daily",
+    "stk_holdernumber",
+    "stock_basic",
+    "stock_concepts",
+    "stock_sync_status",
+    "suspend_d",
+    "sync_status",
+    "task_history",
+    "top10_holders",
+    "top_list",
+    "trade_cal",
 ]
 
 
@@ -72,12 +71,17 @@ async def _ensure_session_engine():
 
 async def _truncate_all_tables(engine: AsyncEngine):
     """Truncate all tables for test isolation (fast, no DDL)."""
-    for table in TABLE_NAMES:
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
-        except Exception:
-            pass
+    tables_str = ", ".join(TABLE_NAMES)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(f"TRUNCATE TABLE {tables_str} CASCADE"))
+    except Exception:
+        for table in TABLE_NAMES:
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+            except Exception:
+                pass
 
 
 class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):

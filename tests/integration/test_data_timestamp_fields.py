@@ -75,12 +75,11 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """使用独立的 test_astock 数据库进行测试"""
 
-        _db_host = os.environ.get("TEST_DB_HOST", "localhost")
-        _db_port = os.environ.get("TEST_DB_PORT", "5432")
-        _db_user = os.environ.get("TEST_DB_USER", "postgres")
-        _db_password = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD") or "123456"
-        _db_name = os.environ.get("TEST_DB_NAME", "test_astock")
-        self.test_db_url = f"postgresql+asyncpg://{_db_user}:{_db_password}@{_db_host}:{_db_port}/{_db_name}"
+        from conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
+
+        self.test_db_url = (
+            f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
+        )
         self.engine = create_async_engine(self.test_db_url, echo=False)
 
         from data.persistence.models import Base

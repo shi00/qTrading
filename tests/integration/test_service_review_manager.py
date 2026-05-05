@@ -111,6 +111,7 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
         mock_cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
                     "close": [10.0, 10.3],
                     "pct_chg": [1.0, 3.0],
@@ -463,6 +464,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 10.5],
                     "pct_chg": [1.0, 5.0],
@@ -492,6 +494,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 9.5],
                     "pct_chg": [1.0, -5.0],
@@ -521,6 +524,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 10.1],
                     "pct_chg": [1.0, 1.0],
@@ -550,6 +554,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ"] * 6,
                     "trade_date": ["20240315", "20240318", "20240319", "20240320", "20240321", "20240322"],
                     "close": [10.0, 10.5, 10.7, 10.8, 10.9, 11.0],
                     "pct_chg": [1.0, 5.0, 1.9, 0.9, 0.9, 0.9],
@@ -580,14 +585,17 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ"],
                     "trade_date": ["20240315"],
                     "close": [10.0],
                     "pct_chg": [1.0],
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -620,6 +628,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 10.3],
                     "pct_chg": [1.0, 3.0],
@@ -664,14 +673,17 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240311", "20240312"],
                     "close": [10.0, 10.5],
                     "pct_chg": [1.0, 5.0],
                 }
             )
         )
+        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -695,9 +707,10 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "trade_date": ["20240315", "20240318"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+                    "trade_date": ["20240315", "20240318", "20240315", "20240318"],
+                    "close": [10.0, 10.5, 20.0, 21.0],
+                    "pct_chg": [1.0, 5.0, 1.0, 5.0],
                 }
             )
         )

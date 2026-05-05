@@ -310,7 +310,7 @@ class TestOrmDaoAlignment:
             "alpha",
             "review_status",
         }
-        missing = {field for field in required_fields if f'"{field}"' not in source}
+        missing = {field for field in required_fields if f'"{field}"' not in source and f"{field}=" not in source}
         assert not missing, f"update_prediction_result missing review fields: {missing}"
 
     def test_screening_history_pending_index_matches_review_status_query(self):
