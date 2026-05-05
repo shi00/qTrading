@@ -128,6 +128,7 @@ class ReviewManager:
                                 except Exception:
                                     index_cache[trade_date_str] = None
                         except Exception:
+                            logger.warning(f"[Review] Cache index lookup failed for {index_code} on {trade_date_str}")
                             index_cache[trade_date_str] = None
 
                     index_pct = index_cache.get(trade_date_str)
