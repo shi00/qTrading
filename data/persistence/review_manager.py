@@ -75,7 +75,7 @@ class ReviewManager:
                 if t0_row.empty:
                     continue
 
-                t0_idx = int(df_quotes.index.get_loc(t0_row.index[0]))
+                t0_idx = int(df_quotes.index.get_loc(t0_row.index[0]))  # type: ignore[arg-type]
                 t1_pct: float | None = None
                 t1_price: float | None = None
                 t5_pct: float | None = None
@@ -100,7 +100,7 @@ class ReviewManager:
                 if t1_pct is not None and t1_row is not None:
                     t1_date_val = t1_row["trade_date"]
                     if hasattr(t1_date_val, "date") and callable(t1_date_val.date):
-                        t1_date_obj = t1_date_val.date()
+                        t1_date_obj: datetime.date = t1_date_val.date()
                     elif hasattr(t1_date_val, "year"):
                         t1_date_obj = t1_date_val
                     else:
@@ -109,7 +109,7 @@ class ReviewManager:
 
                     if trade_date_str not in index_cache:
                         try:
-                            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=t1_date_obj)
+                            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=trade_date_str)
                             if df_idx is not None and not df_idx.empty:
                                 raw_pct = df_idx.iloc[0]["pct_chg"]
                                 index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
@@ -182,7 +182,7 @@ class ReviewManager:
                 trade_cal_df = await self.cache.get_trade_cal(
                     start_date=start_dt.strftime("%Y%m%d"),
                     end_date=end_dt.strftime("%Y%m%d"),
-                    is_open=1,
+                    is_open="1",
                 )
                 if trade_cal_df is not None and not trade_cal_df.empty and len(trade_cal_df) >= 10:
                     date_threshold = trade_cal_df.iloc[-10]["cal_date"]
@@ -214,7 +214,7 @@ class ReviewManager:
 
         try:
             df_wins = await self.cache.screener_dao.get_learning_context(
-                limit=limit,
+                limit=limit or 3,
                 is_win=True,
             )
             if df_wins is not None and not df_wins.empty:
@@ -233,7 +233,7 @@ class ReviewManager:
                     )
 
             df_losses = await self.cache.screener_dao.get_learning_context(
-                limit=limit,
+                limit=limit or 3,
                 is_win=False,
             )
             if df_losses is not None and not df_losses.empty:

@@ -9,6 +9,16 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+__all__ = [
+    "TEST_DB_HOST",
+    "TEST_DB_PORT",
+    "TEST_DB_USER",
+    "TEST_DB_PASSWORD",
+    "TEST_DB_NAME",
+    "TEST_DB_URL",
+    "TEST_DB_SYNC_URL",
+]
+
 
 @pytest.fixture(scope="session")
 def event_loop_policy():
