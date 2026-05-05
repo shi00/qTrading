@@ -94,7 +94,7 @@ class NewsFetcher:
 
                         if title_col:
                             news_list = []
-                            for _, row in df_cninfo.head(limit).iterrows():
+                            for _, row in df_cninfo.head(limit if limit is not None else len(df_cninfo)).iterrows():
                                 title = str(row.get(title_col, "")).strip()
                                 pub_date = str(row.get(time_col, "")) if time_col else ""
                                 pub_time = f"{pub_date} 00:00:00" if pub_date else ""
@@ -124,7 +124,7 @@ class NewsFetcher:
                     if df_em is not None and not df_em.empty:
                         news_list = []
                         # EastMoney returns '新闻内容' as title, '新闻链接', '新闻时间', etc.
-                        for _, row in df_em.head(limit).iterrows():
+                        for _, row in df_em.head(limit if limit is not None else len(df_em)).iterrows():
                             title = row.get("新闻标题", row.get("新闻内容", ""))
                             pub_time = row.get("新闻时间", row.get("发布时间", ""))
                             source = row.get("文章来源", "东财新闻")
@@ -190,7 +190,7 @@ class NewsFetcher:
             now = get_now()
             today_str = now.strftime("%Y-%m-%d")
 
-            for _, row in df.head(limit).iterrows():
+            for _, row in df.head(limit if limit is not None else len(df)).iterrows():
                 # Extract raw time string
                 raw_time = row.get("发布时间") or row.get("时间") or row.get("time", "")
                 final_time = raw_time
@@ -392,7 +392,7 @@ class NewsFetcher:
                 df = df.sort_values("涨跌幅", ascending=False)
 
             results = []
-            for _, row in df.head(limit).iterrows():
+            for _, row in df.head(limit if limit is not None else len(df)).iterrows():
                 name = row.get("板块", "")
                 if not name:
                     continue

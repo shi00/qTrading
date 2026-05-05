@@ -231,8 +231,8 @@ class QuoteDao(BaseDao):
     async def get_daily_quotes(
         self,
         ts_code: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
         ts_code_list: list | None = None,
         suppress_errors: bool = True,
     ):
@@ -244,13 +244,15 @@ class QuoteDao(BaseDao):
             sql += f" AND ts_code = ${idx}"
             params.append(ts_code)
             idx += 1
-        if start_date:
+        sd = self._to_date_str(start_date) if start_date else None
+        if sd:
             sql += f" AND trade_date >= ${idx}"
-            params.append(start_date)
+            params.append(sd)
             idx += 1
-        if end_date:
+        ed = self._to_date_str(end_date) if end_date else None
+        if ed:
             sql += f" AND trade_date <= ${idx}"
-            params.append(end_date)
+            params.append(ed)
             idx += 1
 
         if ts_code_list:
@@ -379,7 +381,7 @@ class QuoteDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def get_index_daily(self, ts_code: str | None = None, trade_date: str | None = None):
+    async def get_index_daily(self, ts_code: str | None = None, trade_date: datetime.date | str | None = None):
         sql = "SELECT * FROM index_daily WHERE 1=1"
         p = []
         idx = 1
@@ -387,17 +389,18 @@ class QuoteDao(BaseDao):
             sql += f" AND ts_code=${idx}"
             p.append(ts_code)
             idx += 1
-        if trade_date:
+        td = self._to_date_str(trade_date) if trade_date else None
+        if td:
             sql += f" AND trade_date=${idx}"
-            p.append(trade_date)
+            p.append(td)
         sql += " ORDER BY trade_date DESC"
         return await self._read_db(sql, p)
 
     async def get_index_daily_range(
         self,
         ts_code_list: list,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
     ):
         """
         批量获取多只指数的日线数据。
@@ -417,13 +420,15 @@ class QuoteDao(BaseDao):
         params = []
         idx = 1
 
-        if start_date:
+        sd = self._to_date_str(start_date) if start_date else None
+        if sd:
             sql += f" AND trade_date >= ${idx}"
-            params.append(start_date)
+            params.append(sd)
             idx += 1
-        if end_date:
+        ed = self._to_date_str(end_date) if end_date else None
+        if ed:
             sql += f" AND trade_date <= ${idx}"
-            params.append(end_date)
+            params.append(ed)
             idx += 1
 
         placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])

@@ -1,5 +1,10 @@
 """Cache layer - 缓存管理"""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from data.cache.cache_manager import CacheManager
+
 
 def __getattr__(name):
     if name == "CacheManager":

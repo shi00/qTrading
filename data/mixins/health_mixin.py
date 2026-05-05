@@ -13,6 +13,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+import pandas as pd
+
 from data.constants import (
     CRITICAL_EMPTY_TABLES,
     HEALTH_THRESHOLD_BREADTH,
@@ -139,7 +141,7 @@ class HealthCheckMixin:
             sync_records = await self.cache.get_sync_status()
 
             # _read_db returns a pandas DataFrame
-            if sync_records is None or (hasattr(sync_records, "empty") and sync_records.empty):
+            if sync_records is None or not isinstance(sync_records, pd.DataFrame) or sync_records.empty:
                 self._quality_tier = 0
                 logger.warning(
                     "[DataProcessor] FastCheck | ⚠️ No sync records. Degrading Tier to CRITICAL (0)",
@@ -328,7 +330,7 @@ class HealthCheckMixin:
                 from data.external.tushare_client import TushareClient
 
                 tc = TushareClient()
-                api_cal_df = await tc.trade_cal(
+                api_cal_df = await tc.trade_cal(  # type: ignore[attr-defined]
                     start_date=end_date_obj.strftime("%Y%m%d"),
                     end_date=end_date_obj.strftime("%Y%m%d"),
                     is_open="1",
@@ -497,7 +499,7 @@ class HealthCheckMixin:
                 logger.debug(f"[DataProcessor] HealthCheck | Field completeness check skipped: {e}")
             try:
                 sync_records = await self.cache.get_sync_status()
-                if sync_records is not None and not sync_records.empty:
+                if isinstance(sync_records, pd.DataFrame) and not sync_records.empty:
                     fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
                     if not fin_info.empty:
                         fin_date_str = fin_info.iloc[0].get("last_data_date", "")
@@ -725,7 +727,7 @@ class HealthCheckMixin:
             fin_lag_days = None
             try:
                 sync_records = await self.cache.get_sync_status()
-                if sync_records is not None and not sync_records.empty:
+                if isinstance(sync_records, pd.DataFrame) and not sync_records.empty:
                     fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
                     if not fin_info.empty:
                         fin_date_str = fin_info.iloc[0].get("last_data_date", "")

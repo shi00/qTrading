@@ -149,7 +149,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         self.assertEqual(len(result), 5)
         self.mock_api.get_trade_cal.assert_called()
 
-        cached_df = await self.cache.get_trade_cal(start, end, is_open=1)
+        cached_df = await self.cache.get_trade_cal(start, end, is_open="1")
         self.assertIsNotNone(cached_df)
         self.assertEqual(len(cached_df), 5)
 
@@ -1191,7 +1191,7 @@ class TestTradeCalendarServiceIntegration(TestDatabaseBase):
         end = datetime.date(2024, 3, 24)
         await self._seed_trade_calendar(start, end)
 
-        result = await self.service.get_trade_cal_df(start, end, is_open=1)
+        result = await self.service.get_trade_cal_df(start, end, is_open="1")
 
         self.assertIsInstance(result, pd.DataFrame)
         for _, row in result.iterrows():
@@ -1219,7 +1219,7 @@ class TestTradeCalendarServiceIntegration(TestDatabaseBase):
         )
         self.mock_api.get_trade_cal.return_value = api_df
 
-        result = await self.service.get_trade_cal_df(start, end, is_open=1)
+        result = await self.service.get_trade_cal_df(start, end, is_open="1")
 
         self.assertFalse(result.empty)
         self.assertEqual(len(result), 5)
@@ -1298,8 +1298,8 @@ class TestEnsureCalendarRange(TestDatabaseBase):
         all_df = await self.cache.get_trade_cal(start, end)
         self.assertEqual(len(all_df), 31)
 
-        trading_df = await self.cache.get_trade_cal(start, end, is_open=1)
-        non_trading_df = await self.cache.get_trade_cal(start, end, is_open=0)
+        trading_df = await self.cache.get_trade_cal(start, end, is_open="1")
+        non_trading_df = await self.cache.get_trade_cal(start, end, is_open="0")
         self.assertGreater(len(trading_df), 0)
         self.assertGreater(len(non_trading_df), 0)
         self.assertEqual(len(trading_df) + len(non_trading_df), 31)

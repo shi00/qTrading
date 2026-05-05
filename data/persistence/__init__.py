@@ -1,5 +1,11 @@
 """Persistence layer - 持久化层"""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from data.persistence.database_manager import DatabaseManager
+    from data.persistence.models import Base
+
 
 def __getattr__(name):
     if name == "DatabaseManager":

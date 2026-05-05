@@ -68,6 +68,32 @@ class TestBaseDaoConvertParam:
         assert result == 123.45
 
 
+class TestBaseDaoToDateStr:
+    """测试 BaseDao._to_date_str 方法"""
+
+    def test_none(self):
+        result = BaseDao._to_date_str(None)
+        assert result is None
+
+    def test_string_passthrough(self):
+        result = BaseDao._to_date_str("20240321")
+        assert result == "20240321"
+
+    def test_empty_string(self):
+        result = BaseDao._to_date_str("")
+        assert result == ""
+
+    def test_date_object(self):
+        d = datetime.date(2024, 3, 21)
+        result = BaseDao._to_date_str(d)
+        assert result == "20240321"
+
+    def test_date_object_padding(self):
+        d = datetime.date(2024, 1, 5)
+        result = BaseDao._to_date_str(d)
+        assert result == "20240105"
+
+
 class TestBaseDaoQuoteColumns:
     """测试 BaseDao._quote_columns 方法"""
 
@@ -431,7 +457,7 @@ class TestStockDao:
         saved = await stock_dao.save_trade_cal(df)
         assert saved == 3
 
-        result = await stock_dao.get_trade_cal(start_date="20240321", end_date="20240322", is_open=1)
+        result = await stock_dao.get_trade_cal(start_date="20240321", end_date="20240322", is_open="1")
         assert len(result) == 2
 
     async def test_count_trade_days(self, stock_dao, clean_db):

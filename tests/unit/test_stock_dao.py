@@ -88,7 +88,7 @@ class TestGetTradeCal:
     async def test_with_all_filters(self):
         dao = _make_dao()
         dao._read_db = AsyncMock(return_value=pd.DataFrame())
-        result = await dao.get_trade_cal(start_date="20240101", end_date="20240630", is_open=1)
+        result = await dao.get_trade_cal(start_date="20240101", end_date="20240630", is_open="1")
         assert isinstance(result, pd.DataFrame)
 
 

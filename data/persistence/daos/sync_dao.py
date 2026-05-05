@@ -1,6 +1,8 @@
 import logging
 from datetime import date, datetime
 
+import pandas as pd
+
 from data.constants import (
     SYNC_RESULT_EMPTY,
     SYNC_RESULT_FETCH_FAILED,
@@ -65,7 +67,7 @@ class SyncDao(BaseDao):
             (table_name, now, parsed_date, record_count, status, last_result_status, now),
         )
 
-    async def get_sync_status(self, table_name: str | None = None):
+    async def get_sync_status(self, table_name: str | None = None) -> pd.DataFrame | dict | None:
         if table_name:
             df = await self._read_db(
                 "SELECT * FROM sync_status WHERE table_name = $1",

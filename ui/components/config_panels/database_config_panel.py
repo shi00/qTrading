@@ -275,11 +275,11 @@ class DatabaseConfigPanel(ft.Container):
 
     def get_config(self) -> dict:
         return {
-            "host": self.db_host_input.value.strip(),
-            "port": int(self.db_port_input.value.strip() or 5432),
-            "user": self.db_user_input.value.strip(),
+            "host": (self.db_host_input.value or "").strip(),
+            "port": int((self.db_port_input.value or "").strip() or 5432),
+            "user": (self.db_user_input.value or "").strip(),
             "password": self.db_password_input.value,
-            "database": self.db_name_input.value.strip(),
+            "database": (self.db_name_input.value or "").strip(),
             "create_if_not_exists": self.db_create_checkbox.value,
         }
 

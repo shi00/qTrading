@@ -224,7 +224,7 @@ class TradeCalendarService:
             return False
 
         try:
-            df = await self._cache.get_trade_cal(start_date=date_obj, end_date=date_obj, is_open=1)
+            df = await self._cache.get_trade_cal(start_date=date_obj, end_date=date_obj, is_open="1")
             if df is not None and not df.empty:
                 return True
 
@@ -278,7 +278,7 @@ class TradeCalendarService:
             return []
 
         try:
-            df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open=1)
+            df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open="1")
             if df is not None and not df.empty:
                 # 数据完整性快速校验：日期跨度 vs 记录数
                 # 3年约730个交易日，如果记录数远低于预期跨度的交易日密度，说明数据不完整
@@ -583,7 +583,7 @@ class TradeCalendarService:
 
         示例:
             >>> df = await service.get_trade_cal_df(
-            ...     datetime.date(2024, 3, 1), datetime.date(2024, 3, 31), is_open=1
+            ...     datetime.date(2024, 3, 1), datetime.date(2024, 3, 31), is_open="1"
             ... )
         """
         start_obj = self._to_date(start_date)
@@ -597,7 +597,7 @@ class TradeCalendarService:
             df = await self._fetch_from_api_and_persist(start_obj, end_obj)
             if df is not None and not df.empty:
                 if is_open is not None and "is_open" in df.columns:
-                    df = df[df["is_open"] == is_open]
+                    df = df[df["is_open"] == int(is_open)]
                 return df  # type: ignore
 
             return pd.DataFrame()

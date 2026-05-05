@@ -109,7 +109,7 @@ class ReviewManager:
 
                     if trade_date_str not in index_cache:
                         try:
-                            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=trade_date_str)
+                            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=t1_date_obj)
                             if df_idx is not None and not df_idx.empty:
                                 raw_pct = df_idx.iloc[0]["pct_chg"]
                                 index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None

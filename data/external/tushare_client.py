@@ -305,7 +305,7 @@ class TushareClient:
             return None
         return pd.concat(df_list, ignore_index=True)
 
-    def get_trade_dates(self, start_date: str | None, end_date: str | None):
+    def get_trade_dates(self, start_date: datetime.date | str | None, end_date: datetime.date | str | None):
         """Get list of actual trading dates (includes holidays handling).
         NOTE: This is a SYNC method — must remain sync for APScheduler (non-asyncio thread).
         For async contexts, use get_trade_cal() instead."""

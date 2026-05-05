@@ -12,6 +12,12 @@ Data layer - 数据层
 - mixins: Mixin 类
 """
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from data.cache.cache_manager import CacheManager
+    from data.data_processor import DataProcessor
+
 
 def __getattr__(name):
     if name == "CacheManager":

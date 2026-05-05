@@ -1,3 +1,4 @@
+import datetime
 import logging
 
 from data.persistence.models import (
@@ -47,21 +48,28 @@ class StockDao(BaseDao):
 
         return await self._save_upsert(df, "trade_cal", cols, pk_columns=pk_columns)
 
-    async def get_trade_cal(self, start_date=None, end_date=None, is_open=None):
+    async def get_trade_cal(
+        self,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
+        is_open: int | str | None = None,
+    ):
         sql = "SELECT * FROM trade_cal WHERE 1=1"
         p = []
         idx = 1
-        if start_date:
+        sd = self._to_date_str(start_date)
+        ed = self._to_date_str(end_date)
+        if sd:
             sql += f" AND cal_date>=${idx}"
-            p.append(start_date)
+            p.append(sd)
             idx += 1
-        if end_date:
+        if ed:
             sql += f" AND cal_date<=${idx}"
-            p.append(end_date)
+            p.append(ed)
             idx += 1
         if is_open is not None:
             sql += f" AND is_open=${idx}"
-            p.append(is_open)
+            p.append(int(is_open))
         sql += " ORDER BY cal_date ASC"
         return await self._read_db(sql, p)
 
@@ -74,24 +82,26 @@ class StockDao(BaseDao):
             return (df["min_d"].iloc[0], df["max_d"].iloc[0])
         return (None, None)
 
-    async def count_trade_days(self, start_date, end_date):
+    async def count_trade_days(self, start_date: datetime.date | str | None, end_date: datetime.date | str | None):
         """
         Count trading days in the given date range.
 
         Args:
-            start_date: Start date (date object)
-            end_date: End date (date object)
+            start_date: Start date (date object or string)
+            end_date: End date (date object or string)
 
         Returns:
             int: Number of trading days
         """
+        sd = self._to_date_str(start_date)
+        ed = self._to_date_str(end_date)
         sql = "SELECT COUNT(*) as cnt FROM trade_cal WHERE is_open=1 AND cal_date >= $1 AND cal_date <= $2"
-        df = await self._read_db(sql, (start_date, end_date))
+        df = await self._read_db(sql, (sd, ed))
         if df is None or df.empty:
             return 0
         return df["cnt"].iloc[0] or 0
 
-    async def get_start_date_by_trade_days(self, end_date, trade_days: int):
+    async def get_start_date_by_trade_days(self, end_date: datetime.date | str | None, trade_days: int):
         """
         Get the start date by looking back N trading days from end_date.
 
@@ -102,13 +112,14 @@ class StockDao(BaseDao):
         Returns:
             date: The start date (N trading days before end_date)
         """
+        ed = self._to_date_str(end_date)
         sql = """
             SELECT cal_date FROM trade_cal
             WHERE is_open = 1 AND cal_date <= $1
             ORDER BY cal_date DESC
             LIMIT $2
         """
-        df = await self._read_db(sql, (end_date, trade_days))
+        df = await self._read_db(sql, (ed, trade_days))
         if df is None or df.empty or len(df) < trade_days:
             return None
         return df["cal_date"].iloc[-1]

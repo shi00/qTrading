@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 class BaseDao:
     _maintenance_event = None
 
+    @staticmethod
+    def _to_date_str(val: datetime.date | str | None) -> str | None:
+        if val is None:
+            return None
+        if isinstance(val, str):
+            return val
+        return val.strftime("%Y%m%d")
+
     @classmethod
     def _get_maintenance_event(cls):
         import asyncio

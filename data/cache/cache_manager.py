@@ -7,7 +7,7 @@ import typing
 
 import pandas as pd
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 import config
 from data.constants import get_health_depth_full_trade_days
@@ -65,7 +65,7 @@ class CacheManager:
         self._maintenance_event_lazy = None
         self._init_lock_lazy = None
 
-        self.engine = None
+        self.engine: AsyncEngine | None = None
         self._disposed = False
 
         self.stock_dao = StockDao(self.engine)
@@ -282,6 +282,8 @@ class CacheManager:
 
         BaseDao._get_maintenance_event().clear()
         try:
+            if self.engine is None:
+                raise RuntimeError("Database engine not initialized")
             async with self.engine.begin() as conn:
                 await conn.run_sync(metadata.drop_all)
                 await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
@@ -342,8 +344,8 @@ class CacheManager:
     async def get_daily_quotes(
         self,
         ts_code: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
         ts_code_list: list | None = None,
         suppress_errors: bool = True,
     ):
@@ -365,8 +367,8 @@ class CacheManager:
     async def get_daily_indicators(
         self,
         ts_code: str | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
         limit: int | None = None,
     ):
         return await self.market_dao.get_daily_indicators(
@@ -379,8 +381,8 @@ class CacheManager:
     async def get_daily_indicators_bulk(
         self,
         ts_code_list: list,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
     ):
         """
         批量获取多只股票的 daily_indicators 数据。
@@ -462,7 +464,7 @@ class CacheManager:
             last_result_status,
         )
 
-    async def get_sync_status(self, table_name: str | None = None):
+    async def get_sync_status(self, table_name: str | None = None) -> pd.DataFrame | dict | None:
         return await self.sync_dao.get_sync_status(table_name)
 
     async def check_comprehensive_health(self):
@@ -503,6 +505,8 @@ class CacheManager:
         from data.persistence.models import Base as ModelsBase
 
         # === Step 2: Use single connection for table checks (no DAO calls inside) ===
+        if self.engine is None:
+            raise RuntimeError("Database engine not initialized")
         async with self.engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
 
@@ -686,14 +690,14 @@ class CacheManager:
     async def save_index_dailybasic(self, df: pd.DataFrame):
         return await self.quote_dao.save_index_dailybasic(df)
 
-    async def get_index_daily(self, ts_code: str | None = None, trade_date: str | None = None):
+    async def get_index_daily(self, ts_code: str | None = None, trade_date: datetime.date | str | None = None):
         return await self.quote_dao.get_index_daily(ts_code, trade_date)
 
     async def get_index_daily_range(
         self,
         ts_code_list: list,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
     ):
         """
         批量获取多只指数的日线数据。
@@ -772,13 +776,13 @@ class CacheManager:
 
     async def get_trade_cal(
         self,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        is_open: str | None = None,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
+        is_open: int | str | None = None,
     ):
         return await self.stock_dao.get_trade_cal(start_date, end_date, is_open)
 
-    async def get_start_date_by_trade_days(self, end_date: str | None, trade_days: int):
+    async def get_start_date_by_trade_days(self, end_date: datetime.date | str | None, trade_days: int):
         return await self.stock_dao.get_start_date_by_trade_days(end_date, trade_days)
 
     async def get_latest_northbound(self):
@@ -812,7 +816,7 @@ class CacheManager:
     async def save_moneyflow_hsgt(self, df: pd.DataFrame):
         return await self.market_dao.save_moneyflow_hsgt(df)
 
-    async def get_moneyflow_hsgt(self, trade_date: str | None = None, limit: int | None = None):
+    async def get_moneyflow_hsgt(self, trade_date: datetime.date | str | None = None, limit: int | None = None):
         return await self.market_dao.get_moneyflow_hsgt(trade_date, limit)
 
     # === Phase 1.5: Cache 层新增方法（AI Prompt 数据注入）===
@@ -1016,6 +1020,8 @@ class CacheManager:
             if tbl is None:
                 logger.warning(f"[CacheManager] Unknown table in check_table_has_data: {table_name}")
                 return False
+            if self.engine is None:
+                raise RuntimeError("Database engine not initialized")
             async with self.engine.connect() as conn:
                 result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
                 return result.first() is not None

@@ -159,7 +159,7 @@ class DataQualityService:
 
                 # Check absolute difference against tolerance
                 # Using fillna(0) to handle potential NaNs in calculation safely
-                failures = diff.abs().fillna(0) > tolerance
+                failures = diff.abs().fillna(0) > tolerance  # type: ignore[union-attr]
                 fail_count = int(failures.sum())  # type: ignore
 
                 if fail_count > 0:

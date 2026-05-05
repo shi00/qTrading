@@ -10,7 +10,7 @@ def _make_service(cache_return=None, api_return=None, offline_return=None, cache
     mock_cache = MagicMock()
 
     async def _get_trade_cal(**kwargs):
-        if kwargs.get("is_open") == 1:
+        if kwargs.get("is_open") in (1, "1"):
             return cache_return
         if cache_return_no_filter is not None:
             return cache_return_no_filter
@@ -476,7 +476,7 @@ class TestGetTradeCalDf:
     async def test_with_is_open_filter(self):
         api_df = pd.DataFrame({"cal_date": ["20240614", "20240615"], "is_open": [1, 0]})
         svc = _make_service(cache_return=pd.DataFrame(), api_return=api_df)
-        result = await svc.get_trade_cal_df(start_date="20240614", end_date="20240615", is_open=1)
+        result = await svc.get_trade_cal_df(start_date="20240614", end_date="20240615", is_open="1")
         assert len(result) == 1
 
     @pytest.mark.asyncio
