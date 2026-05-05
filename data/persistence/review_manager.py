@@ -100,7 +100,7 @@ class ReviewManager:
                 if t1_pct is not None and t1_row is not None:
                     t1_date_val = t1_row["trade_date"]
                     if hasattr(t1_date_val, "date") and callable(t1_date_val.date):
-                        t1_date_obj: datetime.date = t1_date_val.date()
+                        t1_date_obj: datetime.date = typing.cast(datetime.date, t1_date_val.date())
                     elif hasattr(t1_date_val, "year"):
                         t1_date_obj = t1_date_val
                     else:
