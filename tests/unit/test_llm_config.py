@@ -65,7 +65,7 @@ class TestConfigHandlerLLM:
 
         result = ConfigHandler.save_llm_config(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             base_url="https://api.deepseek.com",
             api_key="sk-test-key",
         )
@@ -74,7 +74,7 @@ class TestConfigHandlerLLM:
 
         config = ConfigHandler.load_config()
         assert config.get("llm_provider") == "deepseek"
-        assert config.get("llm_model") == "deepseek-chat"
+        assert config.get("llm_model") == "deepseek-v4-flash"
         assert config.get("llm_base_url") == "https://api.deepseek.com"
 
     def test_save_llm_config_azure(self, isolated_config):
@@ -83,12 +83,12 @@ class TestConfigHandlerLLM:
 
         result = ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o",
+            model="gpt-5.4",
             base_url="https://myresource.openai.azure.com",
             api_key="azure-key",
             api_version="2024-08-01-preview",
             azure_resource_name="myresource",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         assert result is True
@@ -100,7 +100,7 @@ class TestConfigHandlerLLM:
         assert "azure" in provider_extras
         assert provider_extras["azure"].get("api_version") == "2024-08-01-preview"
         assert provider_extras["azure"].get("resource_name") == "myresource"
-        assert provider_extras["azure"].get("deployment_name") == "gpt-4o-deployment"
+        assert provider_extras["azure"].get("deployment_name") == "gpt-5.4-deployment"
 
     def test_get_llm_config_defaults(self, isolated_config):
         """Test: get_llm_config returns correct defaults for new installation"""
@@ -110,7 +110,7 @@ class TestConfigHandlerLLM:
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "deepseek"
-            assert config["model"] == "deepseek-chat"
+            assert config["model"] == "deepseek-v4-flash"
             assert config["base_url"] == "https://api.deepseek.com"
             assert config["api_key"] == ""
             assert config["api_version"] == AZURE_DEFAULT_API_VERSION
@@ -123,21 +123,21 @@ class TestConfigHandlerLLM:
 
         ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o-deployment",
+            model="gpt-5.4-deployment",
             base_url="https://myresource.openai.azure.com",
             api_key="azure-key",
             api_version="2024-08-01-preview",
             azure_resource_name="myresource",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         with patch("utils.config_handler.keyring.get_password", return_value="azure-key"):
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "azure"
-            assert config["model"] == "gpt-4o-deployment"
+            assert config["model"] == "gpt-5.4-deployment"
             assert config["azure_resource_name"] == "myresource"
-            assert config["azure_deployment_name"] == "gpt-4o-deployment"
+            assert config["azure_deployment_name"] == "gpt-5.4-deployment"
             assert config["api_version"] == "2024-08-01-preview"
 
     def test_get_llm_config_backward_compatibility(self, isolated_config):
@@ -147,11 +147,11 @@ class TestConfigHandlerLLM:
         ConfigHandler.save_config(
             {
                 "llm_provider": "azure",
-                "llm_model": "gpt-4o-deployment",
+                "llm_model": "gpt-5.4-deployment",
                 "llm_base_url": "https://myresource.openai.azure.com",
                 "llm_api_version": "2024-08-01-preview",
                 "llm_azure_resource_name": "myresource",
-                "llm_azure_deployment_name": "gpt-4o-deployment",
+                "llm_azure_deployment_name": "gpt-5.4-deployment",
             }
         )
 
@@ -159,9 +159,9 @@ class TestConfigHandlerLLM:
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "azure"
-            assert config["model"] == "gpt-4o-deployment"
+            assert config["model"] == "gpt-5.4-deployment"
             assert config["azure_resource_name"] == "myresource"
-            assert config["azure_deployment_name"] == "gpt-4o-deployment"
+            assert config["azure_deployment_name"] == "gpt-5.4-deployment"
             assert config["api_version"] == "2024-08-01-preview"
 
     def test_get_llm_provider(self, isolated_config):
@@ -170,7 +170,7 @@ class TestConfigHandlerLLM:
 
         ConfigHandler.save_llm_config(
             provider="openai",
-            model="gpt-4o",
+            model="gpt-5.4",
             base_url="https://api.openai.com",
             api_key="test-key",
         )
@@ -184,12 +184,12 @@ class TestConfigHandlerLLM:
 
         ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o-deployment",
+            model="gpt-5.4-deployment",
             base_url="",
             api_key="azure-key",
             api_version="2024-08-01-preview",
             azure_resource_name="myresource",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         config = ConfigHandler.load_config()
@@ -197,7 +197,7 @@ class TestConfigHandlerLLM:
 
         ConfigHandler.save_llm_config(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             base_url="https://api.deepseek.com",
             api_key="deepseek-key",
         )
@@ -232,11 +232,11 @@ class TestAIServiceLiteLLM:
 
         ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o",
+            model="gpt-5.4",
             base_url="",
             api_key="azure-key",
             azure_resource_name="",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         AIService._instance = None
@@ -270,11 +270,11 @@ class TestAIServiceLiteLLM:
 
         ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o-deployment",
+            model="gpt-5.4-deployment",
             base_url="",
             api_key="azure-key",
             azure_resource_name="myresource",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         AIService._instance = None
@@ -291,7 +291,7 @@ class TestAIServiceLiteLLM:
 
         ConfigHandler.save_llm_config(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             base_url="https://api.deepseek.com",
             api_key="",
         )
@@ -309,7 +309,7 @@ class TestAIServiceLiteLLM:
 
         ConfigHandler.save_llm_config(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             base_url="https://api.deepseek.com",
             api_key="test-key",
         )
@@ -325,7 +325,7 @@ class TestAIServiceLiteLLM:
             service._is_cloud_configured = True
             service._litellm_config = {
                 "provider": "deepseek",
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "api_key": "test-key",
                 "base_url": "https://api.deepseek.com",
             }
@@ -356,7 +356,7 @@ class TestAIServiceLiteLLM:
         ai_service_module.LITELLM_AVAILABLE = False
 
         try:
-            result = await AIService.test_connection(api_key="test-key")
+            result = await AIService.test_connection(api_key="test-key", model="gpt-5.4")
             assert result["success"] is False
             assert "LiteLLM not installed" in result["message"]
         finally:
@@ -373,7 +373,7 @@ class TestLLMConfigPanel:
 
         ConfigHandler.save_llm_config(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             base_url="https://api.deepseek.com",
             api_key="test-key",
         )
@@ -383,7 +383,7 @@ class TestLLMConfigPanel:
         config = panel.get_current_config()
 
         assert config["provider"] == "deepseek"
-        assert config["model"] == "deepseek-chat"
+        assert config["model"] == "deepseek-v4-flash"
         assert config["base_url"] == "https://api.deepseek.com"
 
     def test_get_current_config_azure_provider(self, isolated_config):
@@ -397,11 +397,11 @@ class TestLLMConfigPanel:
 
         ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o-deployment",
+            model="gpt-5.4-deployment",
             base_url="https://myresource.openai.azure.com",
             api_key="azure-key",
             azure_resource_name="myresource",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         panel = LLMConfigPanel(show_save_button=False, compact=True)
@@ -409,16 +409,16 @@ class TestLLMConfigPanel:
         panel._current_provider = "azure"
         panel._is_azure = True
         panel.azure_resource_input.value = "myresource"
-        panel.azure_deployment_input.value = "gpt-4o-deployment"
+        panel.azure_deployment_input.value = "gpt-5.4-deployment"
         panel.azure_version_input.value = "2024-08-01-preview"
         panel.api_key_input.value = "azure-key"
 
         config = panel.get_current_config()
 
         assert config["provider"] == "azure"
-        assert config["model"] == "gpt-4o-deployment"
+        assert config["model"] == "gpt-5.4-deployment"
         assert config["azure_resource_name"] == "myresource"
-        assert config["azure_deployment_name"] == "gpt-4o-deployment"
+        assert config["azure_deployment_name"] == "gpt-5.4-deployment"
         assert config["api_version"] == "2024-08-01-preview"
 
     def test_save_current_config(self, isolated_config):
@@ -429,7 +429,7 @@ class TestLLMConfigPanel:
         panel = LLMConfigPanel(show_save_button=False, compact=True)
 
         panel._current_provider = "openai"
-        panel.model_dropdown.value = "gpt-4o"
+        panel.model_dropdown.value = "gpt-5.4"
         panel.base_url_input.value = "https://api.openai.com"
         panel.api_key_input.value = "openai-key"
 
@@ -439,7 +439,7 @@ class TestLLMConfigPanel:
 
         config = ConfigHandler.get_llm_config()
         assert config["provider"] == "openai"
-        assert config["model"] == "gpt-4o"
+        assert config["model"] == "gpt-5.4"
 
     def test_show_save_button_parameter(self, isolated_config):
         """Test: show_save_button parameter controls button visibility"""
@@ -494,8 +494,8 @@ class TestLLMProviders:
         models = deepseek.get("models", [])
         model_ids = [m.get("id") for m in models]
 
-        assert "deepseek-chat" in model_ids
-        assert "deepseek-reasoner" in model_ids
+        assert "deepseek-v4-pro" in model_ids
+        assert "deepseek-v4-flash" in model_ids
 
     def test_provider_categories(self):
         """Test: PROVIDER_CATEGORIES contains all expected providers"""
@@ -520,7 +520,7 @@ class TestIntegration:
 
         original_config = {
             "provider": "anthropic",
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-opus-4-7",
             "base_url": "https://api.anthropic.com",
             "api_key": "sk-ant-test",
         }
@@ -548,21 +548,21 @@ class TestIntegration:
 
         ConfigHandler.save_llm_config(
             provider="azure",
-            model="gpt-4o-deployment",
+            model="gpt-5.4-deployment",
             base_url="https://myresource.openai.azure.com",
             api_key="azure-test-key",
             api_version="2024-08-01-preview",
             azure_resource_name="myresource",
-            azure_deployment_name="gpt-4o-deployment",
+            azure_deployment_name="gpt-5.4-deployment",
         )
 
         with patch("utils.config_handler.keyring.get_password", return_value="azure-test-key"):
             config = ConfigHandler.get_llm_config()
 
             assert config["provider"] == "azure"
-            assert config["model"] == "gpt-4o-deployment"
+            assert config["model"] == "gpt-5.4-deployment"
             assert config["azure_resource_name"] == "myresource"
-            assert config["azure_deployment_name"] == "gpt-4o-deployment"
+            assert config["azure_deployment_name"] == "gpt-5.4-deployment"
             assert config["api_version"] == "2024-08-01-preview"
 
 

@@ -133,7 +133,11 @@ class TestKeyringFallbackMigratesLegacy:
         monkeypatch.setattr(
             cfg_mod.ConfigHandler,
             "load_config",
-            lambda: {"ai_api_key": "legacy_encrypted_key", "llm_provider": "deepseek", "llm_model": "deepseek-chat"},
+            lambda: {
+                "ai_api_key": "legacy_encrypted_key",
+                "llm_provider": "deepseek",
+                "llm_model": "deepseek-v4-flash",
+            },
         )
         monkeypatch.setattr(cfg_mod.ConfigHandler, "_try_decrypt", lambda v: "decrypted_api_key" if v else "")
         monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda payload: config_saves.append(payload) or True)

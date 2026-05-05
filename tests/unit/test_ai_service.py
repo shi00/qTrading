@@ -23,7 +23,7 @@ class TestAIServiceInit:
     @patch("services.ai_service.ConfigHandler")
     def test_init(self, mock_ch):
         mock_ch.get_ai_provider.return_value = "cloud"
-        mock_ch.get_ai_model.return_value = "gpt-4"
+        mock_ch.get_ai_model.return_value = "gpt-5.4"
         svc = AIService()
         assert svc is not None
 
@@ -32,13 +32,13 @@ class TestAIServiceBuildLiteLLMParams:
     @patch("services.ai_service.ConfigHandler")
     def test_basic_params(self, mock_ch):
         mock_ch.get_ai_provider.return_value = "cloud"
-        mock_ch.get_ai_model.return_value = "gpt-4"
+        mock_ch.get_ai_model.return_value = "gpt-5.4"
         mock_ch.get_ai_api_key.return_value = "test-key"
         mock_ch.get_ai_base_url.return_value = ""
         svc = AIService()
         llm_config = {
             "provider": "openai",
-            "model": "gpt-4",
+            "model": "gpt-5.4",
             "api_key": "test-key",
             "base_url": "",
         }
@@ -55,7 +55,7 @@ class TestAIServiceClassifyNews:
     @patch("services.ai_service.ConfigHandler")
     async def test_classify_news(self, mock_ch):
         mock_ch.get_ai_provider.return_value = "cloud"
-        mock_ch.get_ai_model.return_value = "gpt-4"
+        mock_ch.get_ai_model.return_value = "gpt-5.4"
         mock_ch.get_ai_api_key.return_value = "test-key"
         mock_ch.get_ai_base_url.return_value = ""
         svc = AIService()
@@ -110,7 +110,7 @@ class TestAIServiceSafeTruncate:
 class TestCheckReasoningSupport:
     def test_no_litellm(self):
         with patch("services.ai_service.LITELLM_AVAILABLE", False):
-            assert _check_reasoning_support("deepseek-r1") is False
+            assert _check_reasoning_support("deepseek-v4-pro") is False
 
 
 class TestClassifyApiError:
@@ -191,7 +191,7 @@ class TestAIServiceIsCloudAvailable:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "test-key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -313,7 +313,7 @@ class TestAIServiceBuildLiteLLMParamsProviderPrefix:
     def test_deepseek_prefix(self):
         llm_config = {
             "provider": "deepseek",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "api_key": "key",
             "base_url": "http://api.test.com",
         }
@@ -321,7 +321,7 @@ class TestAIServiceBuildLiteLLMParamsProviderPrefix:
             llm_config=llm_config,
             messages=[{"role": "user", "content": "hi"}],
         )
-        assert params["model"] == "deepseek/deepseek-chat"
+        assert params["model"] == "deepseek/deepseek-v4-flash"
 
     def test_qwen_prefix(self):
         llm_config = {
@@ -352,7 +352,7 @@ class TestAIServiceBuildLiteLLMParamsProviderPrefix:
     def test_temperature_and_max_tokens(self):
         llm_config = {
             "provider": "openai",
-            "model": "gpt-4",
+            "model": "gpt-5.4",
             "api_key": "key",
             "base_url": "http://api.test.com",
         }
@@ -375,7 +375,7 @@ class TestAIServiceParseNewsResult:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -396,7 +396,7 @@ class TestAIServiceParseNewsResult:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -416,7 +416,7 @@ class TestAIServiceParseNewsResult:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -435,7 +435,7 @@ class TestAIServiceParseNewsResult:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -484,7 +484,7 @@ class TestAIServiceReloadConfig:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -502,7 +502,7 @@ class TestAIServiceCleanupPromptDumps:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
@@ -517,7 +517,7 @@ class TestAIServiceCleanupPromptDumps:
             "provider": "deepseek",
             "base_url": "http://api.test.com",
         }
-        mock_ch.get_ai_model.return_value = "deepseek-chat"
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.side_effect = lambda k, d=False: True if k == "ai_prompt_dump_enabled" else d
@@ -528,5 +528,118 @@ class TestAIServiceCleanupPromptDumps:
 class TestCheckReasoningSupportWithLitellm:
     def test_with_litellm_true(self):
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
-            result = _check_reasoning_support("deepseek-r1")
+            result = _check_reasoning_support("deepseek-v4-pro")
             assert isinstance(result, bool)
+
+
+class TestBuildLiteLLMParamsBoundaryConditions:
+    def test_empty_model_raises_value_error(self):
+        llm_config = {
+            "provider": "openai",
+            "model": "",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        with pytest.raises(ValueError, match="Model ID is required"):
+            AIService._build_litellm_params(
+                llm_config=llm_config,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    def test_azure_empty_model_raises_value_error(self):
+        llm_config = {
+            "provider": "azure",
+            "model": "",
+            "api_key": "key",
+            "azure_resource_name": "myresource",
+            "base_url": "",
+        }
+        with pytest.raises(ValueError, match="Model ID is required"):
+            AIService._build_litellm_params(
+                llm_config=llm_config,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    def test_unknown_provider_uses_openai_prefix(self):
+        llm_config = {
+            "provider": "unknown_provider",
+            "model": "some-model",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["model"] == "openai/some-model"
+
+    def test_mistral_prefix(self):
+        llm_config = {
+            "provider": "mistral",
+            "model": "mistral-large-latest",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["model"] == "mistral/mistral-large-latest"
+
+    def test_deepseek_prefix(self):
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["model"] == "deepseek/deepseek-v4-flash"
+
+
+class TestTestConnectionBoundaryConditions:
+    @pytest.mark.asyncio
+    async def test_empty_model_returns_failure(self):
+        result = await AIService.test_connection(
+            provider="openai",
+            model="",
+            api_key="test-key",
+            base_url="https://api.openai.com",
+        )
+        assert result["success"] is False
+        assert "Model ID is empty" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_empty_api_key_returns_failure(self):
+        result = await AIService.test_connection(
+            provider="openai",
+            model="gpt-5.4",
+            api_key="",
+            base_url="https://api.openai.com",
+        )
+        assert result["success"] is False
+        assert "API Key is empty" in result["message"]
+
+
+class TestReasoningModelFallbackList:
+    def test_fallback_list_contains_current_models(self):
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch("services.ai_service.litellm.utils.supports_reasoning", side_effect=Exception("test")):
+                assert _check_reasoning_support("deepseek-v4-pro") is True
+                assert _check_reasoning_support("o3-pro") is True
+                assert _check_reasoning_support("o4-mini") is True
+                assert _check_reasoning_support("claude-opus-4-7") is True
+                assert _check_reasoning_support("magistral-medium-latest") is True
+                assert _check_reasoning_support("qwen3.6-max") is True
+                assert _check_reasoning_support("glm-5") is True
+
+    def test_fallback_list_excludes_non_reasoning(self):
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch("services.ai_service.litellm.utils.supports_reasoning", side_effect=Exception("test")):
+                assert _check_reasoning_support("gpt-5.4") is False
+                assert _check_reasoning_support("gpt-5.5") is False
+                assert _check_reasoning_support("deepseek-v4-flash") is False
+                assert _check_reasoning_support("mistral-small-latest") is False

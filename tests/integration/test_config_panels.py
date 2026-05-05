@@ -1054,7 +1054,7 @@ class TestLLMConfigPanelVerificationState:
         panel._current_provider = "deepseek"
         panel._is_azure = False
         panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-chat"
+        panel.model_dropdown.value = "deepseek-v4-flash"
         panel.custom_model_input = MagicMock()
         panel.custom_model_input.value = ""
         panel.base_url_input = MagicMock()
@@ -1078,7 +1078,7 @@ class TestLLMConfigPanelVerificationState:
         panel._current_provider = "deepseek"
         panel._is_azure = False
         panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-chat"
+        panel.model_dropdown.value = "deepseek-v4-flash"
         panel.custom_model_input = MagicMock()
         panel.custom_model_input.value = ""
         panel.base_url_input = MagicMock()
@@ -1107,7 +1107,7 @@ class TestLLMConfigPanelVerificationState:
         panel._current_provider = "deepseek"
         panel._is_azure = False
         panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-chat"
+        panel.model_dropdown.value = "deepseek-v4-flash"
         panel.custom_model_input = MagicMock()
         panel.custom_model_input.value = ""
         panel.base_url_input = MagicMock()
@@ -1136,7 +1136,7 @@ class TestLLMConfigPanelVerificationState:
         panel._current_provider = "deepseek"
         panel._is_azure = False
         panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-chat"
+        panel.model_dropdown.value = "deepseek-v4-flash"
         panel.custom_model_input = MagicMock()
         panel.custom_model_input.value = ""
         panel.base_url_input = MagicMock()

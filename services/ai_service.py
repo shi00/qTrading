@@ -73,15 +73,17 @@ def _check_reasoning_support(model: str) -> bool:
     except Exception:
         logger.debug(f"[AIService] supports_reasoning check failed for {model}, using fallback list")
         reasoning_models = {
-            "deepseek-reasoner",
-            "deepseek-r1",
-            "o1",
-            "o1-mini",
-            "o1-preview",
-            "o3-mini",
-            "claude-3.7-sonnet",
-            "claude-4-opus",
-            "claude-4-sonnet",
+            "deepseek-v4-pro",
+            "o3-pro",
+            "o4-mini",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "magistral",
+            "qwen3.6-max",
+            "kimi-k2",
+            "gemini-3.1-pro",
+            "glm-5",
         }
         model_lower = model.lower()
         return any(rm in model_lower for rm in reasoning_models)
@@ -263,6 +265,9 @@ class AIService:
         provider = llm_config.get("provider", "custom")
         model = llm_config.get("model", "")
 
+        if not model:
+            raise ValueError("Model ID is required but empty")
+
         request_params = {
             "messages": messages,
             "api_key": llm_config.get("api_key"),
@@ -353,6 +358,13 @@ class AIService:
         """
         llm_config = self._litellm_config
         request_params = self._build_litellm_params(llm_config, messages, **kwargs)
+
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        estimated_tokens = total_chars // 3
+        if estimated_tokens > 80000:
+            logger.warning(
+                f"[AIService] Cloud | ⚠️ Prompt may exceed context window: ~{estimated_tokens} tokens ({total_chars} chars)"
+            )
 
         # S1-4 fix: Real-time reasoning support check for model switching
         model_id = llm_config.get("model", "")
@@ -898,6 +910,9 @@ class AIService:
         """
         if not api_key:
             return {"success": False, "message": "API Key is empty"}
+
+        if not model:
+            return {"success": False, "message": "Model ID is empty"}
 
         if not LITELLM_AVAILABLE:
             return {"success": False, "message": "LiteLLM not installed"}

@@ -55,19 +55,19 @@ class TestReasoningSupportDetection:
         with open(ai_path, encoding="utf-8") as f:
             source = f.read()
 
-        has_deepseek = "deepseek" in source.lower() and "reason" in source.lower()
-        assert has_deepseek, "S1-4: _check_reasoning_support should detect DeepSeek reasoner"
+        has_deepseek = "deepseek" in source.lower() and "v4-pro" in source.lower()
+        assert has_deepseek, "S1-4: _check_reasoning_support should detect DeepSeek reasoning models"
 
     def test_check_reasoning_deepseek(self):
-        """DeepSeek reasoner should be detected as reasoning-capable"""
-        REASONING_PATTERNS = ["deepseek-reasoner", "o1", "o3", "r1"]
-        model = "deepseek-reasoner"
+        """DeepSeek V4 Pro should be detected as reasoning-capable"""
+        REASONING_PATTERNS = ["deepseek-v4-pro", "o3-pro", "o4-mini", "magistral"]
+        model = "deepseek-v4-pro"
         is_reasoning = any(p in model.lower() for p in REASONING_PATTERNS)
         assert is_reasoning is True
 
     def test_check_reasoning_gpt4_not_reasoning(self):
         """GPT-4 should not be in the reasoning list"""
-        REASONING_PATTERNS = ["deepseek-reasoner", "o1", "o3", "r1"]
+        REASONING_PATTERNS = ["deepseek-v4-pro", "o3-pro", "o4-mini", "magistral"]
         model = "gpt-4"
         is_reasoning = any(p in model.lower() for p in REASONING_PATTERNS)
         assert is_reasoning is False

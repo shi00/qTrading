@@ -209,7 +209,7 @@ class TestConfigHandlerGetLlmConfig:
         "load_config",
         return_value={
             "llm_provider": "deepseek",
-            "llm_model": "deepseek-chat",
+            "llm_model": "deepseek-v4-flash",
             "llm_base_url": "https://api.deepseek.com",
         },
     )
@@ -225,7 +225,7 @@ class TestConfigHandlerGetLlmConfig:
         "load_config",
         return_value={
             "llm_provider": "openai",
-            "llm_model": "gpt-4",
+            "llm_model": "gpt-5.4",
             "llm_base_url": "",
         },
     )
@@ -276,7 +276,7 @@ class TestConfigHandlerSaveLlmConfig:
     def test_save_empty_key_clears(self, mock_del, mock_save):
         result = cfg_mod.ConfigHandler.save_llm_config(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             base_url="https://api.deepseek.com",
             api_key="",
         )

@@ -2,7 +2,7 @@
 LLM Provider Configuration Data
 
 数据来源说明:
-- 验证日期: 2026-03-29
+- 验证日期: 2026-05-05
 - 数据来源: 各供应商官方 API 文档和定价页面
 - 更新策略:
   1. 用户可通过"刷新模型列表"按钮动态获取最新模型
@@ -27,17 +27,22 @@ LLM_PROVIDERS = {
         "base_url": "https://api.deepseek.com",
         "models": [
             {
-                "id": "deepseek-reasoner",
-                "name": "DeepSeek Reasoner (V3.2)",
-                "context": 64000,
+                "id": "deepseek-v4-pro",
+                "name": "DeepSeek V4 Pro",
+                "context": 1000000,
+                "tag": "旗舰",
+            },
+            {
+                "id": "deepseek-v4-flash",
+                "name": "DeepSeek V4 Flash",
+                "context": 1000000,
                 "tag": "推荐",
             },
-            {"id": "deepseek-chat", "name": "DeepSeek Chat (V3.2)", "context": 64000},
         ],
         "key_prefix": "sk-",
         "console_url": "https://platform.deepseek.com/api_keys",
-        "pricing_url": "https://platform.deepseek.com/api-docs/pricing/",
-        "models_url": "https://platform.deepseek.com/api-docs/",
+        "pricing_url": "https://api-docs.deepseek.com/quick_start/pricing",
+        "models_url": "https://api-docs.deepseek.com/",
     },
     "qwen": {
         "name": "通义千问",
@@ -45,25 +50,29 @@ LLM_PROVIDERS = {
         "icon": "qwen.png",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "models": [
-            {"id": "qwen-max", "name": "Qwen Max", "context": 32768, "tag": "旗舰"},
             {
-                "id": "qwen-plus",
-                "name": "Qwen Plus (Qwen3.5)",
-                "context": 131072,
+                "id": "qwen3.6-max-preview",
+                "name": "Qwen 3.6 Max",
+                "context": 256000,
+                "tag": "旗舰",
+            },
+            {
+                "id": "qwen3.6-plus",
+                "name": "Qwen 3.6 Plus",
+                "context": 1000000,
                 "tag": "推荐",
             },
-            {"id": "qwen-turbo", "name": "Qwen Turbo", "context": 131072},
             {
-                "id": "qwen-flash",
-                "name": "Qwen Flash",
-                "context": 131072,
+                "id": "qwen3.6-flash",
+                "name": "Qwen 3.6 Flash",
+                "context": 1000000,
                 "tag": "高速",
             },
         ],
         "key_prefix": "sk-",
         "console_url": "https://dashscope.console.aliyun.com/apiKey",
-        "pricing_url": "https://help.aliyun.com/zh/dashscope/developer-reference/billing",
-        "models_url": "https://help.aliyun.com/zh/dashscope/developer-reference/model-introduction",
+        "pricing_url": "https://help.aliyun.com/zh/model-studio/getting-started/models",
+        "models_url": "https://help.aliyun.com/zh/model-studio/text-generation-model/",
     },
     "zhipu": {
         "name": "智谱 AI",
@@ -71,26 +80,13 @@ LLM_PROVIDERS = {
         "icon": "zhipu.png",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "models": [
+            {"id": "glm-5.1", "name": "GLM-5.1", "context": 200000, "tag": "最新"},
             {"id": "glm-5", "name": "GLM-5", "context": 200000, "tag": "旗舰"},
-            {
-                "id": "glm-5-plus",
-                "name": "GLM-5 Plus",
-                "context": 131072,
-                "tag": "推荐",
-            },
-            {
-                "id": "glm-5-flash",
-                "name": "GLM-5 Flash",
-                "context": 131072,
-                "tag": "高速",
-            },
-            {"id": "glm-4-plus", "name": "GLM-4 Plus", "context": 131072},
-            {"id": "glm-4-flash", "name": "GLM-4 Flash", "context": 131072},
         ],
         "key_prefix": "",
         "console_url": "https://open.bigmodel.cn/usercenter/apikeys",
         "pricing_url": "https://open.bigmodel.cn/pricing",
-        "models_url": "https://open.bigmodel.cn/dev/api",
+        "models_url": "https://open.bigmodel.cn/cn/guide/start/model-overview",
     },
     "moonshot": {
         "name": "Moonshot (Kimi)",
@@ -98,19 +94,13 @@ LLM_PROVIDERS = {
         "icon": "moonshot.png",
         "base_url": "https://api.moonshot.cn/v1",
         "models": [
+            {"id": "kimi-k2.6", "name": "Kimi K2.6", "context": 262144, "tag": "最新"},
             {"id": "kimi-k2.5", "name": "Kimi K2.5", "context": 262144, "tag": "推荐"},
-            {
-                "id": "moonshot-v1-128k",
-                "name": "Moonshot V1 128K",
-                "context": 131072,
-                "tag": "旧版",
-            },
-            {"id": "moonshot-v1-32k", "name": "Moonshot V1 32K", "context": 32768},
         ],
         "key_prefix": "sk-",
         "console_url": "https://platform.moonshot.cn/console/api-keys",
-        "pricing_url": "https://platform.moonshot.cn/docs/pricing",
-        "models_url": "https://platform.moonshot.cn/docs/intro",
+        "pricing_url": "https://platform.moonshot.cn/docs/pricing/chat",
+        "models_url": "https://platform.moonshot.cn/docs/models",
     },
     "minimax": {
         "name": "MiniMax",
@@ -121,16 +111,15 @@ LLM_PROVIDERS = {
             {
                 "id": "MiniMax-M2.7",
                 "name": "MiniMax M2.7",
-                "context": 245000,
+                "context": 204800,
                 "tag": "最新",
             },
             {
                 "id": "MiniMax-M2.5",
                 "name": "MiniMax M2.5",
-                "context": 245000,
+                "context": 204800,
                 "tag": "推荐",
             },
-            {"id": "MiniMax-Text-01", "name": "MiniMax Text 01", "context": 245000},
         ],
         "key_prefix": "",
         "console_url": "https://www.minimaxi.com/user-center/basic-information/interface-key",
@@ -143,16 +132,22 @@ LLM_PROVIDERS = {
         "icon": "openai.png",
         "base_url": "https://api.openai.com",
         "models": [
-            {"id": "gpt-5.4", "name": "GPT-5.4", "context": 1000000, "tag": "最新"},
+            {"id": "gpt-5.5", "name": "GPT-5.5", "context": 1050000, "tag": "最新旗舰"},
+            {"id": "gpt-5.4", "name": "GPT-5.4", "context": 1050000, "tag": "旗舰"},
             {
                 "id": "gpt-5.4-mini",
                 "name": "GPT-5.4 Mini",
-                "context": 1000000,
+                "context": 400000,
                 "tag": "推荐",
             },
-            {"id": "gpt-4o", "name": "GPT-4o", "context": 128000},
-            {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "context": 128000},
-            {"id": "o3-mini", "name": "o3 Mini", "context": 200000, "tag": "推理增强"},
+            {
+                "id": "gpt-5.4-nano",
+                "name": "GPT-5.4 Nano",
+                "context": 400000,
+                "tag": "高速",
+            },
+            {"id": "o4-mini", "name": "o4 Mini", "context": 200000, "tag": "推理"},
+            {"id": "o3-pro", "name": "o3 Pro", "context": 200000, "tag": "推理增强"},
         ],
         "key_prefix": "sk-",
         "console_url": "https://platform.openai.com/api-keys",
@@ -178,6 +173,12 @@ LLM_PROVIDERS = {
         "base_url": "https://api.anthropic.com",
         "models": [
             {
+                "id": "claude-opus-4-7",
+                "name": "Claude Opus 4.7",
+                "context": 1000000,
+                "tag": "最新旗舰",
+            },
+            {
                 "id": "claude-opus-4-6",
                 "name": "Claude Opus 4.6",
                 "context": 1000000,
@@ -190,12 +191,6 @@ LLM_PROVIDERS = {
                 "tag": "推荐",
             },
             {
-                "id": "claude-sonnet-5",
-                "name": "Claude Sonnet 5",
-                "context": 1000000,
-                "tag": "代码专精",
-            },
-            {
                 "id": "claude-haiku-4-5",
                 "name": "Claude Haiku 4.5",
                 "context": 200000,
@@ -205,7 +200,7 @@ LLM_PROVIDERS = {
         "key_prefix": "sk-ant-",
         "console_url": "https://console.anthropic.com/settings/keys",
         "pricing_url": "https://www.anthropic.com/pricing",
-        "models_url": "https://docs.anthropic.com/claude/docs/models-overview",
+        "models_url": "https://docs.anthropic.com/en/docs/about-claude/models/overview",
     },
     "google": {
         "name": "Google AI (Gemini)",
@@ -214,7 +209,7 @@ LLM_PROVIDERS = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
         "models": [
             {
-                "id": "gemini-3.1-pro",
+                "id": "gemini-3.1-pro-preview",
                 "name": "Gemini 3.1 Pro",
                 "context": 1048576,
                 "tag": "最新",
@@ -225,12 +220,16 @@ LLM_PROVIDERS = {
                 "context": 1048576,
                 "tag": "推荐",
             },
-            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "context": 1048576},
-            {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "context": 1048576},
+            {
+                "id": "gemini-3.1-flash-lite-preview",
+                "name": "Gemini 3.1 Flash Lite",
+                "context": 1048576,
+                "tag": "高速",
+            },
         ],
         "key_prefix": "",
         "console_url": "https://aistudio.google.com/apikey",
-        "pricing_url": "https://ai.google.dev/pricing",
+        "pricing_url": "https://ai.google.dev/gemini-api/docs/pricing",
         "models_url": "https://ai.google.dev/gemini-api/docs/models",
     },
     "mistral": {
@@ -240,34 +239,40 @@ LLM_PROVIDERS = {
         "base_url": "https://api.mistral.ai",
         "models": [
             {
+                "id": "mistral-medium-latest",
+                "name": "Mistral Medium 3.5",
+                "context": 262144,
+                "tag": "最新",
+            },
+            {
                 "id": "mistral-large-latest",
                 "name": "Mistral Large 3",
-                "context": 128000,
+                "context": 262144,
                 "tag": "旗舰",
             },
             {
                 "id": "mistral-small-latest",
                 "name": "Mistral Small 4",
-                "context": 128000,
+                "context": 131072,
                 "tag": "推荐",
             },
             {
                 "id": "magistral-medium-latest",
                 "name": "Magistral Medium",
-                "context": 128000,
+                "context": 131072,
                 "tag": "推理增强",
             },
             {
-                "id": "codestral-latest",
-                "name": "Codestral 2",
-                "context": 256000,
+                "id": "devstral-latest",
+                "name": "Devstral 2",
+                "context": 262144,
                 "tag": "代码专用",
             },
         ],
         "key_prefix": "",
         "console_url": "https://console.mistral.ai/api-keys/",
         "pricing_url": "https://mistral.ai/pricing",
-        "models_url": "https://docs.mistral.ai/getting-started/models/",
+        "models_url": "https://docs.mistral.ai/models/overview",
     },
     "custom": {
         "name": "自定义供应商",

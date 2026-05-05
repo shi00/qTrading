@@ -135,3 +135,45 @@ class TestLLMProviderConstants:
 
     def test_provider_categories_has_custom(self):
         assert "custom" in PROVIDER_CATEGORIES
+
+    def test_all_models_have_valid_context(self):
+        for pid, provider in LLM_PROVIDERS.items():
+            for model in provider["models"]:
+                assert "context" in model, f"Provider {pid} model {model.get('id', '?')} missing 'context'"
+                assert isinstance(model["context"], int), f"Provider {pid} model {model['id']} context should be int"
+                assert model["context"] > 0, f"Provider {pid} model {model['id']} context must be positive"
+
+    def test_all_models_have_valid_id(self):
+        for pid, provider in LLM_PROVIDERS.items():
+            for model in provider["models"]:
+                assert "id" in model, f"Provider {pid} model missing 'id'"
+                assert model["id"], f"Provider {pid} has model with empty id"
+                assert " " not in model["id"], f"Provider {pid} model id '{model['id']}' contains spaces"
+
+    def test_all_models_have_name(self):
+        for pid, provider in LLM_PROVIDERS.items():
+            for model in provider["models"]:
+                assert "name" in model, f"Provider {pid} model {model.get('id', '?')} missing 'name'"
+                assert model["name"], f"Provider {pid} model {model['id']} has empty name"
+
+    def test_all_models_have_tag(self):
+        for pid, provider in LLM_PROVIDERS.items():
+            for model in provider["models"]:
+                assert "tag" in model, f"Provider {pid} model {model.get('id', '?')} missing 'tag'"
+
+    def test_no_duplicate_model_ids_within_provider(self):
+        for pid, provider in LLM_PROVIDERS.items():
+            model_ids = [m["id"] for m in provider["models"]]
+            assert len(model_ids) == len(set(model_ids)), f"Provider {pid} has duplicate model IDs"
+
+    def test_azure_has_empty_models_list(self):
+        azure = LLM_PROVIDERS.get("azure")
+        assert azure is not None
+        assert isinstance(azure["models"], list)
+        assert len(azure["models"]) == 0
+
+    def test_custom_has_empty_models_list(self):
+        custom = LLM_PROVIDERS.get("custom")
+        assert custom is not None
+        assert isinstance(custom["models"], list)
+        assert len(custom["models"]) == 0

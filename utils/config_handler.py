@@ -97,7 +97,7 @@ class ConfigHandler:
         "no_proxy_domains": [],
         # LLM Provider Configuration
         "llm_provider": "deepseek",
-        "llm_model": "deepseek-chat",
+        "llm_model": "deepseek-v4-flash",
         "llm_base_url": "",
         "llm_api_version": AZURE_DEFAULT_API_VERSION,  # Azure specific
         "llm_azure_resource_name": "",  # Azure specific
@@ -726,16 +726,14 @@ class ConfigHandler:
                     pass
 
         provider = config.get("llm_provider", "deepseek")
-        model = config.get("llm_model", "deepseek-chat")
+        model = config.get("llm_model", "deepseek-v4-flash")
         base_url = config.get("llm_base_url", "")
 
         if not base_url:
-            default_urls = {
-                "deepseek": "https://api.deepseek.com",
-                "openai": "https://api.openai.com",
-                "anthropic": "https://api.anthropic.com",
-            }
-            base_url = default_urls.get(provider, "")
+            from utils.llm_providers import LLM_PROVIDERS
+
+            provider_config = LLM_PROVIDERS.get(provider, {})
+            base_url = provider_config.get("base_url", "")
 
         provider_extras = config.get("llm_provider_extras", {})
 

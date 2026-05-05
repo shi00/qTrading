@@ -409,7 +409,7 @@ class TestCloudAIConnectionValidation:
 
             result = await mock_ai_service.test_connection(
                 provider="deepseek",
-                model="deepseek-chat",
+                model="deepseek-v4-flash",
                 base_url="",
                 api_key="invalid-key",
             )
