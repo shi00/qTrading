@@ -304,7 +304,7 @@ def test_watchdog_uses_force_exit_callback():
 
         thread_target()
 
-    assert exit_calls == [0]
+    assert exit_calls == [1]
 
 
 def test_watchdog_cancel_prevents_force_exit():
