@@ -289,15 +289,10 @@ class MacroSyncStrategy(ISyncStrategy):
                 f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",
             )
 
+            iw_saved = 0
             for idx_code in MAJOR_INDICES:
                 if self._cancelled:
                     break
-
-                # Fetch for this index
-                # Note: index_weight returns monthly weights usually.
-                # Be careful not to fetch too much history unless needed.
-                # If backfilling, maybe just get latest?
-                # Tushare: index_weight(index_code='399300.SZ', start_date='20180901', end_date='20180930')
 
                 try:
                     df = await self.context.api.get_index_weight(
@@ -308,7 +303,9 @@ class MacroSyncStrategy(ISyncStrategy):
 
                     if df is not None and not df.empty:
                         count = await self.context.cache.save_index_weights(df)
-                        result.added += count if count else 0
+                        if count:
+                            iw_saved += count
+                            result.added += count
                 except Exception as e:
                     logger.warning(
                         f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}",
@@ -317,9 +314,9 @@ class MacroSyncStrategy(ISyncStrategy):
             await self.context.cache.update_sync_status(
                 "index_weight",
                 today_date,
-                result.added,
+                iw_saved,
             )
-            logger.debug(f"[MacroSync] IndexWeight | Total: {result.added} records")
+            logger.debug(f"[MacroSync] IndexWeight | Total: {iw_saved} records")
 
         except Exception as e:
             logger.warning(

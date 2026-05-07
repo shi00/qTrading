@@ -269,3 +269,66 @@ class TestTushareClientReset:
         TushareClient._instance = MagicMock()
         TushareClient._reset_singleton()
         assert TushareClient._instance is None
+
+
+class TestTushareClientExecutorTimeout:
+    @pytest.mark.asyncio
+    async def test_asyncio_wait_for_wraps_run_in_executor(self):
+        client = _make_client()
+        mock_func = MagicMock(return_value=pd.DataFrame({"a": [1]}))
+        with patch(
+            "data.external.tushare_client.asyncio.wait_for", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+        ) as mock_wait:
+            result = await client._handle_api_call(mock_func)
+            assert result is not None
+            mock_wait.assert_called_once()
+            call_args = mock_wait.call_args
+            assert call_args[1]["timeout"] == client.timeout * 1.5
+
+    @pytest.mark.asyncio
+    async def test_asyncio_timeout_error_triggers_network_retry(self):
+        client = _make_client()
+        client.max_retries = 2
+        call_count = [0]
+
+        async def mock_wait_for(coro, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise TimeoutError()
+            return pd.DataFrame({"a": [1]})
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
+                result = await client._handle_api_call(MagicMock())
+                assert result is not None
+                assert call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_builtin_timeout_error_triggers_network_retry(self):
+        client = _make_client()
+        client.max_retries = 2
+        call_count = [0]
+
+        async def mock_wait_for(coro, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise TimeoutError("read timeout")
+            return pd.DataFrame({"a": [1]})
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
+                result = await client._handle_api_call(MagicMock())
+                assert result is not None
+                assert call_count[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_timeout_exhausts_retries_raises(self):
+        client = _make_client()
+        client.max_retries = 1
+
+        async def mock_wait_for(coro, timeout=None):
+            raise TimeoutError()
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with pytest.raises(RuntimeError, match="retries exhausted"):
+                await client._handle_api_call(MagicMock())

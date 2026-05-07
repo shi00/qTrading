@@ -478,3 +478,36 @@ class TestMacroSyncStrategySyncShibor:
         result = SyncResult()
         await strategy._sync_shibor_daily(result)
         assert result.added == 10
+
+
+class TestMacroSyncIndexWeightCounterIsolation:
+    @pytest.mark.asyncio
+    async def test_index_weight_counter_excludes_prior_added(self):
+        from data.constants import MAJOR_INDICES
+
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=3)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(
+            return_value=pd.DataFrame({"index_code": ["000001.SH"], "con_code": ["600000.SH"]}),
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)],
+            )
+            result = SyncResult()
+            result.added = 50
+            await strategy._sync_index_weights(result)
+            call_args = ctx.cache.update_sync_status.call_args
+            assert call_args[0][0] == "index_weight"
+            expected_iw_count = 3 * len(MAJOR_INDICES)
+            assert call_args[0][2] == expected_iw_count
+            assert call_args[0][2] != result.added

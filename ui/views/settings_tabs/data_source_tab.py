@@ -740,11 +740,11 @@ class DataSourceTab(ft.Container):
                     )
                 raise
             except Exception as ex:
-                from utils.error_classifier import classify_error
+                from utils.error_classifier import classify_error, get_error_message
 
                 error_info = classify_error(ex, context="general")
                 self.show_snack(
-                    f"{I18n.get('common_op_fail').format(error=error_info['message'])}",
+                    f"{I18n.get('common_op_fail').format(error=get_error_message(error_info))}",
                     color=AppColors.ERROR,
                 )
                 raise
@@ -868,11 +868,11 @@ class DataSourceTab(ft.Container):
                     )
                 raise
             except Exception as ex:
-                from utils.error_classifier import classify_error
+                from utils.error_classifier import classify_error, get_error_message
 
                 error_info = classify_error(ex, context="general")
                 self.show_snack(
-                    f"{I18n.get('common_op_fail').format(error=error_info['message'])}",
+                    f"{I18n.get('common_op_fail').format(error=get_error_message(error_info))}",
                     color=AppColors.ERROR,
                 )
                 raise
@@ -932,10 +932,10 @@ class DataSourceTab(ft.Container):
                     self.page.pubsub.send_all("cache_cleared")
                 return I18n.get("ds_cache_clear_done")
             except Exception as ex:
-                from utils.error_classifier import classify_error
+                from utils.error_classifier import classify_error, get_error_message
 
                 error_info = classify_error(ex, context="general")
-                self.show_snack(I18n.get("ds_clean_fail").format(error=error_info["message"]))
+                self.show_snack(I18n.get("ds_clean_fail").format(error=get_error_message(error_info)))
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -1165,10 +1165,10 @@ class DataSourceTab(ft.Container):
             self.page.open(dlg)
 
         except Exception as ex:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(ex, context="general")
             self.show_snack(
-                error_info["message"],
+                get_error_message(error_info),
                 color=AppColors.ERROR,
             )

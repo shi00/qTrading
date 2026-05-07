@@ -830,6 +830,13 @@ class ConfigHandler:
 
     @staticmethod
     def save_ai_system_prompt(prompt):
+        from utils.prompt_guard import validate_prompt, sanitize_prompt
+
+        if prompt:
+            is_valid, _ = validate_prompt(prompt)
+            if not is_valid:
+                return False
+            prompt = sanitize_prompt(prompt)
         return ConfigHandler.save_config({"ai_system_prompt": prompt})
 
     @staticmethod
@@ -842,6 +849,13 @@ class ConfigHandler:
     @staticmethod
     def set_strategy_prompt(strategy_key, prompt):
         """Save user-customized prompt for a specific strategy."""
+        from utils.prompt_guard import validate_prompt, sanitize_prompt
+
+        if prompt:
+            is_valid, _ = validate_prompt(prompt)
+            if not is_valid:
+                return False
+            prompt = sanitize_prompt(prompt)
         key = f"ai_strategy_prompt_{strategy_key}"
         return ConfigHandler.save_config({key: prompt})
 

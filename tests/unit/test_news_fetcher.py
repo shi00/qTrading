@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -75,6 +77,19 @@ class TestGetStockNews:
         mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
 
         with patch("data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock, side_effect=TimeoutError):
+            result = await NewsFetcher.get_stock_news("000001.SZ")
+            assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_asyncio_timeout_error(self, mock_tpm):
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
+
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError
+        ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
 

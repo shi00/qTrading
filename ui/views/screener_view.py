@@ -986,8 +986,22 @@ class ScreenerView(ft.Container):
                     def make_save_prompt(strat, ctrl_field):
                         def save_prompt(e):
                             from utils.config_handler import ConfigHandler
+                            from utils.prompt_guard import validate_prompt, MAX_PROMPT_LENGTH
 
-                            ConfigHandler.set_strategy_prompt(strat, ctrl_field.value)
+                            prompt_val = ctrl_field.value or ""
+                            is_valid, warning = validate_prompt(prompt_val)
+                            if not is_valid:
+                                if self.page and hasattr(self.page, "show_toast"):
+                                    msg = I18n.get(warning, warning)
+                                    if warning == "prompt_err_length":
+                                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+                                    self.page.show_toast(
+                                        f"⚠ {msg}",
+                                        "warning",
+                                    )
+                                return
+
+                            ConfigHandler.set_strategy_prompt(strat, prompt_val)
                             UILogger.log_action(
                                 "ScreenerView",
                                 "SavePrompt",

@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from strategies.utils import StrategyContext
-from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +59,20 @@ class BaseStrategy(ABC):
         super().__init__()
 
     @property
+    def name_key(self) -> str:
+        return self._name_key
+
+    @property
+    def desc_key(self) -> str:
+        return self._desc_key
+
+    @property
     def name(self) -> str:
-        return I18n.get(self._name_key)
+        return self._name_key
 
     @property
     def description(self) -> str:
-        return I18n.get(self._desc_key)
+        return self._desc_key
 
     def get_dynamic_description(self, current_params: dict) -> str:
         """

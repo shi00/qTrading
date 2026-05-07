@@ -344,8 +344,8 @@ class TestBaseDaoWriteDbExtended:
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = True
-            result = await dao._write_db("INSERT INTO t VALUES ($1)")
-            assert result == 0
+            with pytest.raises(RuntimeError, match="Engine disposed"):
+                await dao._write_db("INSERT INTO t VALUES ($1)")
 
     @pytest.mark.asyncio
     async def test_write_sync_engine_none(self):
@@ -712,9 +712,8 @@ class TestBaseDaoReadDbExtended:
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = True
-            result = await dao._read_db("SELECT 1")
-            assert isinstance(result, pd.DataFrame)
-            assert result.empty
+            with pytest.raises(RuntimeError, match="Engine disposed"):
+                await dao._read_db("SELECT 1")
 
     @pytest.mark.asyncio
     async def test_read_cancelled_propagates(self):

@@ -6,4 +6,4 @@
 brotlicffi>=1.1.0.0
 
 # Browser automation for E2E tests and scraping helpers.
-playwright>=1.58.0
+playwright>=1.59.0

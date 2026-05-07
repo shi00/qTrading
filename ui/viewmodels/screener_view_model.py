@@ -101,7 +101,7 @@ class ScreenerViewModel:
 
     def get_strategy_desc(self, key: str) -> str:
         st = self.strategy_mgr.get_strategy(key)
-        return st.description if st else ""
+        return I18n.get(st.desc_key) if st else ""
 
     def get_strategy_params(self, key: str) -> list:
         """Get dynamic parameter definitions for a strategy."""
@@ -194,7 +194,7 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.2,
-                    I18n.get("task_executing_strategy", name=strategy.name),
+                    I18n.get("task_executing_strategy", name=I18n.get(strategy.name_key)),
                 )
 
                 if inspect.iscoroutinefunction(strategy.filter):
@@ -226,7 +226,7 @@ class ScreenerViewModel:
 
                         run_id = _uuid.uuid4().hex[:16]
                         await self.review_mgr.save_results(
-                            strategy.name,
+                            I18n.get(strategy.name_key),
                             result_df,
                             trade_date=analysis_trade_date,
                             run_id=run_id,
@@ -297,13 +297,13 @@ class ScreenerViewModel:
             self.on_progress(True)
         if self.on_status:
             self.on_status(
-                I18n.get("screener_running_strategy").format(name=strategy.name),
+                I18n.get("screener_running_strategy").format(name=I18n.get(strategy.name_key)),
                 "blue",
             )
 
         # Dispatch to TaskManager!
         task_id = TaskManager().submit_task(
-            name=f"{TASK_NAME_PREFIX}: {strategy.name}",
+            name=f"{TASK_NAME_PREFIX}: {I18n.get(strategy.name_key)}",
             task_type=I18n.get("task_type_ai_screening"),
             coroutine_factory=_execute_screening,
             cancellable=True,

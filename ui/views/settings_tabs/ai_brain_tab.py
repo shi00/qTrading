@@ -481,6 +481,19 @@ class AIBrainTab(ft.Container):
                 )
                 return
 
+            from utils.prompt_guard import validate_prompt, MAX_PROMPT_LENGTH
+
+            is_valid, warning = validate_prompt(ai_prompt)
+            if not is_valid:
+                msg = I18n.get(warning, warning)
+                if warning == "prompt_err_length":
+                    msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+                self.show_snack(
+                    f"⚠ {msg}",
+                    color=AppColors.WARNING,
+                )
+                return
+
             ConfigHandler.save_ai_system_prompt(ai_prompt)
             ConfigHandler.set_ai_news_prompt(self.ai_news_prompt_input.value)
 

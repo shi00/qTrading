@@ -72,8 +72,12 @@ async def main(page: ft.Page):
             logger.error("[Main] Graceful shutdown incomplete, forcing process exit.")
             await asyncio.sleep(0.2)
             import os
+            import sys
 
-            os._exit(0)
+            try:
+                sys.exit(1)
+            except SystemExit:
+                os._exit(1)
         finally:
             shutdown_requested = False
 

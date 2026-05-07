@@ -313,10 +313,10 @@ class TushareConfigPanel(ft.Container):
             return True
 
         except Exception as e:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(e, context="token")
-            self._show_error(error_info["message"])
+            self._show_error(get_error_message(error_info))
             logger.error(f"[TushareConfigPanel] Token verification failed: {e}")
             return False
 

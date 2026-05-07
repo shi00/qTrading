@@ -422,7 +422,7 @@ class TaskManager:
             task.status = TaskStatus.FAILED
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
-            task.error = error_info["message"]
+            task.error = error_info["message_key"]
             task.description = I18n.get("task_failed_desc", "任务执行失败")
             if severity == "system":
                 logger.critical(

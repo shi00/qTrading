@@ -20,6 +20,11 @@ def get_loop_local(key: str, factory: Callable[[], Any]) -> Any:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        logger.error(
+            f"[loop_local] get_loop_local('{key}') called outside event loop; "
+            f"factory() invoked but result will NOT be cached. "
+            f"Callers must ensure they are inside an async context.",
+        )
         return factory()
 
     if loop not in store:

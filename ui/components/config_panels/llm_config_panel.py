@@ -596,13 +596,16 @@ class LLMConfigPanel(ft.Container):
             if result.get("success"):
                 self._show_success(I18n.get("llm_test_success"))
             else:
-                self._show_error(f"{I18n.get('llm_test_failed')}: {result.get('message', '')}")
+                self._show_error(
+                    f"{I18n.get('llm_test_failed')}: {I18n.get(result.get('message', 'common_err_unknown'))}"
+                )
 
         except Exception as ex:
             from services.ai_service import _classify_api_error
+            from utils.error_classifier import get_error_message
 
             error_info = _classify_api_error(ex)
-            self._show_error(f"{I18n.get('llm_test_failed')}: {error_info['message']}")
+            self._show_error(f"{I18n.get('llm_test_failed')}: {get_error_message(error_info)}")
             logger.error(f"[LLMConfigPanel] Test connection error: {ex}")
 
         finally:
@@ -679,9 +682,10 @@ class LLMConfigPanel(ft.Container):
 
         except Exception as ex:
             from services.ai_service import _classify_api_error
+            from utils.error_classifier import get_error_message
 
             error_info = _classify_api_error(ex)
-            self._show_error(f"{I18n.get('llm_test_failed')}: {error_info['message']}")
+            self._show_error(f"{I18n.get('llm_test_failed')}: {get_error_message(error_info)}")
             logger.error(f"[LLMConfigPanel] Verify connection error: {ex}")
             return False
 
@@ -724,10 +728,12 @@ class LLMConfigPanel(ft.Container):
 
         try:
             import httpx
+            from utils.proxy_manager import ProxyManager
 
             models_url = f"{base_url.rstrip('/')}/models"
 
-            async with httpx.AsyncClient() as client:
+            proxy_cfg = ProxyManager.get_httpx_proxy_config()
+            async with httpx.AsyncClient(**proxy_cfg) as client:
                 response = await client.get(
                     models_url,
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -753,10 +759,10 @@ class LLMConfigPanel(ft.Container):
             self._show_success(I18n.get("llm_refresh_success", count=len(model_ids)))
 
         except Exception as ex:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(ex, context="llm")
-            self._show_error(f"{I18n.get('llm_refresh_failed')}: {error_info['message']}")
+            self._show_error(f"{I18n.get('llm_refresh_failed')}: {get_error_message(error_info)}")
             logger.error(f"[LLMConfigPanel] Refresh models error: {ex}")
 
         finally:
@@ -866,10 +872,10 @@ class LLMConfigPanel(ft.Container):
                 self.on_save()
 
         except Exception as ex:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(ex, context="llm")
-            self._show_error(f"{I18n.get('settings_save_failed')}: {error_info['message']}")
+            self._show_error(f"{I18n.get('settings_save_failed')}: {get_error_message(error_info)}")
             logger.error(f"[LLMConfigPanel] Save config error: {ex}")
 
         self.update()

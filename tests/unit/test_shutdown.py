@@ -422,3 +422,32 @@ class TestShutdownCoordinatorExecuteCleanup:
         )
         result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
         assert result is False
+
+
+class TestShutdownWatchdogForceExit:
+    def test_watchdog_force_exit_uses_exit_code_1(self):
+        exit_codes = []
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: exit_codes.append(code))
+        coord.start_watchdog(timeout_s=0.1)
+        import time
+
+        time.sleep(0.3)
+        assert exit_codes == [1]
+
+    def test_watchdog_canceled_no_force_exit(self):
+        exit_codes = []
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: exit_codes.append(code))
+        coord.start_watchdog(timeout_s=5)
+        coord.cancel_watchdog()
+        assert exit_codes == []
+
+    def test_watchdog_logs_error_on_timeout(self, caplog):
+        import logging
+
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: None)
+        with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
+            coord.start_watchdog(timeout_s=0.1)
+            import time
+
+            time.sleep(0.3)
+            assert any("forcing exit" in r.message.lower() for r in caplog.records)

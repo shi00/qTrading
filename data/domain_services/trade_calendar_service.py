@@ -516,6 +516,11 @@ class TradeCalendarService:
             except Exception as e:
                 logger.warning(f"[TradeCalendarService] get_latest_trade_date failed: {e}")
 
+            logger.error(
+                "[TradeCalendarService] get_latest_trade_date: "
+                "no trade calendar data available, falling back to weekday heuristic. "
+                "Result may be incorrect on holidays (Spring Festival, National Day, etc.)."
+            )
             dt = end_dt
             while dt.weekday() >= 5:
                 dt -= datetime.timedelta(days=1)

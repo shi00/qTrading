@@ -132,8 +132,7 @@ class BaseDao:
         from data.cache.cache_manager import CacheManager
 
         if CacheManager._instance is not None and CacheManager._instance._disposed:
-            logger.warning(f"[{self.__class__.__name__}] Engine disposed, skipping write.")
-            return 0
+            raise RuntimeError(f"[{self.__class__.__name__}] Engine disposed, write rejected.")
 
         if is_many and not params:
             return 0
@@ -438,8 +437,7 @@ class BaseDao:
         from data.cache.cache_manager import CacheManager
 
         if CacheManager._instance is not None and CacheManager._instance._disposed:
-            logger.warning(f"[{self.__class__.__name__}] Engine disposed, skipping read.")
-            return pd.DataFrame()
+            raise RuntimeError(f"[{self.__class__.__name__}] Engine disposed, read rejected.")
 
         if params is not None and isinstance(params, list):
             params = tuple(params)

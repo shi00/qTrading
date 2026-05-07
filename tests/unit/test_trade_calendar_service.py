@@ -418,6 +418,35 @@ class TestGetLatestTradeDate:
             result = await svc.get_latest_trade_date()
             assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_weekday_fallback_logs_error(self, caplog):
+        import logging
+
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        with (
+            patch("data.domain_services.trade_calendar_service.get_now") as mock_now,
+            caplog.at_level(logging.ERROR, logger="data.domain_services.trade_calendar_service"),
+        ):
+            mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
+            await svc.get_latest_trade_date()
+            assert any("falling back to weekday heuristic" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_when_db_has_data(self, caplog):
+        import logging
+
+        df = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)], "is_open": [1, 1]})
+        svc = _make_service(cache_return=df)
+        with (
+            patch("data.domain_services.trade_calendar_service.get_now") as mock_now,
+            caplog.at_level(logging.ERROR, logger="data.domain_services.trade_calendar_service"),
+        ):
+            mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
+            await svc.get_latest_trade_date()
+            assert not any("falling back to weekday heuristic" in r.message for r in caplog.records)
+
 
 class TestGetTradeDatesBatch:
     @pytest.mark.asyncio

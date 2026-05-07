@@ -20,6 +20,10 @@ else:
 # This ensures the bundled encoding files (cl100k_base, o200k_base) are used
 # instead of downloading from openaipublic.blob.core.windows.net at runtime,
 # which fails in mainland China due to SSL/GFW issues.
+# NOTE: setdefault is used intentionally — tiktoken requires this env var
+# before import and has no programmatic API to set cache_dir.  Unlike
+# NO_PROXY (which affects all HTTP clients globally), TIKTOKEN_CACHE_DIR
+# is only read by tiktoken itself, so the scope of pollution is minimal.
 _tiktoken_cache = os.path.join(APP_ROOT, "data", "tiktoken_cache")
 if os.path.isdir(_tiktoken_cache):
     os.environ.setdefault("TIKTOKEN_CACHE_DIR", _tiktoken_cache)

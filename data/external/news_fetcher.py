@@ -276,7 +276,10 @@ class NewsFetcher:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             }
 
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            from utils.proxy_manager import ProxyManager
+
+            proxy_config = ProxyManager.get_requests_proxy_config()
+            resp = requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {}))
             content = resp.text
 
             # Robust JSONP parsing: IO( {Data} );

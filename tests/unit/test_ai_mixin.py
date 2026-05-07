@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 import datetime
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -562,3 +563,73 @@ class TestMacroContextSimplifiedCheck:
 
         source = inspect.getsource(AIStrategyMixin.run_ai_analysis)
         assert "hasattr" not in source or "macro_context" not in source.split("hasattr")[0].split("\n")[-1]
+
+
+class TestAIStrategyMixinTimeoutHandling:
+    def _make_mock_dp(self):
+        dp = MagicMock()
+        dates = pd.date_range("2025-01-01", periods=30, freq="B")
+        dp.get_stock_history = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": dates,
+                    "close": [10.0] * 30,
+                    "high": [10.5] * 30,
+                    "low": [9.5] * 30,
+                    "open": [10.0] * 30,
+                    "vol": [1000] * 30,
+                    "amount": [10000] * 30,
+                }
+            )
+        )
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_northbound_holding = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_northbound_flow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_financial_summary = AsyncMock(return_value=None)
+        dp.cache.get_stock_news = AsyncMock(return_value=[])
+        return dp
+
+    @pytest.mark.asyncio
+    async def test_httpx_timeout_exception_reraises(self):
+        import httpx
+
+        s = ConcreteStrategy()
+        row = pd.Series({"ts_code": "000001.SZ", "name": "test"})
+        prefetched = PreFetchedContext()
+        mock_dp = self._make_mock_dp()
+        with patch("strategies.ai_mixin.AIService") as mock_ai_cls:
+            mock_ai = mock_ai_cls.return_value
+            mock_ai.is_cloud_available.return_value = True
+            mock_ai.analyze_stock = AsyncMock(side_effect=httpx.ReadTimeout("read timeout"))
+            with pytest.raises(httpx.ReadTimeout):
+                await s._mixin_analyze_single(row, mock_dp, mock_ai, prefetched)
+
+    @pytest.mark.asyncio
+    async def test_asyncio_timeout_error_reraises(self):
+        s = ConcreteStrategy()
+        row = pd.Series({"ts_code": "000001.SZ", "name": "test"})
+        prefetched = PreFetchedContext()
+        mock_dp = self._make_mock_dp()
+        with patch("strategies.ai_mixin.AIService") as mock_ai_cls:
+            mock_ai = mock_ai_cls.return_value
+            mock_ai.is_cloud_available.return_value = True
+            mock_ai.analyze_stock = AsyncMock(side_effect=TimeoutError())
+            with pytest.raises(asyncio.TimeoutError):
+                await s._mixin_analyze_single(row, mock_dp, mock_ai, prefetched)
+
+    @pytest.mark.asyncio
+    async def test_builtin_timeout_error_reraises(self):
+        s = ConcreteStrategy()
+        row = pd.Series({"ts_code": "000001.SZ", "name": "test"})
+        prefetched = PreFetchedContext()
+        mock_dp = self._make_mock_dp()
+        with patch("strategies.ai_mixin.AIService") as mock_ai_cls:
+            mock_ai = mock_ai_cls.return_value
+            mock_ai.is_cloud_available.return_value = True
+            mock_ai.analyze_stock = AsyncMock(side_effect=TimeoutError("timeout"))
+            with pytest.raises(TimeoutError):
+                await s._mixin_analyze_single(row, mock_dp, mock_ai, prefetched)

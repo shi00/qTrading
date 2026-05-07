@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+import httpx
 from cachetools import TTLCache
 
 import pandas as pd
@@ -217,6 +218,16 @@ class AIStrategyMixin:
 
         # Extract UI real-time prompt override (handles users clicking Run before blurring Flet textarea)
         ui_prompt_override = context.get("params", {}).get("ai_system_prompt", None)
+
+        if ui_prompt_override:
+            from utils.prompt_guard import validate_prompt, sanitize_prompt
+
+            is_valid, warning = validate_prompt(ui_prompt_override)
+            if not is_valid:
+                logger.warning(f"[AIStrategyMixin] User prompt override rejected: {warning}")
+                ui_prompt_override = None
+            else:
+                ui_prompt_override = sanitize_prompt(ui_prompt_override)
 
         # --- Guard: AI Available? ---
         if not ai_client.is_cloud_available():
@@ -705,7 +716,7 @@ class AIStrategyMixin:
 
         except asyncio.CancelledError:
             raise
-        except (ConnectionError, TimeoutError) as e:
+        except (ConnectionError, TimeoutError, httpx.TimeoutException) as e:
             logger.error(
                 f"[AIStrategyMixin] Network error for {row.get('ts_code', '?')}: {e}",
             )

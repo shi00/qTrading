@@ -118,7 +118,7 @@ class TestClassifyApiError:
         result = _classify_api_error(Exception("test"))
         assert isinstance(result, dict)
         assert "code" in result
-        assert "message" in result
+        assert "message_key" in result
 
 
 class TestStrategyContextMaxLen:
@@ -643,3 +643,101 @@ class TestReasoningModelFallbackList:
                 assert _check_reasoning_support("gpt-5.5") is False
                 assert _check_reasoning_support("deepseek-v4-flash") is False
                 assert _check_reasoning_support("mistral-small-latest") is False
+
+
+class TestAIServiceAnalyzeTimeoutHandling:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_builtin_timeout_error_caught(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=TimeoutError("read timeout"))
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "test"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] == "Analysis timeout"
+        assert result["score"] == 0
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_asyncio_timeout_error_caught(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=TimeoutError())
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "test"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] == "Analysis timeout"
+        assert result["score"] == 0
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_httpx_timeout_exception_caught(self, mock_ch):
+        import httpx
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=httpx.ReadTimeout("read timeout"))
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "test"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] == "Analysis timeout"
+        assert result["score"] == 0
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_httpx_connect_timeout_caught(self, mock_ch):
+        import httpx
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=httpx.ConnectTimeout("connect timeout"))
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "test"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] == "Analysis timeout"
+        assert result["score"] == 0

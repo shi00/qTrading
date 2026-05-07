@@ -51,6 +51,7 @@ class ShutdownCoordinator:
         self._page = page
         self._cleanup_started = False
         self._cleanup_done = False
+        self._cleanup_running = False
         self._cleanup_success = False
         self._cleanup_task = None
         self._step_results: list[StepResult] = []
@@ -91,8 +92,12 @@ class ShutdownCoordinator:
             if cancel_event.wait(timeout_s):
                 logger.info("[Shutdown] Watchdog canceled before timeout.")
                 return
-            logger.warning(f"[Shutdown] Watchdog timeout ({timeout_s}s) — forcing exit.")
-            force_exit(0)
+            logger.error(
+                f"[Shutdown] Watchdog timeout ({timeout_s}s) — forcing exit. "
+                f"cleanup_done={self._cleanup_done}, "
+                f"cleanup_running={self._cleanup_running}",
+            )
+            force_exit(1)
 
         threading.Thread(target=_force_exit_thread, daemon=True).start()
         logger.info(f"[Shutdown] Watchdog armed ({timeout_s}s).")
@@ -118,6 +123,7 @@ class ShutdownCoordinator:
 
         if self._cleanup_task is None:
             self._cleanup_started = True
+            self._cleanup_running = True
             logging.getLogger("asyncio").setLevel(logging.ERROR)
             logger.info(
                 f"[Shutdown] ========== Graceful Shutdown Initiated =========="
@@ -155,6 +161,7 @@ class ShutdownCoordinator:
             return False
         finally:
             self._cleanup_done = True
+            self._cleanup_running = False
             self._cleanup_task = None
             self.cancel_watchdog()
             for handler in logging.root.handlers:

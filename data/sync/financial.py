@@ -788,12 +788,25 @@ class FinancialSyncStrategy(ISyncStrategy):
                     await asyncio.sleep(
                         ConfigHandler.get_sync_request_delay(is_heavy=True),
                     )
-                    await self._fetch_comprehensive_financial_data(
+                    merged_df, aux_counts = await self._fetch_comprehensive_financial_data(
                         ts_code,
                         period=period,
                     )
-                    async with _repair_counter_lock:
-                        total_saved += 1
+                    saved = 0
+                    if merged_df is not None and not merged_df.empty:
+                        for col in FINANCIAL_REPORT_SCHEMA_COLS:
+                            if col not in merged_df.columns:
+                                merged_df[col] = None
+                        saved = (
+                            await self.context.cache.save_financial_reports(
+                                merged_df[FINANCIAL_REPORT_SCHEMA_COLS],
+                            )
+                            or 0
+                        )
+                    delta = saved + aux_counts.get("mainbz", 0) + aux_counts.get("audit", 0)
+                    if delta > 0:
+                        async with _repair_counter_lock:
+                            total_saved += delta
 
                     if progress_callback and idx % 10 == 0:
                         progress_callback(

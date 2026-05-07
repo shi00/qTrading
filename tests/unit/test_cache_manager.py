@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 import pandas as pd
@@ -623,6 +624,30 @@ class TestCacheManagerPrefetchAuxiliaryData:
         assert "000002.SZ" in result
         assert "audit" in result["000001.SZ"]
         assert "audit" in result["000002.SZ"]
+
+    @pytest.mark.asyncio
+    async def test_prefetch_uses_gather_not_sequential(self):
+        import time
+
+        mgr = _make_mgr()
+
+        async def slow_query(ts_codes):
+            await asyncio.sleep(0.1)
+            return pd.DataFrame({"ts_code": ts_codes, "val": [1] * len(ts_codes)})
+
+        mgr.financial_dao.get_fina_audit_batch = AsyncMock(side_effect=slow_query)
+        mgr.financial_dao.get_dividend_batch = AsyncMock(side_effect=slow_query)
+        mgr.financial_dao.get_pledge_stat_batch = AsyncMock(side_effect=slow_query)
+        mgr.holder_dao.get_top10_holders_batch = AsyncMock(side_effect=slow_query)
+        mgr.financial_dao.get_fina_mainbz_batch = AsyncMock(side_effect=slow_query)
+        mgr.financial_dao.get_financial_reports_history_batch = AsyncMock(side_effect=slow_query)
+        mgr.holder_dao.get_stk_holdernumber_batch = AsyncMock(side_effect=slow_query)
+
+        start = time.perf_counter()
+        result = await mgr.prefetch_auxiliary_data(["000001.SZ"])
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.5
+        assert "000001.SZ" in result
 
 
 class TestCacheManagerMaintenanceEvent:

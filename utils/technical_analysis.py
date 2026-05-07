@@ -20,8 +20,11 @@ class TechnicalAnalysis:
             return df
 
         try:
-            df_adj = df.copy()
-            valid_factors = df["adj_factor"].dropna()
+            if "trade_date" in df.columns:
+                df_adj = df.sort_values("trade_date").copy()
+            else:
+                df_adj = df.copy()
+            valid_factors = df_adj["adj_factor"].dropna()
             if valid_factors.empty:
                 return df
 

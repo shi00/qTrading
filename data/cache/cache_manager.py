@@ -922,61 +922,40 @@ class CacheManager:
         """
         result = {code: {} for code in ts_codes}
 
-        # 批量查询审计意见
-        audit_df = await self.financial_dao.get_fina_audit_batch(ts_codes)
-        if audit_df is not None and not audit_df.empty:
-            for code in ts_codes:
-                code_audit = audit_df[audit_df["ts_code"] == code]
-                if not code_audit.empty:
-                    result[code]["audit"] = code_audit
+        (
+            audit_df,
+            dividend_df,
+            pledge_df,
+            holders_df,
+            mainbz_df,
+            financial_history_df,
+            holdernumber_df,
+        ) = await asyncio.gather(
+            self.financial_dao.get_fina_audit_batch(ts_codes),
+            self.financial_dao.get_dividend_batch(ts_codes),
+            self.financial_dao.get_pledge_stat_batch(ts_codes),
+            self.holder_dao.get_top10_holders_batch(ts_codes),
+            self.financial_dao.get_fina_mainbz_batch(ts_codes),
+            self.financial_dao.get_financial_reports_history_batch(ts_codes),
+            self.holder_dao.get_stk_holdernumber_batch(ts_codes),
+        )
 
-        # 批量查询分红记录
-        dividend_df = await self.financial_dao.get_dividend_batch(ts_codes)
-        if dividend_df is not None and not dividend_df.empty:
-            for code in ts_codes:
-                code_dividend = dividend_df[dividend_df["ts_code"] == code]
-                if not code_dividend.empty:
-                    result[code]["dividend"] = code_dividend
+        batch_results = {
+            "audit": audit_df,
+            "dividend": dividend_df,
+            "pledge": pledge_df,
+            "holders": holders_df,
+            "mainbz": mainbz_df,
+            "financial_history": financial_history_df,
+            "holdernumber": holdernumber_df,
+        }
 
-        # 批量查询质押比例
-        pledge_df = await self.financial_dao.get_pledge_stat_batch(ts_codes)
-        if pledge_df is not None and not pledge_df.empty:
-            for code in ts_codes:
-                code_pledge = pledge_df[pledge_df["ts_code"] == code]
-                if not code_pledge.empty:
-                    result[code]["pledge"] = code_pledge
-
-        # 批量查询股东数据
-        holders_df = await self.holder_dao.get_top10_holders_batch(ts_codes)
-        if holders_df is not None and not holders_df.empty:
-            for code in ts_codes:
-                code_holders = holders_df[holders_df["ts_code"] == code]
-                if not code_holders.empty:
-                    result[code]["holders"] = code_holders
-
-        # 批量查询主营业务构成
-        mainbz_df = await self.financial_dao.get_fina_mainbz_batch(ts_codes)
-        if mainbz_df is not None and not mainbz_df.empty:
-            for code in ts_codes:
-                code_mainbz = mainbz_df[mainbz_df["ts_code"] == code]
-                if not code_mainbz.empty:
-                    result[code]["mainbz"] = code_mainbz
-
-        # 批量查询财务报告历史
-        financial_history_df = await self.financial_dao.get_financial_reports_history_batch(ts_codes)
-        if financial_history_df is not None and not financial_history_df.empty:
-            for code in ts_codes:
-                code_history = financial_history_df[financial_history_df["ts_code"] == code]
-                if not code_history.empty:
-                    result[code]["financial_history"] = code_history
-
-        # 批量查询股东人数变化
-        holdernumber_df = await self.holder_dao.get_stk_holdernumber_batch(ts_codes)
-        if holdernumber_df is not None and not holdernumber_df.empty:
-            for code in ts_codes:
-                code_holdernumber = holdernumber_df[holdernumber_df["ts_code"] == code]
-                if not code_holdernumber.empty:
-                    result[code]["holdernumber"] = code_holdernumber
+        for key, df in batch_results.items():
+            if df is not None and not df.empty:
+                for code in ts_codes:
+                    code_df = df[df["ts_code"] == code]
+                    if not code_df.empty:
+                        result[code][key] = code_df
 
         return result
 

@@ -4,8 +4,8 @@ flet-desktop==0.28.3
 
 # === Data Fetching & APIs ===
 # Market data providers
-tushare>=1.4.24
-akshare>=1.18.30
+tushare==1.4.29
+akshare>=1.18.60
 # HTTP Clients
 requests>=2.32.5
 httpx>=0.27.0
@@ -15,45 +15,45 @@ brotlicffi>=1.1.0.0 # Fast Brotli compression support for urllib3 (optional dep,
 
 # === Data Processing & Analysis ===
 # Core dataframe libraries
-numpy>=1.26.0
-pandas>=3.0.0
-polars>=1.38.1
-pyarrow>=14.0.0 # Required by Polars for converting Pandas nullable Int64/Float64 types
+numpy>=2.4.4
+pandas>=3.0.2
+polars>=1.40.1
+pyarrow>=24.0.0 # Required by Polars for converting Pandas nullable Int64/Float64 types
 # Financial specific
-pandas_market_calendars>=4.0.0
+pandas_market_calendars>=5.3.2
 
 # === Database & Storage (PostgreSQL Ecosystem) ===
 # PostgreSQL Drivers
 asyncpg>=0.31.0 # Asynchronous PostgreSQL driver (Used by async DAOs)
-psycopg2-binary>=2.9.9 # Synchronous PostgreSQL driver (Used by SQLAlchemy/Alembic)
+psycopg2-binary>=2.9.12 # Synchronous PostgreSQL driver (Used by SQLAlchemy/Alembic)
 # ORM & Schema Management
-sqlalchemy>=2.0.46 # ORM and Database Toolkit
-alembic>=1.14.0 # Database Migration Tool
-sqlparse>=0.4.4 # SQL Query parser and formatter
+sqlalchemy>=2.0.49 # ORM and Database Toolkit
+alembic>=1.18.4 # Database Migration Tool
+sqlparse>=0.5.5 # SQL Query parser and formatter
 
 # === AI & LLM Integration ===
 # Multi-LLM Gateway (openai 作为子依赖自动安装)
-litellm>=1.83.7
+litellm==1.83.7
 # Local LLM Inference (Optional / Heavy, Requires C++ Build Tools)
-llama-cpp-python>=0.3.16 # Install manually if needed, avoiding breaks in pure python environments
+llama-cpp-python==0.3.22 # Install manually if needed, avoiding breaks in pure python environments
 
 # === Charting & Visualization ===
 mplfinance>=0.12.10b0 # Candlestick Charts
-matplotlib>=3.10.0 # Base plotting library
+matplotlib>=3.10.8 # Base plotting library
 
 # === Scheduling & Time Management ===
-apscheduler>=3.10.0 # Background Task Scheduler
+apscheduler>=3.11.2 # Background Task Scheduler
 tzdata>=2025.3 # Required for APScheduler timezone support on Windows
 pytz>=2024.1 # Timezone offset calculations
 
 # === Security & Configuration ===
-python-dotenv>=1.0.1 # Load environment variables from .env file
-keyring>=25.0.0 # Secure OS-level credential storage (Windows Credential Locker, macOS Keychain)
-cryptography>=46.0.4 # File-based encryption fallback for token storage
+python-dotenv==1.0.1 # Load environment variables from .env file
+keyring>=25.7.0 # Secure OS-level credential storage (Windows Credential Locker, macOS Keychain)
+cryptography>=47.0.0 # File-based encryption fallback for token storage
 
 # === Advanced Utilities ===
 readerwriterlock>=1.0.9 # Advanced Thread-safe read/write locks for CacheManager
 cachetools>=7.0.5 # TTL LRU cache for strategy history prefetch
 
 # === Scrapers & Automations (Optional / Heavy) ===
-playwright>=1.58.0 # Browser automation (For News/Information web scraping and UI tests)
+playwright>=1.59.0 # Browser automation (For News/Information web scraping and UI tests)

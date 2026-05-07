@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import sys
 import tempfile
@@ -61,15 +62,27 @@ TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
 TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
 TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD")
 if not TEST_DB_PASSWORD:
-    TEST_DB_PASSWORD = "astock_test_local_2024"
+    _run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if _run_id:
+        TEST_DB_PASSWORD = hashlib.sha256(f"astock_ci_{_run_id}".encode()).hexdigest()[:24]
+    else:
+        import getpass
+
+        try:
+            _local_user = getpass.getuser()
+        except Exception:
+            _local_user = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
+        TEST_DB_PASSWORD = hashlib.sha256(f"astock_local_{_local_user}".encode()).hexdigest()[:24]
     import warnings
 
     warnings.warn(
-        "Using default test DB password. Set TEST_DB_PASSWORD env var for production CI.",
+        "Using derived test DB password. Set TEST_DB_PASSWORD or CI_PG_PASSWORD env var for production CI.",
         UserWarning,
         stacklevel=2,
     )
-TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "test_astock")
+
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+TEST_DB_NAME = os.environ.get("TEST_DB_NAME", f"test_astock_{_xdist_worker}" if _xdist_worker else "test_astock")
 if not TEST_DB_NAME.startswith("test_"):
     raise ValueError(f"TEST_DB_NAME must start with 'test_' for safety, got: {TEST_DB_NAME!r}")
 if not TEST_DB_NAME.replace("_", "").isalnum():

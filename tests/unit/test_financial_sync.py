@@ -237,13 +237,42 @@ class TestFinancialSyncRepair:
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_repair_with_codes(self):
+    async def test_repair_with_codes_saves_merged_df(self):
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
         with patch("data.sync.financial.ConfigHandler") as mock_cfg:
             mock_cfg.get_sync_request_delay.return_value = 0
             result = await strategy.repair_financial_data(["000001.SZ"])
             assert isinstance(result, int)
+            ctx.cache.save_financial_reports.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_repair_returns_actual_saved_count(self):
+        ctx = make_ctx()
+        ctx.cache.save_financial_reports = AsyncMock(return_value=5)
+        ctx.cache.save_fina_mainbz = AsyncMock(return_value=2)
+        ctx.cache.save_fina_audit = AsyncMock(return_value=1)
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            result = await strategy.repair_financial_data(["000001.SZ"])
+            assert result > 0
+
+    @pytest.mark.asyncio
+    async def test_repair_empty_data_does_not_save(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(return_value=None)
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
+        ctx.api.get_fina_audit = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            result = await strategy.repair_financial_data(["000001.SZ"])
+            ctx.cache.save_financial_reports.assert_not_awaited()
+            assert result == 0
 
 
 class TestFinancialSyncCorporateActions:

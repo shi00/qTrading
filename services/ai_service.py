@@ -91,10 +91,11 @@ def _check_reasoning_support(model: str) -> bool:
 
 def _classify_api_error(e: Exception) -> dict:
     """
-    Classify API errors into user-friendly i18n messages.
+    Classify API errors into structured error info with i18n keys.
 
     Returns:
-        {"code": str, "message": str} where message is translated i18n text
+        {"code": str, "message_key": str} where message_key can be
+        translated via I18n.get() or get_error_message() in the UI layer.
     """
     from utils.error_classifier import classify_error
 
@@ -629,11 +630,22 @@ class AIService:
 
         # Load System Prompt
         from strategies.strategy_prompts import _UNIVERSAL_RULES, resolve_prompt
+        from utils.prompt_guard import validate_prompt, sanitize_prompt
 
         if ui_prompt_override and ui_prompt_override.strip():
-            system_prompt = ui_prompt_override.strip()
-            if _UNIVERSAL_RULES not in system_prompt:
-                system_prompt += "\n\n" + _UNIVERSAL_RULES
+            raw_prompt = ui_prompt_override.strip()
+            is_valid, warning = validate_prompt(raw_prompt)
+            if not is_valid:
+                logger.warning(f"[AIService] Prompt override rejected: {warning}")
+                if strategy_key:
+                    system_prompt = resolve_prompt(strategy_key)
+                else:
+                    system_prompt = ConfigHandler.get_ai_system_prompt() or ""
+                    if _UNIVERSAL_RULES not in system_prompt:
+                        system_prompt += "\n\n" + _UNIVERSAL_RULES
+            else:
+                sanitized = sanitize_prompt(raw_prompt)
+                system_prompt = _UNIVERSAL_RULES + "\n\n" + sanitized
         elif strategy_key:
             system_prompt = resolve_prompt(strategy_key)
         else:
@@ -737,9 +749,9 @@ class AIService:
             )
             return validate_ai_analysis_response(res)
 
-        except TimeoutError:
+        except (TimeoutError, httpx.TimeoutException) as te:
             logger.error(
-                "[AIService] Analyze | ❌ Timeout (120s exceeded)",
+                f"[AIService] Analyze | ❌ Timeout (120s exceeded): {type(te).__name__}",
                 exc_info=True,
             )
             return {"error": "Analysis timeout", "score": 0}
@@ -957,6 +969,6 @@ class AIService:
             error_info = _classify_api_error(e)
             return {
                 "success": False,
-                "message": error_info["message"],
+                "message": error_info["message_key"],
                 "error_code": error_info["code"],
             }

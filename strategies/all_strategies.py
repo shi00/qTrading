@@ -43,23 +43,22 @@ class StrategyManager:
     def _validate_i18n(self):
         """Startup validation — warn if any strategy is missing i18n keys."""
         for key, s in self.strategies.items():
-            name_val = I18n.get(s._name_key)
-            desc_val = I18n.get(s._desc_key)
-            # I18n.get returns the key itself if not found
-            if name_val == s._name_key:
+            name_val = I18n.get(s.name_key)
+            desc_val = I18n.get(s.desc_key)
+            if name_val == s.name_key:
                 logger.warning(
-                    f"[StrategyManager] ⚠ Missing i18n key: '{s._name_key}' (strategy: {key})",
+                    f"[StrategyManager] ⚠ Missing i18n key: '{s.name_key}' (strategy: {key})",
                 )
-            if desc_val == s._desc_key:
+            if desc_val == s.desc_key:
                 logger.warning(
-                    f"[StrategyManager] ⚠ Missing i18n key: '{s._desc_key}' (strategy: {key})",
+                    f"[StrategyManager] ⚠ Missing i18n key: '{s.desc_key}' (strategy: {key})",
                 )
 
     def get_strategy(self, key: typing.Any):
         return self.strategies.get(key)
 
     def get_all_names(self):
-        return {k: v.name for k, v in self.strategies.items()}
+        return {k: I18n.get(v.name_key) for k, v in self.strategies.items()}
 
     def get_strategy_params(self, key: typing.Any):
         """Get dynamic parameter definitions for a strategy."""

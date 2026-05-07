@@ -451,7 +451,16 @@ class StockDetailDialog(ft.AlertDialog):
 
             # Generate inline PNG via mplfinance
             chart_title = f"{self.stock_data.get('name', '')} ({ts_code})"
-            b64_png = generate_kline_png(df, title=chart_title, width=880, height=340)
+            from utils.thread_pool import ThreadPoolManager, TaskType
+
+            b64_png = await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                generate_kline_png,
+                df,
+                title=chart_title,
+                width=880,
+                height=340,
+            )
 
             self.chart_container.content = ft.Image(
                 src_base64=b64_png,
@@ -463,12 +472,12 @@ class StockDetailDialog(ft.AlertDialog):
         except Exception as e:
             import traceback
 
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             logger.error(f"Error loading chart: {e}\n{traceback.format_exc()}")
             error_info = classify_error(e, context="chart")
             self.chart_container.content = ft.Text(
-                error_info["message"],
+                get_error_message(error_info),
                 color=AppColors.ERROR,
             )
             self.chart_container.update()

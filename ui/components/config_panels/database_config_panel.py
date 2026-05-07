@@ -379,16 +379,16 @@ class DatabaseConfigPanel(ft.Container):
                 return False
 
         except ValueError as e:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(e, context="db")
-            self._show_error(error_info["message"])
+            self._show_error(get_error_message(error_info))
             return False
         except Exception as e:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(e, context="db")
-            self._show_error(error_info["message"])
+            self._show_error(get_error_message(error_info))
             return False
         finally:
             self._is_verifying = False
@@ -462,10 +462,10 @@ class DatabaseConfigPanel(ft.Container):
             return True
 
         except Exception as e:
-            from utils.error_classifier import classify_error
+            from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(e, context="db")
-            self._show_error(error_info["message"])
+            self._show_error(get_error_message(error_info))
             return False
         finally:
             self.btn_save.disabled = False

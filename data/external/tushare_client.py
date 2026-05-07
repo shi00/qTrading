@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import threading
@@ -141,7 +142,6 @@ class TushareClient:
         - On success: on_success() for gradual rate recovery
         - Shorter backoff (5-15s) instead of 60-240s exponential
         """
-        import asyncio
         import functools
 
         import functools as _functools
@@ -180,9 +180,12 @@ class TushareClient:
                     )
 
                 loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    ThreadPoolManager().io_pool,
-                    functools.partial(func, **kwargs),
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        ThreadPoolManager().io_pool,
+                        functools.partial(func, **kwargs),
+                    ),
+                    timeout=self.timeout * 1.5,
                 )
 
                 if result is not None and api_name in self._COLUMN_RENAMES:
@@ -214,7 +217,7 @@ class TushareClient:
                     or "频次超限" in error_msg
                 )
                 is_network_error = (
-                    isinstance(e, requests.exceptions.RequestException)
+                    isinstance(e, (requests.exceptions.RequestException, TimeoutError, asyncio.TimeoutError))
                     or "timeout" in error_msg.lower()
                     or "connection" in error_msg.lower()
                     or "timed out" in error_msg.lower()
