@@ -74,7 +74,7 @@ def _format_cell_value(col: str, val) -> str:
     if pd.isna(val):
         return "-"
     if col == "strategy_name":
-        return translate_strategy_name(str(val))
+        return translate_strategy_name(str(val)) or str(val)
     if col in _DATE_COLS:
         if isinstance(val, (datetime.date, datetime.datetime)):
             return val.strftime("%Y-%m-%d")
