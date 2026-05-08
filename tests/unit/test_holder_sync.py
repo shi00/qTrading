@@ -13,7 +13,7 @@ class TestHolderSyncCancel:
         ctx = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         assert not strategy._cancelled
-        await strategy.cancel()
+        strategy.cancel()
         assert strategy._cancelled
 
 
@@ -314,7 +314,7 @@ class TestHolderSyncStrategyCancel:
     async def test_cancel_sets_flag(self):
         ctx = MagicMock(spec=SyncContext)
         strategy = HolderSyncStrategy(ctx)
-        await strategy.cancel()
+        strategy.cancel()
         assert strategy._cancelled is True
 
 

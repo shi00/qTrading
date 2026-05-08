@@ -174,14 +174,16 @@ class ShutdownCoordinator:
         results: list[StepResult] = []
         for name, method_name, critical in _CLEANUP_STEPS:
             step_func = getattr(self, method_name)
-            results.append(
-                await self._run_async_step(
-                    name=name,
-                    step=step_func,
-                    step_timeout_s=step_timeout_s,
-                    critical=critical,
-                )
+            result = await self._run_async_step(
+                name=name,
+                step=step_func,
+                step_timeout_s=step_timeout_s,
+                critical=critical,
             )
+            results.append(result)
+            if critical and not result.ok:
+                logger.error(f"[Shutdown] Critical step '{name}' failed, aborting cleanup sequence.")
+                break
         return results
 
     async def _run_async_step(self, name: str, step, step_timeout_s: float, critical: bool) -> StepResult:
@@ -241,11 +243,11 @@ class ShutdownCoordinator:
 
         if NewsSubscriptionService._instance is not None:
             logger.info("[Shutdown]   - NewsSubscriptionService")
-            NewsSubscriptionService._instance.stop()
+            await NewsSubscriptionService._instance.stop_async()
 
         if MarketDataService._instance is not None:
             logger.info("[Shutdown]   - MarketDataService")
-            MarketDataService._instance.stop()
+            await MarketDataService._instance.stop_async()
 
         if self._service_stop_delay > 0:
             await asyncio.sleep(self._service_stop_delay)

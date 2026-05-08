@@ -32,8 +32,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 
 from data.sync.base import SyncResult
 from strategies.prompt_validator import (
-    DECLARATIONS,
     generate_declaration_report,
+    get_declarations,
     validate_prompt_declarations,
 )
 
@@ -355,8 +355,8 @@ class TestPromptDeclarationReport:
         """
         测试生成声明状态报告
         """
-        await validate_prompt_declarations(DECLARATIONS)
-        report = generate_declaration_report(DECLARATIONS)
+        await validate_prompt_declarations(get_declarations())
+        report = generate_declaration_report(get_declarations())
 
         assert "multi_period_roe" in report
         assert "Prompt 数据声明状态报告" in report
@@ -366,9 +366,9 @@ class TestPromptDeclarationReport:
         """
         测试声明状态格式
         """
-        await validate_prompt_declarations(DECLARATIONS)
+        await validate_prompt_declarations(get_declarations())
 
-        for decl in DECLARATIONS:
+        for decl in get_declarations():
             assert decl.status in [
                 "available",
                 "missing",

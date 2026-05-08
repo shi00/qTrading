@@ -41,6 +41,7 @@ class ScreenerDao(BaseDao):
         sql = """
             SELECT run_id, trade_date, strategy_name, COUNT(*) as cnt
             FROM screening_history
+            WHERE trade_date >= CURRENT_DATE - INTERVAL '180 days'
             GROUP BY run_id, trade_date, strategy_name
             ORDER BY trade_date DESC, MIN(created_at) DESC
             LIMIT $1 OFFSET $2
@@ -76,7 +77,8 @@ class ScreenerDao(BaseDao):
     async def get_pending_reviews(self):
         sql = f"""
             SELECT {self.SH_BASE_COLS} FROM screening_history sh
-            WHERE sh.review_status IN ($1, $2) OR sh.review_status IS NULL
+            WHERE (sh.review_status IN ($1, $2) OR sh.review_status IS NULL)
+              AND sh.trade_date >= CURRENT_DATE - INTERVAL '90 days'
             ORDER BY sh.created_at DESC LIMIT 500
         """
         df = await self._read_db(sql, (REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))

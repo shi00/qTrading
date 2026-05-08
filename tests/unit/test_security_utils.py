@@ -2,7 +2,57 @@ import base64
 import pytest
 from unittest.mock import patch, MagicMock
 
-from utils.security_utils import SecurityManager, DecryptionError
+from utils.security_utils import (
+    SecurityManager,
+    DecryptionError,
+    _derive_key_from_machine,
+    _get_machine_fingerprint,
+    _hide_file_windows,
+)
+
+
+class TestMachineFingerprint:
+    def test_fingerprint_is_bytes(self):
+        fp = _get_machine_fingerprint()
+        assert isinstance(fp, bytes)
+        assert len(fp) > 0
+
+    def test_fingerprint_deterministic(self):
+        fp1 = _get_machine_fingerprint()
+        fp2 = _get_machine_fingerprint()
+        assert fp1 == fp2
+
+
+class TestDeriveKeyFromMachine:
+    def test_derived_key_length(self):
+        salt = b"a" * 32
+        key = _derive_key_from_machine(salt)
+        assert len(key) == 32
+
+    def test_different_salt_different_key(self):
+        key1 = _derive_key_from_machine(b"a" * 32)
+        key2 = _derive_key_from_machine(b"b" * 32)
+        assert key1 != key2
+
+    def test_same_salt_same_key(self):
+        salt = b"x" * 32
+        key1 = _derive_key_from_machine(salt)
+        key2 = _derive_key_from_machine(salt)
+        assert key1 == key2
+
+
+class TestHideFileWindows:
+    def test_non_windows_noop(self):
+        with patch("utils.security_utils.os.name", "posix"):
+            _hide_file_windows("/some/path")
+
+    def test_windows_ctypes_call(self):
+        with patch("utils.security_utils.os.name", "nt"):
+            mock_kernel32 = MagicMock()
+            mock_kernel32.SetFileAttributesW.return_value = True
+            with patch("ctypes.windll", create=True) as mock_windll:
+                mock_windll.kernel32 = mock_kernel32
+                _hide_file_windows("C:\\test\\file.key")
 
 
 class TestSecurityManagerGetKey:
@@ -15,15 +65,14 @@ class TestSecurityManagerGetKey:
         assert result == b"cached_key_32bytes_long_enough!!"
 
     @patch("utils.security_utils.os.path.exists")
-    @patch("utils.security_utils.AESGCM")
-    def test_generate_new_key_when_no_files(self, mock_aesgcm, mock_exists):
+    def test_derive_key_when_no_files(self, mock_exists):
         mock_exists.side_effect = lambda p: False
-        mock_aesgcm.generate_key.return_value = b"new_key_32bytes_generated!"
         SecurityManager._key = None
 
-        with patch.object(SecurityManager, "_save_key"):
+        with patch.object(SecurityManager, "_get_or_create_salt", return_value=b"s" * 32):
             result = SecurityManager.get_key()
-            assert result == b"new_key_32bytes_generated!"
+            assert result is not None
+            assert len(result) == 32
 
     @patch("utils.security_utils.os.path.exists")
     def test_load_existing_key(self, mock_exists):
@@ -71,6 +120,40 @@ class TestSecurityManagerGetKey:
         with patch.object(SecurityManager, "_load_key_file", side_effect=Exception("unreadable")):
             with pytest.raises(RuntimeError, match="unreadable"):
                 SecurityManager.get_key()
+
+
+class TestSecurityManagerSalt:
+    def setup_method(self):
+        SecurityManager._key = None
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_load_existing_salt(self, mock_exists):
+        from utils.security_utils import _MACHINE_SALT_FILE
+
+        salt_content = b"existing_salt_16bytes"
+        mock_exists.side_effect = lambda p: p == _MACHINE_SALT_FILE
+
+        with patch("builtins.open", MagicMock()):
+            with patch("utils.security_utils.os.path.exists", return_value=True):
+                with patch.object(SecurityManager, "_get_or_create_salt") as mock_salt:
+                    mock_salt.return_value = salt_content
+                    result = SecurityManager._get_or_create_salt()
+                    assert result == salt_content
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_create_new_salt_when_missing(self, mock_exists):
+        mock_exists.return_value = False
+
+        with (
+            patch("builtins.open", MagicMock()),
+            patch("utils.security_utils.os.replace"),
+            patch("utils.security_utils.os.fsync"),
+            patch("utils.security_utils._hide_file_windows"),
+        ):
+            SecurityManager._key = None
+            salt = SecurityManager._get_or_create_salt()
+            assert isinstance(salt, bytes)
+            assert len(salt) == 32
 
 
 class TestSecurityManagerEncryptDecrypt:
@@ -153,3 +236,74 @@ class TestDecryptionError:
         err = DecryptionError("test")
         assert isinstance(err, Exception)
         assert str(err) == "test"
+
+
+class TestLegacyMarker:
+    def setup_method(self):
+        SecurityManager._key = None
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_ensure_legacy_marker_creates_file(self, mock_exists):
+        mock_exists.return_value = False
+        with (
+            patch("builtins.open", MagicMock()) as mock_open,
+            patch("utils.security_utils._hide_file_windows"),
+        ):
+            SecurityManager._ensure_legacy_marker()
+            mock_open.assert_called_once()
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_ensure_legacy_marker_skips_if_exists(self, mock_exists):
+        mock_exists.return_value = True
+        with patch("builtins.open", MagicMock()) as mock_open:
+            SecurityManager._ensure_legacy_marker()
+            mock_open.assert_not_called()
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_legacy_marker_warning_when_key_missing(self, mock_exists):
+        from utils.security_utils import _LEGACY_MARKER
+
+        SecurityManager._key = None
+        mock_exists.side_effect = lambda p: p == _LEGACY_MARKER
+
+        with (
+            patch.object(SecurityManager, "_get_or_create_salt", return_value=b"s" * 32),
+            patch("utils.security_utils.logger") as mock_logger,
+        ):
+            SecurityManager.get_key()
+            mock_logger.warning.assert_any_call(
+                "Legacy key marker found but key file is missing. "
+                "Previously encrypted data (API keys, tokens) may be undecryptable. "
+                "Run SecurityManager.migrate_to_derived_key() to re-encrypt with the new key, "
+                "or delete .secret.legacy to suppress this warning (data will be lost)."
+            )
+
+
+class TestMigrateToDerivedKey:
+    def setup_method(self):
+        SecurityManager._key = None
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_no_file_key_returns_true(self, mock_exists):
+        mock_exists.return_value = False
+        result = SecurityManager.migrate_to_derived_key()
+        assert result is True
+
+    @patch("utils.security_utils.os.path.exists")
+    @patch("utils.security_utils.os.remove")
+    def test_migration_deletes_key_files(self, mock_remove, mock_exists):
+        mock_exists.return_value = True
+        with (
+            patch.object(SecurityManager, "_load_key_file", return_value=b"x" * 32),
+            patch.object(SecurityManager, "_get_or_create_salt", return_value=b"s" * 32),
+        ):
+            result = SecurityManager.migrate_to_derived_key()
+            assert result is True
+            assert mock_remove.call_count == 3
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_migration_fails_if_key_unreadable(self, mock_exists):
+        mock_exists.return_value = True
+        with patch.object(SecurityManager, "_load_key_file", side_effect=Exception("unreadable")):
+            result = SecurityManager.migrate_to_derived_key()
+            assert result is False

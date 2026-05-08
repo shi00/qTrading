@@ -38,12 +38,6 @@ class HolderSyncStrategy(ISyncStrategy):
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
-        self._cancelled = False
-
-    async def cancel(self):
-        """Handle cancellation request."""
-        self._cancelled = True
-        logger.debug("[HolderSync] Stop | Cancellation requested.")
 
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default snapshot anchoring."""
@@ -126,10 +120,17 @@ class HolderSyncStrategy(ISyncStrategy):
             if errors >= _MAX_ERRORS:
                 result.status = "partial"
                 result.errors.append(f"Aborted after {errors} errors")
+            elif self._cancelled:
+                result.status = "cancelled"
 
-            logger.info(
-                f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}",
-            )
+            if result.status == "cancelled":
+                logger.info(
+                    f"[HolderSync] Run | ⚠️ Cancelled. Synced={result.added}, Errors={errors}",
+                )
+            else:
+                logger.info(
+                    f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}",
+                )
 
         except Exception as e:
             logger.error(f"[HolderSync] Run | ❌ Top-level failure: {e}", exc_info=True)
@@ -282,6 +283,9 @@ class HolderSyncStrategy(ISyncStrategy):
             )
 
             if consecutive_errors >= _MAX_ERRORS:
+                return -1
+
+            if self._cancelled:
                 return -1
 
             return total_rows

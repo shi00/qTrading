@@ -475,24 +475,33 @@ class CacheManager:
         logger.debug("[CacheManager] Health | Starting comprehensive check...")
 
         # === Step 1: All DAO calls outside async with (avoid connection nesting) ===
-        # 1.1 Get active stock count
-        total_stocks = await self.stock_dao.get_active_stock_count()
-        total_stocks = total_stocks or 1
+        total_stocks_result, date_range_result = await asyncio.gather(
+            self.stock_dao.get_active_stock_count(),
+            self.quote_dao.get_date_range(),
+            return_exceptions=True,
+        )
+        total_stocks = (total_stocks_result if not isinstance(total_stocks_result, Exception) else None) or 1
+        if isinstance(date_range_result, Exception):
+            logger.warning(
+                f"[CacheManager] Health | ⚠️ Date range query failed (non-fatal): {date_range_result}",
+            )
         logger.debug(
             f"[CacheManager] Health | Active stocks baseline: {total_stocks}",
         )
 
-        # 1.2 Get global baseline using DAO methods
         global_trade_days = 0
         global_expected_rows = None
         try:
-            g_min, g_max = await self.quote_dao.get_date_range()
-            if g_min and g_max:
-                global_trade_days = await self.stock_dao.count_trade_days(g_min, g_max)
-                global_expected_rows = await self.stock_dao.count_expected_rows(g_min, g_max)
-                logger.debug(
-                    f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
-                )
+            if not isinstance(date_range_result, Exception):
+                g_min, g_max = date_range_result
+                if g_min and g_max:
+                    global_trade_days, global_expected_rows = await asyncio.gather(
+                        self.stock_dao.count_trade_days(g_min, g_max),
+                        self.stock_dao.count_expected_rows(g_min, g_max),
+                    )
+                    logger.debug(
+                        f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
+                    )
         except Exception as e:
             logger.warning(
                 f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}",
@@ -856,13 +865,13 @@ class CacheManager:
         return await self.holder_dao.get_existing_top10_ts_codes(period)
 
     # --- 宏观数据方法 ---
-    async def get_macro_economy(self) -> pd.DataFrame:
+    async def get_macro_economy(self, as_of_date=None) -> pd.DataFrame:
         """获取宏观经济数据"""
-        return await self.macro_dao.get_macro_economy_latest()
+        return await self.macro_dao.get_macro_economy_latest(as_of_date=as_of_date)
 
-    async def get_shibor_latest(self) -> pd.DataFrame:
+    async def get_shibor_latest(self, as_of_date=None) -> pd.DataFrame:
         """获取最新 Shibor 利率"""
-        return await self.macro_dao.get_shibor_latest()
+        return await self.macro_dao.get_shibor_latest(as_of_date=as_of_date)
 
     # === Phase 2: 批量质量评分方法 ===
 
@@ -922,15 +931,7 @@ class CacheManager:
         """
         result = {code: {} for code in ts_codes}
 
-        (
-            audit_df,
-            dividend_df,
-            pledge_df,
-            holders_df,
-            mainbz_df,
-            financial_history_df,
-            holdernumber_df,
-        ) = await asyncio.gather(
+        gather_results = await asyncio.gather(
             self.financial_dao.get_fina_audit_batch(ts_codes),
             self.financial_dao.get_dividend_batch(ts_codes),
             self.financial_dao.get_pledge_stat_batch(ts_codes),
@@ -938,17 +939,25 @@ class CacheManager:
             self.financial_dao.get_fina_mainbz_batch(ts_codes),
             self.financial_dao.get_financial_reports_history_batch(ts_codes),
             self.holder_dao.get_stk_holdernumber_batch(ts_codes),
+            return_exceptions=True,
         )
 
-        batch_results = {
-            "audit": audit_df,
-            "dividend": dividend_df,
-            "pledge": pledge_df,
-            "holders": holders_df,
-            "mainbz": mainbz_df,
-            "financial_history": financial_history_df,
-            "holdernumber": holdernumber_df,
-        }
+        batch_keys = [
+            "audit",
+            "dividend",
+            "pledge",
+            "holders",
+            "mainbz",
+            "financial_history",
+            "holdernumber",
+        ]
+        batch_results = {}
+        for key, raw in zip(batch_keys, gather_results, strict=False):
+            if isinstance(raw, Exception):
+                logger.warning(f"[CacheManager] prefetch_auxiliary_data: {key} query failed: {raw}")
+                batch_results[key] = None
+            else:
+                batch_results[key] = raw
 
         for key, df in batch_results.items():
             if df is not None and not df.empty:

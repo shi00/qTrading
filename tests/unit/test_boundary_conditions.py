@@ -416,7 +416,7 @@ class TestSortDirectionBoundaryConditions:
     def test_virtual_table_new_column_defaults_ascending(self):
         source = read_source(os.path.join("ui", "components", "virtual_table.py"))
         sort_src = extract_method_source(source, "_handle_sort_click")
-        assert "self.sort_asc = True" in sort_src, "VirtualTable new column should default to ascending"
+        assert "self.sort_asc = True" in sort_src, "PaginatedTable new column should default to ascending"
 
     def test_vm_toggle_sort_direction(self):
         source = read_source(os.path.join("ui", "viewmodels", "screener_view_model.py"))

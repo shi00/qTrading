@@ -132,6 +132,16 @@ async def check_table_has_data(table_name: str) -> bool:
 
 
 DECLARATIONS: list[DataDeclaration] = []
+_declarations_initialized = False
+
+
+def get_declarations() -> list[DataDeclaration]:
+    """懒加载数据声明列表，避免 import 时触发 ORM/缓存依赖"""
+    global DECLARATIONS, _declarations_initialized
+    if not _declarations_initialized:
+        DECLARATIONS = _init_declarations()
+        _declarations_initialized = True
+    return DECLARATIONS
 
 
 def _init_declarations() -> list[DataDeclaration]:
@@ -199,6 +209,3 @@ def _init_declarations() -> list[DataDeclaration]:
             injector=lambda: check_table_has_data(FinaMainbz.__tablename__),
         ),
     ]
-
-
-DECLARATIONS = _init_declarations()

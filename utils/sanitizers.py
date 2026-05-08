@@ -78,12 +78,24 @@ class DataSanitizer:
     # Match absolute paths starting with /, containing word chars, dots, dashes, slashes
     _PATTERN_UNIX_PATH = re.compile(r"/(?:[\w\.\-]+/)+[\w\.\-]+")
 
+    _PATTERN_URL_QUERY_KEY = re.compile(
+        r"([?&])(api_key|key|token|secret|password|apikey|access_token|refresh_token)=[^\s&\"']+",
+        re.IGNORECASE,
+    )
+
+    _PATTERN_BEARER = re.compile(r"Bearer\s+[^\s\"']+", re.IGNORECASE)
+
+    _PATTERN_URL_CREDENTIALS = re.compile(
+        r"(postgresql|postgres|mysql|mongodb|redis|amqp|http|https|ftp)://([^:@\s]+):([^@\s]+)@",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def sanitize_error(exception: Exception, show_traceback: bool = False) -> str:
         """
         异常信息脱敏
 
-        移除文件路径,避免暴露系统结构
+        移除文件路径和敏感凭证,避免暴露系统结构和API密钥
 
         Args:
             exception: 异常对象
@@ -94,10 +106,14 @@ class DataSanitizer:
         """
         msg = str(exception)
 
-        # 移除 Windows路径
+        msg = DataSanitizer._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", msg)
+
+        msg = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(r"\1://\2:***@", msg)
+
+        msg = DataSanitizer._PATTERN_BEARER.sub("Bearer ***", msg)
+
         msg = DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", msg)
 
-        # 移除 Unix路径
         msg = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", msg)
 
         # 如果需要堆栈,也要脱敏

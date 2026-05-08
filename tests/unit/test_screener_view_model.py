@@ -1,7 +1,7 @@
 import inspect
 
 
-from ui.components.virtual_table import VirtualTable
+from ui.components.virtual_table import PaginatedTable
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 
@@ -20,9 +20,9 @@ class TestSortDirectionConsistency:
     def test_vm_new_column_defaults_ascending(self):
         source = inspect.getsource(ScreenerViewModel.sort_data)
         assert "self.sort_ascending = True" in source, (
-            "VM new column should default to ascending (True) to match VirtualTable"
+            "VM new column should default to ascending (True) to match PaginatedTable"
         )
 
-    def test_virtual_table_new_column_defaults_ascending(self):
-        source = inspect.getsource(VirtualTable._handle_sort_click)
-        assert "self.sort_asc = True" in source, "VirtualTable new column should default to ascending"
+    def test_paginated_table_new_column_defaults_ascending(self):
+        source = inspect.getsource(PaginatedTable._handle_sort_click)
+        assert "self.sort_asc = True" in source, "PaginatedTable new column should default to ascending"

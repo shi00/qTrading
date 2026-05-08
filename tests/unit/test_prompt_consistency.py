@@ -5,8 +5,8 @@ import os
 import pytest
 
 from strategies.prompt_validator import (
-    DECLARATIONS,
     generate_declaration_report,
+    get_declarations,
     validate_prompt_declarations,
 )
 
@@ -17,12 +17,12 @@ INTEGRATION_TEST = os.environ.get("INTEGRATION_TEST", "").lower() in ("1", "true
 @pytest.mark.skipif(not INTEGRATION_TEST, reason="需要数据库中有数据，仅在 INTEGRATION_TEST=1 时运行")
 async def test_prompt_data_consistency():
     """确保所有 Prompt 声明的数据都已注入"""
-    results = await validate_prompt_declarations(DECLARATIONS)
+    results = await validate_prompt_declarations(get_declarations())
 
     missing = [name for name, valid in results.items() if not valid]
 
     if missing:
-        report = generate_declaration_report(DECLARATIONS)
+        report = generate_declaration_report(get_declarations())
         pytest.fail(f"以下 Prompt 声明的数据未注入: {missing}\n\n{report}")
 
 
@@ -30,8 +30,8 @@ async def test_prompt_data_consistency():
 @pytest.mark.skipif(not INTEGRATION_TEST, reason="需要数据库中有数据，仅在 INTEGRATION_TEST=1 时运行")
 async def test_prompt_declaration_report():
     """生成声明状态报告（用于调试）"""
-    await validate_prompt_declarations(DECLARATIONS)
-    report = generate_declaration_report(DECLARATIONS)
+    await validate_prompt_declarations(get_declarations())
+    report = generate_declaration_report(get_declarations())
     print(report)
     assert True
 

@@ -82,14 +82,13 @@ class ScreenerViewModel:
 
     def dispose(self):
         """Cleanup resources and ensure aggressive GC of large dataframes"""
-        # Detach bindings
         self.on_update = None
         self.on_log = None
         self.on_status = None
         self.on_progress = None
         self.on_log_stream_start = None
+        self._main_loop = None
 
-        # P1-11 Fix: Prevent massive Pandas DataFrame leak across component remounts
         self._full_results = None
         self._ai_buffer = []
         self._realtime_snapshot = None
@@ -442,6 +441,11 @@ class ScreenerViewModel:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._flush_ai_buffer())
                 except RuntimeError:
+                    if self._main_loop is None:
+                        try:
+                            self._main_loop = asyncio.get_running_loop()
+                        except RuntimeError:
+                            pass
                     if self._main_loop and self._main_loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             self._flush_ai_buffer(),

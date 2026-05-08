@@ -36,28 +36,29 @@ class OfflineCalendar:
         try:
             cal = OfflineCalendar.get_instance()
             if cal is None:
-                # Fallback if library fails
                 if isinstance(date_obj, str):
                     date_obj = parse_date(date_obj)
                 if hasattr(date_obj, "weekday"):
-                    return date_obj.weekday() < 5
-                return True
+                    is_weekday = date_obj.weekday() < 5
+                    if is_weekday:
+                        logger.warning(
+                            f"[OfflineCalendar] Calendar unavailable, treating {date_obj} as trading day (weekday fallback)",
+                        )
+                    return is_weekday
+                logger.error(f"[OfflineCalendar] Cannot determine date type for {date_obj}, assuming non-trading day")
+                return False
 
-            # Convert to Timestamp
             if isinstance(date_obj, (str, datetime.date, datetime.datetime)):
                 ts = pd.Timestamp(date_obj)
             else:
-                ts = date_obj  # Hope it's compatible
+                ts = date_obj
 
-            # Check schedule
-            # Efficient way: valid_days(start, end)
             schedule = cal.schedule(start_date=ts, end_date=ts)
             return not schedule.empty
 
         except Exception as e:
-            logger.warning(f"[OfflineCalendar] Check failed: {e}")
-            # Fallback
-            return True
+            logger.error(f"[OfflineCalendar] is_trading_day check failed for {date_obj}: {e}")
+            return False
 
     @staticmethod
     def get_trade_dates(start_date: str | None, end_date: str | None):

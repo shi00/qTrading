@@ -141,7 +141,6 @@ class NorthboundHolding(Base):
 
     NOTE: This model stores *holding ratio* data, NOT net capital flow.
     For northbound money flow (净流入), use `moneyflow_hsgt` via TushareClient.
-    See P1-11 in code-review.md for the strategy split plan.
     """
 
     __tablename__ = "northbound_holding"
@@ -221,7 +220,7 @@ class ScreeningHistory(Base):
     t5_pct = Column(Float)
     index_pct = Column(Float)
     alpha = Column(Float)
-    ai_score = Column(Integer)
+    ai_score = Column(Float)
     ai_reason = Column(String)
     prediction_result = Column(String)
     review_status = Column(String, server_default="PENDING")

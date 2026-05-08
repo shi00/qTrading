@@ -376,7 +376,8 @@ class TestTaskManagerAutoEvictOld:
             t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
             t.completed_at = datetime.datetime(2024, 1, 1, 0, 0, 0)
             mgr._tasks[t.id] = t
-        mgr._auto_evict_old()
+        while sum(1 for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES) > mgr._MAX_FINISHED_HISTORY:
+            mgr._evict_on_complete("dummy_id")
         finished = [t for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES]
         assert len(finished) <= mgr._MAX_FINISHED_HISTORY
 
@@ -537,7 +538,8 @@ class TestTaskManagerAutoEvict:
             t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
             t.completed_at = get_now()
             mgr._tasks[t.id] = t
-        mgr._auto_evict_old()
+        while sum(1 for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES) > mgr._MAX_FINISHED_HISTORY:
+            mgr._evict_on_complete("dummy_id")
         finished = [t for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES]
         assert len(finished) <= mgr._MAX_FINISHED_HISTORY
 

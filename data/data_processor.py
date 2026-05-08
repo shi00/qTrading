@@ -128,7 +128,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Propagate to all strategies
         for name, strategy in self.strategies.items():
             try:
-                await strategy.cancel()
+                strategy.cancel()
                 logger.debug(f"[DataProcessor] Stop | Cancelled strategy: {name}")
             except Exception as e:
                 logger.error(

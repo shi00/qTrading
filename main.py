@@ -61,8 +61,8 @@ async def main(page: ft.Page):
             try:
                 page.window.prevent_close = False
                 page.window.destroy()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Window destroy ignored: {e}")
 
             if cleanup_ok:
                 coordinator.cancel_watchdog()

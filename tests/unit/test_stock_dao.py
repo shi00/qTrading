@@ -332,6 +332,34 @@ class TestGetConcepts:
         result = await dao.get_concepts(ts_codes=["000001.SZ", "000002.SZ"])
         assert "000001.SZ" in result
 
+    @pytest.mark.asyncio
+    async def test_empty_ts_codes_returns_empty(self):
+        dao = _make_dao()
+        result = await dao.get_concepts(ts_codes=[])
+        assert result == {}
+        dao._read_db.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_large_ts_codes_chunked(self):
+        dao = _make_dao()
+        codes = [f"{i:06d}.SZ" for i in range(1, 1201)]
+        call_count = 0
+
+        async def mock_read_db(sql, params=None):
+            nonlocal call_count
+            call_count += 1
+            n = len(params) if params else 10
+            return pd.DataFrame(
+                {
+                    "ts_code": [f"{i:06d}.SZ" for i in range(1, min(n + 1, 10))],
+                    "concept_name": ["概念A"] * min(n, 9),
+                }
+            )
+
+        dao._read_db = AsyncMock(side_effect=mock_read_db)
+        await dao.get_concepts(ts_codes=codes)
+        assert call_count == 3
+
 
 class TestGetConceptCount:
     @pytest.mark.asyncio

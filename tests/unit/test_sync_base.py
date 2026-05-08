@@ -56,6 +56,25 @@ class TestSyncResult:
         r1.merge(r2)
         assert r1.errors == ["err1", "err2"]
 
+    def test_merge_message_concat(self):
+        r1 = SyncResult(message="first")
+        r2 = SyncResult(message="second")
+        r1.merge(r2)
+        assert r1.message == "first | second"
+
+    def test_merge_message_empty_self(self):
+        r1 = SyncResult(message="")
+        r2 = SyncResult(message="only")
+        r1.merge(r2)
+        assert r1.message == "only"
+
+    def test_merge_message_truncation(self):
+        r1 = SyncResult(message="A" * 1500)
+        r2 = SyncResult(message="B" * 1500)
+        r1.merge(r2)
+        assert len(r1.message) == 2000
+        assert r1.message.endswith("...")
+
     def test_merge_quality_scores(self):
         r1 = SyncResult(quality_scores={datetime.date(2024, 1, 1): 0.9})
         r2 = SyncResult(quality_scores={datetime.date(2024, 1, 2): 0.8})

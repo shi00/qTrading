@@ -11,6 +11,7 @@ import tushare as ts
 from data.constants import attach_top_list_column_units
 from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
+from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -330,7 +331,7 @@ class TushareClient:
             if df is not None and not df.empty:
                 return df["cal_date"].tolist()
         except Exception as e:
-            logger.warning(f"[API] get_trade_dates sync call failed: {e}")
+            logger.warning(f"[API] get_trade_dates sync call failed: {DataSanitizer.sanitize_error(e)}")
         return []
 
     def is_trading_day(self, date_str: typing.Any = None):
@@ -507,7 +508,7 @@ class TushareClient:
                         how="left",
                     )
         except Exception as e:
-            logger.warning(f"[API] Failed to fetch adj_factor: {e}, using default 1.0")
+            logger.warning(f"[API] Failed to fetch adj_factor: {DataSanitizer.sanitize_error(e)}, using default 1.0")
 
         # Fill NaN adj_factor with 1.0
         if "adj_factor" in df_daily.columns:

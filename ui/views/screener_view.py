@@ -9,7 +9,7 @@ import pandas as pd
 from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager
 from ui.components.stock_detail_dialog import StockDetailDialog
-from ui.components.virtual_table import VirtualTable
+from ui.components.virtual_table import PaginatedTable
 from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import TASK_NAME_PREFIX, ScreenerViewModel
@@ -17,6 +17,97 @@ from utils.log_decorators import UILogger
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
+
+_HIDDEN_COLS = frozenset(
+    {
+        "symbol",
+        "id",
+        "list_status",
+        "list_date",
+        "trade_date",
+        "ann_date",
+        "open",
+        "high",
+        "low",
+        "pre_close",
+        "change",
+        "pe",
+        "pe_ttm",
+        "pb",
+        "ps",
+        "ps_ttm",
+        "dv_ratio",
+        "dv_ttm",
+        "circ_mv",
+        "float_share",
+        "free_share",
+        "total_share",
+        "area",
+        "market",
+        "thinking",
+        "prediction_result",
+        "review_status",
+        "created_at",
+        "t1_price",
+        "t1_pct",
+        "t5_price",
+        "t5_pct",
+    }
+)
+
+_COLUMN_WIDTHS = {
+    "ts_code": 100,
+    "name": 120,
+    "ai_score": 80,
+    "ai_reason": 250,
+    "confidence": 70,
+    "industry": 120,
+    "strategy_name": 120,
+}
+
+_VOLUME_COLS = frozenset({"vol", "volume", "amount"})
+
+_DATE_COLS = frozenset({"list_date", "trade_date"})
+
+
+def _format_cell_value(col: str, val) -> str:
+    if pd.isna(val):
+        return "-"
+    if col == "strategy_name":
+        return translate_strategy_name(str(val))
+    if col in _DATE_COLS:
+        if isinstance(val, (datetime.date, datetime.datetime)):
+            return val.strftime("%Y-%m-%d")
+        val_str = str(val).split(".")[0]
+        if len(val_str) == 8 and val_str.isdigit():
+            return f"{val_str[:4]}-{val_str[4:6]}-{val_str[6:]}"
+        return str(val)
+    if isinstance(val, (float, int)) and col not in ("ts_code", "symbol"):
+        if col in _VOLUME_COLS:
+            if val > 1_000_000_000:
+                return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi', '亿')}"
+            if val > 10_000:
+                return f"{val / 10_000:.2f}{I18n.get('unit_wan', '万')}"
+            return f"{val:,.0f}"
+        if isinstance(val, float):
+            return f"{val:.2f}"
+    return str(val)
+
+
+def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
+    vt_columns = []
+    visible_cols = []
+    for col in df.columns:
+        if col in _HIDDEN_COLS:
+            continue
+        visible_cols.append(col)
+        width = _COLUMN_WIDTHS.get(col, 80)
+        label = MetaDataManager.get_column_alias("screening_history", col)
+        vt_columns.append({"id": col, "label": label, "width": width})
+
+    records = df[visible_cols].to_dict("records")
+    formatted_rows = [{col: _format_cell_value(col, val) for col, val in row.items()} for row in records]
+    return vt_columns, formatted_rows
 
 
 class ScreenerView(ft.Container):
@@ -77,7 +168,7 @@ class ScreenerView(ft.Container):
             color=AppColors.ACCENT,
         )
 
-        self.result_table = VirtualTable(on_sort=self._on_virtual_sort)
+        self.result_table = PaginatedTable(on_sort=self._on_virtual_sort)
 
         # 3. Dynamic Strategy Parameters Panel
         self.params_container = ft.Column(spacing=8)
@@ -225,7 +316,7 @@ class ScreenerView(ft.Container):
             self.page.overlay.remove(self.save_file_picker)
             self.page.update()
 
-        # P1-11 Fix: Detach the thousands of Flet Row references inside the VirtualTable
+        # P1-11 Fix: Detach the thousands of Flet Row references inside the PaginatedTable
         if hasattr(self, "result_table") and self.result_table:
             self.result_table.list_view.controls.clear()
 
@@ -1181,7 +1272,7 @@ class ScreenerView(ft.Container):
             pass
 
     def _on_row_click(self, row_data):
-        """Handler passed down to VirtualTable for row clicks.
+        """Handler passed down to PaginatedTable for row clicks.
         row_data here is the FORMATTED dict (for display). We look up the
         RAW dict (with numeric values) for StockDetailDialog."""
         if not self.page:
@@ -1242,130 +1333,21 @@ class ScreenerView(ft.Container):
         df = self.vm.get_current_page_data()
 
         if df is None or df.empty:
-            # Clear table explicitly to remove old results
             self.result_table.set_columns([])
             self.result_table.set_rows(
                 [],
                 sort_col=self.vm.sort_column,
                 sort_asc=self.vm.sort_ascending,
             )
-            self._raw_row_lookup = {}  # Clear lookup
+            self._raw_row_lookup = {}
             return
 
-        # Build a lookup of raw row data for the detail dialog
-        # (formatted strings like '1.20万' would break StockDetailDialog._format_val)
-        self._raw_row_lookup = {}
-        for _, row in df.iterrows():
-            key = str(row.get("ts_code", ""))
-            self._raw_row_lookup[key] = row.to_dict()
+        self._raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
 
-        # Columns to hide from the main table view to save space (details available on click)
-        HIDDEN_COLS = {
-            "symbol",
-            "id",
-            "list_status",
-            "list_date",
-            "trade_date",
-            "ann_date",
-            "open",
-            "high",
-            "low",
-            "pre_close",
-            "change",
-            "pe",
-            "pe_ttm",
-            "pb",
-            "ps",
-            "ps_ttm",
-            "dv_ratio",
-            "dv_ttm",
-            "circ_mv",
-            "float_share",
-            "free_share",
-            "total_share",
-            "area",
-            "market",
-            # History-specific: hide verbose/review-only fields
-            "thinking",
-            "prediction_result",
-            "review_status",
-            "created_at",
-            "t1_price",
-            "t1_pct",
-            "t5_price",
-            "t5_pct",
-        }
+        vt_columns, formatted_rows = _build_table_data(df)
 
-        # Column width overrides (default: 80px for numeric columns)
-        COLUMN_WIDTHS = {
-            "ts_code": 100,
-            "name": 120,
-            "ai_score": 80,
-            "ai_reason": 250,
-            "confidence": 70,
-            "industry": 120,
-            "strategy_name": 120,
-        }
-
-        # Define Columns (Dynamic based on data)
-        # Map DataFrame columns to VirtualTable columns
-        vt_columns = []
-        visible_cols = []
-        for col in df.columns:
-            if col in HIDDEN_COLS:
-                continue
-            visible_cols.append(col)
-
-            width = COLUMN_WIDTHS.get(col, 80)
-
-            # Use MetaDataManager to get I18n label directly, the data dictionary manager
-            # handles English fallback.
-            label = MetaDataManager.get_column_alias("screening_history", col)
-
-            vt_columns.append({"id": col, "label": label, "width": width})
-
-        self.result_table.on_row_click = self._on_row_click  # type: ignore
+        self.result_table.on_row_click = self._on_row_click
         self.result_table.set_columns(vt_columns)
-
-        def _format_cell_value(col, val):
-            """Helper to consistently format cell values."""
-            if pd.isna(val):
-                return "-"
-
-            # Translate strategy_name column
-            if col == "strategy_name":
-                return translate_strategy_name(str(val))
-
-            # Format Dates safely
-            if col in ["list_date", "trade_date"]:
-                import datetime
-
-                if isinstance(val, (datetime.date, datetime.datetime)):
-                    return val.strftime("%Y-%m-%d")
-                val_str = str(val).split(".")[0]
-                if len(val_str) == 8 and val_str.isdigit():
-                    return f"{val_str[:4]}-{val_str[4:6]}-{val_str[6:]}"
-                return str(val)
-
-            # Format Numerics
-            if isinstance(val, (float, int)) and col not in ["ts_code", "symbol"]:
-                if col in ["vol", "volume", "amount"]:
-                    # Human readable large numbers
-                    if val > 1_000_000_000:
-                        return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi', '亿')}"
-                    if val > 10_000:
-                        return f"{val / 10_000:.2f}{I18n.get('unit_wan', '万')}"
-                    return f"{val:,.0f}"
-                if isinstance(val, float):
-                    return f"{val:.2f}"
-
-            return str(val)
-
-        formatted_rows = []
-        for _, row in df.iterrows():
-            row_dict = {col: _format_cell_value(col, row[col]) for col in visible_cols}
-            formatted_rows.append(row_dict)
-
         self.result_table.set_rows(
             formatted_rows,
             sort_col=self.vm.sort_column,
@@ -1544,7 +1526,7 @@ class ScreenerView(ft.Container):
         self.status_text.color = AppColors.TEXT_SECONDARY
         self.progress_ring.color = AppColors.ACCENT
 
-        # 2. Result Table (Update props always, VirtualTable.update_theme checks self.page for UI)
+        # 2. Result Table (Update props always, PaginatedTable.update_theme checks self.page for UI)
         self.result_table.update_theme()
 
         # 3. Logs (Use modern card style)

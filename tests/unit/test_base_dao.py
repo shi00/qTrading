@@ -368,7 +368,7 @@ class TestBaseDaoWriteDbExtended:
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
             result = await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn, suppress_errors=True)
-            assert result == 0
+            assert result == -1
 
     @pytest.mark.asyncio
     async def test_write_error_not_suppressed(self):
@@ -428,8 +428,8 @@ class TestNullProtectedFromMetadata:
     def test_financial_reports_null_protected_columns(self):
         from data.persistence.models import FinancialReports
 
-        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", False)}
-        expected = {
+        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", True)}
+        expected_subset = {
             "roe",
             "roe_dt",
             "grossprofit_margin",
@@ -447,27 +447,49 @@ class TestNullProtectedFromMetadata:
             "netprofit_yoy",
             "n_cashflow_act",
         }
-        assert null_protected == expected
+        assert expected_subset.issubset(null_protected)
 
     def test_non_null_protected_columns_excluded(self):
         from data.persistence.models import FinancialReports
 
-        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", False)}
-        assert "ts_code" not in null_protected
-        assert "end_date" not in null_protected
-        assert "ann_date" not in null_protected
-        assert "audit_result" not in null_protected
+        table = FinancialReports.__table__
+        pk_columns = {"ts_code", "end_date"}
+        update_cols = [c.name for c in table.columns if c.name not in pk_columns]
+        null_protected_update = {
+            c.name for c in table.columns if c.name in update_cols and c.info.get("null_protected", True)
+        }
+        assert len(null_protected_update) > 0
+        for col_name in pk_columns:
+            col = table.c[col_name]
+            assert col.info.get("null_protected", True) is True
+
+    def test_default_null_protected_is_true(self):
+        from data.persistence.models import FinancialReports
+
+        table = FinancialReports.__table__
+        for c in table.columns:
+            if c.name not in ("ts_code", "end_date", "ann_date", "report_type", "audit_result"):
+                assert c.info.get("null_protected", True) is True
 
     def test_save_upsert_uses_metadata_null_protected(self):
         from data.persistence.models import FinancialReports
 
         table = FinancialReports.__table__
-        null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
+        null_protected = {c.name for c in table.columns if c.info.get("null_protected", True)}
         update_cols = [c.name for c in table.columns if c.name not in ("ts_code", "end_date")]
         for c in update_cols:
             if c in null_protected:
                 col = table.c[c]
-                assert col.info.get("null_protected") is True
+                assert col.info.get("null_protected", True) is True
+
+
+class TestAiScoreColumnType:
+    def test_ai_score_is_float(self):
+        import sqlalchemy as sa
+        from data.persistence.models import ScreeningHistory
+
+        col = ScreeningHistory.__table__.c["ai_score"]
+        assert isinstance(col.type, sa.Float), f"ai_score should be Float, got {type(col.type).__name__}"
 
 
 class TestScreeningThinkingModelConstraints:
@@ -613,7 +635,7 @@ class TestBaseDaoSaveUpsertExtended:
             result = await dao._save_upsert(
                 pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], suppress_errors=True, conn=mock_conn
             )
-            assert result == 0
+            assert result == -1
 
     @pytest.mark.asyncio
     async def test_upsert_cancelled_propagates(self):

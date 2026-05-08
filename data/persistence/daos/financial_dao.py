@@ -18,6 +18,40 @@ from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
+_IN_CHUNK_SIZE = 500
+
+
+async def _chunked_in_query(read_db_fn, sql_template, ts_codes, params_fn=None):
+    """
+    Execute a SQL query with IN clause in chunks to avoid PostgreSQL parameter limit.
+
+    Args:
+        read_db_fn: async _read_db method
+        sql_template: SQL with {placeholders} marker
+        ts_codes: list of stock codes
+        params_fn: callable(ts_codes_chunk) -> extra params list, appended after ts_codes
+    """
+    if len(ts_codes) <= _IN_CHUNK_SIZE:
+        placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
+        extra = params_fn(ts_codes) if params_fn else []
+        sql = sql_template.format(placeholders=placeholders)
+        df = await read_db_fn(sql, ts_codes + extra)
+        return df if df is not None else pd.DataFrame()
+
+    all_results = []
+    for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
+        chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
+        placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
+        extra = params_fn(chunk) if params_fn else []
+        sql = sql_template.format(placeholders=placeholders)
+        df = await read_db_fn(sql, chunk + extra)
+        if df is not None and not df.empty:
+            all_results.append(df)
+
+    if all_results:
+        return pd.concat(all_results, ignore_index=True)
+    return pd.DataFrame()
+
 
 class FinancialDao(BaseDao):
     async def save_financial_reports(self, df: pd.DataFrame, conn=None):
@@ -186,24 +220,35 @@ class FinancialDao(BaseDao):
             return pd.DataFrame()
 
         try:
-            placeholders = ", ".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
-                SELECT * FROM (
-                    SELECT
-                        ts_code, end_date, ann_date, report_type,
-                        total_revenue, revenue, n_income, n_income_attr_p,
-                        total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                        roe, roe_dt, grossprofit_margin, netprofit_margin,
-                        debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                        audit_result, n_cashflow_act,
-                        ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                    FROM financial_reports
-                    WHERE ts_code IN ({placeholders})
-                ) sub
-                WHERE rn <= ${len(ts_codes) + 1}
-                ORDER BY ts_code, end_date DESC
-            """
-            df = await self._read_db(sql, ts_codes + [periods])
+            all_results = []
+            for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
+                chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
+                placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
+                sql = f"""
+                    SELECT * FROM (
+                        SELECT
+                            ts_code, end_date, ann_date, report_type,
+                            total_revenue, revenue, n_income, n_income_attr_p,
+                            total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                            roe, roe_dt, grossprofit_margin, netprofit_margin,
+                            debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                            audit_result, n_cashflow_act,
+                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                        FROM financial_reports
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE rn <= ${len(chunk) + 1}
+                    ORDER BY ts_code, end_date DESC
+                """
+                df = await self._read_db(sql, chunk + [periods])
+                if df is not None and not df.empty:
+                    all_results.append(df)
+
+            if all_results:
+                df = pd.concat(all_results, ignore_index=True)
+            else:
+                df = pd.DataFrame()
+
             if df is not None and not df.empty and "rn" in df.columns:
                 df = df.drop(columns=["rn"])
             return df if df is not None else pd.DataFrame()
@@ -212,91 +257,61 @@ class FinancialDao(BaseDao):
             return pd.DataFrame()
 
     async def get_fina_audit_batch(self, ts_codes: list[str]) -> pd.DataFrame:
-        """
-        批量获取审计意见。
-
-        从 fina_audit 表获取完整的审计信息，包括审计意见、
-        审计签字、审计费用和审计机构。
-
-        Args:
-            ts_codes: 股票代码列表
-
-        Returns:
-            DataFrame with audit results
-        """
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
+            return await _chunked_in_query(
+                self._read_db,
+                """
                 SELECT DISTINCT ON (ts_code)
                     ts_code, end_date, audit_result, audit_sign, audit_fees, audit_agency
                 FROM fina_audit
                 WHERE ts_code IN ({placeholders})
                   AND audit_result IS NOT NULL
                 ORDER BY ts_code, end_date DESC
-            """
-
-            df = await self._read_db(sql, ts_codes)
-            return df if df is not None else pd.DataFrame()
+                """,
+                ts_codes,
+            )
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get audit batch: {e}")
             return pd.DataFrame()
 
     async def get_dividend_batch(self, ts_codes: list[str]) -> pd.DataFrame:
-        """
-        批量获取分红记录。
-
-        Args:
-            ts_codes: 股票代码列表
-
-        Returns:
-            DataFrame with dividend records
-        """
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
+            return await _chunked_in_query(
+                self._read_db,
+                """
                 SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
                 FROM dividend
                 WHERE ts_code IN ({placeholders})
                 ORDER BY ts_code, end_date DESC
-            """
-
-            df = await self._read_db(sql, ts_codes)
-            return df if df is not None else pd.DataFrame()
+                """,
+                ts_codes,
+            )
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get dividend batch: {e}")
             return pd.DataFrame()
 
     async def get_pledge_stat_batch(self, ts_codes: list[str]) -> pd.DataFrame:
-        """
-        批量获取质押比例。
-
-        Args:
-            ts_codes: 股票代码列表
-
-        Returns:
-            DataFrame with pledge statistics
-        """
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
+            return await _chunked_in_query(
+                self._read_db,
+                """
                 SELECT DISTINCT ON (ts_code)
                     ts_code, end_date, pledge_count, pledge_ratio
                 FROM pledge_stat
                 WHERE ts_code IN ({placeholders})
                 ORDER BY ts_code, end_date DESC
-            """
-
-            df = await self._read_db(sql, ts_codes)
-            return df if df is not None else pd.DataFrame()
+                """,
+                ts_codes,
+            )
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get pledge batch: {e}")
             return pd.DataFrame()
@@ -328,37 +343,33 @@ class FinancialDao(BaseDao):
             return pd.DataFrame()
 
     async def get_fina_mainbz_batch(self, ts_codes: list[str]) -> pd.DataFrame:
-        """
-        批量获取主营业务构成。
-
-        使用窗口函数只取每只股票最新一期的主营构成数据，
-        避免返回过多历史数据。
-
-        Args:
-            ts_codes: 股票代码列表
-
-        Returns:
-            DataFrame with main business composition for all stocks (latest period only)
-        """
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            placeholders = ", ".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
-                SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                FROM (
-                    SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
-                    FROM fina_mainbz
-                    WHERE ts_code IN ({placeholders})
-                ) sub
-                WHERE dr = 1
-                ORDER BY ts_code, bz_sales DESC
-            """
-            df = await self._read_db(sql, ts_codes)
-            if df is not None and not df.empty and "dr" in df.columns:
-                df = df.drop(columns=["dr"])
-            return df if df is not None else pd.DataFrame()
+            all_results = []
+            for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
+                chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
+                placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
+                sql = f"""
+                    SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                    FROM (
+                        SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                        FROM fina_mainbz
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE dr = 1
+                    ORDER BY ts_code, bz_sales DESC
+                """
+                df = await self._read_db(sql, chunk)
+                if df is not None and not df.empty:
+                    if "dr" in df.columns:
+                        df = df.drop(columns=["dr"])
+                    all_results.append(df)
+
+            if all_results:
+                return pd.concat(all_results, ignore_index=True)
+            return pd.DataFrame()
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get fina_mainbz batch: {e}")
             return pd.DataFrame()

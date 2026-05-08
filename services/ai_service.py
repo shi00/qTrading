@@ -10,10 +10,11 @@ import time
 
 import httpx
 
-from services.local_model_manager import LocalModelManager
+from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -384,6 +385,22 @@ class AIService:
             reasoning_content = ""
             usage = None
 
+            _CHUNK_BUFFER_CHARS = 50
+            _content_buf: list[str] = []
+            _reasoning_buf: list[str] = []
+
+            def _flush_content_buf():
+                nonlocal _content_buf
+                if _content_buf and on_chunk:
+                    on_chunk("".join(_content_buf), False)
+                _content_buf = []
+
+            def _flush_reasoning_buf():
+                nonlocal _reasoning_buf
+                if _reasoning_buf and on_chunk:
+                    on_chunk("".join(_reasoning_buf), True)
+                _reasoning_buf = []
+
             async for chunk in response:  # type: ignore[reportGeneralTypeIssues]
                 if not chunk.choices:
                     if hasattr(chunk, "usage") and chunk.usage:
@@ -401,12 +418,19 @@ class AIService:
                     if reasoning:
                         reasoning_content += reasoning
                         if on_chunk:
-                            on_chunk(reasoning, True)
+                            _reasoning_buf.append(reasoning)
+                            if sum(len(s) for s in _reasoning_buf) >= _CHUNK_BUFFER_CHARS:
+                                _flush_reasoning_buf()
 
                 if delta.content:
                     response_content += delta.content
                     if on_chunk:
-                        on_chunk(delta.content, False)
+                        _content_buf.append(delta.content)
+                        if sum(len(s) for s in _content_buf) >= _CHUNK_BUFFER_CHARS:
+                            _flush_content_buf()
+
+            _flush_content_buf()
+            _flush_reasoning_buf()
 
             if not response_content and reasoning_content:
                 response_content = reasoning_content
@@ -565,7 +589,7 @@ class AIService:
         Requires 'llm_model' to be configured.
         """
         if not self.is_cloud_available():
-            return None  # type: ignore
+            return None
 
         # Build Prompt
         import pandas as pd
@@ -594,7 +618,7 @@ class AIService:
                 stock_info.pop("concepts", None)
 
         except Exception as e:
-            logger.warning(f"[AIService] Analyze | ⚠️ Concepts processing failed: {e}")
+            logger.warning(f"[AIService] Analyze | ⚠️ Concepts processing failed: {DataSanitizer.sanitize_error(e)}")
             stock_info.pop("concepts", None)
 
         # Convert dicts to XML-like string, filtering out Pandas artifacts and private injected keys like `_23` or `_rsi_period`
@@ -755,6 +779,12 @@ class AIService:
                 exc_info=True,
             )
             return {"error": "Analysis timeout", "score": 0}
+        except LocalInferenceTimeoutError as lite:
+            logger.error(
+                f"[AIService] Analyze | ❌ Local model inference timeout: {lite}",
+                exc_info=False,
+            )
+            return {"error": "Local model timeout", "score": 0}
         except Exception as e:
             logger.error(
                 f"[AIService] Analyze | ❌ Top-level failure: {e}",
@@ -876,7 +906,7 @@ class AIService:
                 f"[AIService] Classify | ❌ All providers failed: {e}",
                 exc_info=True,
             )
-            return None  # type: ignore
+            return {"category": "unknown", "sentiment": "neutral", "error": str(e)}
 
     async def verify_connection(self) -> bool:
         """
@@ -965,7 +995,7 @@ class AIService:
             return result
 
         except Exception as e:
-            logger.error(f"[AIService] TestConn | ❌ Test connection failed: {e}")
+            logger.error(f"[AIService] TestConn | ❌ Test connection failed: {DataSanitizer.sanitize_error(e)}")
             error_info = _classify_api_error(e)
             return {
                 "success": False,

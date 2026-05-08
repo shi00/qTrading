@@ -52,12 +52,6 @@ class MacroSyncStrategy(ISyncStrategy):
     def __init__(self, context: typing.Any):
         super().__init__(context)
         self.dao = MacroDao(context.cache.engine)
-        self._cancelled = False
-
-    async def cancel(self):
-        """Handle cancellation request."""
-        self._cancelled = True
-        logger.debug("[MacroSync] Stop | Cancellation requested.")
 
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync windows."""
@@ -84,17 +78,23 @@ class MacroSyncStrategy(ISyncStrategy):
 
         try:
             await self._sync_macro_monthly(result)
-            if self._cancelled:
+            if self._check_cancelled(result):
                 return result
             await self._sync_shibor_daily(result)
-            if self._cancelled:
+            if self._check_cancelled(result):
                 return result
             await self._sync_index_weights(result)
         except Exception as e:
             logger.error(f"[MacroSync] Failed: {e}", exc_info=True)
             result.status = "failed"
             result.errors.append(str(e))
-        if result.status != "failed":
+        if self._cancelled and result.status not in ("failed", "cancelled"):
+            result.status = "cancelled"
+        if result.status == "cancelled":
+            logger.info(
+                f"[MacroSync] Run | ⚠️ Cancelled. Added={result.added}, Errors={len(result.errors)}",
+            )
+        elif result.status != "failed":
             logger.info(
                 f"[MacroSync] Run | ✅ Complete. Added={result.added}, Errors={len(result.errors)}",
             )

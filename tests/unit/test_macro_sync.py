@@ -32,7 +32,7 @@ class TestMacroSyncCancel:
         ctx.cache.engine = MagicMock()
         strategy = MacroSyncStrategy(ctx)
         assert not strategy._cancelled
-        await strategy.cancel()
+        strategy.cancel()
         assert strategy._cancelled
 
 
@@ -93,6 +93,37 @@ class TestMacroSyncMergeMacroData:
         df_cpi = pd.DataFrame({"period": ["202406"], "other": [2.0]})
         result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, None)
         assert result is not None
+
+
+class TestMacroSyncCancelSemantics:
+    @pytest.mark.asyncio
+    async def test_cancel_sets_status(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._sync_macro_monthly = AsyncMock()
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+
+        async def cancel_after_first(result):
+            strategy._cancelled = True
+
+        strategy._sync_macro_monthly = cancel_after_first
+        result = await strategy.run()
+        assert result.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_complete_sets_no_cancel_status(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._sync_macro_monthly = AsyncMock()
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result.status != "cancelled"
 
 
 class TestMacroSyncMergeIndicator:

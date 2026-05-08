@@ -180,10 +180,11 @@ class TestShutdownCoordinatorCleanupSteps:
         ):
             mock_sched.scheduler.running = False
             mock_news_instance = MagicMock()
+            mock_news_instance.stop_async = AsyncMock()
             mock_news._instance = mock_news_instance
             mock_mds._instance = None
             await coord._step1_stop_services()
-            mock_news_instance.stop.assert_called_once()
+            mock_news_instance.stop_async.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_step1_stop_market_data(self):
@@ -196,9 +197,10 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds_instance = MagicMock()
+            mock_mds_instance.stop_async = AsyncMock()
             mock_mds._instance = mock_mds_instance
             await coord._step1_stop_services()
-            mock_mds_instance.stop.assert_called_once()
+            mock_mds_instance.stop_async.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_step2_close_processor_no_instance(self):

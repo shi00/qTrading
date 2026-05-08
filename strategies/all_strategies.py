@@ -5,7 +5,7 @@ Strategy Manager — Auto-discovers strategies via @register_strategy decorator.
 
 Adding a new strategy requires ONLY:
   1. Write the strategy class with @register_strategy("key") decorator
-  2. Import the module here (one line)
+  2. Import the module in _import_all_strategies() below
   3. Add i18n keys for name/desc (validated at startup)
 """
 
@@ -16,19 +16,29 @@ from ui.i18n import I18n
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# IMPORTANT: Import each strategy module to trigger @register_strategy.
-# This is the ONLY place you need to touch when adding a new strategy file.
-# ============================================================================
-import strategies.ai_strategy  # noqa: E402
-import strategies.fundamental  # noqa: E402
-import strategies.market  # noqa: E402
-import strategies.oversold_strategy  # noqa: E402, F401
+_strategies_imported = False
+
+
+def _import_all_strategies():
+    """Import all strategy modules to trigger @register_strategy.
+
+    This is called lazily by StrategyManager.__init__ to avoid
+    import-time side effects.
+    """
+    global _strategies_imported
+    if _strategies_imported:
+        return
+    _strategies_imported = True
+
+    import strategies.ai_strategy  # noqa: E402
+    import strategies.fundamental  # noqa: E402
+    import strategies.market  # noqa: E402
+    import strategies.oversold_strategy  # noqa: E402, F401
 
 
 class StrategyManager:
     def __init__(self):
-        # Auto-instantiate all registered strategies and inject their key
+        _import_all_strategies()
         self.strategies = {}
         for k, cls in _STRATEGY_REGISTRY.items():
             instance = cls()

@@ -16,7 +16,10 @@ _INJECTION_PATTERNS = [
     re.compile(r"bypass\s+(all\s+)?(safety|security|content)\s+(rules?|filters?|checks?)", re.IGNORECASE),
     re.compile(r"override\s+(all\s+)?(safety|security|content)\s+(rules?|filters?|checks?)", re.IGNORECASE),
     re.compile(r"you\s+are\s+now\s+(?:a\s+)?(?:DAN|jailbreak|unrestricted|uncensored)", re.IGNORECASE),
-    re.compile(r"^system\s*:", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        r"^system\s*:\s*(you\s+are|from\s+now|new\s+instructions?|ignore|disregard|override)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
     re.compile(r"<\s*/?\s*system\s*>", re.IGNORECASE),
     re.compile(r"pretend\s+you\s+(are|can|have)\s+no\s+(rules?|restrictions?|limits?)", re.IGNORECASE),
     re.compile(r"act\s+as\s+if\s+you\s+(have\s+)?no\s+(rules?|restrictions?|limits?)", re.IGNORECASE),

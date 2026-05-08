@@ -649,6 +649,24 @@ class TestCacheManagerPrefetchAuxiliaryData:
         assert elapsed < 0.5
         assert "000001.SZ" in result
 
+    @pytest.mark.asyncio
+    async def test_prefetch_auxiliary_data_partial_failure(self):
+        mgr = _make_mgr()
+        mgr.financial_dao.get_fina_audit_batch = AsyncMock(side_effect=RuntimeError("DB error"))
+        mgr.financial_dao.get_dividend_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "div": [1.0]})
+        )
+        mgr.financial_dao.get_pledge_stat_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.holder_dao.get_top10_holders_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.financial_dao.get_fina_mainbz_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.financial_dao.get_financial_reports_history_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.holder_dao.get_stk_holdernumber_batch = AsyncMock(return_value=pd.DataFrame())
+
+        result = await mgr.prefetch_auxiliary_data(["000001.SZ"])
+        assert "000001.SZ" in result
+        assert "dividend" in result["000001.SZ"]
+        assert "audit" not in result["000001.SZ"]
+
 
 class TestCacheManagerMaintenanceEvent:
     def test_maintenance_event_property(self):

@@ -213,7 +213,7 @@ class BaseDao:
 
             if not suppress_errors:
                 raise
-            return 0
+            return -1
 
     @staticmethod
     def _quote_columns(columns: typing.Any):
@@ -280,30 +280,21 @@ class BaseDao:
         def _prepare_records(df_slice: typing.Any):
             df_clean = df_slice.copy()
 
-            # Vectorized conversion to native date/datetime objects before dict generation
             for col in df_clean.columns:
                 if col in target_date_cols:
                     df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce").dt.date
                 elif col in target_datetime_cols:
                     df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
 
+            df_clean = df_clean.where(df_clean.notna(), None)
+
             records = df_clean.to_dict(orient="records")
 
-            # Convert numpy types in dicts to python native types
             for record in records:
                 for k, v in record.items():
-                    # 1. Defend against NaN/NaT bypassing type checks
-                    try:
-                        if pd.isna(v):
-                            record[k] = None
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-
-                    # 2. Safely cast numerics and booleans
-                    if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore
+                    if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
                         record[k] = int(v)
-                    elif isinstance(v, (np.float64, np.float32)):  # type: ignore
+                    elif isinstance(v, (np.float64, np.float32)):
                         record[k] = float(v)
                     elif isinstance(v, np.bool_):
                         record[k] = bool(v)
@@ -319,7 +310,7 @@ class BaseDao:
         if not update_cols:
             stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
         else:
-            null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
+            null_protected = {c.name for c in table.columns if c.info.get("null_protected", True)}
             update_dict = {}
             for c in update_cols:
                 excluded_val = getattr(stmt.excluded, c)
@@ -386,7 +377,7 @@ class BaseDao:
                 )
             if not suppress_errors:
                 raise
-            return 0
+            return -1
 
     @staticmethod
     def _convert_param_for_asyncpg(val: typing.Any):

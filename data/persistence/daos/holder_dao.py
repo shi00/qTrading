@@ -5,6 +5,7 @@ import pandas as pd
 from data.persistence.models import StkHoldernumber, Top10Holders, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao
+from .financial_dao import _chunked_in_query
 
 logger = logging.getLogger(__name__)
 
@@ -28,47 +29,43 @@ class HolderDao(BaseDao):
         return rows
 
     async def _calculate_holder_changes(self, ts_codes: list[str]):
-        """
-        Calculate holder_num_change and holder_num_ratio for the given stocks.
-        Uses SQL window functions to compute changes relative to previous period.
-
-        holder_num_change = current holder_num - previous holder_num
-        holder_num_ratio = (current - previous) / previous * 100
-        """
         if not ts_codes:
             return
 
         try:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
-                UPDATE stk_holdernumber h
-                SET holder_num_change = sub.holder_num_change,
-                    holder_num_ratio = sub.holder_num_ratio
-                FROM (
-                    SELECT ts_code, end_date,
-                        holder_num - LAG(holder_num) OVER (
-                            PARTITION BY ts_code ORDER BY end_date
-                        ) as holder_num_change,
-                        CASE
-                            WHEN LAG(holder_num) OVER (
+            _CHUNK = 500
+            for i in range(0, len(ts_codes), _CHUNK):
+                chunk = ts_codes[i : i + _CHUNK]
+                placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
+                sql = f"""
+                    UPDATE stk_holdernumber h
+                    SET holder_num_change = sub.holder_num_change,
+                        holder_num_ratio = sub.holder_num_ratio
+                    FROM (
+                        SELECT ts_code, end_date,
+                            holder_num - LAG(holder_num) OVER (
                                 PARTITION BY ts_code ORDER BY end_date
-                            ) > 0 THEN
-                                ROUND(
-                                    (holder_num - LAG(holder_num) OVER (
-                                        PARTITION BY ts_code ORDER BY end_date
-                                    ))::numeric / LAG(holder_num) OVER (
-                                        PARTITION BY ts_code ORDER BY end_date
-                                    ) * 100,
-                                    2
-                                )
-                            ELSE NULL
-                        END as holder_num_ratio
-                    FROM stk_holdernumber
-                    WHERE ts_code IN ({placeholders})
-                ) sub
-                WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
-            """
-            await self._write_db(sql, tuple(ts_codes))
+                            ) as holder_num_change,
+                            CASE
+                                WHEN LAG(holder_num) OVER (
+                                    PARTITION BY ts_code ORDER BY end_date
+                                ) > 0 THEN
+                                    ROUND(
+                                        (holder_num - LAG(holder_num) OVER (
+                                            PARTITION BY ts_code ORDER BY end_date
+                                        ))::numeric / LAG(holder_num) OVER (
+                                            PARTITION BY ts_code ORDER BY end_date
+                                        ) * 100,
+                                        2
+                                    )
+                                ELSE NULL
+                            END as holder_num_ratio
+                        FROM stk_holdernumber
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
+                """
+                await self._write_db(sql, tuple(chunk))
             logger.debug(f"[HolderDao] Calculated holder changes for {len(ts_codes)} stocks")
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to calculate holder changes: {e}")
@@ -141,66 +138,55 @@ class HolderDao(BaseDao):
             return pd.DataFrame()
 
     async def get_top10_holders_batch(self, ts_codes: list[str]) -> pd.DataFrame:
-        """
-        批量获取前十大股东。
-
-        Args:
-            ts_codes: 股票代码列表
-
-        Returns:
-            DataFrame with top 10 holders for all codes
-        """
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
+            return await _chunked_in_query(
+                self._read_db,
+                """
                 SELECT DISTINCT ON (ts_code, end_date)
                     ts_code, end_date, holder_name, hold_ratio
                 FROM top10_holders
                 WHERE ts_code IN ({placeholders})
                 ORDER BY ts_code, end_date DESC, hold_ratio DESC
-            """
-
-            df = await self._read_db(sql, ts_codes)
-            return df if df is not None else pd.DataFrame()
+                """,
+                ts_codes,
+            )
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to get top10 holders batch: {e}")
             return pd.DataFrame()
 
     async def get_stk_holdernumber_batch(self, ts_codes: list[str]) -> pd.DataFrame:
-        """
-        批量获取股东人数变化。
-
-        Args:
-            ts_codes: 股票代码列表
-
-        Returns:
-            DataFrame with shareholder numbers for all codes
-        """
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-            sql = f"""
-                SELECT ts_code, end_date, ann_date, holder_num,
-                       holder_num_change, holder_num_ratio
-                FROM (
-                    SELECT *,
-                        ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                    FROM stk_holdernumber
-                    WHERE ts_code IN ({placeholders})
-                ) sub
-                WHERE rn <= 5
-                ORDER BY ts_code, end_date DESC
-            """
+            all_results = []
+            for i in range(0, len(ts_codes), 500):
+                chunk = ts_codes[i : i + 500]
+                placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
+                sql = f"""
+                    SELECT ts_code, end_date, ann_date, holder_num,
+                           holder_num_change, holder_num_ratio
+                    FROM (
+                        SELECT *,
+                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                        FROM stk_holdernumber
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE rn <= 5
+                    ORDER BY ts_code, end_date DESC
+                """
+                df = await self._read_db(sql, chunk)
+                if df is not None and not df.empty:
+                    if "rn" in df.columns:
+                        df = df.drop(columns=["rn"])
+                    all_results.append(df)
 
-            df = await self._read_db(sql, ts_codes)
-            if df is not None and not df.empty and "rn" in df.columns:
-                df = df.drop(columns=["rn"])
-            return df if df is not None else pd.DataFrame()
+            if all_results:
+                return pd.concat(all_results, ignore_index=True)
+            return pd.DataFrame()
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to get holder number batch: {e}")
             return pd.DataFrame()

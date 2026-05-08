@@ -71,9 +71,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         return get_loop_local("hist_shutdown_evt", _factory)
 
-    async def cancel(self):
+    def cancel(self):
         """Signal cancellation."""
-        self._shutdown_event.set()
+        super().cancel()
+        try:
+            self._shutdown_event.set()
+        except RuntimeError:
+            logger.debug("[HistoricalSync] Shutdown event unavailable (no event loop).")
         logger.debug("[HistoricalSync] Stop | Cancellation signal received.")
         with self._tasks_lock:
             for task in self._active_tasks:

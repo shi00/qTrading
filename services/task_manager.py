@@ -169,21 +169,21 @@ class TaskManager:
     def _notify_subscribers(self):
         """Broadcast current tasks snapshot to all listeners. Safe to call from UI tread if using page.run_task."""
         tasks_snapshot = self.get_all_tasks()
-        for cb in self._subscribers[:]:  # Iterate copy
+        for cb in self._subscribers[:]:
             try:
                 cb(tasks_snapshot)
                 self._subscriber_error_counts[cb] = 0
             except Exception as e:
-                error_count = self._subscriber_error_counts.get(cb, 0) + 1
-                self._subscriber_error_counts[cb] = error_count
+                consecutive_errors = self._subscriber_error_counts.get(cb, 0) + 1
+                self._subscriber_error_counts[cb] = consecutive_errors
                 logger.error(
-                    f"[TaskManager] Subscriber callback failed ({error_count}/{self._MAX_SUBSCRIBER_ERRORS}): {e}"
+                    f"[TaskManager] Subscriber callback failed (consecutive: {consecutive_errors}/{self._MAX_SUBSCRIBER_ERRORS}): {e}"
                 )
-                if error_count >= self._MAX_SUBSCRIBER_ERRORS:
+                if consecutive_errors >= self._MAX_SUBSCRIBER_ERRORS:
                     with contextlib.suppress(ValueError):
                         self._subscribers.remove(cb)
                     self._subscriber_error_counts.pop(cb, None)
-                    logger.warning("[TaskManager] Subscriber disabled after repeated callback failures")
+                    logger.warning("[TaskManager] Subscriber disabled after consecutive callback failures")
 
     def get_all_tasks(self) -> list[AppTask]:
         """Return a snapshot of all tracked tasks + loaded history, ordered by creation."""
@@ -357,17 +357,21 @@ class TaskManager:
 
     _MAX_FINISHED_HISTORY = 200
 
-    def _auto_evict_old(self):
-        """Prevent unbounded memory growth by evicting oldest finished tasks when history exceeds limit."""
-        finished = [(tid, t) for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
-        if len(finished) > self._MAX_FINISHED_HISTORY:
-            finished.sort(key=lambda x: x[1].completed_at or datetime.datetime.min)
-            to_evict = finished[: len(finished) - self._MAX_FINISHED_HISTORY]
-            for tid, _ in to_evict:
-                del self._tasks[tid]
-            logger.debug(
-                f"[TaskManager] Auto-evicted {len(to_evict)} old finished task(s).",
-            )
+    def _evict_on_complete(self, task_id: str):
+        """Evict oldest finished task if history exceeds limit, O(1) amortized."""
+        finished_count = sum(1 for t in self._tasks.values() if t.status in TERMINAL_STATUSES)
+        if finished_count <= self._MAX_FINISHED_HISTORY:
+            return
+        oldest_tid = None
+        oldest_time = None
+        for tid, t in self._tasks.items():
+            if t.status in TERMINAL_STATUSES:
+                t_time = t.completed_at or datetime.datetime.min
+                if oldest_time is None or t_time < oldest_time:
+                    oldest_tid = tid
+                    oldest_time = t_time
+        if oldest_tid is not None:
+            del self._tasks[oldest_tid]
 
     # --- Internal Runner ---
 
@@ -438,7 +442,7 @@ class TaskManager:
                 task.completed_at = get_now()
             self._persist_task(task)
             self._notify_subscribers()
-            self._auto_evict_old()
+            self._evict_on_complete(task.id)
             clear_correlation_id()
 
     # --- Persistence ---

@@ -64,6 +64,37 @@ class TestSanitizeError:
         assert "/home/user/test.py" not in result
         assert "<PATH>" in result
 
+    def test_error_with_api_key_in_url(self):
+        err = ValueError("Request failed: https://api.openai.com/v1/chat?api_key=sk-abc123xyz789")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-abc123xyz789" not in result
+        assert "***" in result
+
+    def test_error_with_token_in_url(self):
+        err = ValueError("Auth failed: https://example.com/api?token=secret_token_value")
+        result = DataSanitizer.sanitize_error(err)
+        assert "secret_token_value" not in result
+        assert "***" in result
+
+    def test_error_with_bearer_token(self):
+        err = ValueError("HTTP 401: Bearer sk-proj-abc123def456ghi789")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-proj-abc123def456ghi789" not in result
+        assert "Bearer ***" in result
+
+    def test_error_with_password_in_url(self):
+        err = ValueError("Connection: postgres://user:mysecretpass@host/db")
+        result = DataSanitizer.sanitize_error(err)
+        assert "mysecretpass" not in result
+        assert "***" in result
+        assert "user" in result
+
+    def test_error_with_access_token(self):
+        err = ValueError("Failed: ?access_token=eyJhbGciOiJIUzI1NiJ9")
+        result = DataSanitizer.sanitize_error(err)
+        assert "eyJhbGciOiJIUzI1NiJ9" not in result
+        assert "***" in result
+
 
 class TestSanitizeDict:
     def test_normal_keys(self):

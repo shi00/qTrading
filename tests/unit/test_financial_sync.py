@@ -1,6 +1,6 @@
 import pytest
 import datetime
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 import pandas as pd
 
 from data.sync.financial import FinancialSyncStrategy
@@ -102,7 +102,7 @@ class TestFinancialSyncCancel:
     async def test_cancel(self):
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
-        await strategy.cancel()
+        strategy.cancel()
         assert strategy._shutdown_event.is_set()
 
     @pytest.mark.asyncio
@@ -111,8 +111,15 @@ class TestFinancialSyncCancel:
         strategy = FinancialSyncStrategy(ctx)
         strategy._shutdown_event.clear()
         assert not strategy._shutdown_event.is_set()
-        await strategy.cancel()
+        strategy.cancel()
         assert strategy._shutdown_event.is_set()
+
+    def test_cancel_no_event_loop_no_raise(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        with patch.object(type(strategy), "_shutdown_event", new_callable=PropertyMock) as mock_evt:
+            mock_evt.side_effect = RuntimeError("no event loop")
+            strategy.cancel()
 
 
 class TestFinancialSyncGetEffectiveTradeDate:

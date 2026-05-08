@@ -3,9 +3,13 @@ import flet as ft
 from ui.theme import AppColors, AppStyles
 
 
-class VirtualTable(ft.Column):
+class PaginatedTable(ft.Column):
     """
-    High performance table using ListView.
+    Paginated table using ListView with column sorting support.
+
+    Note: This is NOT a true virtualized table (viewport-based row recycling).
+    It renders all rows of the current page in memory. For large datasets,
+    use pagination to limit rows per page.
     """
 
     def __init__(self, on_sort=None):

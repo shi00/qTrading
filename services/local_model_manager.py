@@ -12,6 +12,13 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
+
+class LocalInferenceTimeoutError(RuntimeError):
+    """Raised when local model inference exceeds the configured timeout."""
+
+    pass
+
+
 # Try importing llama_cpp dynamically, handle missing dependency gracefully.
 # Dynamic import avoids hard static dependency for type check in CI.
 try:
@@ -300,7 +307,7 @@ class LocalModelManager:
                 self.unload_model()
                 self._model_path = ""
                 self._model_stat = (0, 0)
-                raise RuntimeError(
+                raise LocalInferenceTimeoutError(
                     f"Local inference timed out ({timeout_val}s). Memory freed.",
                 ) from te
             except Exception as e:

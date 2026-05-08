@@ -71,6 +71,14 @@ class SyncResult:
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
 
+        if other.message:
+            if self.message:
+                self.message = self.message + " | " + other.message
+            else:
+                self.message = other.message
+            if len(self.message) > 2000:
+                self.message = self.message[:1997] + "..."
+
         def normalize_date_key(key):
             if isinstance(key, datetime.date):
                 return key
@@ -151,6 +159,18 @@ class ISyncStrategy(ABC):
     def __init__(self, context: SyncContext):
         self.context = context
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._cancelled = False
+
+    def cancel(self):
+        """Signal the strategy to stop gracefully."""
+        self._cancelled = True
+
+    def _check_cancelled(self, result: SyncResult) -> bool:
+        """Check if cancelled and update result status. Returns True if cancelled."""
+        if self._cancelled:
+            result.status = "cancelled"
+            return True
+        return False
 
     @staticmethod
     def _clean_null_values(df: typing.Any) -> typing.Any:
@@ -183,10 +203,3 @@ class ISyncStrategy(ABC):
         Execute the synchronization logic.
         """
         pass
-
-    async def cancel(self):
-        """
-        Handle cancellation requests.
-        Default implementation just logs, overrides should set internal flags.
-        """
-        self.logger.debug("Cancellation requested.")

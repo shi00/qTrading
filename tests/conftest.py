@@ -55,7 +55,22 @@ def _create_mock_keyring():
     return mock_kr
 
 
+_original_keyring = sys.modules.get("keyring")
 sys.modules["keyring"] = _create_mock_keyring()
+
+
+def pytest_unconfigure(config):
+    """Restore original keyring module after test session."""
+    if _original_keyring is not None:
+        sys.modules["keyring"] = _original_keyring
+    else:
+        sys.modules.pop("keyring", None)
+
+    import shutil
+
+    if os.path.exists(_temp_config_dir):
+        shutil.rmtree(_temp_config_dir, ignore_errors=True)
+
 
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
@@ -115,17 +130,6 @@ def pytest_configure(config):
     import utils.config_handler
 
     utils.config_handler.CONFIG_FILE = _temp_config_file
-
-
-def pytest_unconfigure(config):
-    """
-    Hook that runs after all tests complete.
-    Cleanup temp config directory.
-    """
-    import shutil
-
-    if os.path.exists(_temp_config_dir):
-        shutil.rmtree(_temp_config_dir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True, scope="session")

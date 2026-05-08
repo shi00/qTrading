@@ -53,6 +53,19 @@ excludes = [
     "_pytest",
 ]
 
+import fnmatch
+
+_datas_filtered = []
+for src, dst in datas:
+    skip = False
+    for pattern in ["*.key", "*.key.bak", "*.key.tmp", "*.salt", "*.salt.tmp", "*.legacy"]:
+        if fnmatch.fnmatch(os.path.basename(src), pattern):
+            skip = True
+            break
+    if not skip:
+        _datas_filtered.append((src, dst))
+datas = _datas_filtered
+
 icon_path = project_root / "assets" / "icon.ico"
 if not icon_path.exists():
     icon_path = project_root / "assets" / "icon.png"

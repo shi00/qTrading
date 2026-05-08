@@ -333,8 +333,8 @@ class ConfigHandler:
                 keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", decrypted)
                 ConfigHandler.save_config({"ts_token": ""})
                 logger.info("Migrated ts_token from config to keyring and cleared legacy value")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Keyring migration failed: {e}")
         return decrypted
 
     @staticmethod

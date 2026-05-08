@@ -497,7 +497,9 @@ class AIStrategyMixin:
                         summary += f" ({I18n.get('ai_risk_label')}: {uncertainty_str})"
 
                 score_raw = res.get("score", 0)
-                row_dict["ai_score"] = min(100, max(0, int(score_raw))) if isinstance(score_raw, (int, float)) else 0
+                row_dict["ai_score"] = (
+                    round(min(100, max(0, float(score_raw))), 1) if isinstance(score_raw, (int, float)) else 0
+                )
                 row_dict["ai_reason"] = summary
                 thinking_raw = res.get("thinking", "")
                 row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
@@ -666,7 +668,7 @@ class AIStrategyMixin:
 
             # 7c. Macro Context (Phase 1.3) - build once per batch
             if not prefetched.macro_context:
-                prefetched.macro_context = await self._build_macro_context(dp.cache)
+                prefetched.macro_context = await self._build_macro_context(dp.cache, as_of_date=prefetched.trade_date)
 
             # Combine all financial context
             financials_parts = [base_financials]
@@ -1296,14 +1298,16 @@ class AIStrategyMixin:
             return "\n".join(lines) + "\n"
         return I18n.get("ai_no_auxiliary_data")
 
-    async def _build_macro_context(self, cache: typing.Any) -> str:
+    async def _build_macro_context(self, cache: typing.Any, as_of_date=None) -> str:
         """
         构建宏观经济环境上下文。
 
         L3 修复：新增 Shibor 利率注入，对价值投资和固收相关策略有重要参考价值。
+        B-P1-1 修复：新增 as_of_date 参数，在历史回放场景下按日期截断宏观数据，防止前视偏差。
 
         Args:
             cache: 数据缓存实例
+            as_of_date: 截止日期（含），None 表示不限制
 
         Returns:
             宏观经济环境文本
@@ -1312,7 +1316,7 @@ class AIStrategyMixin:
         has_data = False
 
         try:
-            macro = await cache.get_macro_economy()
+            macro = await cache.get_macro_economy(as_of_date=as_of_date)
             if macro is not None and not macro.empty:
                 latest = macro.iloc[0]
 
@@ -1331,7 +1335,7 @@ class AIStrategyMixin:
                     lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
                     has_data = True
 
-            shibor = await cache.get_shibor_latest()
+            shibor = await cache.get_shibor_latest(as_of_date=as_of_date)
             if shibor is not None and not shibor.empty:
                 shibor_latest = shibor.iloc[0]
 

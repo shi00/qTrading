@@ -40,11 +40,14 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         return get_loop_local("fina_shutdown_evt", _factory)
 
-    async def cancel(self):
+    def cancel(self):
         """Signal cancellation."""
-        self._shutdown_event.set()
+        super().cancel()
+        try:
+            self._shutdown_event.set()
+        except RuntimeError:
+            logger.debug("[FinancialSync] Shutdown event unavailable (no event loop).")
         logger.debug("[FinancialSync] Stop | Cancellation signal received.")
-        # Cancel active tasks
         with self._tasks_lock:
             for task in self._active_tasks:
                 if not task.done():
@@ -467,12 +470,15 @@ class FinancialSyncStrategy(ISyncStrategy):
                 return result
 
             tasks = [sync_one_target(item) for item in target_list]
-            results = await asyncio.gather(*tasks)
 
-            for r in results:
-                total_saved += r["saved"]
-                total_mainbz_rows += r["mainbz"]
-                total_audit_rows += r["audit"]
+            _BATCH_SIZE = 100
+            for batch_start in range(0, len(tasks), _BATCH_SIZE):
+                batch = tasks[batch_start : batch_start + _BATCH_SIZE]
+                batch_results = await asyncio.gather(*batch)
+                for r in batch_results:
+                    total_saved += r["saved"]
+                    total_mainbz_rows += r["mainbz"]
+                    total_audit_rows += r["audit"]
 
             day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()
             await self.context.cache.update_sync_status(

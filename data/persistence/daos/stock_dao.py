@@ -1,6 +1,8 @@
 import datetime
 import logging
 
+import pandas as pd
+
 from data.persistence.models import (
     StockBasic,
     StockConcepts,
@@ -235,29 +237,32 @@ class StockDao(BaseDao):
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]
         """
-        sql = "SELECT ts_code, concept_name FROM stock_concepts"
-        params = []
+        if ts_codes is None:
+            rows = await self._read_db("SELECT ts_code, concept_name FROM stock_concepts")
+        elif len(ts_codes) == 0:
+            return {}
+        elif len(ts_codes) == 1:
+            rows = await self._read_db(
+                "SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code=$1",
+                [ts_codes[0]],
+            )
+        else:
+            _CHUNK = 500
+            all_dfs = []
+            for i in range(0, len(ts_codes), _CHUNK):
+                chunk = ts_codes[i : i + _CHUNK]
+                placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
+                sql = f"SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code IN ({placeholders})"
+                df = await self._read_db(sql, chunk)
+                if df is not None and not df.empty:
+                    all_dfs.append(df)
+            rows = pd.concat(all_dfs, ignore_index=True) if all_dfs else None
 
-        if ts_codes:
-            # Handle large list of codes
-            if len(ts_codes) == 1:
-                sql += " WHERE ts_code=$1"
-                params.append(ts_codes[0])
-            else:
-                placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-                sql += f" WHERE ts_code IN ({placeholders})"
-                params.extend(ts_codes)
-
-        rows = await self._read_db(sql, params)
-
-        # Transform to dict
         result = {}
         if rows is None or rows.empty:
             return result
 
-        # P3-2: Use groupby instead of iterrows for better performance
         for code, group in rows.groupby("ts_code"):
-            # 过滤掉防无限循环的占位符概念名
             concepts = [c for c in group["concept_name"].tolist() if c != "已扫描无强概念"]
             if concepts:
                 result[code] = concepts
@@ -281,8 +286,6 @@ class StockDao(BaseDao):
         ai_concept_entries: list of dict, e.g. [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
         """
         import hashlib
-
-        import pandas as pd
 
         if not ai_concept_entries:
             return 0
