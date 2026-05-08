@@ -57,7 +57,7 @@ try:
     from litellm import acompletion  # pyright: ignore[reportMissingImports]
 
     litellm.suppress_debug_info = True
-    litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]
+    litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
 
     LITELLM_AVAILABLE = True
 except ImportError:
@@ -186,7 +186,7 @@ class AIService:
         if not LITELLM_AVAILABLE:
             return
 
-        litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]
+        litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
         litellm.drop_params = True
         litellm.set_timeout = 30.0
         litellm.max_retries = 2
@@ -401,7 +401,7 @@ class AIService:
                     on_chunk("".join(_reasoning_buf), True)
                 _reasoning_buf = []
 
-            async for chunk in response:  # type: ignore[reportGeneralTypeIssues]
+            async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
                 if not chunk.choices:
                     if hasattr(chunk, "usage") and chunk.usage:
                         usage = {
@@ -459,7 +459,7 @@ class AIService:
     async def _chat_completion(
         self,
         messages: list,
-        model: str = None,  # type: ignore
+        model: str | None = None,
         provider: str = "cloud",
         temperature: float = 0.3,
         timeout: float = 30.0,
@@ -578,12 +578,12 @@ class AIService:
         financials_text: str = "",
         history_text: str = "",
         on_chunk=None,
-        history_context: str = None,  # type: ignore
-        strategy_key: str = None,  # type: ignore
+        history_context: str | None = None,
+        strategy_key: str | None = None,
         include_global_context: bool = True,
         include_learning_context: bool = True,
-        ui_prompt_override: str = None,  # type: ignore
-    ) -> dict:
+        ui_prompt_override: str | None = None,
+    ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'llm_model' to be configured.

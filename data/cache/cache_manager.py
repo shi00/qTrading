@@ -322,7 +322,7 @@ class CacheManager:
         Get concepts for stock list.
         Returns: Dict[ts_code, List[concept_name]]
         """
-        return await self.stock_dao.get_concepts(ts_codes)  # type: ignore
+        return await self.stock_dao.get_concepts(ts_codes)  # type: ignore  # DAO return type may vary from expected dict structure
 
     # --- Daily Quotes ---
     async def save_daily_quotes(
@@ -480,8 +480,8 @@ class CacheManager:
             self.quote_dao.get_date_range(),
             return_exceptions=True,
         )
-        total_stocks = (total_stocks_result if not isinstance(total_stocks_result, Exception) else None) or 1
-        if isinstance(date_range_result, Exception):
+        total_stocks = (total_stocks_result if not isinstance(total_stocks_result, BaseException) else None) or 1
+        if isinstance(date_range_result, BaseException):
             logger.warning(
                 f"[CacheManager] Health | ⚠️ Date range query failed (non-fatal): {date_range_result}",
             )
@@ -492,7 +492,7 @@ class CacheManager:
         global_trade_days = 0
         global_expected_rows = None
         try:
-            if not isinstance(date_range_result, Exception):
+            if not isinstance(date_range_result, BaseException):
                 g_min, g_max = date_range_result
                 if g_min and g_max:
                     global_trade_days, global_expected_rows = await asyncio.gather(
