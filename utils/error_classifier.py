@@ -184,7 +184,7 @@ def get_error_message(error_info: dict) -> str:
     ui.i18n should use this helper.  Pure utils/strategies code should
     just read error_info["message_key"] and pass it up.
     """
-    from ui.i18n import I18n
+    from core.i18n import I18n
 
     message_key = error_info.get("message_key", "common_err_unknown")
     format_args = error_info.get("format_args")

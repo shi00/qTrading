@@ -62,7 +62,7 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
     if current_tier is None:
         current_tier = 0  # Treat uninitialized as CRITICAL
     if current_tier < min_tier:
-        from ui.i18n import I18n
+        from core.i18n import I18n
 
         msg = I18n.get(
             "quality_err_too_low",

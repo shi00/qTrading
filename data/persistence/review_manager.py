@@ -8,7 +8,7 @@ import pandas as pd
 
 from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_date
@@ -194,7 +194,7 @@ class ReviewManager:
 
             if date_threshold is not None:
                 date_threshold = to_date(date_threshold)
-            return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore
+            return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore[union-attr]
 
         except Exception as e:
             logger.error(f"[Review] Error fetching pending predictions: {e}")
@@ -228,7 +228,7 @@ class ReviewManager:
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "reason": str(row["ai_reason"])[:50]
-                            if row["ai_reason"]  # type: ignore
+                            if row["ai_reason"]  # type: ignore[union-attr]
                             else "",
                         },
                     )
@@ -247,7 +247,7 @@ class ReviewManager:
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "reason": str(row["ai_reason"])[:50]
-                            if row["ai_reason"]  # type: ignore
+                            if row["ai_reason"]  # type: ignore[union-attr]
                             else "",
                         },
                     )
@@ -393,16 +393,16 @@ class ReviewManager:
 
             ai_score = row.get("ai_score", 0)
             try:
-                ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore
+                ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore[union-attr]
             except (ValueError, TypeError):
                 ai_score = 0
 
             ai_reason = row.get("ai_reason", "")
-            if pd.isnull(ai_reason):  # type: ignore
+            if pd.isnull(ai_reason):  # type: ignore[union-attr]
                 ai_reason = ""
 
             thinking = row.get("thinking", "")
-            if pd.isnull(thinking):  # type: ignore
+            if pd.isnull(thinking):  # type: ignore[union-attr]
                 thinking = ""
 
             records.append(

@@ -380,7 +380,7 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        with patch("ui.i18n.I18n") as mock_i18n:
+        with patch("core.i18n.I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, default=None: {
                 "news_l1_finance": "金融核心",
                 "news_l2_precious_metals": "贵金属",
@@ -401,7 +401,7 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        with patch("ui.i18n.I18n") as mock_i18n:
+        with patch("core.i18n.I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, default=None: {
                 "news_l1_finance": "金融核心",
             }.get(key, default if default is not None else key)
@@ -421,7 +421,7 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        with patch("ui.i18n.I18n") as mock_i18n:
+        with patch("core.i18n.I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, default=None: default if default is not None else key
             result = svc._parse_news_result({"category_L1": "Tech"})
         assert result["emoji"] == "📰"
@@ -440,7 +440,7 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        with patch("ui.i18n.I18n") as mock_i18n:
+        with patch("core.i18n.I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, default=None: default if default is not None else key
             result = svc._parse_news_result({"category_L1": "unknown_l1", "category_L2": "unknown_l2"})
         assert result["category"] == "unknown_l1-unknown_l2"

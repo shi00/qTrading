@@ -22,7 +22,7 @@ from data.constants import (
     SYNC_RESULT_SAVE_FAILED,
 )
 from data.sync.base import ISyncStrategy, SyncResult
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -87,7 +87,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync operations."""
         try:
-            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore
+            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
             if trade_date is not None:
                 return trade_date
         except Exception:
@@ -171,7 +171,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         start_date = end_date - datetime.timedelta(days=calendar_days)
 
         try:
-            trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore
+            trade_date_objs = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore[union-attr]
                 start_date, end_date
             )
             trade_dates = list(reversed(trade_date_objs))

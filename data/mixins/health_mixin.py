@@ -31,7 +31,7 @@ from data.constants import (
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
@@ -302,7 +302,7 @@ class HealthCheckMixin:
             return self._health_cache["data"]
 
         try:
-            end_date = await self.get_latest_trade_date()  # type: ignore
+            end_date = await self.get_latest_trade_date()  # type: ignore[attr-defined]
             from utils.time_utils import parse_date
 
             end_date_obj = parse_date(end_date)
@@ -311,7 +311,7 @@ class HealthCheckMixin:
             years = ConfigHandler.get_init_history_years()
             # Use a safe 2.0 multiplier for trade-days to natural-days conversion
             rough_start = (end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))).date()
-            all_dates = await self.get_trade_dates(  # type: ignore
+            all_dates = await self.get_trade_dates(  # type: ignore[attr-defined]
                 start_date=rough_start,
                 end_date=end_date,
             )
@@ -320,7 +320,7 @@ class HealthCheckMixin:
             else:
                 start_date = all_dates[0] if all_dates else (end_date_obj - datetime.timedelta(days=365 * years)).date()
 
-            official_dates = await self.get_trade_dates(start_date, end_date)  # type: ignore
+            official_dates = await self.get_trade_dates(start_date, end_date)  # type: ignore[attr-defined]
 
             if not official_dates:
                 return {"status": "red", "msg": I18n.get("health_err_calendar")}
@@ -581,7 +581,7 @@ class HealthCheckMixin:
         import random
 
         # Reset cancel event (prevents immediate skipped scan if previous op was cancelled)
-        self.clear_cancel()  # type: ignore
+        self.clear_cancel()  # type: ignore[attr-defined]
 
         if progress_callback:
             progress_callback(0, 100, I18n.get("scan_step_init"))
@@ -619,7 +619,7 @@ class HealthCheckMixin:
             # Align deep-scan recency to the latest closed trade date to avoid
             # intraday false negatives before the market close snapshot exists.
             try:
-                latest_closed_trade_date = await self.get_latest_trade_date()  # type: ignore
+                latest_closed_trade_date = await self.get_latest_trade_date()  # type: ignore[attr-defined]
                 if isinstance(latest_closed_trade_date, datetime.datetime):
                     end_date_obj = latest_closed_trade_date.date()
                 elif isinstance(latest_closed_trade_date, datetime.date):
@@ -637,7 +637,7 @@ class HealthCheckMixin:
             # and over-fetching entire 20-year history for single stocks.
             start_date_obj = end_date_obj - datetime.timedelta(days=365)
 
-            trade_cal_df = await self.trade_calendar.get_trade_cal_df(  # type: ignore
+            trade_cal_df = await self.trade_calendar.get_trade_cal_df(  # type: ignore[attr-defined]
                 start_date=start_date_obj,
                 end_date=end_date_obj,
                 is_open=1,
@@ -658,7 +658,7 @@ class HealthCheckMixin:
             total_steps = len(sample)
 
             for idx, ts_code in enumerate(sample):
-                if self.is_cancelled():  # type: ignore
+                if self.is_cancelled():  # type: ignore[attr-defined]
                     break
 
                 # Update Progress
@@ -674,7 +674,7 @@ class HealthCheckMixin:
 
                 if df_daily is not None and not df_daily.empty:
                     # Sort explicitly to guarantee recency check safety
-                    df_daily = df_daily.sort_values("trade_date", ascending=False)  # type: ignore
+                    df_daily = df_daily.sort_values("trade_date", ascending=False)  # type: ignore[union-attr]
 
                     # Check Continuity (only if trade_cal is available)
                     if trade_cal_df is not None and not trade_cal_df.empty:
@@ -792,4 +792,4 @@ class HealthCheckMixin:
             return {"score": 0, "tier": 0, "error": str(e)}
         finally:
             # Ensure cancel state doesn't leak into subsequent operations
-            self.clear_cancel()  # type: ignore
+            self.clear_cancel()  # type: ignore[attr-defined]

@@ -14,6 +14,8 @@ class ProxyManager:
     Design decisions:
     - Writes NO_PROXY to os.environ so that third-party libraries
       (litellm/httpx/requests) can respect the proxy bypass rules.
+      WARNING: This is a process-wide side effect (S-P0-2).
+      Prefer get_no_proxy_env_dict() + per-client config when possible.
     - Does NOT log the full domain list to prevent enterprise network
       topology leakage (S-P0-2 fix).
     - Also caches domains in a class-level store for programmatic queries.
@@ -24,6 +26,7 @@ class ProxyManager:
     _no_proxy_domains: set[str] = set()
     _initialized: bool = False
     _original_no_proxy: set[str] | None = None
+    _env_written: bool = False
 
     @staticmethod
     def apply_smart_proxy_policy():
@@ -76,6 +79,13 @@ class ProxyManager:
         if final_domains:
             valid_domains = [d for d in final_domains if d]
             new_no_proxy = ",".join(valid_domains)
+
+            if not ProxyManager._env_written:
+                logger.warning(
+                    "[ProxyManager] Writing NO_PROXY to os.environ (process-wide side effect). "
+                    "Prefer get_no_proxy_env_dict() + per-client config for new code.",
+                )
+                ProxyManager._env_written = True
 
             os.environ["NO_PROXY"] = new_no_proxy
             os.environ["no_proxy"] = new_no_proxy
@@ -151,6 +161,38 @@ class ProxyManager:
             proxies["https://"] = https_proxy
 
         return {"proxies": proxies} if proxies else {}
+
+    @staticmethod
+    def get_no_proxy_env_dict() -> dict[str, str]:
+        """
+        Return a dict of proxy-related env vars WITHOUT writing to os.environ.
+
+        Includes NO_PROXY, HTTP_PROXY, HTTPS_PROXY (both upper and lower case).
+        Use this to pass proxy config to subprocesses or per-client setups
+        instead of polluting the global process environment.
+
+        Returns:
+            Dict like {"NO_PROXY": "...", "no_proxy": "...", "HTTP_PROXY": "...", ...}
+            or empty dict if no proxy config exists at all.
+        """
+        result: dict[str, str] = {}
+
+        no_proxy_str = ProxyManager.get_no_proxy_string()
+        if no_proxy_str:
+            result["NO_PROXY"] = no_proxy_str
+            result["no_proxy"] = no_proxy_str
+
+        http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("http_proxy", ""))
+        https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
+
+        if http_proxy:
+            result["HTTP_PROXY"] = http_proxy
+            result["http_proxy"] = http_proxy
+        if https_proxy:
+            result["HTTPS_PROXY"] = https_proxy
+            result["https_proxy"] = https_proxy
+
+        return result
 
     @staticmethod
     def get_requests_proxy_config() -> dict | None:

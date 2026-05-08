@@ -16,7 +16,7 @@ class MetaDataManager:
         """
         Get alias for a table using I18n.
         """
-        from ui.i18n import I18n  # Import here to avoid circular dependency
+        from core.i18n import I18n  # Import here to avoid circular dependency
 
         table_def = TABLE_DEFINITIONS.get(table_name)
         if table_def and "alias" in table_def:
@@ -30,7 +30,7 @@ class MetaDataManager:
         """
         Get alias for a column with context awareness using I18n.
         """
-        from ui.i18n import I18n  # Import here to avoid circular dependency
+        from core.i18n import I18n  # Import here to avoid circular dependency
 
         alias_key = None
 
@@ -61,7 +61,7 @@ class MetaDataManager:
         Get just the translated alias string without formatting.
         Useful for tooltips or other UI elements.
         """
-        from ui.i18n import I18n  # Import here to avoid circular dependency
+        from core.i18n import I18n  # Import here to avoid circular dependency
 
         alias_key = None
         if context_table:

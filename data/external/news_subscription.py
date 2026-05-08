@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 from data.cache.cache_manager import CacheManager
 from services.ai_service import AIService
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
@@ -237,7 +237,7 @@ class NewsSubscriptionService:
 
             # Simple error handling for the loop itself (unlikely to fail here)
             try:
-                await asyncio.sleep(base_interval)  # type: ignore
+                await asyncio.sleep(base_interval)  # type: ignore[arg-type]
             except asyncio.CancelledError:
                 break
 
@@ -295,7 +295,7 @@ class NewsSubscriptionService:
                 # Wait for item with timeout to allow checking self._running
                 try:
                     item = await asyncio.wait_for(
-                        self.processing_queue.get(),  # type: ignore
+                        self.processing_queue.get(),  # type: ignore[union-attr]
                         timeout=1.0,
                     )
                 except TimeoutError:
@@ -304,7 +304,7 @@ class NewsSubscriptionService:
                 # Process Item
                 content = item.get("content", "")
                 if not content:
-                    self.processing_queue.task_done()  # type: ignore
+                    self.processing_queue.task_done()  # type: ignore[union-attr]
                     continue
 
                 content_hash = item.get("content_hash", hashlib.md5(content.encode()).hexdigest()[:12])
@@ -323,7 +323,7 @@ class NewsSubscriptionService:
                         data={"content": content, "tags": tags},
                     )
 
-                self.processing_queue.task_done()  # type: ignore
+                self.processing_queue.task_done()  # type: ignore[union-attr]
 
                 # 4. Cooperative yield: let event loop handle pending UI
                 # events (Flet WebSocket dispatch) before next item.
@@ -441,7 +441,7 @@ class NewsSubscriptionService:
                             )
                             await self.cache.save_market_news(normalized)
 
-                            await self._safe_queue_put(item)  # type: ignore
+                            await self._safe_queue_put(item)  # type: ignore[misc]
 
                     latest_item = news_list[0]
                     self._last_news_time = latest_item.get("time", "")
@@ -482,7 +482,7 @@ class NewsSubscriptionService:
                         )
                         await self.cache.save_market_news(normalized, wait=True)
 
-                        await self._safe_queue_put(item)  # type: ignore
+                        await self._safe_queue_put(item)  # type: ignore[misc]
 
                         display_msg = clean_content
                         enable_alerts = ConfigHandler.get_config("enable_news_alerts", True)

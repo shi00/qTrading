@@ -60,7 +60,7 @@ class TestCheckTier:
         processor._quality_tier = QualityTier.SILVER
         _check_tier(processor, QualityTier.BRONZE, "test_func")
 
-    @patch("ui.i18n.I18n")
+    @patch("core.i18n.I18n")
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
     def test_processor_tier_insufficient_raises(self, mock_i18n):
         mock_i18n.get.return_value = "quality_err_too_low"
@@ -104,7 +104,7 @@ class TestRequireQualityDecorator:
         s = MyStrategy()
         assert await s.run() == "success"
 
-    @patch("ui.i18n.I18n")
+    @patch("core.i18n.I18n")
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
     def test_sync_decorator_insufficient_raises(self, mock_i18n):
         mock_i18n.get.return_value = "quality_err_too_low"

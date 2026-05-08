@@ -16,7 +16,7 @@ from data.cache.cache_manager import CacheManager
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.external.news_fetcher import NewsFetcher
 from data.external.tushare_client import TushareClient
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -132,7 +132,7 @@ class MarketDataService:
             dict: 包含 date, indices, hsgt, hot_concepts 的字典，
                   如果缓存为空则返回 None
         """
-        return self._cached_data  # type: ignore
+        return self._cached_data  # type: ignore[return-value]
 
     async def _poll_loop(self):
         """主轮询循环"""

@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from data.data_processor import DataProcessor
 from data.persistence.review_manager import ReviewManager
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
@@ -313,11 +313,11 @@ class SchedulerService:
             if result is None:
                 added = 0
             elif hasattr(result, "added"):
-                added = getattr(result, "added", 0)  # type: ignore
+                added = getattr(result, "added", 0)  # type: ignore[union-attr]
             elif hasattr(result, "empty"):
                 # DataFrame/Series fallback: treat row count as added amount
                 try:
-                    added = 0 if result.empty else len(result)  # type: ignore
+                    added = 0 if result.empty else len(result)  # type: ignore[union-attr]
                 except Exception:
                     added = 0
             else:

@@ -12,7 +12,7 @@ import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS
 from data.sync.base import ISyncStrategy, SyncResult
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
 from utils.time_utils import get_now, parse_date
@@ -69,7 +69,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
     async def run(
         self,
-        periods: list[str] = None,  # type: ignore
+        periods: list[str] = None,  # type: ignore[assignment]
         force: bool = False,
         progress_callback=None,
         **kwargs,

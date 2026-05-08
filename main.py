@@ -7,7 +7,7 @@ from data.cache.cache_manager import CacheManager
 from data.domain_services.market_data_service import MarketDataService
 from data.external.news_subscription import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
-from ui.i18n import I18n
+from core.i18n import I18n
 from ui.theme import apply_page_theme
 from ui.views.onboarding_wizard import OnboardingWizard
 from utils.config_handler import ConfigHandler
@@ -30,7 +30,7 @@ async def main(page: ft.Page):
     cache_manager = CacheManager()
 
     page.title = I18n.get("app_title")
-    page.window_icon = "icon.png"  # type: ignore
+    page.window_icon = "icon.png"  # type: ignore[attr-defined]
 
     # ============================================================
     # 优雅退出全链路控制 (v5) — 使用 ShutdownCoordinator
@@ -249,12 +249,12 @@ async def main(page: ft.Page):
     page.padding = 0
     apply_page_theme(page)
 
-    page.toast = ToastManager(page)  # type: ignore
+    page.toast = ToastManager(page)  # type: ignore[attr-defined]
 
     def show_toast(message, type="info"):
-        page.toast.show(message, type)  # type: ignore
+        page.toast.show(message, type)  # type: ignore[attr-defined]
 
-    page.show_toast = show_toast  # type: ignore
+    page.show_toast = show_toast  # type: ignore[attr-defined]
 
     async def _init_services_and_start_app():
         """Initialize all services and start the app."""
@@ -333,8 +333,8 @@ async def main(page: ft.Page):
         app_layout = AppLayout(page)
 
         def on_news_alert(msg):
-            if hasattr(page, "toast") and page.toast:  # type: ignore
-                page.toast.show(f"📰 {msg}", toast_type="info")  # type: ignore
+            if hasattr(page, "toast") and page.toast:  # type: ignore[attr-defined]
+                page.toast.show(f"📰 {msg}", toast_type="info")  # type: ignore[attr-defined]
 
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
 

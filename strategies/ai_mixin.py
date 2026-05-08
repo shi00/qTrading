@@ -32,7 +32,7 @@ from data.constants import TOP_LIST_NET_AMOUNT_UNIT, get_column_unit
 from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from strategies.utils import fmt_val, safe_float
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.technical_analysis import TechnicalAnalysis
 from utils.time_utils import get_now, to_yyyymmdd_str
@@ -197,7 +197,7 @@ class AIStrategyMixin:
         self,
         candidates_df: pd.DataFrame,
         context: dict,
-        max_stocks: int = None,  # type: ignore
+        max_stocks: int = None,  # type: ignore[assignment]
     ) -> pd.DataFrame:
         """
         Run sequential AI analysis on pre-filtered candidates.
@@ -286,7 +286,7 @@ class AIStrategyMixin:
         concepts_map = {}
         all_ts_codes = candidates_df["ts_code"].tolist()
         try:
-            concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore
+            concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to pre-fetch concepts: {e}")
 
@@ -317,7 +317,7 @@ class AIStrategyMixin:
             bulk_history_df = self._history_cache.get(cache_key)
 
             if bulk_history_df is None:
-                bulk_history_df = await dp.cache.get_daily_quotes(  # type: ignore
+                bulk_history_df = await dp.cache.get_daily_quotes(  # type: ignore[union-attr]
                     ts_code_list=all_ts_codes,
                     start_date=start_date,
                     end_date=end_date,
@@ -347,7 +347,7 @@ class AIStrategyMixin:
         trade_date = self._normalize_trade_date_for_cache(context.get("trade_date"))
         try:
             if trade_date is None:
-                trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore
+                trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore[union-attr]
         except Exception as e:
             logger.warning(f"[AIStrategyMixin] Failed to get latest trade date: {e}")
 
@@ -357,17 +357,17 @@ class AIStrategyMixin:
 
         if trade_date:
             try:
-                moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore
+                moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
             except Exception as e:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch moneyflow: {e}")
 
             try:
-                top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore
+                top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
             except Exception as e:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch top_list: {e}")
 
             try:
-                northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore
+                northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
             except Exception as e:
                 logger.warning(f"[AIStrategyMixin] Failed to pre-fetch northbound: {e}")
 
@@ -424,7 +424,7 @@ class AIStrategyMixin:
                 )
                 break
 
-            row_data = row._asdict()  # type: ignore
+            row_data = row._asdict()  # type: ignore[union-attr]
             stock_name = row_data.get("name", row_data.get("ts_code", "?"))
 
             # Setup streaming callback for this specific stock
@@ -570,7 +570,7 @@ class AIStrategyMixin:
         on_chunk=None,
         history_df=None,
         news=None,
-        ui_prompt_override: str = None,  # type: ignore
+        ui_prompt_override: str = None,  # type: ignore[assignment]
         vol_ratio_threshold: float = 1.5,
     ):
         """
@@ -1377,7 +1377,7 @@ class AIStrategyMixin:
         parts.append(f"{I18n.get('ai_revenue_yoy')}: {fmt_val(row.get('or_yoy'), suffix='%')}")
         parts.append(f"{I18n.get('ai_profit_yoy')}: {fmt_val(row.get('netprofit_yoy'), suffix='%')}")
 
-        tmv = safe_float(row.get("total_mv"), default=None)  # type: ignore
+        tmv = safe_float(row.get("total_mv"), default=None)  # type: ignore[union-attr]
         if tmv is not None:
             tmv_str = f"{tmv / 10000:.2f}{I18n.get('ai_billion_yuan')}"
         else:
@@ -1386,8 +1386,8 @@ class AIStrategyMixin:
 
         parts.append(f"{I18n.get('ai_dividend_yield_ttm')}: {fmt_val(row.get('dv_ttm'), suffix='%')}")
 
-        pe_val = safe_float(row.get("pe_ttm"), default=None)  # type: ignore
-        growth_val = safe_float(row.get("netprofit_yoy"), default=None)  # type: ignore
+        pe_val = safe_float(row.get("pe_ttm"), default=None)  # type: ignore[union-attr]
+        growth_val = safe_float(row.get("netprofit_yoy"), default=None)  # type: ignore[union-attr]
         if pe_val is not None and growth_val is not None and growth_val > 0:
             peg = pe_val / growth_val
             parts.append(f"{I18n.get('ai_peg')}: {peg:.2f} ({I18n.get('ai_peg_pe_profit_growth')})")

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from ui.i18n import I18n
+from core.i18n import I18n
 
 
 class TechnicalAnalysis:
@@ -253,7 +253,7 @@ class TechnicalAnalysis:
         days_since_healthy = None
         if healthy_mask.any():
             last_healthy_idx = healthy_mask[healthy_mask].index[-1]
-            days_since_healthy = len(rsi) - rsi.index.get_loc(last_healthy_idx) - 1  # type: ignore
+            days_since_healthy = len(rsi) - rsi.index.get_loc(last_healthy_idx) - 1  # type: ignore[union-attr]
 
         stagnation_detected = False
         recent_window = min(len(rsi), 20)

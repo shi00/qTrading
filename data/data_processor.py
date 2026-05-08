@@ -17,7 +17,7 @@ from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -296,7 +296,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     async def run_doubao_tagging(
         self,
-        task_id: str = None,  # type: ignore
+        task_id: str = None,  # type: ignore[assignment]
         cancel_event=None,
         **kwargs,
     ):
@@ -343,7 +343,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             last_sync = status.get("last_sync_date")
             if isinstance(last_sync, str):
                 last_sync = parse_date(last_sync)
-            days_since = (get_now() - last_sync.replace(tzinfo=None)).days  # type: ignore
+            days_since = (get_now() - last_sync.replace(tzinfo=None)).days  # type: ignore[union-attr]
 
             if days_since >= 30:
                 return True, I18n.get("status_days_ago", days=days_since)
@@ -664,7 +664,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         Note: Call request_cancel() to cancel this operation.
         """
         from data.data_dictionary import validate_schema_definitions
-        from ui.i18n import I18n
+        from core.i18n import I18n
 
         # Run schema validation (DD-01)
         validate_schema_definitions()
@@ -711,7 +711,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return None
 
             # ===== Step 1.5: Concepts (runs as part of Step 1) =====
-            report_step(1, 0.5, 1, I18n.get("init_sync_concepts"))  # type: ignore
+            report_step(1, 0.5, 1, I18n.get("init_sync_concepts"))  # type: ignore[attr-defined]
             await self.sync_concepts()
 
             # ===== Step 2: Trade Calendar (5%) =====

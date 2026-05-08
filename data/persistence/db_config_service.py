@@ -13,7 +13,7 @@ from urllib.parse import quote_plus, unquote_plus, urlparse
 
 import asyncpg
 
-from ui.i18n import I18n
+from core.i18n import I18n
 
 logger = logging.getLogger(__name__)
 

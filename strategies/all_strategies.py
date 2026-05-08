@@ -12,7 +12,7 @@ Adding a new strategy requires ONLY:
 import logging
 
 from strategies.base_strategy import _STRATEGY_REGISTRY
-from ui.i18n import I18n
+from core.i18n import I18n
 
 logger = logging.getLogger(__name__)
 

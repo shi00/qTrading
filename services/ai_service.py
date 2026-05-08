@@ -820,7 +820,7 @@ class AIService:
         L1/L2 codes are English enum values returned by the AI prompt,
         translated to locale-specific display names via I18n.
         """
-        from ui.i18n import I18n
+        from core.i18n import I18n
 
         l1_code = raw_result.get("category_L1", "")
         l2_code = raw_result.get("category_L2", "")

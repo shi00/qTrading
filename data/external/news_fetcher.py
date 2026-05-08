@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 from cachetools import TTLCache
 
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
@@ -62,7 +62,7 @@ class NewsFetcher:
         try:
             import akshare.stock_feature.stock_disclosure_cninfo as mod
 
-            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore
+            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
         except Exception:
             market = "沪深京"  # Fallback to standard standard UTF-8 key
 
@@ -224,7 +224,7 @@ class NewsFetcher:
                 # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
                 try:
                     # Try parsing with pandas for robustness (handles multiple formats)
-                    dt_obj = pd.to_datetime(final_time)  # type: ignore
+                    dt_obj = pd.to_datetime(final_time)  # type: ignore[assignment]
                     final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     # Fallback: if pandas fails, try to ensure at least string format
@@ -403,10 +403,10 @@ class NewsFetcher:
                 try:
                     raw_val = row.get("涨跌幅", 0)
                     # Handle NaN from pandas
-                    if pd.isna(raw_val):  # type: ignore
+                    if pd.isna(raw_val):  # type: ignore[union-attr]
                         change_val = 0.0
                     else:
-                        change_val = float(raw_val)  # type: ignore
+                        change_val = float(raw_val)  # type: ignore[arg-type]
                     change_str = f"{change_val:.2f}%"
                 except (ValueError, TypeError):
                     change_str = "0.00%"

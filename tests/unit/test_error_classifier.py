@@ -211,14 +211,14 @@ class TestGetErrorMessage:
     def test_translates_message_key(self):
         from unittest.mock import patch
 
-        with patch("ui.i18n.I18n.get", return_value="翻译后的消息"):
+        with patch("core.i18n.I18n.get", return_value="翻译后的消息"):
             result = get_error_message({"code": "test", "message_key": "some_key"})
             assert result == "翻译后的消息"
 
     def test_passes_format_args(self):
         from unittest.mock import patch
 
-        with patch("ui.i18n.I18n.get", return_value="格式化: bad") as mock_get:
+        with patch("core.i18n.I18n.get", return_value="格式化: bad") as mock_get:
             get_error_message(
                 {
                     "code": "format",
@@ -231,14 +231,14 @@ class TestGetErrorMessage:
     def test_no_format_args(self):
         from unittest.mock import patch
 
-        with patch("ui.i18n.I18n.get", return_value="简单消息") as mock_get:
+        with patch("core.i18n.I18n.get", return_value="简单消息") as mock_get:
             get_error_message({"code": "test", "message_key": "some_key"})
             mock_get.assert_called_once_with("some_key")
 
     def test_default_key_when_missing(self):
         from unittest.mock import patch
 
-        with patch("ui.i18n.I18n.get", return_value="未知错误") as mock_get:
+        with patch("core.i18n.I18n.get", return_value="未知错误") as mock_get:
             get_error_message({"code": "test"})
             mock_get.assert_called_once_with("common_err_unknown")
 

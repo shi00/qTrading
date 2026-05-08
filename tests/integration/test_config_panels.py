@@ -579,7 +579,7 @@ class TestTushareConfigPanel:
         panel = TushareConfigPanel()
         panel._safe_update = MagicMock()
 
-        with patch("ui.i18n.I18n.get", return_value="Test Label"):
+        with patch("ui.components.config_panels.tushare_config_panel.I18n.get", return_value="Test Label"):
             panel.refresh_locale()
 
         assert panel.token_input.label == "Test Label"

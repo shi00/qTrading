@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.error_classifier import classify_error, classify_severity
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import ThreadPoolManager
@@ -60,7 +60,7 @@ class AppTask:
     error: str = ""
 
     # Internal fields for execution
-    _coroutine_gen: Callable = None  # Function that returns a coroutine  # type: ignore
+    _coroutine_gen: Callable = None  # Function that returns a coroutine  # type: ignore[assignment]
     _asyncio_task: asyncio.Task | None = None
     _cancel_event: asyncio.Event | None = None
     unique_key: str | None = None  # For deduplication
@@ -202,7 +202,7 @@ class TaskManager:
         task_type: str,
         coroutine_factory: Callable,
         cancellable: bool = False,
-        unique_key: str = None,  # type: ignore
+        unique_key: str = None,  # type: ignore[assignment]
         **kwargs,
     ) -> str | None:
         """
@@ -263,7 +263,7 @@ class TaskManager:
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
-    def update_progress(self, task_id: str, progress: float, description: str = None):  # type: ignore
+    def update_progress(self, task_id: str, progress: float, description: str = None):  # type: ignore[assignment]
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
         Throttled to avoid flooding subscribers with high-frequency updates."""
         task = self._tasks.get(task_id)
@@ -492,9 +492,9 @@ class TaskManager:
             for _, row in df.iterrows():
                 try:
                     t = AppTask(
-                        id=row.get("id", ""),  # type: ignore
-                        name=row.get("name", ""),  # type: ignore
-                        task_type=row.get("task_type", "System"),  # type: ignore
+                        id=row.get("id", ""),  # type: ignore[union-attr]
+                        name=row.get("name", ""),  # type: ignore[union-attr]
+                        task_type=row.get("task_type", "System"),  # type: ignore[union-attr]
                         status=TaskStatus(row.get("status", "COMPLETED")),
                         progress=float(row.get("progress", 0) or 0),
                         description=str(row.get("description", "") or ""),

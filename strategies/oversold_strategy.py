@@ -9,7 +9,7 @@ from data.persistence.quality_gate import QualityGateError, QualityTier, require
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.technical_analysis import TechnicalAnalysis
 
 logger = logging.getLogger(__name__)
@@ -367,7 +367,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 if end_date:
                     start_date = await dp.trade_calendar.get_start_date_by_trade_days(end_date, 30)
                     if not start_date:
-                        start_date = end_date - datetime.timedelta(days=45)  # type: ignore
+                        start_date = end_date - datetime.timedelta(days=45)  # type: ignore[operator]
                     prefetched.indicators = await dp.cache.get_daily_indicators_bulk(
                         ts_code_list=ts_codes,
                         start_date=start_date,
@@ -389,7 +389,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 if trade_date:
                     start_date = await dp.trade_calendar.get_start_date_by_trade_days(trade_date, 30)
                     if not start_date:
-                        start_date = trade_date - datetime.timedelta(days=45)  # type: ignore
+                        start_date = trade_date - datetime.timedelta(days=45)  # type: ignore[operator]
 
                     indices = ["000001.SH", "399001.SZ", "399006.SZ"]
                     idx_df = await dp.cache.get_index_daily_range(
@@ -408,7 +408,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                             idx_data = idx_data.sort_values("trade_date", ascending=True)
 
                             current_row = idx_data[
-                                idx_data["trade_date"] == trade_date.strftime("%Y%m%d")  # type: ignore
+                                idx_data["trade_date"] == trade_date.strftime("%Y%m%d")  # type: ignore[union-attr]
                             ]
                             if current_row.empty:
                                 current_row = idx_data.tail(1)
@@ -475,7 +475,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         turnover_col = "turnover_rate"
 
         if turnover_col in stock_indicators.columns:
-            sorted_df = stock_indicators.sort_values("trade_date", ascending=False)  # type: ignore
+            sorted_df = stock_indicators.sort_values("trade_date", ascending=False)  # type: ignore[union-attr]
             recent_5 = sorted_df.head(5)
             recent_20 = sorted_df.head(20)
 
@@ -484,13 +484,13 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 avg_5d = recent_5[turnover_col].mean()
                 avg_20d = recent_20[turnover_col].mean() if len(recent_20) >= 20 else None
 
-                if pd.isna(current_turnover) or pd.isna(avg_5d):  # type: ignore
+                if pd.isna(current_turnover) or pd.isna(avg_5d):  # type: ignore[union-attr]
                     return "换手率数据: 包含无效值"
 
                 parts.append(f"当前换手率: {current_turnover:.2f}%")
                 parts.append(f"5日均值: {avg_5d:.2f}%")
 
-                if avg_20d is not None and not pd.isna(avg_20d):  # type: ignore
+                if avg_20d is not None and not pd.isna(avg_20d):  # type: ignore[union-attr]
                     parts.append(f"20日均值: {avg_20d:.2f}%")
                     ratio_5_20 = avg_5d / avg_20d if avg_20d > 0 else 1
                     if ratio_5_20 < 0.7:

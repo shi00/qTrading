@@ -270,7 +270,7 @@ class TestNewsSubscriptionServiceGenerateTags:
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
         svc.ai_client.classify_news = AsyncMock(return_value={"emoji": "[TEST]", "category": "Policy"})
-        with patch("ui.i18n.I18n.get", return_value="政策"):
+        with patch("core.i18n.I18n.get", return_value="政策"):
             result = await svc._generate_tags("央行发布新政策")
             assert "政策" in result
 
@@ -281,7 +281,7 @@ class TestNewsSubscriptionServiceGenerateTags:
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
         svc.ai_client.classify_news = AsyncMock(side_effect=Exception("AI error"))
-        with patch("ui.i18n.I18n.get", return_value="政策"):
+        with patch("core.i18n.I18n.get", return_value="政策"):
             result = await svc._generate_tags("央行发布新政策")
             assert len(result) > 0
 
@@ -292,7 +292,7 @@ class TestNewsSubscriptionServiceGenerateTags:
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
         svc.ai_client.classify_news = AsyncMock(return_value=None)
-        with patch("ui.i18n.I18n.get", return_value="政策"):
+        with patch("core.i18n.I18n.get", return_value="政策"):
             result = await svc._generate_tags("央行发布新政策")
             assert len(result) > 0
 
@@ -303,7 +303,7 @@ class TestNewsSubscriptionServiceGenerateTags:
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
         svc.ai_client.classify_news = AsyncMock(return_value=None)
-        with patch("ui.i18n.I18n.get", return_value="全球"):
+        with patch("core.i18n.I18n.get", return_value="全球"):
             result = await svc._generate_tags("美联储加息")
             assert len(result) > 0
 
@@ -314,7 +314,7 @@ class TestNewsSubscriptionServiceGenerateTags:
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
         svc.ai_client.classify_news = AsyncMock(return_value=None)
-        with patch("ui.i18n.I18n.get", return_value="宏观"):
+        with patch("core.i18n.I18n.get", return_value="宏观"):
             result = await svc._generate_tags("GDP增长超预期")
             assert len(result) > 0
 
