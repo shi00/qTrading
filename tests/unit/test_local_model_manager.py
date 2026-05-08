@@ -14,6 +14,7 @@ def reset_singleton():
     LocalModelManager._model_stat = (0, 0)
     LocalModelManager._last_config = {}
     LocalModelManager._is_loading = False
+    LocalModelManager._cancel_event.clear()
     yield
     LocalModelManager._instance = None
     LocalModelManager._initialized = False
@@ -23,6 +24,7 @@ def reset_singleton():
     LocalModelManager._model_stat = (0, 0)
     LocalModelManager._last_config = {}
     LocalModelManager._is_loading = False
+    LocalModelManager._cancel_event.clear()
 
 
 class TestLocalModelManagerGetLoadedModelPath:
@@ -406,13 +408,89 @@ class TestLocalModelManagerGenerateSync:
         with pytest.raises(ValueError, match="Model is None"):
             mgr._generate_sync("prompt", 100, 0.7, "system")
 
-    def test_generate_sync_success(self):
+    def test_generate_sync_stream_success(self):
+        """Verify streaming generation collects tokens correctly."""
         mgr = LocalModelManager()
         mock_llm = MagicMock()
-        mock_llm.create_chat_completion.return_value = {"choices": [{"message": {"content": "hello"}}]}
+        # Simulate streaming response: each chunk has a delta with content
+        mock_llm.create_chat_completion.return_value = iter(
+            [
+                {"choices": [{"delta": {"role": "assistant"}}]},
+                {"choices": [{"delta": {"content": "hel"}}]},
+                {"choices": [{"delta": {"content": "lo"}}]},
+                {"choices": [{"delta": {}}]},  # Empty delta (finish chunk)
+            ]
+        )
         mgr._llm = mock_llm
+        mgr._cancel_event.clear()
         result = mgr._generate_sync("prompt", 100, 0.7, "system")
         assert result == "hello"
+        mock_llm.create_chat_completion.assert_called_once()
+        # Verify stream=True was passed
+        call_kwargs = mock_llm.create_chat_completion.call_args
+        assert call_kwargs.kwargs.get("stream") is True or call_kwargs[1].get("stream") is True
+
+    def test_generate_sync_cancel_event_stops_generation(self):
+        """Verify that setting _cancel_event causes early exit from streaming loop."""
+        mgr = LocalModelManager()
+        mock_llm = MagicMock()
+        # Simulate a long stream; the cancel event should stop it early
+        mock_llm.create_chat_completion.return_value = iter(
+            [
+                {"choices": [{"delta": {"content": "tok1"}}]},
+                {"choices": [{"delta": {"content": "tok2"}}]},
+                {"choices": [{"delta": {"content": "tok3"}}]},
+                {"choices": [{"delta": {"content": "tok4"}}]},
+            ]
+        )
+        mgr._llm = mock_llm
+
+        # Pre-set the cancel event — simulates timeout handler firing
+        mgr._cancel_event.set()
+
+        result = mgr._generate_sync("prompt", 100, 0.7, "system")
+        # Should return empty or partial since cancel is checked before processing
+        assert result == ""
+
+    def test_generate_sync_cancel_mid_stream(self):
+        """Verify cancellation mid-stream returns partial output."""
+        mgr = LocalModelManager()
+        mock_llm = MagicMock()
+        cancel_event = mgr._cancel_event
+        cancel_event.clear()
+
+        # Custom iterator that sets cancel after 2nd chunk
+        def stream_with_cancel():
+            yield {"choices": [{"delta": {"content": "first"}}]}
+            yield {"choices": [{"delta": {"content": "second"}}]}
+            cancel_event.set()  # Simulate timeout firing
+            yield {"choices": [{"delta": {"content": "third"}}]}
+            yield {"choices": [{"delta": {"content": "fourth"}}]}
+
+        mock_llm.create_chat_completion.return_value = stream_with_cancel()
+        mgr._llm = mock_llm
+
+        result = mgr._generate_sync("prompt", 100, 0.7, "system")
+        # Should have first two chunks, then break on the third iteration
+        assert result == "firstsecond"
+
+
+class TestLocalModelManagerUnloadSetsCancel:
+    def test_unload_sets_cancel_event(self):
+        """Verify unload_model sets _cancel_event to signal running inference."""
+        mgr = LocalModelManager()
+        mgr._llm = MagicMock()
+        mgr._cancel_event.clear()
+        mgr.unload_model()
+        assert mgr._llm is None
+        assert mgr._cancel_event.is_set()
+
+    def test_unload_no_model_still_sets_cancel(self):
+        """Even without a loaded model, unload should set cancel for safety."""
+        mgr = LocalModelManager()
+        mgr._cancel_event.clear()
+        mgr.unload_model()
+        assert mgr._cancel_event.is_set()
 
 
 class TestLocalModelManagerGetLoadLock:

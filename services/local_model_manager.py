@@ -65,6 +65,7 @@ class LocalModelManager:
     _model_stat: tuple = (0, 0)
     _last_config: dict = {}
     _is_loading: bool = False
+    _cancel_event: threading.Event = threading.Event()
 
     @classmethod
     def _reset_singleton(cls):
@@ -276,6 +277,9 @@ class LocalModelManager:
         )
         start_time = asyncio.get_event_loop().time()
 
+        # Clear cancel signal before starting new inference
+        self._cancel_event.clear()
+
         # Serialize inference to prevent native crash (Llama instance is not thread-safe)
         async with self._get_load_lock():
             try:
@@ -301,9 +305,11 @@ class LocalModelManager:
                     f"[LocalModel] Inference timed out after {timeout_val}s.",
                     exc_info=False,
                 )
-                # FATAL: The underlying thread is still running _generate_sync synchronously!
-                # We MUST destroy the model instance to free memory and forcefully crash the C++ generation loop,
-                # otherwise we leak a fully-loaded CPU thread that will spin until it finishes.
+                # Signal the running thread to stop at the next token yield.
+                # With stream=True, _generate_sync checks _cancel_event between tokens
+                # and breaks out of the loop, allowing the thread to exit naturally
+                # and release its reference to the Llama object.
+                self._cancel_event.set()
                 self.unload_model()
                 self._model_path = ""
                 self._model_stat = (0, 0)
@@ -313,6 +319,7 @@ class LocalModelManager:
             except Exception as e:
                 logger.error(f"[LocalModel] Inference error: {e}", exc_info=True)
                 # Cleanup on unexpected errors as well just to be safe
+                self._cancel_event.set()
                 self.unload_model()
                 self._model_path = ""
                 self._model_stat = (0, 0)
@@ -320,7 +327,12 @@ class LocalModelManager:
 
     def _generate_sync(self, prompt: str, max_tokens: int, temperature: float, system_prompt: str) -> str:
         """
-        Sync generation logic.
+        Sync generation logic using streaming to enable cooperative cancellation.
+
+        Uses stream=True so that the generation yields control back to Python
+        between tokens. The _cancel_event is checked at each yield point;
+        if set (e.g. by timeout handler), the loop breaks and the thread
+        exits naturally, releasing its reference to the Llama object.
         """
         logger.info(
             f"[LocalModel] Running generation in thread: {threading.current_thread().name}",
@@ -335,18 +347,38 @@ class LocalModelManager:
             ChatCompletionRequestUserMessage(role="user", content=prompt),
         ]
 
-        response = self._llm.create_chat_completion(
+        # Stream=True enables cooperative cancellation: each token yield is a
+        # checkpoint where we can inspect _cancel_event and break out.
+        stream = self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
-            # Removed dangerous custom stop words (like "```" or "\n\n")
-            # which caused valid JSON truncation and len=0 outputs.
+            stream=True,
         )
 
-        return response["choices"][0]["message"]["content"]  # type: ignore
+        collected_content: list[str] = []
+        for chunk in stream:
+            # Cooperative cancellation: check between token yields
+            if self._cancel_event.is_set():
+                logger.warning(
+                    "[LocalModel] Generation cancelled by timeout signal. "
+                    f"Partial output: {len(collected_content)} chunks collected.",
+                )
+                break
+
+            choices = chunk.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    collected_content.append(content)
+
+        return "".join(collected_content)
 
     def unload_model(self):
-        """Free memory"""
+        """Free memory and signal any running inference to stop."""
+        # Ensure any in-flight streaming generation sees the cancel signal
+        self._cancel_event.set()
         if self._llm:
             del self._llm
             self._llm = None
