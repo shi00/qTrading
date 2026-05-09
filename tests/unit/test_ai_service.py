@@ -707,9 +707,9 @@ class TestAIServiceAnalyzeStockSuccess:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"})
         with (
-            patch("services.ai_service.resolve_prompt") as mock_resolve,
-            patch("services.ai_service.validate_prompt", return_value=(True, "")),
-            patch("services.ai_service.sanitize_prompt", return_value="safe prompt"),
+            patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve,
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="safe prompt"),
         ):
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
@@ -741,7 +741,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("services.ai_service.resolve_prompt") as mock_resolve:
+        with patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "concepts": []},
@@ -767,7 +767,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("services.ai_service.resolve_prompt") as mock_resolve:
+        with patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "concepts": None},
@@ -793,8 +793,8 @@ class TestAIServiceAnalyzeStockSuccess:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
         with (
-            patch("services.ai_service.validate_prompt", return_value=(True, "")),
-            patch("services.ai_service.sanitize_prompt", return_value="safe"),
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="safe"),
         ):
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
@@ -821,8 +821,8 @@ class TestAIServiceAnalyzeStockSuccess:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
-            patch("services.ai_service.validate_prompt", return_value=(False, "Injection detected")),
-            patch("services.ai_service.resolve_prompt") as mock_resolve,
+            patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
+            patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve,
         ):
             mock_resolve.return_value = "Fallback prompt"
             result = await svc.analyze_stock(
@@ -939,7 +939,7 @@ class TestAIServiceSetupLocalModel:
         mock_ch.get_ai_model.return_value = ""
         mock_ch.get_ai_api_key.return_value = ""
         mock_ch.get_ai_base_url.return_value = ""
-        mock_ch.get_setting.return_value = lambda k, d=False: None if k == "local_model_path" else d
+        mock_ch.get_setting.side_effect = lambda k, d=False: None if k == "local_model_path" else d
         svc = AIService()
         with patch("services.ai_service.LocalModelManager") as mock_lmm:
             mock_lmm.get_instance = AsyncMock(

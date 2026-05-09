@@ -93,7 +93,7 @@ class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):
     - Per-test TRUNCATE for data isolation (fast, no DDL)
     """
 
-    _session_engine: AsyncEngine = None  # type: ignore
+    _session_engine: AsyncEngine = None  # type: ignore[assignment]
 
     @classmethod
     def setUpClass(cls):
@@ -123,10 +123,10 @@ class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):
 
         self.engine = self._session_engine
 
-        await _truncate_all_tables(self.engine)
-
         self.cache = CacheManager()
         await self.cache.init_db()
+
+        await _truncate_all_tables(self.cache.engine)
 
     async def asyncTearDown(self):
         if hasattr(self, "cache"):

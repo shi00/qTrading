@@ -628,7 +628,7 @@ class TestTaskManagerRegisterAndRun:
         t = AppTask(name="test", cancellable=True)
         t._coroutine_gen = lambda t=t: asyncio.sleep(0)
         mgr._tasks[t.id] = t
-        with patch.object(mgr, "_notify_subscribers"):
+        with patch.object(mgr, "_notify_subscribers"), patch("asyncio.create_task"):
             mgr._register_and_run(t)
         assert t._cancel_event is not None
 
@@ -694,7 +694,7 @@ class TestTaskManagerPersistSnapshot:
     @patch("services.task_manager.I18n")
     async def test_cache_not_initialized(self, mock_i18n, mock_tp):
         mgr = TaskManager()
-        with patch("services.task_manager.CacheManager") as mock_cm:
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
             await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
 
@@ -705,7 +705,7 @@ class TestTaskManagerPersistSnapshot:
         mgr = TaskManager()
         mock_cache = MagicMock()
         mock_cache._write_db = AsyncMock()
-        with patch("services.task_manager.CacheManager") as mock_cm:
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = mock_cache
             await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
             mock_cache._write_db.assert_called_once()
@@ -717,7 +717,7 @@ class TestTaskManagerPersistSnapshot:
         mgr = TaskManager()
         mock_cache = MagicMock()
         mock_cache._write_db = AsyncMock(side_effect=Exception("DB error"))
-        with patch("services.task_manager.CacheManager") as mock_cm:
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = mock_cache
             await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
 
@@ -740,8 +740,8 @@ class TestTaskManagerClearFinishedDb:
         mock_conn.execute = AsyncMock()
         mock_engine.begin = MagicMock(return_value=mock_conn.__aenter__())
         with (
-            patch("services.task_manager.CacheManager") as mock_cm,
-            patch("services.task_manager.TaskHistory") as mock_th,
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.TaskHistory") as mock_th,
         ):
             mock_cm.return_value.engine = mock_engine
             mock_th.__table__ = MagicMock()
