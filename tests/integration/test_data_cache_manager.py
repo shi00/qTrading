@@ -236,11 +236,11 @@ class TestCacheManager(TestDatabaseBase):
         """Test complex join for screening data"""
         stock_basic = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ"],
-                "symbol": ["000001"],
-                "name": ["PA"],
-                "area": ["Sz"],
-                "industry": ["Bank"],
+                "ts_code": ["600519.SH"],
+                "symbol": ["600519"],
+                "name": ["Moutai"],
+                "area": ["Gz"],
+                "industry": ["Liquor"],
                 "market": ["Main"],
                 "list_date": ["20000101"],
                 "list_status": ["L"],
@@ -248,7 +248,7 @@ class TestCacheManager(TestDatabaseBase):
         )
         daily_quotes = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ"],
+                "ts_code": ["600519.SH"],
                 "trade_date": [datetime.date(2026, 5, 8)],
                 "close": [10.0],
                 "pct_chg": [1.0],
@@ -264,7 +264,7 @@ class TestCacheManager(TestDatabaseBase):
         )
         daily_ind = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ"],
+                "ts_code": ["600519.SH"],
                 "trade_date": [datetime.date(2026, 5, 8)],
                 "pe_ttm": [8.0],
                 "pe": [8],
@@ -284,7 +284,7 @@ class TestCacheManager(TestDatabaseBase):
         )
         fina = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ"],
+                "ts_code": ["600519.SH"],
                 "end_date": [datetime.date(2022, 12, 31)],
                 "ann_date": [datetime.date(2026, 5, 8)],
                 "report_type": ["1"],
@@ -315,7 +315,7 @@ class TestCacheManager(TestDatabaseBase):
 
         self.assertFalse(df.empty)
         row = df.iloc[0]
-        self.assertEqual(row["ts_code"], "000001.SZ")
+        self.assertEqual(row["ts_code"], "600519.SH")
         self.assertEqual(row["close"], 10.0)
         self.assertEqual(row["pe_ttm"], 8.0)
         self.assertEqual(row["roe"], 12.0)

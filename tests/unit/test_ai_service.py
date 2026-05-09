@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from services.ai_service import (
     AIService,
@@ -668,6 +668,341 @@ class TestAIServiceAnalyzeTimeoutHandling:
         )
         assert result["error"] == "Analysis timeout"
         assert result["score"] == 0
+
+
+class TestAIServiceAnalyzeStockCloudNotAvailable:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_returns_none_when_not_configured(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {}
+        mock_ch.get_ai_model.return_value = ""
+        mock_ch.get_ai_api_key.return_value = ""
+        mock_ch.get_ai_base_url.return_value = ""
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result is None
+
+
+class TestAIServiceAnalyzeStockSuccess:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_analyze_with_all_contexts(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"})
+        with (
+            patch("services.ai_service.resolve_prompt") as mock_resolve,
+            patch("services.ai_service.validate_prompt", return_value=(True, "")),
+            patch("services.ai_service.sanitize_prompt", return_value="safe prompt"),
+        ):
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test", "concepts": ["AI", "芯片"]},
+                tech_info={"rsi_14": 25},
+                news_list=[{"source": "CLS", "publish_time": "2026-05-09", "title": "利好消息"}],
+                global_context="大盘上涨",
+                strategy_context="超跌反弹策略",
+                capital_flow_text="北向资金净流入",
+                financials_text="ROE 15%",
+                history_text="近5日下跌",
+                strategy_key="oversold",
+            )
+        assert result["score"] == 80
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_analyze_with_empty_concepts(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        with patch("services.ai_service.resolve_prompt") as mock_resolve:
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "concepts": []},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+            )
+        assert result["score"] == 50
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_analyze_with_none_concepts(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        with patch("services.ai_service.resolve_prompt") as mock_resolve:
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "concepts": None},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+            )
+        assert result["score"] == 50
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_analyze_with_ui_prompt_override(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
+        with (
+            patch("services.ai_service.validate_prompt", return_value=(True, "")),
+            patch("services.ai_service.sanitize_prompt", return_value="safe"),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                ui_prompt_override="Custom analysis prompt",
+            )
+        assert result["score"] == 60
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_analyze_with_invalid_prompt_override(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
+        with (
+            patch("services.ai_service.validate_prompt", return_value=(False, "Injection detected")),
+            patch("services.ai_service.resolve_prompt") as mock_resolve,
+        ):
+            mock_resolve.return_value = "Fallback prompt"
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                ui_prompt_override="<script>evil</script>",
+                strategy_key="oversold",
+            )
+        assert result["score"] == 40
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_analyze_general_exception(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=RuntimeError("API error"))
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] is not None
+        assert result["score"] == 0
+
+
+class TestAIServiceClassifyNewsFallback:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_local_fails_cloud_succeeds(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_news_prompt.return_value = "Classify this news"
+        svc = AIService()
+        call_count = [0]
+
+        async def mock_chat_completion(messages, **kwargs):
+            call_count[0] += 1
+            if kwargs.get("provider") == "local":
+                raise Exception("Local model not configured")
+            return {"category_L1": "finance", "category_L2": "banking", "emoji": "📊", "sentiment": "Positive"}
+
+        svc._chat_completion = AsyncMock(side_effect=mock_chat_completion)
+        with patch("core.i18n.I18n.get", return_value="金融"):
+            result = await svc.classify_news("央行降息")
+        assert call_count[0] == 2
+        assert "category" in result
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_all_providers_fail(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_news_prompt.return_value = "Classify this news"
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=Exception("All down"))
+        result = await svc.classify_news("央行降息")
+        assert result.get("error") is not None
+        assert result.get("category") == "unknown"
+
+
+class TestAIServiceGetSemaphore:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_get_semaphore(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_max_concurrent_analysis.return_value = 3
+        svc = AIService()
+        sem = await svc._get_semaphore()
+        assert sem is not None
+
+
+class TestAIServiceSetupLocalModel:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_setup_local_model_no_path(self, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {}
+        mock_ch.get_ai_model.return_value = ""
+        mock_ch.get_ai_api_key.return_value = ""
+        mock_ch.get_ai_base_url.return_value = ""
+        mock_ch.get_setting.return_value = lambda k, d=False: None if k == "local_model_path" else d
+        svc = AIService()
+        with patch("services.ai_service.LocalModelManager") as mock_lmm:
+            mock_lmm.get_instance = AsyncMock(
+                return_value=MagicMock(get_loaded_model_path=MagicMock(return_value=None))
+            )
+            await svc._setup_local_model()
+
+
+class TestAIServiceBuildLiteLLMParamsResponseFormat:
+    def test_response_format_included(self):
+        llm_config = {
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={"type": "json_object"},
+        )
+        assert params["response_format"] == {"type": "json_object"}
+
+
+class TestAIServiceBuildLiteLLMParamsZhipu:
+    def test_zhipu_prefix(self):
+        llm_config = {
+            "provider": "zhipu",
+            "model": "glm-4",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["model"] == "openai/glm-4"
+
+    def test_moonshot_prefix(self):
+        llm_config = {
+            "provider": "moonshot",
+            "model": "moonshot-v1",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["model"] == "openai/moonshot-v1"
+
+    def test_minimax_prefix(self):
+        llm_config = {
+            "provider": "minimax",
+            "model": "abab6",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["model"] == "openai/abab6"
 
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")

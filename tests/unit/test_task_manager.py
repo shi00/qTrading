@@ -608,3 +608,175 @@ class TestTerminalStatuses:
         assert TaskStatus.INTERRUPTED in TERMINAL_STATUSES
         assert TaskStatus.QUEUED not in TERMINAL_STATUSES
         assert TaskStatus.RUNNING not in TERMINAL_STATUSES
+
+
+class TestTaskManagerRegisterAndRun:
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancelled_task_skipped(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.CANCELLED)
+        mgr._tasks[t.id] = t
+        mgr._register_and_run(t)
+        assert t._cancel_event is None
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_registers_and_launches(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._db_ready = False
+        t = AppTask(name="test", cancellable=True)
+        t._coroutine_gen = lambda t=t: asyncio.sleep(0)
+        mgr._tasks[t.id] = t
+        with patch.object(mgr, "_notify_subscribers"):
+            mgr._register_and_run(t)
+        assert t._cancel_event is not None
+
+
+class TestTaskManagerTaskRunner:
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_successful_execution(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
+            t = AppTask(name="test", cancellable=True)
+            t._cancel_event = asyncio.Event()
+            t._coroutine_gen = lambda: asyncio.sleep(0)
+            mgr._tasks[t.id] = t
+            with (
+                patch.object(mgr, "_persist_task"),
+                patch.object(mgr, "_notify_subscribers"),
+                patch.object(mgr, "_evict_on_complete"),
+            ):
+                await mgr._task_runner(t.id)
+            assert t.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_failed_execution(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
+            t = AppTask(name="test", cancellable=True)
+            t._cancel_event = asyncio.Event()
+            t._coroutine_gen = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+            mgr._tasks[t.id] = t
+            with (
+                patch.object(mgr, "_persist_task"),
+                patch.object(mgr, "_notify_subscribers"),
+                patch.object(mgr, "_evict_on_complete"),
+            ):
+                await mgr._task_runner(t.id)
+            assert t.status == TaskStatus.FAILED
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_cancelled_task_skipped(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.CANCELLED)
+        mgr._tasks[t.id] = t
+        await mgr._task_runner(t.id)
+        assert t.status == TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_nonexistent_task(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        await mgr._task_runner("nonexistent")
+
+
+class TestTaskManagerPersistSnapshot:
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_cache_not_initialized(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        with patch("services.task_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_write_succeeds(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache._write_db = AsyncMock()
+        with patch("services.task_manager.CacheManager") as mock_cm:
+            mock_cm._instance = mock_cache
+            await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
+            mock_cache._write_db.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_write_fails_gracefully(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache._write_db = AsyncMock(side_effect=Exception("DB error"))
+        with patch("services.task_manager.CacheManager") as mock_cm:
+            mock_cm._instance = mock_cache
+            await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
+
+
+class TestTaskManagerClearFinishedDb:
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_empty_ids(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        await mgr._clear_finished_db([])
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_clear_succeeds(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_engine = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock()
+        mock_engine.begin = MagicMock(return_value=mock_conn.__aenter__())
+        with (
+            patch("services.task_manager.CacheManager") as mock_cm,
+            patch("services.task_manager.TaskHistory") as mock_th,
+        ):
+            mock_cm.return_value.engine = mock_engine
+            mock_th.__table__ = MagicMock()
+            mock_th.__table__.delete.return_value.where.return_value = MagicMock()
+            await mgr._clear_finished_db(["id1", "id2"])
+
+
+class TestTaskManagerQueuePersistSnapshot:
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_no_loop_drops(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = None
+        mgr._queue_persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
+        assert mgr._persist_pending_count == 0
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_with_loop_schedules(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = MagicMock()
+        mgr._loop.is_running.return_value = True
+        mgr._queue_persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
+        assert mgr._persist_pending_count == 1
+
+
+class TestTaskManagerFlushPersistenceTimeout:
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_timeout_raises(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._persist_pending_count = 5
+        with pytest.raises(TimeoutError, match="timed out"):
+            await mgr.flush_persistence(timeout_s=0.01)

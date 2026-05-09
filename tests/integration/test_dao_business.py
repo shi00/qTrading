@@ -107,20 +107,23 @@ async def setup_stock_data(test_engine: AsyncEngine):
         await conn.execute(
             text(
                 "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
-                "VALUES ('000001.SZ', _RECENT_DATE, 10.0, 2.0, 1000000, 10000000)"
-            )
+                "VALUES ('000001.SZ', :trade_date, 10.0, 2.0, 1000000, 10000000)"
+            ),
+            {"trade_date": _RECENT_DATE},
         )
         await conn.execute(
             text(
                 "INSERT INTO daily_indicators (ts_code, trade_date, pe_ttm, pb, total_mv, turnover_rate) "
-                "VALUES ('000001.SZ', _RECENT_DATE, 5.0, 0.5, 1000000000, 1.5)"
-            )
+                "VALUES ('000001.SZ', :trade_date, 5.0, 0.5, 1000000000, 1.5)"
+            ),
+            {"trade_date": _RECENT_DATE},
         )
         await conn.execute(
             text(
                 "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe, grossprofit_margin, debt_to_assets) "
-                "VALUES ('000001.SZ', _RECENT_DATE_MINUS_90, _RECENT_DATE_MINUS_2, 12.0, 30.0, 80.0)"
-            )
+                "VALUES ('000001.SZ', :end_date, :ann_date, 12.0, 30.0, 80.0)"
+            ),
+            {"end_date": _RECENT_DATE_MINUS_90, "ann_date": _RECENT_DATE_MINUS_2},
         )
 
 
@@ -1041,7 +1044,7 @@ class TestMacroDao:
         assert saved == 1
 
         result = await macro_dao.get_macro_latest_date()
-        assert result == datetime.date(2026, 4, 8)
+        assert result == (_TODAY - timedelta(days=91))
 
     async def test_save_shibor_daily(self, macro_dao, clean_db):
         """保存 Shibor 利率"""
@@ -1065,7 +1068,7 @@ class TestMacroDao:
         assert saved == 1
 
         result = await macro_dao.get_shibor_latest_date()
-        assert result == datetime.date(2026, 5, 8)
+        assert result == (_TODAY - timedelta(days=1))
 
 
 @pytest.mark.asyncio

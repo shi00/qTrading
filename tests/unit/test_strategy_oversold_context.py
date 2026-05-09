@@ -882,3 +882,117 @@ class TestComputeSectorStats(unittest.TestCase):
         result = self.strategy._compute_sector_stats(pd.DataFrame())
 
         self.assertEqual(result, {})
+
+
+class TestSortForAI(unittest.TestCase):
+    """测试 _sort_for_ai 排序逻辑"""
+
+    def setUp(self):
+        self.strategy = OversoldStrategy()
+
+    def test_sort_by_rsi_ascending(self):
+        """按 RSI 升序排列"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["A", "B", "C"],
+                "rsi_14": [25.0, 15.0, 20.0],
+                "amount": [100, 200, 300],
+                "total_mv": [50, 60, 70],
+            }
+        )
+        result = self.strategy._sort_for_ai(df)
+        self.assertEqual(result.iloc[0]["ts_code"], "B")
+        self.assertEqual(result.iloc[1]["ts_code"], "C")
+        self.assertEqual(result.iloc[2]["ts_code"], "A")
+
+    def test_sort_empty_df(self):
+        """空 DataFrame 直接返回"""
+        df = pd.DataFrame()
+        result = self.strategy._sort_for_ai(df)
+        self.assertTrue(result.empty)
+
+    def test_sort_no_rsi_column(self):
+        """无 RSI 列时按 amount 降序"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["A", "B"],
+                "amount": [100, 200],
+                "total_mv": [50, 60],
+            }
+        )
+        result = self.strategy._sort_for_ai(df)
+        self.assertEqual(result.iloc[0]["ts_code"], "B")
+
+    def test_sort_no_amount_use_vol(self):
+        """无 amount 列时按 vol 降序"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["A", "B"],
+                "rsi_14": [25.0, 20.0],
+                "vol": [100, 200],
+                "total_mv": [50, 60],
+            }
+        )
+        result = self.strategy._sort_for_ai(df)
+        self.assertEqual(result.iloc[0]["ts_code"], "B")
+
+    def test_sort_no_sortable_columns(self):
+        """无可排序列时返回原 DataFrame"""
+        df = pd.DataFrame({"ts_code": ["A", "B"], "close": [10, 20]})
+        result = self.strategy._sort_for_ai(df)
+        self.assertEqual(len(result), 2)
+
+
+class TestGetDynamicDescription(unittest.TestCase):
+    """测试 get_dynamic_description 动态描述"""
+
+    def setUp(self):
+        self.strategy = OversoldStrategy()
+
+    def test_default_params(self):
+        """默认参数返回 RSI(14) < 30"""
+        result = self.strategy.get_dynamic_description({})
+        self.assertIn("14", result)
+        self.assertIn("30", result)
+
+    def test_custom_params(self):
+        """自定义参数返回对应描述"""
+        result = self.strategy.get_dynamic_description({"rsi_period": 6, "rsi_threshold": 25})
+        self.assertIn("6", result)
+        self.assertIn("25", result)
+
+
+class TestShouldIncludeContext(unittest.TestCase):
+    """测试 should_include_* 方法"""
+
+    def setUp(self):
+        self.strategy = OversoldStrategy()
+
+    def test_should_include_global_context_false(self):
+        """超跌策略不包含全球上下文"""
+        self.assertFalse(self.strategy.should_include_global_context())
+
+    def test_should_include_learning_context_false(self):
+        """超跌策略不包含学习上下文"""
+        self.assertFalse(self.strategy.should_include_learning_context())
+
+
+class TestGetParameters(unittest.TestCase):
+    """测试 get_parameters 返回参数定义"""
+
+    def setUp(self):
+        self.strategy = OversoldStrategy()
+
+    def test_get_parameters_returns_list(self):
+        """返回参数列表"""
+        params = self.strategy.get_parameters()
+        self.assertIsInstance(params, list)
+        self.assertEqual(len(params), 3)
+
+    def test_get_parameters_has_rsi_period(self):
+        """包含 RSI 周期参数"""
+        params = self.strategy.get_parameters()
+        names = [p["name"] for p in params]
+        self.assertIn("rsi_period", names)
+        self.assertIn("rsi_threshold", names)
+        self.assertIn("vol_ratio_threshold", names)
