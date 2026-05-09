@@ -453,3 +453,35 @@ class TestShutdownWatchdogForceExit:
 
             time.sleep(0.3)
             assert any("forcing exit" in r.message.lower() for r in caplog.records)
+
+
+class TestShutdownCoordinatorGracefulForceExit:
+    def test_custom_callback_tries_sys_exit_first(self):
+
+        exit_calls = []
+
+        def mock_sys_exit(code):
+            exit_calls.append(("sys.exit", code))
+            raise SystemExit(code)
+
+        def force_exit(code):
+            exit_calls.append(("force_exit", code))
+
+        coord = ShutdownCoordinator(force_exit_callback=force_exit)
+        coord._force_exit(1)
+        assert ("force_exit", 1) in exit_calls
+
+    def test_default_callback_is_os_exit(self):
+        import os
+
+        coord = ShutdownCoordinator()
+        assert coord._force_exit == os._exit
+
+    def test_main_py_uses_graceful_callback(self):
+        import pathlib
+
+        main_path = pathlib.Path(__file__).resolve().parent.parent.parent / "main.py"
+        source = main_path.read_text(encoding="utf-8")
+        assert "force_exit_callback=_graceful_force_exit" in source
+        assert "_graceful_force_exit" in source
+        assert "sys.exit" in source

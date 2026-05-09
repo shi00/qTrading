@@ -670,6 +670,109 @@ class TestAIServiceAnalyzeTimeoutHandling:
         assert result["score"] == 0
 
 
+class TestUniversalRulesSeparateSystemMessage:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_messages_contain_two_system_messages(self, mock_ch):
+        from strategies.strategy_prompts import _UNIVERSAL_RULES
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        with patch("strategies.strategy_prompts.get_base_prompt", return_value="Strategy prompt"):
+            await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test"},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+            )
+        messages = svc._chat_completion.await_args.args[0]
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert len(system_msgs) == 2
+        assert system_msgs[0]["content"] == _UNIVERSAL_RULES
+        assert system_msgs[1]["content"] == "Strategy prompt"
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_ui_override_does_not_merge_with_universal_rules(self, mock_ch):
+        from strategies.strategy_prompts import _UNIVERSAL_RULES
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
+        with (
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="safe custom prompt"),
+        ):
+            await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                ui_prompt_override="Custom analysis prompt",
+            )
+        messages = svc._chat_completion.await_args.args[0]
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert len(system_msgs) == 2
+        assert system_msgs[0]["content"] == _UNIVERSAL_RULES
+        assert _UNIVERSAL_RULES not in system_msgs[1]["content"]
+        assert system_msgs[1]["content"] == "safe custom prompt"
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_invalid_override_uses_base_prompt_without_rules(self, mock_ch):
+        from strategies.strategy_prompts import _UNIVERSAL_RULES
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
+        with (
+            patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="Fallback prompt"),
+        ):
+            await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                ui_prompt_override="<script>evil</script>",
+                strategy_key="oversold",
+            )
+        messages = svc._chat_completion.await_args.args[0]
+        system_msgs = [m for m in messages if m["role"] == "system"]
+        assert len(system_msgs) == 2
+        assert system_msgs[0]["content"] == _UNIVERSAL_RULES
+        assert _UNIVERSAL_RULES not in system_msgs[1]["content"]
+        assert system_msgs[1]["content"] == "Fallback prompt"
+
+
 class TestAIServiceAnalyzeStockCloudNotAvailable:
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -707,7 +810,7 @@ class TestAIServiceAnalyzeStockSuccess:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"})
         with (
-            patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve,
+            patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve,
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
             patch("utils.prompt_guard.sanitize_prompt", return_value="safe prompt"),
         ):
@@ -741,7 +844,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve:
+        with patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "concepts": []},
@@ -767,7 +870,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve:
+        with patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "concepts": None},
@@ -822,7 +925,7 @@ class TestAIServiceAnalyzeStockSuccess:
         svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
-            patch("strategies.strategy_prompts.resolve_prompt") as mock_resolve,
+            patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve,
         ):
             mock_resolve.return_value = "Fallback prompt"
             result = await svc.analyze_stock(

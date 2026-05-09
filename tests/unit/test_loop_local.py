@@ -74,3 +74,35 @@ class TestClearAllLoopLocals:
         clear_all_loop_locals()
         result = get_loop_local("clear_a", list)
         assert isinstance(result, list)
+
+
+class TestGetLoopLocalStrict:
+    def test_strict_outside_event_loop_raises(self):
+        with pytest.raises(RuntimeError, match="strict mode"):
+            get_loop_local("strict_key", list, strict=True)
+
+    @pytest.mark.asyncio
+    async def test_strict_inside_event_loop_works(self):
+        result = get_loop_local("strict_in_loop", list, strict=True)
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_strict_caches_within_same_loop(self):
+        call_count = [0]
+
+        def factory():
+            call_count[0] += 1
+            return object()
+
+        result1 = get_loop_local("strict_cache", factory, strict=True)
+        result2 = get_loop_local("strict_cache", factory, strict=True)
+        assert result1 is result2
+        assert call_count[0] == 1
+
+    def test_non_strict_outside_event_loop_still_works(self):
+        result = get_loop_local("non_strict_key", list, strict=False)
+        assert isinstance(result, list)
+
+    def test_strict_error_message_contains_key(self):
+        with pytest.raises(RuntimeError, match="my_special_key"):
+            get_loop_local("my_special_key", list, strict=True)

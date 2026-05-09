@@ -146,7 +146,7 @@ _test_db_initialized = False
 
 
 async def _ensure_test_db():
-    """Ensure test database exists - called lazily"""
+    """Ensure test database exists - called lazily per worker"""
     global _test_db_initialized
     if _test_db_initialized:
         return
@@ -157,20 +157,18 @@ async def _ensure_test_db():
         user=TEST_DB_USER,
         password=TEST_DB_PASSWORD,
         database="postgres",
-        timeout=5.0,  # type: ignore
+        timeout=5.0,  # type: ignore[arg-type]
     )
     try:
-        await conn.execute(
-            """
-            SELECT pg_terminate_backend(pid)
-            FROM pg_stat_activity
-            WHERE datname = $1
-              AND pid <> pg_backend_pid();
-            """,
+        existing = await conn.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1",
             TEST_DB_NAME,
         )
+        if existing:
+            _test_db_initialized = True
+            return
+
         db_name_sql = TEST_DB_NAME.replace('"', '""')
-        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
         await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
         _test_db_initialized = True
     finally:
@@ -198,6 +196,33 @@ async def test_engine():
     if _test_engine is not None:
         await _test_engine.dispose()
         _test_engine = None
+
+    if _xdist_worker:
+        try:
+            conn = await asyncpg.connect(
+                host=TEST_DB_HOST,
+                port=TEST_DB_PORT,
+                user=TEST_DB_USER,
+                password=TEST_DB_PASSWORD,
+                database="postgres",
+                timeout=5.0,
+            )
+            try:
+                await conn.execute(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = $1
+                      AND pid <> pg_backend_pid();
+                    """,
+                    TEST_DB_NAME,
+                )
+                db_name_sql = TEST_DB_NAME.replace('"', '""')
+                await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
+            finally:
+                await conn.close()
+        except Exception:
+            pass
 
 
 @pytest_asyncio.fixture

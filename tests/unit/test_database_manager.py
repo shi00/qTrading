@@ -177,6 +177,54 @@ class TestValidateTableName:
             with pytest.raises(ValueError, match="Invalid"):
                 dm._validate_table_name("nonexistent")
 
+    def test_sql_injection_drop_table(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("stock_basic; DROP TABLE stock_basic;--")
+
+    def test_sql_injection_union(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("stock_basic UNION SELECT * FROM users--")
+
+    def test_empty_string(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("")
+
+    def test_whitespace_only(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("   ")
+
+    def test_semicolon_injection(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name(";")
+
+    def test_comment_injection(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("--")
+
+    def test_case_sensitive_rejection(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("STOCK_BASIC")
+
+    def test_partial_name_rejection(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            with pytest.raises(ValueError, match="Invalid"):
+                dm._validate_table_name("stock")
+
 
 class TestApplyFilters:
     def test_no_filters(self):

@@ -303,6 +303,9 @@ class HealthCheckMixin:
 
         try:
             end_date = await self.get_latest_trade_date()  # type: ignore[attr-defined]
+            if end_date is None:
+                logger.warning("[DataProcessor] HealthCheck | No trade date available, using today.")
+                end_date = get_now().date()
             from utils.time_utils import parse_date
 
             end_date_obj = parse_date(end_date)

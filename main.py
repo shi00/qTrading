@@ -37,7 +37,16 @@ async def main(page: ft.Page):
     # ============================================================
     from utils.shutdown import ShutdownCoordinator
 
-    coordinator = ShutdownCoordinator(page)
+    def _graceful_force_exit(code: int):
+        import sys
+        import os
+
+        try:
+            sys.exit(code)
+        except SystemExit:
+            os._exit(code)
+
+    coordinator = ShutdownCoordinator(page, force_exit_callback=_graceful_force_exit)
     close_confirm_dialog = None
     close_confirm_visible = False
     shutdown_requested = False

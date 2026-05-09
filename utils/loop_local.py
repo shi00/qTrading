@@ -15,11 +15,16 @@ def _get_store(key: str) -> weakref.WeakKeyDictionary[asyncio.AbstractEventLoop,
     return _stores[key]
 
 
-def get_loop_local(key: str, factory: Callable[[], Any]) -> Any:
+def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = False) -> Any:
     store = _get_store(key)
     try:
         loop = asyncio.get_running_loop()
-    except RuntimeError:
+    except RuntimeError as exc:
+        if strict:
+            raise RuntimeError(
+                f"get_loop_local('{key}') called outside event loop in strict mode. "
+                f"Callers must ensure they are inside an async context."
+            ) from exc
         logger.error(
             f"[loop_local] get_loop_local('{key}') called outside event loop; "
             f"factory() invoked but result will NOT be cached. "

@@ -237,7 +237,7 @@ class TradeCalendarService:
             if df is not None and not df.empty:
                 row = df[df["cal_date"] == self._to_str(date_obj)]
                 if not row.empty:
-                    return row["is_open"].iloc[0] == 1  # type: ignore
+                    return row["is_open"].iloc[0] == 1  # type: ignore[index]
 
             return self._offline.is_trading_day(date_obj)
 
@@ -299,7 +299,7 @@ class TradeCalendarService:
             if df is not None and not df.empty:
                 trade_df = df[df["is_open"] == 1] if "is_open" in df.columns else df
                 if not trade_df.empty:
-                    dates = pd.to_datetime(trade_df["cal_date"]).dt.date.tolist()  # type: ignore
+                    dates = pd.to_datetime(trade_df["cal_date"]).dt.date.tolist()  # type: ignore[union-attr]
                     return sorted(dates)
 
             offline_dates = self._offline.get_trade_dates(start_obj, end_obj)
@@ -464,7 +464,7 @@ class TradeCalendarService:
         log_exceptions=True,
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
     )
-    async def get_latest_trade_date(self) -> datetime.date | None:
+    async def get_latest_trade_date(self, *, allow_fallback: bool = True) -> datetime.date | None:
         """
         获取最近的交易日。
 
@@ -472,8 +472,13 @@ class TradeCalendarService:
         - 当前时间 < 15:00 → 返回上一个交易日
         - 当前时间 >= 15:00 → 返回今天 (如果是交易日) 或上一个交易日
 
+        Args:
+            allow_fallback: If True (default), falls back to weekday heuristic when
+                calendar data is unavailable. If False, returns None instead of guessing,
+                which prevents incorrect dates on Chinese holidays.
+
         Returns:
-            date: 最近交易日
+            date: 最近交易日, or None if allow_fallback=False and no calendar data
 
         示例:
             # 假设今天是 2024-03-21 (周四) 14:00
@@ -517,10 +522,14 @@ class TradeCalendarService:
                 logger.warning(f"[TradeCalendarService] get_latest_trade_date failed: {e}")
 
             logger.error(
-                "[TradeCalendarService] get_latest_trade_date: "
-                "no trade calendar data available, falling back to weekday heuristic. "
-                "Result may be incorrect on holidays (Spring Festival, National Day, etc.)."
+                "[TradeCalendarService] get_latest_trade_date: no trade calendar data available.%s",
+                " Falling back to weekday heuristic (may be incorrect on holidays)."
+                if allow_fallback
+                else " allow_fallback=False, returning None.",
             )
+            if not allow_fallback:
+                return None
+
             dt = end_dt
             while dt.weekday() >= 5:
                 dt -= datetime.timedelta(days=1)
@@ -603,7 +612,7 @@ class TradeCalendarService:
             if df is not None and not df.empty:
                 if is_open is not None and "is_open" in df.columns:
                     df = df[df["is_open"] == int(is_open)]
-                return df  # type: ignore
+                return df  # type: ignore[return-value]
 
             return pd.DataFrame()
 

@@ -1,5 +1,8 @@
 import logging
 import os
+import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 
 from utils.config_handler import ConfigHandler
 
@@ -11,14 +14,14 @@ class ProxyManager:
     Manages network proxy settings to ensure stability for both
     Domestic (Direct) and International (Proxy) traffic.
 
-    Design decisions:
-    - Writes NO_PROXY to os.environ so that third-party libraries
-      (litellm/httpx/requests) can respect the proxy bypass rules.
-      WARNING: This is a process-wide side effect (S-P0-2).
-      Prefer get_no_proxy_env_dict() + per-client config when possible.
+    Design decisions (S-P0-2 fix):
+    - NO_PROXY is cached internally but NOT written to os.environ by default.
+    - Callers should use get_httpx_proxy_config() / get_requests_proxy_config()
+      for per-client proxy injection.
+    - For libraries that read os.environ (e.g. litellm), use the
+      litellm_env_context() context manager to temporarily set/restore env.
     - Does NOT log the full domain list to prevent enterprise network
-      topology leakage (S-P0-2 fix).
-    - Also caches domains in a class-level store for programmatic queries.
+      topology leakage.
     - Preserves the ORIGINAL env NO_PROXY (before any ProxyManager writes)
       so that reapply can correctly remove domains that were deleted from config.
     """
@@ -27,18 +30,20 @@ class ProxyManager:
     _initialized: bool = False
     _original_no_proxy: set[str] | None = None
     _env_written: bool = False
+    _env_lock: threading.Lock = threading.Lock()
 
     @staticmethod
     def apply_smart_proxy_policy():
         """
-        Computes and applies the NO_PROXY domain list at startup.
+        Computes and caches the NO_PROXY domain list at startup.
 
         Strategy:
         1. On first call, snapshot the original NO_PROXY from env (before we modify it).
         2. Load whitelist from Config (user_settings.json).
         3. Merge original NO_PROXY with config whitelist.
-        4. Apply updated NO_PROXY to environment (required for litellm/httpx).
-        5. Cache the result for programmatic queries.
+        4. Cache the result for programmatic queries.
+        5. Apply to os.environ ONLY if _env_written is explicitly enabled
+           (for backward compatibility with litellm).
         """
         logger.info("[ProxyManager] Computing proxy configuration...")
 
@@ -78,25 +83,11 @@ class ProxyManager:
 
         if final_domains:
             valid_domains = [d for d in final_domains if d]
-            new_no_proxy = ",".join(valid_domains)
-
-            if not ProxyManager._env_written:
-                logger.warning(
-                    "[ProxyManager] Writing NO_PROXY to os.environ (process-wide side effect). "
-                    "Prefer get_no_proxy_env_dict() + per-client config for new code.",
-                )
-                ProxyManager._env_written = True
-
-            os.environ["NO_PROXY"] = new_no_proxy
-            os.environ["no_proxy"] = new_no_proxy
-
             logger.info(
-                f"[ProxyManager] Configuration applied. {len(valid_domains)} domains in NO_PROXY.",
+                f"[ProxyManager] Configuration cached. {len(valid_domains)} domains in NO_PROXY.",
             )
         else:
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
-            logger.info("[ProxyManager] Configuration applied. NO_PROXY cleared.")
+            logger.info("[ProxyManager] Configuration cached. NO_PROXY empty.")
 
     @staticmethod
     def reapply_proxy_policy():
@@ -215,3 +206,36 @@ class ProxyManager:
             proxies["https"] = https_proxy
 
         return {"proxies": proxies}
+
+    @staticmethod
+    @contextmanager
+    def litellm_env_context() -> Generator[None, None, None]:
+        """
+        Context manager that temporarily sets NO_PROXY in os.environ
+        for libraries that read proxy config from env (e.g. litellm).
+
+        Thread-safe: uses a class-level lock to prevent concurrent coroutines
+        or threads from overwriting each other's env snapshot.
+
+        Restores the original env vars on exit, avoiding process-wide pollution.
+
+        Usage:
+            with ProxyManager.litellm_env_context():
+                result = await litellm.acompletion(...)
+        """
+        with ProxyManager._env_lock:
+            env_dict = ProxyManager.get_no_proxy_env_dict()
+            saved: dict[str, str | None] = {}
+
+            for key in ("NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+                saved[key] = os.environ.get(key)
+
+            try:
+                os.environ.update(env_dict)
+                yield
+            finally:
+                for key, original_value in saved.items():
+                    if original_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = original_value

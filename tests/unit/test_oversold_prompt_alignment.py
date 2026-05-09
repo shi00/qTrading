@@ -30,6 +30,11 @@ def _build_test_ai_service():
     return service
 
 
+def _get_user_prompt(service):
+    messages = service._chat_completion.await_args.args[0]
+    return next(m["content"] for m in messages if m["role"] == "user")
+
+
 def _build_history_df(ts_code: str, days: int = 80) -> pd.DataFrame:
     rows = []
     start = datetime.date(2024, 1, 2)
@@ -83,8 +88,7 @@ async def test_strategy_context_truncation_limit_is_relaxed():
             strategy_context=long_context,
         )
 
-    messages = service._chat_completion.await_args.args[0]
-    user_prompt = messages[1]["content"]
+    user_prompt = _get_user_prompt(service)
     strategy_segment = user_prompt.split("<strategy_context>\n", 1)[1].split("\n</strategy_context>", 1)[0]
 
     assert "...(truncated)" in strategy_segment
@@ -178,8 +182,7 @@ async def test_oversold_runtime_strategy_context_keeps_all_core_blocks():
             strategy_context=strategy_ctx,
         )
 
-    messages = service._chat_completion.await_args.args[0]
-    user_prompt = messages[1]["content"]
+    user_prompt = _get_user_prompt(service)
     strategy_segment = user_prompt.split("<strategy_context>\n", 1)[1].split("\n</strategy_context>", 1)[0]
 
     assert "### turnover" in strategy_segment
@@ -286,8 +289,7 @@ async def test_strategy_manager_oversold_pipeline_forwards_shared_context_flags(
     assert analyze_call.kwargs["include_global_context"] is False
     assert analyze_call.kwargs["include_learning_context"] is False
 
-    messages = service._chat_completion.await_args.args[0]
-    user_prompt = messages[1]["content"]
+    user_prompt = _get_user_prompt(service)
 
     assert "<global_context>" not in user_prompt
     assert "<history_context>" not in user_prompt
@@ -324,8 +326,7 @@ async def test_oversold_prompt_skips_shared_context_blocks():
 
         await service.analyze_stock(**analyze_kwargs)
 
-    messages = service._chat_completion.await_args.args[0]
-    user_prompt = messages[1]["content"]
+    user_prompt = _get_user_prompt(service)
 
     assert "<global_context>" not in user_prompt
     assert "<history_context>" not in user_prompt
@@ -350,8 +351,7 @@ async def test_strategy_key_alone_no_longer_disables_shared_context():
             strategy_key="oversold",
         )
 
-    messages = service._chat_completion.await_args.args[0]
-    user_prompt = messages[1]["content"]
+    user_prompt = _get_user_prompt(service)
 
     assert "<global_context>" in user_prompt
     assert "<history_context>" in user_prompt
@@ -384,8 +384,7 @@ async def test_oversold_final_prompt_contains_dynamic_ui_params():
             strategy_key="oversold",
         )
 
-    messages = service._chat_completion.await_args.args[0]
-    user_prompt = messages[1]["content"]
+    user_prompt = _get_user_prompt(service)
     strategy_segment = user_prompt.split("<strategy_context>\n", 1)[1].split("\n</strategy_context>", 1)[0]
 
     assert "当前策略参数: RSI周期=21, 超卖阈值=35, 量能判定阈值=1.8" in strategy_segment

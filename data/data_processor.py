@@ -530,6 +530,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         now = get_now()
         today_date = now.date()
         latest = await self.get_latest_trade_date()
+        if latest is None:
+            logger.warning("[DataProcessor] prepare_market_data | No trade date, syncing today.")
+            await self.sync_daily_market_snapshot(today_date)
+            return today_date
         if latest != today_date:
             return latest
 

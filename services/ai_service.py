@@ -374,87 +374,90 @@ class AIService:
         litellm_model = f"{provider}/{model_id}" if provider else model_id
         supports_reasoning = _check_reasoning_support(litellm_model)
 
+        from utils.proxy_manager import ProxyManager
+
         stream = kwargs.get("stream", False) or on_chunk is not None
 
-        if stream:
-            if supports_reasoning:
-                request_params["stream_options"] = {"include_usage": True}
-
-            response = await acompletion(stream=True, **request_params)
-            response_content = ""
-            reasoning_content = ""
-            usage = None
-
-            _CHUNK_BUFFER_CHARS = 50
-            _content_buf: list[str] = []
-            _reasoning_buf: list[str] = []
-
-            def _flush_content_buf():
-                nonlocal _content_buf
-                if _content_buf and on_chunk:
-                    on_chunk("".join(_content_buf), False)
-                _content_buf = []
-
-            def _flush_reasoning_buf():
-                nonlocal _reasoning_buf
-                if _reasoning_buf and on_chunk:
-                    on_chunk("".join(_reasoning_buf), True)
-                _reasoning_buf = []
-
-            async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
-                if not chunk.choices:
-                    if hasattr(chunk, "usage") and chunk.usage:
-                        usage = {
-                            "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
-                            "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
-                            "total_tokens": getattr(chunk.usage, "total_tokens", 0),
-                        }
-                    continue
-
-                delta = chunk.choices[0].delta
-
+        with ProxyManager.litellm_env_context():
+            if stream:
                 if supports_reasoning:
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        reasoning_content += reasoning
+                    request_params["stream_options"] = {"include_usage": True}
+
+                response = await acompletion(stream=True, **request_params)
+                response_content = ""
+                reasoning_content = ""
+                usage = None
+
+                _CHUNK_BUFFER_CHARS = 50
+                _content_buf: list[str] = []
+                _reasoning_buf: list[str] = []
+
+                def _flush_content_buf():
+                    nonlocal _content_buf
+                    if _content_buf and on_chunk:
+                        on_chunk("".join(_content_buf), False)
+                    _content_buf = []
+
+                def _flush_reasoning_buf():
+                    nonlocal _reasoning_buf
+                    if _reasoning_buf and on_chunk:
+                        on_chunk("".join(_reasoning_buf), True)
+                    _reasoning_buf = []
+
+                async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
+                    if not chunk.choices:
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            usage = {
+                                "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
+                                "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
+                                "total_tokens": getattr(chunk.usage, "total_tokens", 0),
+                            }
+                        continue
+
+                    delta = chunk.choices[0].delta
+
+                    if supports_reasoning:
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            reasoning_content += reasoning
+                            if on_chunk:
+                                _reasoning_buf.append(reasoning)
+                                if sum(len(s) for s in _reasoning_buf) >= _CHUNK_BUFFER_CHARS:
+                                    _flush_reasoning_buf()
+
+                    if delta.content:
+                        response_content += delta.content
                         if on_chunk:
-                            _reasoning_buf.append(reasoning)
-                            if sum(len(s) for s in _reasoning_buf) >= _CHUNK_BUFFER_CHARS:
-                                _flush_reasoning_buf()
+                            _content_buf.append(delta.content)
+                            if sum(len(s) for s in _content_buf) >= _CHUNK_BUFFER_CHARS:
+                                _flush_content_buf()
 
-                if delta.content:
-                    response_content += delta.content
-                    if on_chunk:
-                        _content_buf.append(delta.content)
-                        if sum(len(s) for s in _content_buf) >= _CHUNK_BUFFER_CHARS:
-                            _flush_content_buf()
+                _flush_content_buf()
+                _flush_reasoning_buf()
 
-            _flush_content_buf()
-            _flush_reasoning_buf()
+                if not response_content and reasoning_content:
+                    response_content = reasoning_content
 
-            if not response_content and reasoning_content:
-                response_content = reasoning_content
+                result = {"content": response_content}
+                if reasoning_content:
+                    result["reasoning_content"] = reasoning_content
+                if usage:
+                    result["usage"] = usage
 
-            result = {"content": response_content}
-            if reasoning_content:
-                result["reasoning_content"] = reasoning_content
-            if usage:
-                result["usage"] = usage
+                return result
+            else:
+                response = await acompletion(**request_params)
+                content = response.choices[0].message.content
+                result = {"content": content}
 
-            return result
-        else:
-            response = await acompletion(**request_params)
-            content = response.choices[0].message.content
-            result = {"content": content}
+                if hasattr(response, "usage") and response.usage:
+                    result["usage"] = {
+                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                        "total_tokens": getattr(response.usage, "total_tokens", 0),
+                    }
 
-            if hasattr(response, "usage") and response.usage:
-                result["usage"] = {
-                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-                    "total_tokens": getattr(response.usage, "total_tokens", 0),
-                }
-
-            return result
+                return result
 
     async def _chat_completion(
         self,
@@ -653,7 +656,7 @@ class AIService:
             history_context = ""
 
         # Load System Prompt
-        from strategies.strategy_prompts import _UNIVERSAL_RULES, resolve_prompt
+        from strategies.strategy_prompts import _UNIVERSAL_RULES, get_base_prompt
         from utils.prompt_guard import validate_prompt, sanitize_prompt
 
         if ui_prompt_override and ui_prompt_override.strip():
@@ -662,20 +665,16 @@ class AIService:
             if not is_valid:
                 logger.warning(f"[AIService] Prompt override rejected: {warning}")
                 if strategy_key:
-                    system_prompt = resolve_prompt(strategy_key)
+                    system_prompt = get_base_prompt(strategy_key)
                 else:
                     system_prompt = ConfigHandler.get_ai_system_prompt() or ""
-                    if _UNIVERSAL_RULES not in system_prompt:
-                        system_prompt += "\n\n" + _UNIVERSAL_RULES
             else:
                 sanitized = sanitize_prompt(raw_prompt)
-                system_prompt = _UNIVERSAL_RULES + "\n\n" + sanitized
+                system_prompt = sanitized
         elif strategy_key:
-            system_prompt = resolve_prompt(strategy_key)
+            system_prompt = get_base_prompt(strategy_key)
         else:
             system_prompt = ConfigHandler.get_ai_system_prompt() or ""
-            if _UNIVERSAL_RULES not in system_prompt:
-                system_prompt += "\n\n" + _UNIVERSAL_RULES
 
         # Capital flow and financials: use real data or fallback
         capital_flow_content = capital_flow_text if capital_flow_text else "(Data not available yet, assume neutral)"
@@ -722,6 +721,7 @@ class AIService:
         user_prompt = "\n\n".join(user_prompt_parts)
 
         messages = [
+            {"role": "system", "content": _UNIVERSAL_RULES},
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
@@ -751,7 +751,8 @@ class AIService:
                 )
 
                 with open(dump_file, "w", encoding="utf-8") as f:
-                    f.write(f"# System Prompt\n```text\n{system_prompt}\n```\n\n")
+                    f.write(f"# Universal Rules (System)\n```text\n{_UNIVERSAL_RULES}\n```\n\n")
+                    f.write(f"# Strategy Prompt (System)\n```text\n{system_prompt}\n```\n\n")
                     f.write(f"# User Prompt\n```xml\n{user_prompt}\n```\n")
 
                 logger.debug(
@@ -978,7 +979,10 @@ class AIService:
                 timeout=10.0,
             )
 
-            response = await acompletion(**request_params)
+            from utils.proxy_manager import ProxyManager
+
+            with ProxyManager.litellm_env_context():
+                response = await acompletion(**request_params)
 
             result = {"success": True, "message": "Connection successful"}
 
