@@ -4,10 +4,13 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import asyncio
+import logging
 import unittest
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+logger = logging.getLogger(__name__)
 
 from conftest import TEST_DB_URL
 from data.cache.cache_manager import CacheManager
@@ -75,13 +78,15 @@ async def _truncate_all_tables(engine: AsyncEngine):
     try:
         async with engine.begin() as conn:
             await conn.execute(text(f"TRUNCATE TABLE {tables_str} CASCADE"))
+        return
     except Exception:
-        for table in TABLE_NAMES:
-            try:
-                async with engine.begin() as conn:
-                    await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
-            except Exception:
-                pass
+        pass
+    for table in TABLE_NAMES:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+        except Exception as e:
+            logger.warning(f"[TestDB] TRUNCATE {table} failed: {e}")
 
 
 class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):

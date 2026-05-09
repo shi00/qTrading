@@ -738,7 +738,10 @@ class TestTaskManagerClearFinishedDb:
         mock_engine = MagicMock()
         mock_conn = MagicMock()
         mock_conn.execute = AsyncMock()
-        mock_engine.begin = MagicMock(return_value=mock_conn.__aenter__())
+        mock_context = AsyncMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_context.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.begin = MagicMock(return_value=mock_context)
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
             patch("data.persistence.models.TaskHistory") as mock_th,
@@ -747,6 +750,7 @@ class TestTaskManagerClearFinishedDb:
             mock_th.__table__ = MagicMock()
             mock_th.__table__.delete.return_value.where.return_value = MagicMock()
             await mgr._clear_finished_db(["id1", "id2"])
+            mock_conn.execute.assert_awaited_once()
 
 
 class TestTaskManagerQueuePersistSnapshot:
