@@ -18,9 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 _TODAY = date.today()
-_RECENT_DATE = (_TODAY - timedelta(days=1)).strftime("%Y-%m-%d")
-_RECENT_DATE_MINUS_2 = (_TODAY - timedelta(days=3)).strftime("%Y-%m-%d")
-_RECENT_DATE_MINUS_90 = (_TODAY - timedelta(days=91)).strftime("%Y-%m-%d")
+_RECENT_DATE = _TODAY - timedelta(days=1)
+_RECENT_DATE_MINUS_2 = _TODAY - timedelta(days=3)
+_RECENT_DATE_MINUS_90 = _TODAY - timedelta(days=91)
+_RECENT_DATE_STR = _RECENT_DATE.strftime("%Y%m%d")
+_RECENT_DATE_MINUS_2_STR = _RECENT_DATE_MINUS_2.strftime("%Y%m%d")
+_RECENT_DATE_MINUS_90_STR = _RECENT_DATE_MINUS_90.strftime("%Y%m%d")
 
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
@@ -137,7 +140,7 @@ class TestMarketDao:
             [
                 {
                     "ts_code": "000001.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "pe": 5.0,
                     "pe_ttm": 5.5,
                     "pb": 0.5,
@@ -170,7 +173,7 @@ class TestMarketDao:
             [
                 {
                     "ts_code": "000001.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "pe": 5.0,
                     "pe_ttm": 5.5,
                     "pb": 0.5,
@@ -185,7 +188,7 @@ class TestMarketDao:
             [
                 {
                     "ts_code": "000001.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "pe": 6.0,
                     "pe_ttm": 6.5,
                     "pb": 0.6,
@@ -206,21 +209,21 @@ class TestMarketDao:
             [
                 {
                     "ts_code": "000001.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "pe_ttm": 5.0,
                     "pb": 0.5,
                     "turnover_rate": 1.5,
                 },
                 {
                     "ts_code": "000002.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "pe_ttm": 10.0,
                     "pb": 1.0,
                     "turnover_rate": 2.0,
                 },
                 {
                     "ts_code": "000003.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "pe_ttm": 15.0,
                     "pb": 1.5,
                     "turnover_rate": 2.5,
@@ -242,7 +245,7 @@ class TestMarketDao:
         df = pd.DataFrame(
             [
                 {
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "ggt_ss": "100000",
                     "ggt_sz": "200000",
                     "hgt": "50000",
@@ -256,7 +259,7 @@ class TestMarketDao:
         saved = await market_dao.save_moneyflow_hsgt(df)
         assert saved == 1
 
-        result = await market_dao.get_moneyflow_hsgt(trade_date="20260508")
+        result = await market_dao.get_moneyflow_hsgt(trade_date=_RECENT_DATE_STR)
         assert not result.empty
         assert result["north_money"].iloc[0] == 110000.0
 
@@ -267,13 +270,13 @@ class TestMarketDao:
                 {
                     "index_code": "000300.SH",
                     "con_code": "000001.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "weight": 1.5,
                 },
                 {
                     "index_code": "000300.SH",
                     "con_code": "000002.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "weight": 2.0,
                 },
             ]
@@ -282,7 +285,7 @@ class TestMarketDao:
         saved = await market_dao.save_index_weights(df)
         assert saved == 2
 
-        result = await market_dao.get_index_weights(index_code="000300.SH", trade_date="20260508")
+        result = await market_dao.get_index_weights(index_code="000300.SH", trade_date=_RECENT_DATE_STR)
         assert len(result) == 2
 
     async def test_get_latest_index_weight_date(self, market_dao, clean_db):
@@ -292,13 +295,13 @@ class TestMarketDao:
                 {
                     "index_code": "000300.SH",
                     "con_code": "000001.SZ",
-                    "trade_date": "20260506",
+                    "trade_date": _RECENT_DATE_MINUS_2_STR,
                     "weight": 1.5,
                 },
                 {
                     "index_code": "000300.SH",
                     "con_code": "000001.SZ",
-                    "trade_date": "20260508",
+                    "trade_date": _RECENT_DATE_STR,
                     "weight": 1.6,
                 },
             ]
@@ -306,7 +309,7 @@ class TestMarketDao:
         await market_dao.save_index_weights(df)
 
         result = await market_dao.get_latest_index_weight_date()
-        assert result == datetime.date(2026, 5, 8)
+        assert result == _RECENT_DATE
 
 
 @pytest.mark.asyncio
@@ -905,8 +908,8 @@ class TestHolderDao:
             [
                 {
                     "ts_code": "000001.SZ",
-                    "end_date": "20260207",
-                    "ann_date": "20260508",
+                    "end_date": _RECENT_DATE_MINUS_90_STR,
+                    "ann_date": _RECENT_DATE_STR,
                     "holder_num": 100000,
                 }
             ]
@@ -926,8 +929,8 @@ class TestHolderDao:
             [
                 {
                     "ts_code": "000001.SZ",
-                    "end_date": "20260207",
-                    "ann_date": "20260508",
+                    "end_date": _RECENT_DATE_MINUS_90_STR,
+                    "ann_date": _RECENT_DATE_STR,
                     "holder_name": "中国平安保险",
                     "hold_amount": 1000000000,
                     "hold_ratio": 10.0,
@@ -944,8 +947,18 @@ class TestHolderDao:
         df = pd.DataFrame(
             [
                 {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
-                {"ts_code": "000001.SZ", "end_date": "20260207", "ann_date": "20260508", "holder_num": 95000},
-                {"ts_code": "000001.SZ", "end_date": "20260508", "ann_date": "20260508", "holder_num": 90000},
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": _RECENT_DATE_MINUS_90_STR,
+                    "ann_date": _RECENT_DATE_STR,
+                    "holder_num": 95000,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": _RECENT_DATE_STR,
+                    "ann_date": _RECENT_DATE_STR,
+                    "holder_num": 90000,
+                },
             ]
         )
 
@@ -970,9 +983,19 @@ class TestHolderDao:
         df = pd.DataFrame(
             [
                 {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
-                {"ts_code": "000001.SZ", "end_date": "20260207", "ann_date": "20260508", "holder_num": 90000},
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": _RECENT_DATE_MINUS_90_STR,
+                    "ann_date": _RECENT_DATE_STR,
+                    "holder_num": 90000,
+                },
                 {"ts_code": "000002.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 50000},
-                {"ts_code": "000002.SZ", "end_date": "20260207", "ann_date": "20260508", "holder_num": 60000},
+                {
+                    "ts_code": "000002.SZ",
+                    "end_date": _RECENT_DATE_MINUS_90_STR,
+                    "ann_date": _RECENT_DATE_STR,
+                    "holder_num": 60000,
+                },
             ]
         )
 
@@ -1005,7 +1028,12 @@ class TestHolderDao:
 
         df2 = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "end_date": "20260207", "ann_date": "20260508", "holder_num": 90000},
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": _RECENT_DATE_MINUS_90_STR,
+                    "ann_date": _RECENT_DATE_STR,
+                    "holder_num": 90000,
+                },
             ]
         )
         await holder_dao.save_holder_number(df2)
@@ -1079,7 +1107,7 @@ class TestSyncDao:
         """更新并获取同步状态"""
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
@@ -1093,14 +1121,14 @@ class TestSyncDao:
         """同步状态更新"""
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 6),
+            last_data_date=_RECENT_DATE_MINUS_2,
             record_count=4000,
             status="success",
         )
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
@@ -1112,40 +1140,40 @@ class TestSyncDao:
         """last_data_date 单调递增保护：旧日期不应覆盖新日期"""
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 4, 8),
+            last_data_date=_RECENT_DATE_MINUS_90,
             record_count=3000,
             status="success",
         )
 
         result = await sync_dao.get_sync_status(table_name="daily_quotes")
-        assert result["last_data_date"] == datetime.date(2026, 5, 8)
+        assert result["last_data_date"] == _RECENT_DATE
         assert result["record_count"] == 5000
 
     async def test_sync_status_same_date_updates_count(self, sync_dao, clean_db):
         """同日重跑：last_data_date 不变，record_count 应更新"""
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5500,
             status="success",
         )
 
         result = await sync_dao.get_sync_status(table_name="daily_quotes")
-        assert result["last_data_date"] == datetime.date(2026, 5, 8)
+        assert result["last_data_date"] == _RECENT_DATE
         assert result["record_count"] == 5500
 
     async def test_sync_status_null_recovery(self, sync_dao, clean_db):
@@ -1153,7 +1181,7 @@ class TestSyncDao:
         await sync_dao._write_db(
             'INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") '
             "VALUES ($1, $2, NULL, NULL, 'error', $3)",
-            ("daily_quotes", datetime.date(2026, 5, 6), datetime.datetime(2026, 5, 6)),
+            ("daily_quotes", _RECENT_DATE_MINUS_2, datetime.datetime.combine(_RECENT_DATE_MINUS_2, datetime.time())),
         )
 
         result_before = await sync_dao.get_sync_status(table_name="daily_quotes")
@@ -1161,13 +1189,13 @@ class TestSyncDao:
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
 
         result_after = await sync_dao.get_sync_status(table_name="daily_quotes")
-        assert result_after["last_data_date"] == datetime.date(2026, 5, 8)
+        assert result_after["last_data_date"] == _RECENT_DATE
         assert result_after["record_count"] == 5000
         assert result_after["status"] == "success"
 
@@ -1175,20 +1203,20 @@ class TestSyncDao:
         """失败状态写入时，last_data_date 和 record_count 应保留上次成功的值"""
         await sync_dao.update_sync_status(
             table_name="daily_indicators",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
 
         await sync_dao.update_sync_status(
             table_name="daily_indicators",
-            last_data_date=datetime.date(2026, 5, 9),
+            last_data_date=_TODAY,
             record_count=0,
             status="permission_denied",
         )
 
         result = await sync_dao.get_sync_status(table_name="daily_indicators")
-        assert result["last_data_date"] == datetime.date(2026, 5, 8)
+        assert result["last_data_date"] == _RECENT_DATE
         assert result["record_count"] == 5000
         assert result["status"] == "permission_denied"
 
@@ -1197,12 +1225,12 @@ class TestSyncDao:
         await sync_dao._write_db(
             'INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") '
             "VALUES ($1, $2, NULL, NULL, 'error', $3)",
-            ("moneyflow_daily", datetime.date(2026, 5, 6), datetime.datetime(2026, 5, 6)),
+            ("moneyflow_daily", _RECENT_DATE_MINUS_2, datetime.datetime.combine(_RECENT_DATE_MINUS_2, datetime.time())),
         )
 
         await sync_dao.update_sync_status(
             table_name="moneyflow_daily",
-            last_data_date=datetime.date(2026, 5, 9),
+            last_data_date=_TODAY,
             record_count=0,
             status="permission_denied",
         )
@@ -1213,8 +1241,8 @@ class TestSyncDao:
 
     async def test_get_all_sync_status(self, sync_dao, clean_db):
         """获取所有同步状态"""
-        await sync_dao.update_sync_status("daily_quotes", datetime.date(2026, 5, 8), 5000)
-        await sync_dao.update_sync_status("stock_basic", datetime.date(2026, 5, 8), 5000)
+        await sync_dao.update_sync_status("daily_quotes", _RECENT_DATE, 5000)
+        await sync_dao.update_sync_status("stock_basic", _RECENT_DATE, 5000)
 
         result = await sync_dao.get_sync_status()
         assert not result.empty
@@ -1239,7 +1267,7 @@ class TestSyncDao:
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
@@ -1253,7 +1281,7 @@ class TestSyncDao:
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=0,
             status="success",
         )
@@ -1267,7 +1295,7 @@ class TestSyncDao:
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=0,
             status="fetch_failed",
         )
@@ -1281,7 +1309,7 @@ class TestSyncDao:
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=0,
             status="save_failed",
         )
@@ -1293,20 +1321,20 @@ class TestSyncDao:
         """empty 状态应更新 last_data_date 和 record_count"""
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 8),
+            last_data_date=_RECENT_DATE,
             record_count=5000,
             status="success",
         )
 
         await sync_dao.update_sync_status(
             table_name="daily_quotes",
-            last_data_date=datetime.date(2026, 5, 9),
+            last_data_date=_TODAY,
             record_count=0,
             status="empty",
         )
 
         result = await sync_dao.get_sync_status(table_name="daily_quotes")
-        assert result["last_data_date"] == datetime.date(2026, 5, 9)
+        assert result["last_data_date"] == _TODAY
         assert result["record_count"] == 0
         assert result["status"] == "empty"
 
