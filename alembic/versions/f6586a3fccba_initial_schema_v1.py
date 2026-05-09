@@ -63,7 +63,7 @@ NEW_SH_COLUMNS: dict[str, sa.Column] = {
     "t5_pct": sa.Column("t5_pct", sa.Float(), nullable=True),
     "index_pct": sa.Column("index_pct", sa.Float(), nullable=True),
     "alpha": sa.Column("alpha", sa.Float(), nullable=True),
-    "ai_score": sa.Column("ai_score", sa.Integer(), nullable=True),
+    "ai_score": sa.Column("ai_score", sa.Float(), nullable=True),
     "ai_reason": sa.Column("ai_reason", sa.String(), nullable=True),
     "prediction_result": sa.Column("prediction_result", sa.String(), nullable=True),
     "review_status": sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
@@ -699,7 +699,7 @@ def _create_all_tables_fresh() -> None:
         sa.Column("t5_pct", sa.Float(), nullable=True),
         sa.Column("index_pct", sa.Float(), nullable=True),
         sa.Column("alpha", sa.Float(), nullable=True),
-        sa.Column("ai_score", sa.Integer(), nullable=True),
+        sa.Column("ai_score", sa.Float(), nullable=True),
         sa.Column("ai_reason", sa.String(), nullable=True),
         sa.Column("prediction_result", sa.String(), nullable=True),
         sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
@@ -733,6 +733,12 @@ def _create_all_tables_fresh() -> None:
         "idx_sh_run_id",
         "screening_history",
         ["run_id"],
+        unique=False,
+    )
+    op.create_index(
+        "idx_screening_history_trade_date",
+        "screening_history",
+        ["trade_date"],
         unique=False,
     )
     _create_partial_index(
@@ -948,6 +954,8 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_task_history")),
     )
     op.create_index(op.f("ix_task_history_created_at"), "task_history", ["created_at"], unique=False)
+    op.create_index("idx_task_history_status_created", "task_history", ["status", "created_at"], unique=False)
+    op.create_index("idx_task_history_completed", "task_history", ["completed_at"], unique=False)
     op.create_table(
         "top10_holders",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -1072,7 +1080,7 @@ def _create_table_screening_history() -> None:
         sa.Column("t5_pct", sa.Float(), nullable=True),
         sa.Column("index_pct", sa.Float(), nullable=True),
         sa.Column("alpha", sa.Float(), nullable=True),
-        sa.Column("ai_score", sa.Integer(), nullable=True),
+        sa.Column("ai_score", sa.Float(), nullable=True),
         sa.Column("ai_reason", sa.String(), nullable=True),
         sa.Column("prediction_result", sa.String(), nullable=True),
         sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
@@ -1225,6 +1233,8 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_top10_holders_holder_name"), table_name="top10_holders")
     op.drop_table("top10_holders")
     op.drop_index(op.f("ix_task_history_created_at"), table_name="task_history")
+    op.drop_index("idx_task_history_completed", table_name="task_history")
+    op.drop_index("idx_task_history_status_created", table_name="task_history")
     op.drop_table("task_history")
     op.drop_table("sync_status")
     op.drop_index(op.f("ix_suspend_d_trade_date"), table_name="suspend_d")
@@ -1243,6 +1253,7 @@ def downgrade() -> None:
     op.drop_index("idx_sh_run_id", table_name="screening_history")
     op.drop_index("idx_sh_date_code", table_name="screening_history")
     op.drop_index("idx_sh_date_strategy", table_name="screening_history")
+    op.drop_index("idx_screening_history_trade_date", table_name="screening_history")
     op.drop_table("screening_thinking")
     op.drop_table("screening_history")
     op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")

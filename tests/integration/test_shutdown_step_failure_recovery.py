@@ -32,7 +32,6 @@ class TestShutdownStepFailureRecovery:
         mock_singletons["TaskManager"]._instance.cancel_all_running_async = AsyncMock(
             side_effect=RuntimeError("cancel failed")
         )
-        mock_singletons["DataProcessor"]._instance.close = AsyncMock(side_effect=RuntimeError("close failed"))
         coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
@@ -40,13 +39,12 @@ class TestShutdownStepFailureRecovery:
 
         assert ok is False
         failed = [r for r in coordinator.step_results if r.critical and not r.ok]
-        assert len(failed) >= 2
+        assert len(failed) >= 1
         failed_names = {r.name for r in failed}
         assert "Step 0" in failed_names
-        assert "Step 2" in failed_names
 
     @pytest.mark.asyncio
-    async def test_later_steps_still_run_after_earlier_critical_failure(self, mock_singletons):
+    async def test_critical_failure_aborts_remaining_steps(self, mock_singletons):
         mock_singletons["TaskManager"]._instance.cancel_all_running_async = AsyncMock(
             side_effect=RuntimeError("step0 failed")
         )
@@ -56,28 +54,24 @@ class TestShutdownStepFailureRecovery:
             ok = await coordinator.do_cleanup()
 
         assert ok is False
-        mock_singletons["scheduler"].stop.assert_called_once()
-        mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
-        mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
-        mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
+        step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
+        assert step0.ok is False
+        assert len(coordinator.step_results) == 1
 
     @pytest.mark.asyncio
-    async def test_step_timeout_still_runs_remaining_steps(self, mock_singletons):
+    async def test_step_timeout_aborts_remaining_steps(self, mock_singletons):
         coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
-        real_sleep = asyncio.sleep
-
         async def _blocking_step0():
-            await real_sleep(0.5)
+            await asyncio.sleep(1)
 
         with patch.object(coordinator, "_step0_cancel_tasks", side_effect=_blocking_step0):
-            await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=0.1)
+            await coordinator.do_cleanup(timeout_s=3.0, step_timeout_s=0.3)
 
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
-
-        step6 = next(r for r in coordinator.step_results if r.name == "Step 6")
-        assert step6.ok is True
+        assert step0.timed_out is True
+        assert len(coordinator.step_results) == 1
 
     @pytest.mark.asyncio
     async def test_step_result_error_message_preserved(self, mock_singletons):
@@ -135,9 +129,9 @@ def mock_singletons():
     orig_scheduler_stop = getattr(svc, "stop", None)
 
     TaskManager._instance = AsyncMock()
-    NewsSubscriptionService._instance = MagicMock()
+    NewsSubscriptionService._instance = AsyncMock()
     DataProcessor._instance = AsyncMock()
-    MarketDataService._instance = MagicMock()
+    MarketDataService._instance = AsyncMock()
     LocalModelManager._instance = MagicMock()
     LocalModelManager._instance._llm = MagicMock()
     ThreadPoolManager._instance = MagicMock()

@@ -370,7 +370,8 @@ class TestTaskManagerAutoEvict(unittest.TestCase):
             )
             self.manager._tasks[f"task{i}"] = task
 
-        self.manager._auto_evict_old()
+        for _ in range(60):
+            self.manager._evict_on_complete("task249")
 
         self.assertLessEqual(len(self.manager._tasks), 200)
 
@@ -395,9 +396,9 @@ class TestTaskManagerSafeDatetime(unittest.TestCase):
         result = TaskManager._safe_dt("2024-01-15 10:30:00")
 
         self.assertIsNotNone(result)
-        self.assertEqual(result.year, 2024)  # type: ignore
-        self.assertEqual(result.month, 1)  # type: ignore
-        self.assertEqual(result.day, 15)  # type: ignore
+        self.assertEqual(result.year, 2024)  # type: ignore[union-attr]
+        self.assertEqual(result.month, 1)  # type: ignore[union-attr]
+        self.assertEqual(result.day, 15)  # type: ignore[union-attr]
 
     def test_safe_dt_invalid_string(self):
         """无效字符串"""

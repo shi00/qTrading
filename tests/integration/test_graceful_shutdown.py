@@ -5,7 +5,6 @@ a parallel simplified copy of the cleanup code.
 """
 
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -37,11 +36,11 @@ def mock_singletons():
     orig_scheduler_stop = getattr(svc, "stop", None)
 
     TaskManager._instance = AsyncMock()
-    NewsSubscriptionService._instance = MagicMock()
+    NewsSubscriptionService._instance = AsyncMock()
     DataProcessor._instance = AsyncMock()
     CacheManager._instance = AsyncMock()
     CacheManager._instance.engine = AsyncMock()
-    MarketDataService._instance = MagicMock()
+    MarketDataService._instance = AsyncMock()
     LocalModelManager._instance = MagicMock()
     LocalModelManager._instance._llm = MagicMock()
     ThreadPoolManager._instance = MagicMock()
@@ -83,8 +82,8 @@ async def test_full_cleanup_all_steps(mock_singletons):
 
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
     mock_singletons["scheduler"].stop.assert_called_once()
-    mock_singletons["NewsSubscriptionService"]._instance.stop.assert_called_once()
-    mock_singletons["MarketDataService"]._instance.stop.assert_called_once()
+    mock_singletons["NewsSubscriptionService"]._instance.stop_async.assert_awaited_once()
+    mock_singletons["MarketDataService"]._instance.stop_async.assert_awaited_once()
     mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
@@ -349,10 +348,6 @@ async def test_step_exception_does_not_crash(mock_singletons):
 
     assert ok is False
     assert coordinator.cleanup_done is True
-    mock_singletons["scheduler"].stop.assert_called_once()
-    mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
-    mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
-    mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
     assert any(result.name == "Step 0" and result.ok is False for result in coordinator.step_results)
 
 
@@ -436,16 +431,23 @@ async def test_cleanup_caller_cancel_does_not_cancel_single_flight():
 @pytest.mark.asyncio
 async def test_step5_timeout_marks_cleanup_failed(mock_singletons):
     """Verify blocking Step 5 (AI model unload) is constrained by step timeout and marks cleanup failed."""
-    coordinator = ShutdownCoordinator(page=None)
+    coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
-    def _blocking_unload():
-        time.sleep(0.2)
+    async def _noop():
+        pass
+
+    async def _blocking_unload():
+        await asyncio.sleep(5)
 
     with (
-        patch("asyncio.sleep", new_callable=AsyncMock),
-        patch.object(coordinator, "_step5_unload_ai_model_sync", side_effect=_blocking_unload),
+        patch.object(coordinator, "_step0_cancel_tasks", side_effect=_noop),
+        patch.object(coordinator, "_step1_stop_services", side_effect=_noop),
+        patch.object(coordinator, "_step2_close_processor", side_effect=_noop),
+        patch.object(coordinator, "_step3_flush_db_writes", side_effect=_noop),
+        patch.object(coordinator, "_step4_clear_toast", side_effect=_noop),
+        patch.object(coordinator, "_step5_unload_ai_model", side_effect=_blocking_unload),
     ):
-        ok = await coordinator.do_cleanup(timeout_s=2.0, step_timeout_s=0.01)
+        ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=0.5)
 
     assert ok is False
     step5 = next(result for result in coordinator.step_results if result.name == "Step 5")
@@ -474,8 +476,7 @@ async def test_step5_exception_marks_cleanup_failed(mock_singletons):
     coordinator = ShutdownCoordinator(page=None)
 
     with (
-        patch("asyncio.sleep", new_callable=AsyncMock),
-        patch.object(coordinator, "_step5_unload_ai_model_sync", side_effect=RuntimeError("llm unload failed")),
+        patch.object(coordinator, "_step5_unload_ai_model", side_effect=RuntimeError("llm unload failed")),
     ):
         ok = await coordinator.do_cleanup()
 
