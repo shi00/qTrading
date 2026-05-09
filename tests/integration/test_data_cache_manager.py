@@ -2,10 +2,14 @@ import datetime
 import os
 import sys
 import unittest
+from datetime import date, timedelta
 
 import pandas as pd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+_TODAY = date.today()
+_RECENT = _TODAY - timedelta(days=1)
 
 from data.constants import (
     DATAFRAME_ATTR_COLUMN_UNITS,
@@ -43,7 +47,7 @@ class TestCacheManager(TestDatabaseBase):
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "open": [10.0],
                 "high": [11.0],
                 "low": [9.0],
@@ -64,17 +68,17 @@ class TestCacheManager(TestDatabaseBase):
         self.assertEqual(res.iloc[0]["close"], 10.5)
 
         date = await self.cache.get_latest_trade_date()
-        self.assertEqual(date, datetime.date(2023, 1, 1))
+        self.assertEqual(date, datetime.date(2026, 5, 8))
 
         dates = await self.cache.get_cached_trade_dates()
-        self.assertIn(datetime.date(2023, 1, 1), dates)
+        self.assertIn(datetime.date(2026, 5, 8), dates)
 
     async def test_daily_indicators(self):
         """Test daily indicators operations"""
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "pe": [10.0],
                 "pe_ttm": [9.5],
                 "pb": [1.2],
@@ -95,9 +99,9 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_daily_indicators(df)
 
         dates = await self.cache.get_cached_indicator_dates()
-        self.assertIn(datetime.date(2023, 1, 1), dates)
+        self.assertIn(datetime.date(2026, 5, 8), dates)
 
-        res = await self.cache.get_latest_indicators(datetime.date(2023, 1, 1))
+        res = await self.cache.get_latest_indicators(datetime.date(2026, 5, 8))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["pe"], 10.0)
 
@@ -106,7 +110,7 @@ class TestCacheManager(TestDatabaseBase):
         daily_quotes = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "open": [10.0],
                 "high": [11.0],
                 "low": [9.0],
@@ -122,7 +126,7 @@ class TestCacheManager(TestDatabaseBase):
         daily_indicators = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000001.SZ"],
-                "trade_date": ["20230101", "20230102"],
+                "trade_date": ["20260508", "20260509"],
                 "pe": [10.0, 20.0],
                 "pe_ttm": [9.5, 19.5],
                 "pb": [1.2, 2.2],
@@ -142,7 +146,7 @@ class TestCacheManager(TestDatabaseBase):
         res = await self.cache.get_latest_indicators()
 
         self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["trade_date"], datetime.date(2023, 1, 1))
+        self.assertEqual(res.iloc[0]["trade_date"], datetime.date(2026, 5, 8))
         self.assertEqual(res.iloc[0]["pe"], 10.0)
 
     async def test_financial_reports(self):
@@ -150,8 +154,8 @@ class TestCacheManager(TestDatabaseBase):
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "end_date": ["20230331"],
-                "ann_date": ["20230401"],
+                "end_date": ["20260508"],
+                "ann_date": ["20260508"],
                 "report_type": ["1"],
                 "roe": [15.5],
                 "total_revenue": [50000],
@@ -175,14 +179,14 @@ class TestCacheManager(TestDatabaseBase):
 
         res = await self.cache.get_cached_financial_records()
         self.assertEqual(len(res), 1)
-        self.assertIn(("000001.SZ", datetime.date(2023, 3, 31)), res)
+        self.assertIn(("000001.SZ", datetime.date(2026, 5, 8)), res)
 
     async def test_moneyflow_northbound(self):
         """Test moneyflow and northbound data"""
         mf_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "buy_md_amount": [100],
                 "buy_sm_vol": [100],
                 "buy_sm_amount": [100],
@@ -199,7 +203,7 @@ class TestCacheManager(TestDatabaseBase):
         nb_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "name": ["PA"],
                 "vol": [100],
                 "ratio": [5.5],
@@ -210,7 +214,7 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_moneyflow(mf_df)
         await self.cache.save_northbound(nb_df)
 
-        res_mf = await self.cache.get_moneyflow(datetime.date(2023, 1, 1))
+        res_mf = await self.cache.get_moneyflow(datetime.date(2026, 5, 8))
         self.assertEqual(res_mf.iloc[0]["buy_md_amount"], 100)
 
         res_latest_nb = await self.cache.get_latest_northbound()
@@ -219,14 +223,14 @@ class TestCacheManager(TestDatabaseBase):
 
     async def test_sync_status(self):
         """Test sync status operations"""
-        await self.cache.update_sync_status("test_table", datetime.date(2023, 1, 1), 100)
+        await self.cache.update_sync_status("test_table", datetime.date(2026, 5, 8), 100)
 
         status = await self.cache.get_sync_status("test_table")
-        self.assertEqual(status["record_count"], 100)  # type: ignore
-        self.assertEqual(status["status"], "success")  # type: ignore
+        self.assertEqual(status["record_count"], 100)  # type: ignore[index]
+        self.assertEqual(status["status"], "success")  # type: ignore[index]
 
         all_status = await self.cache.get_sync_status()
-        self.assertFalse(all_status.empty)  # type: ignore
+        self.assertFalse(all_status.empty)  # type: ignore[union-attr]
 
     async def test_get_screening_data(self):
         """Test complex join for screening data"""
@@ -245,7 +249,7 @@ class TestCacheManager(TestDatabaseBase):
         daily_quotes = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": [datetime.date(2023, 1, 1)],
+                "trade_date": [datetime.date(2026, 5, 8)],
                 "close": [10.0],
                 "pct_chg": [1.0],
                 "open": [10],
@@ -261,7 +265,7 @@ class TestCacheManager(TestDatabaseBase):
         daily_ind = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "trade_date": [datetime.date(2023, 1, 1)],
+                "trade_date": [datetime.date(2026, 5, 8)],
                 "pe_ttm": [8.0],
                 "pe": [8],
                 "pb": [1],
@@ -282,7 +286,7 @@ class TestCacheManager(TestDatabaseBase):
             {
                 "ts_code": ["000001.SZ"],
                 "end_date": [datetime.date(2022, 12, 31)],
-                "ann_date": [datetime.date(2023, 1, 1)],
+                "ann_date": [datetime.date(2026, 5, 8)],
                 "report_type": ["1"],
                 "roe": [12.0],
                 "total_revenue": [100],
@@ -307,7 +311,7 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_daily_indicators(daily_ind)
         await self.cache.save_financial_reports(fina)
 
-        df = await self.cache.get_screening_data(trade_date=datetime.date(2023, 1, 1))
+        df = await self.cache.get_screening_data(trade_date=datetime.date(2026, 5, 8))
 
         self.assertFalse(df.empty)
         row = df.iloc[0]
@@ -330,7 +334,7 @@ class TestCacheManager(TestDatabaseBase):
                 [
                     {
                         "run_id": "RUN001",
-                        "trade_date": datetime.date(2023, 1, 1),
+                        "trade_date": datetime.date(2026, 5, 8),
                         "strategy_name": "value",
                         "ts_code": "000001.SZ",
                         "name": "PA",
@@ -366,7 +370,7 @@ class TestCacheManager(TestDatabaseBase):
 
     async def test_clear_cache(self):
         """Test clearing cache"""
-        await self.cache.update_sync_status("test", datetime.date(2023, 1, 1), 1)
+        await self.cache.update_sync_status("test", datetime.date(2026, 5, 8), 1)
         await self.cache.clear_all_cache()
 
         status = await self.cache.get_sync_status("test")
@@ -399,7 +403,7 @@ class TestCacheManager(TestDatabaseBase):
         """Test Top List (LHB)"""
         df = pd.DataFrame(
             {
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "ts_code": ["000001.SZ"],
                 "net_amount": [1000],
                 "name": ["PA"],
@@ -418,7 +422,7 @@ class TestCacheManager(TestDatabaseBase):
         )
         await self.cache.save_top_list(df)
 
-        res = await self.cache.get_top_list(datetime.date(2023, 1, 1))
+        res = await self.cache.get_top_list(datetime.date(2026, 5, 8))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["net_amount"], 1000)
         self.assertEqual(
@@ -434,7 +438,7 @@ class TestCacheManager(TestDatabaseBase):
         """Test Block Trade"""
         df = pd.DataFrame(
             {
-                "trade_date": ["20230101"],
+                "trade_date": ["20260508"],
                 "ts_code": ["000001.SZ"],
                 "amount": [500],
                 "price": [10.0],
@@ -445,7 +449,7 @@ class TestCacheManager(TestDatabaseBase):
         )
         await self.cache.save_block_trade(df)
 
-        res = await self.cache.get_block_trade(datetime.date(2023, 1, 1))
+        res = await self.cache.get_block_trade(datetime.date(2026, 5, 8))
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["amount"], 500)
 
