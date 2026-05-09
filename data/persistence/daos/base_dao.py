@@ -87,9 +87,9 @@ class BaseDao:
                 # multi-dimensional np arrays or un-hashable types that 'isna' dislikes
                 pass
 
-            if isinstance(val, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore
+            if isinstance(val, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore[union-attr]
                 return int(val)
-            if isinstance(val, (np.float64, np.float32)):  # type: ignore
+            if isinstance(val, (np.float64, np.float32)):  # type: ignore[union-attr]
                 return float(val)
             if isinstance(val, (np.bool_)):
                 return bool(val)
@@ -292,7 +292,9 @@ class BaseDao:
 
             for record in records:
                 for k, v in record.items():
-                    if isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
+                    if v is pd.NaT or (isinstance(v, type(pd.NaT)) and pd.isna(v)):
+                        record[k] = None
+                    elif isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
                         record[k] = int(v)
                     elif isinstance(v, (np.float64, np.float32)):
                         record[k] = float(v)
