@@ -544,7 +544,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return latest
 
         cached_date = await self.cache.get_latest_trade_date()
-        if cached_date != today_date:
+        if cached_date is not None and cached_date != today_date:
             await self.sync_daily_market_snapshot(today_date)
 
         return today_date
@@ -925,7 +925,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             latest_closed_trade_date = await self.get_latest_trade_date()
             context_trade_date = self._normalize_context_trade_date(latest_closed_trade_date)
             if context_trade_date is None:
-                context_trade_date = await self.cache.get_latest_trade_date()
+                cache_date = await self.cache.get_latest_trade_date()
+                if cache_date is not None:
+                    context_trade_date = self._normalize_context_trade_date(cache_date)
         screening_data = await self.get_screening_data(context_trade_date)
         resolved_trade_date = self._resolve_screening_trade_date(context_trade_date, screening_data)
 

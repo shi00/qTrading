@@ -56,7 +56,7 @@ async def main(page: ft.Page):
             logger.info("[Main] Window close confirmed by user.")
             coordinator.start_watchdog()
 
-            cleanup_ok = await coordinator.do_cleanup(timeout_s=8.0, step_timeout_s=3.0)
+            cleanup_ok = await coordinator.do_cleanup(timeout_s=12.0, step_timeout_s=2.0)
 
             try:
                 page.window.prevent_close = False
@@ -69,7 +69,14 @@ async def main(page: ft.Page):
                 logger.info("[Main] Graceful window shutdown completed without force-exit.")
                 return
 
-            logger.error("[Main] Graceful shutdown incomplete, forcing process exit.")
+            logger.error(
+                "[Main] Graceful shutdown incomplete, forcing process exit. Step results: %s",
+                [
+                    f"{r.name}(ok={r.ok}, timed_out={r.timed_out}, elapsed={r.elapsed_ms:.0f}ms"
+                    f"{', error=' + r.error if r.error else ''})"
+                    for r in coordinator.step_results
+                ],
+            )
             await asyncio.sleep(0.2)
             coordinator._force_exit(1)
         finally:

@@ -783,13 +783,10 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         logger.debug(f"[FinancialSync] Repair | Repairing {len(ts_codes)} stocks...")
 
-        semaphore = asyncio.Semaphore(1)
         total_saved = 0
-        _repair_counter_lock = asyncio.Lock()
 
-        async def repair_one(ts_code: str, idx: int, period: str, p_idx: int):
-            nonlocal total_saved
-            async with semaphore:
+        for period_idx, period in enumerate(periods):
+            for i, ts_code in enumerate(ts_codes):
                 try:
                     await asyncio.sleep(
                         ConfigHandler.get_sync_request_delay(is_heavy=True),
@@ -810,28 +807,15 @@ class FinancialSyncStrategy(ISyncStrategy):
                             or 0
                         )
                     delta = saved + aux_counts.get("mainbz", 0) + aux_counts.get("audit", 0)
-                    if delta > 0:
-                        async with _repair_counter_lock:
-                            total_saved += delta
+                    total_saved += delta
 
-                    if progress_callback and idx % 10 == 0:
+                    if progress_callback and i % 10 == 0:
                         progress_callback(
-                            p_idx * len(ts_codes) + idx,
+                            period_idx * len(ts_codes) + i,
                             len(periods) * len(ts_codes),
                             I18n.get("status_repairing", period=period, code=ts_code),
                         )
                 except Exception as e:
                     logger.debug(f"[Repair] Failed for {ts_code} period={period}: {e}")
-
-        tasks = []
-        for period_idx, period in enumerate(periods):
-            for i, ts_code in enumerate(ts_codes):
-                # Pass period and period_idx explicitly so each task captures its own values
-                tasks.append(
-                    asyncio.create_task(repair_one(ts_code, i, period, period_idx)),
-                )
-
-        if tasks:
-            await asyncio.gather(*tasks)
 
         return total_saved

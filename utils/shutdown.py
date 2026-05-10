@@ -47,7 +47,7 @@ class ShutdownCoordinator:
         *,
         service_stop_delay: float = 0.5,
         force_exit_callback: Callable[[int], None] | None = None,
-        watchdog_timeout_s: float = 10.0,
+        watchdog_timeout_s: float = 15.0,
     ):
         self._page = page
         self._cleanup_started = False
@@ -112,10 +112,17 @@ class ShutdownCoordinator:
             if cancel_event.wait(effective_timeout):
                 logger.info("[Shutdown] Watchdog canceled before timeout.")
                 return
+            step_snapshot = list(self._step_results)
+            step_summary = [
+                f"{r.name}(ok={r.ok}, timed_out={r.timed_out}, elapsed={r.elapsed_ms:.0f}ms"
+                f"{', error=' + r.error if r.error else ''})"
+                for r in step_snapshot
+            ]
             logger.error(
                 f"[Shutdown] Watchdog timeout ({effective_timeout}s) — forcing exit. "
                 f"cleanup_done={self._cleanup_done}, "
-                f"cleanup_running={self._cleanup_running}",
+                f"cleanup_running={self._cleanup_running}, "
+                f"step_results={step_summary}",
             )
             force_exit(1)
 

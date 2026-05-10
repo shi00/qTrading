@@ -482,3 +482,58 @@ class TestShutdownCoordinatorGracefulForceExit:
         source = main_path.read_text(encoding="utf-8")
         assert "coordinator._force_exit" in source
         assert "_default_force_exit" in source or "ShutdownCoordinator" in source
+
+
+class TestWatchdogStepResultsLogging:
+    def test_watchdog_timeout_includes_step_results(self, caplog):
+        import logging
+        import time
+
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: None)
+        coord._step_results = [
+            StepResult(name="Step 0", critical=True, ok=True, timed_out=False, elapsed_ms=100.0),
+            StepResult(name="Step 1", critical=True, ok=False, timed_out=True, elapsed_ms=2000.0, error="timeout"),
+        ]
+        with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
+            coord.start_watchdog(timeout_s=0.1)
+            time.sleep(0.3)
+            log_msgs = [r.message for r in caplog.records if "forcing exit" in r.message.lower()]
+            assert len(log_msgs) >= 1
+            msg = log_msgs[0]
+            assert "step_results=" in msg
+            assert "Step 0" in msg
+            assert "Step 1" in msg
+            assert "timed_out=True" in msg
+
+    def test_watchdog_timeout_empty_step_results(self, caplog):
+        import logging
+        import time
+
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: None)
+        assert coord._step_results == []
+        with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
+            coord.start_watchdog(timeout_s=0.1)
+            time.sleep(0.3)
+            log_msgs = [r.message for r in caplog.records if "forcing exit" in r.message.lower()]
+            assert len(log_msgs) >= 1
+            assert "step_results=[]" in log_msgs[0]
+
+
+class TestDefaultWatchdogTimeout:
+    def test_default_watchdog_timeout_is_15s(self):
+        coord = ShutdownCoordinator()
+        assert coord._watchdog_timeout_s == 15.0
+
+    def test_custom_watchdog_timeout(self):
+        coord = ShutdownCoordinator(watchdog_timeout_s=20.0)
+        assert coord._watchdog_timeout_s == 20.0
+
+
+class TestMainPyCleanupTimeouts:
+    def test_main_py_uses_adjusted_timeouts(self):
+        import pathlib
+
+        main_path = pathlib.Path(__file__).resolve().parent.parent.parent / "main.py"
+        source = main_path.read_text(encoding="utf-8")
+        assert "timeout_s=12.0" in source
+        assert "step_timeout_s=2.0" in source

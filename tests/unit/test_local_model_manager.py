@@ -15,6 +15,10 @@ def reset_singleton():
     LocalModelManager._last_config = {}
     LocalModelManager._is_loading = False
     LocalModelManager._cancel_event.clear()
+    LocalModelManager._worker_proc = None
+    LocalModelManager._request_queue = None
+    LocalModelManager._result_queue = None
+    LocalModelManager._worker_ready = False
     yield
     LocalModelManager._instance = None
     LocalModelManager._initialized = False
@@ -25,6 +29,10 @@ def reset_singleton():
     LocalModelManager._last_config = {}
     LocalModelManager._is_loading = False
     LocalModelManager._cancel_event.clear()
+    LocalModelManager._worker_proc = None
+    LocalModelManager._request_queue = None
+    LocalModelManager._result_queue = None
+    LocalModelManager._worker_ready = False
 
 
 class TestLocalModelManagerGetLoadedModelPath:
@@ -87,6 +95,203 @@ class TestLocalModelManagerLoadModel:
             mgr = LocalModelManager()
             result = await mgr.load_model("/path/to/model.gguf")
             assert result is False
+        finally:
+            mod._HAS_LLAMA_CPP = original
+
+
+class TestPersistentWorkerEnsureWorker:
+    def test_ensure_worker_returns_true_if_already_ready(self):
+        mgr = LocalModelManager()
+        mgr._worker_proc = MagicMock()
+        mgr._worker_proc.is_alive.return_value = True
+        mgr._worker_ready = True
+        mgr._model_path = "/path/to/model.gguf"
+
+        result = mgr._ensure_worker("/path/to/model.gguf", {})
+        assert result is True
+
+    def test_ensure_worker_restarts_if_model_path_changed(self):
+        mgr = LocalModelManager()
+        mgr._worker_proc = MagicMock()
+        mgr._worker_proc.is_alive.return_value = True
+        mgr._worker_ready = True
+        mgr._model_path = "/old/model.gguf"
+
+        with (
+            patch.object(mgr, "_shutdown_worker"),
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_res_queue = MagicMock()
+            mock_res_queue.get.return_value = ("ready", "/new/model.gguf")
+            mock_req_queue = MagicMock()
+            mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
+
+            mock_proc = MagicMock()
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            result = mgr._ensure_worker("/new/model.gguf", {"n_threads": 4})
+            assert result is True
+            mgr._shutdown_worker.assert_called_once()
+
+    def test_ensure_worker_returns_false_on_load_failure(self):
+        mgr = LocalModelManager()
+        mgr._worker_proc = None
+        mgr._worker_ready = False
+
+        with (
+            patch.object(mgr, "_shutdown_worker"),
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_res_queue = MagicMock()
+            mock_res_queue.get.return_value = ("error", "Model load failed: no file")
+            mock_req_queue = MagicMock()
+            mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
+
+            mock_proc = MagicMock()
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            result = mgr._ensure_worker("/bad/model.gguf", {})
+            assert result is False
+            mgr._shutdown_worker.assert_called()
+
+    def test_ensure_worker_returns_false_on_timeout(self):
+        mgr = LocalModelManager()
+        mgr._worker_proc = None
+        mgr._worker_ready = False
+
+        with (
+            patch.object(mgr, "_shutdown_worker"),
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_res_queue = MagicMock()
+            mock_res_queue.get.side_effect = Exception("timeout")
+            mock_req_queue = MagicMock()
+            mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
+
+            mock_proc = MagicMock()
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            result = mgr._ensure_worker("/path/to/model.gguf", {})
+            assert result is False
+
+
+class TestPersistentWorkerShutdownWorker:
+    def test_shutdown_worker_sends_sentinel(self):
+        from services.local_model_manager import _SENTINEL
+
+        mgr = LocalModelManager()
+        mock_req_queue = MagicMock()
+        mock_proc = MagicMock()
+        mock_proc.is_alive.return_value = True
+        mock_proc.join.return_value = None
+        mgr._request_queue = mock_req_queue
+        mgr._worker_proc = mock_proc
+        mgr._result_queue = MagicMock()
+        mgr._worker_ready = True
+
+        mgr._shutdown_worker()
+
+        mock_req_queue.put.assert_called_once_with(_SENTINEL, timeout=2.0)
+        assert mgr._worker_proc is None
+        assert mgr._worker_ready is False
+
+    def test_shutdown_worker_terminates_if_join_times_out(self):
+        mgr = LocalModelManager()
+        mock_req_queue = MagicMock()
+        mock_proc = MagicMock()
+        mock_proc.is_alive.side_effect = [True, True, False]
+        mock_proc.join.return_value = None
+        mgr._request_queue = mock_req_queue
+        mgr._worker_proc = mock_proc
+        mgr._result_queue = MagicMock()
+        mgr._worker_ready = True
+
+        mgr._shutdown_worker()
+
+        mock_proc.terminate.assert_called()
+
+    def test_shutdown_worker_kills_if_terminate_fails(self):
+        mgr = LocalModelManager()
+        mock_req_queue = MagicMock()
+        mock_proc = MagicMock()
+        mock_proc.is_alive.side_effect = [True, True, True, False]
+        mock_proc.join.return_value = None
+        mgr._request_queue = mock_req_queue
+        mgr._worker_proc = mock_proc
+        mgr._result_queue = MagicMock()
+        mgr._worker_ready = True
+
+        mgr._shutdown_worker()
+
+        mock_proc.kill.assert_called()
+
+    def test_shutdown_worker_noop_if_no_proc(self):
+        mgr = LocalModelManager()
+        mgr._worker_proc = None
+        mgr._request_queue = None
+        mgr._result_queue = None
+        mgr._shutdown_worker()
+        assert mgr._worker_proc is None
+        assert mgr._worker_ready is False
+
+    def test_unload_model_calls_shutdown_worker(self):
+        mgr = LocalModelManager()
+        mgr._llm = MagicMock()
+        with patch.object(mgr, "_shutdown_worker") as mock_sw:
+            mgr.unload_model()
+            mock_sw.assert_called_once()
+
+
+class TestPersistentWorkerModelReuse:
+    @pytest.mark.asyncio
+    async def test_second_inference_reuses_worker(self):
+        import services.local_model_manager as mod
+
+        original = mod._HAS_LLAMA_CPP
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+
+            ensure_call_count = 0
+
+            def mock_ensure(model_path, core_config):
+                nonlocal ensure_call_count
+                ensure_call_count += 1
+                mgr._worker_ready = True
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = True
+                if mgr._request_queue is None:
+                    mgr._request_queue = MagicMock()
+                if mgr._result_queue is None:
+                    mgr._result_queue = MagicMock()
+                return True
+
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", side_effect=mock_ensure),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+
+                mgr._result_queue = MagicMock()
+                mgr._result_queue.get_nowait.return_value = ("ok", "first result")
+                result1 = await mgr.run_inference("first prompt")
+                assert result1 == "first result"
+
+                mgr._result_queue.get_nowait.return_value = ("ok", "second result")
+                result2 = await mgr.run_inference("second prompt")
+                assert result2 == "second result"
+
+                assert ensure_call_count == 2
         finally:
             mod._HAS_LLAMA_CPP = original
 
@@ -306,62 +511,60 @@ class TestLocalModelManagerRunInferenceWithModel:
         mod._HAS_LLAMA_CPP = True
         try:
             mgr = LocalModelManager()
-            mgr._llm = MagicMock()
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                patch.object(mgr, "_ensure_worker", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
                     "local_model_timeout": 30,
                 }
-                mgr.load_model = AsyncMock(return_value=True)
 
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.return_value = ("ok", "result text")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = False
-                mock_proc_cls.return_value = mock_proc
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+                mock_res_queue.get_nowait.return_value = ("ok", "result text")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = True
 
                 result = await mgr.run_inference("test prompt")
                 assert result == "result text"
+                mock_req_queue.put.assert_called_once_with(
+                    ("test prompt", 150, 0.7, "You are a helpful assistant."),
+                    timeout=5,
+                )
         finally:
             mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_run_inference_timeout(self):
         import services.local_model_manager as mod
+        from services.local_model_manager import LocalInferenceTimeoutError
 
         original = mod._HAS_LLAMA_CPP
         mod._HAS_LLAMA_CPP = True
         try:
             mgr = LocalModelManager()
-            mgr._llm = MagicMock()
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_shutdown_worker"),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
                     "local_model_timeout": 1,
                 }
-                mgr.load_model = AsyncMock(return_value=True)
 
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.side_effect = Exception("empty")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = True
-                mock_proc_cls.return_value = mock_proc
-
-                from services.local_model_manager import LocalInferenceTimeoutError
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+                mock_res_queue.get_nowait.side_effect = Exception("empty")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(LocalInferenceTimeoutError, match="timed out"):
                     await mgr.run_inference("test prompt")
@@ -376,26 +579,23 @@ class TestLocalModelManagerRunInferenceWithModel:
         mod._HAS_LLAMA_CPP = True
         try:
             mgr = LocalModelManager()
-            mgr._llm = MagicMock()
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                patch.object(mgr, "_ensure_worker", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
                     "local_model_timeout": 30,
                 }
-                mgr.load_model = AsyncMock(return_value=True)
 
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.return_value = ("error", "inference error")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = False
-                mock_proc_cls.return_value = mock_proc
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+                mock_res_queue.get_nowait.return_value = ("error", "inference error")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(RuntimeError, match="Inference execution failed"):
                     await mgr.run_inference("test prompt")
@@ -403,7 +603,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
-    async def test_run_inference_load_fails(self):
+    async def test_run_inference_worker_not_ready(self):
         import services.local_model_manager as mod
 
         original = mod._HAS_LLAMA_CPP
@@ -415,9 +615,86 @@ class TestLocalModelManagerRunInferenceWithModel:
                     "local_model_path": "/path/to/model.gguf",
                     "local_model_timeout": 30,
                 }
-                mgr.load_model = AsyncMock(return_value=False)
-                with pytest.raises(RuntimeError, match="failed to load"):
+                with patch.object(mgr, "_ensure_worker", return_value=False):
+                    with pytest.raises(RuntimeError, match="Persistent worker failed to start"):
+                        await mgr.run_inference("test prompt")
+        finally:
+            mod._HAS_LLAMA_CPP = original
+
+    @pytest.mark.asyncio
+    async def test_run_inference_no_model_path(self):
+        import services.local_model_manager as mod
+
+        original = mod._HAS_LLAMA_CPP
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            with patch("services.local_model_manager.ConfigHandler") as mock_ch:
+                mock_ch.get_local_ai_config.return_value = {"local_model_path": ""}
+                with pytest.raises(RuntimeError, match="not configured"):
                     await mgr.run_inference("test prompt")
+        finally:
+            mod._HAS_LLAMA_CPP = original
+
+    @pytest.mark.asyncio
+    async def test_run_inference_worker_shutdown_unexpectedly(self):
+        import services.local_model_manager as mod
+
+        original = mod._HAS_LLAMA_CPP
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+                mock_res_queue.get_nowait.return_value = ("shutdown", "ok")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = True
+
+                with pytest.raises(RuntimeError, match="Worker shut down unexpectedly"):
+                    await mgr.run_inference("test prompt")
+                assert mgr._worker_ready is False
+        finally:
+            mod._HAS_LLAMA_CPP = original
+
+    @pytest.mark.asyncio
+    async def test_run_inference_request_queue_full(self):
+        import services.local_model_manager as mod
+
+        original = mod._HAS_LLAMA_CPP
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+
+                mock_req_queue = MagicMock()
+                mock_req_queue.put.side_effect = Exception("queue full")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = MagicMock()
+                mgr._worker_proc = MagicMock()
+
+                with pytest.raises(RuntimeError, match="Failed to send request to worker"):
+                    await mgr.run_inference("test prompt")
+                assert mgr._worker_ready is False
         finally:
             mod._HAS_LLAMA_CPP = original
 
@@ -523,7 +800,7 @@ class TestLocalModelManagerGetLoadLock:
 
 class TestLocalModelManagerSubprocessCleanup:
     @pytest.mark.asyncio
-    async def test_timeout_terminates_subprocess(self):
+    async def test_timeout_shuts_down_worker(self):
         import services.local_model_manager as mod
         from services.local_model_manager import LocalInferenceTimeoutError
 
@@ -531,139 +808,60 @@ class TestLocalModelManagerSubprocessCleanup:
         mod._HAS_LLAMA_CPP = True
         try:
             mgr = LocalModelManager()
-            mgr._llm = MagicMock()
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_shutdown_worker"),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
                     "local_model_timeout": 1,
                 }
-                mgr.load_model = AsyncMock(return_value=True)
 
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.side_effect = Exception("empty")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = True
-                mock_proc_cls.return_value = mock_proc
-
-                with pytest.raises(LocalInferenceTimeoutError):
-                    await mgr.run_inference("test prompt")
-
-                mock_proc.terminate.assert_called()
-                mock_proc.join.assert_called()
-        finally:
-            mod._HAS_LLAMA_CPP = original
-
-    @pytest.mark.asyncio
-    async def test_timeout_kills_if_terminate_fails(self):
-        import services.local_model_manager as mod
-        from services.local_model_manager import LocalInferenceTimeoutError
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
-            mgr = LocalModelManager()
-            mgr._llm = MagicMock()
-            mgr._model_path = "/path/to/model.gguf"
-            with (
-                patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
-            ):
-                mock_ch.get_local_ai_config.return_value = {
-                    "local_model_path": "/path/to/model.gguf",
-                    "local_model_timeout": 1,
-                }
-                mgr.load_model = AsyncMock(return_value=True)
-
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.side_effect = Exception("empty")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = True
-                mock_proc_cls.return_value = mock_proc
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+                mock_res_queue.get_nowait.side_effect = Exception("empty")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(LocalInferenceTimeoutError):
                     await mgr.run_inference("test prompt")
 
-                mock_proc.terminate.assert_called()
-                mock_proc.kill.assert_called()
+                mgr._shutdown_worker.assert_called()
         finally:
             mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
-    async def test_success_closes_queue(self):
+    async def test_worker_exits_without_result(self):
         import services.local_model_manager as mod
 
         original = mod._HAS_LLAMA_CPP
         mod._HAS_LLAMA_CPP = True
         try:
             mgr = LocalModelManager()
-            mgr._llm = MagicMock()
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                patch.object(mgr, "_ensure_worker", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
                     "local_model_timeout": 30,
                 }
-                mgr.load_model = AsyncMock(return_value=True)
 
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.return_value = ("ok", "result text")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = False
-                mock_proc_cls.return_value = mock_proc
-
-                result = await mgr.run_inference("test prompt")
-                assert result == "result text"
-                mock_queue.close.assert_called()
-                mock_queue.join_thread.assert_called()
-        finally:
-            mod._HAS_LLAMA_CPP = original
-
-    @pytest.mark.asyncio
-    async def test_subprocess_exits_without_result(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
-            mgr = LocalModelManager()
-            mgr._llm = MagicMock()
-            mgr._model_path = "/path/to/model.gguf"
-            with (
-                patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
-            ):
-                mock_ch.get_local_ai_config.return_value = {
-                    "local_model_path": "/path/to/model.gguf",
-                    "local_model_timeout": 30,
-                }
-                mgr.load_model = AsyncMock(return_value=True)
-
-                mock_queue = MagicMock()
-                mock_queue.get_nowait.side_effect = Exception("empty")
-                mock_queue_cls.return_value = mock_queue
-
-                mock_proc = MagicMock()
-                mock_proc.is_alive.return_value = False
-                mock_proc_cls.return_value = mock_proc
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+                mock_res_queue.get_nowait.side_effect = Exception("empty")
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_proc = MagicMock()
+                mgr._worker_proc.is_alive.return_value = False
 
                 with pytest.raises(RuntimeError, match="exited without producing"):
                     await mgr.run_inference("test prompt")
+                assert mgr._worker_ready is False
         finally:
             mod._HAS_LLAMA_CPP = original

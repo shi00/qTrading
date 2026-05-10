@@ -30,6 +30,8 @@ class TushareClient:
     _instance = None
     _lock = threading.Lock()
 
+    _ASYNC_TIMEOUT_MULTIPLIER = 1.5
+
     _COLUMN_RENAMES = {
         "cn_cpi": {"month": "period", "nt_val": "cpi"},
         "cn_ppi": {"month": "period", "ppi_yoy": "ppi"},
@@ -186,7 +188,7 @@ class TushareClient:
                         ThreadPoolManager().io_pool,
                         functools.partial(func, **kwargs),
                     ),
-                    timeout=self.timeout * 1.5,
+                    timeout=self.timeout * self._ASYNC_TIMEOUT_MULTIPLIER,
                 )
 
                 if result is not None and api_name in self._COLUMN_RENAMES:

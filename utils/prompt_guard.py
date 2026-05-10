@@ -1,5 +1,6 @@
 import re
 import logging
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,16 @@ _INJECTION_PATTERNS = [
     re.compile(r"act\s+as\s+if\s+you\s+(have\s+)?no\s+(rules?|restrictions?|limits?)", re.IGNORECASE),
 ]
 
+_CN_INJECTION_PATTERNS = [
+    re.compile(r"忽略.{0,4}(所有|之前|上面|以上|以下)?的?(指令|规则|提示|设定)"),
+    re.compile(r"忘记.{0,4}(所有|之前|上面|以上)?的?(指令|规则|提示|设定)"),
+    re.compile(r"绕过.{0,4}(安全|限制|规则|检查)"),
+    re.compile(r"无视.{0,4}(所有|之前|上面|以上)?的?(指令|规则|提示|设定)"),
+    re.compile(r"你现在是(无限制|不受限|未审查|越狱)"),
+    re.compile(r"假装你(没有|不受)(规则|限制|约束)"),
+    re.compile(r"不要(遵守|遵循|执行)(任何|之前的)?(规则|指令|限制)"),
+]
+
 _INJECTION_WARNING_KEYWORDS = [
     "ignore all",
     "disregard all",
@@ -36,6 +47,19 @@ _INJECTION_WARNING_KEYWORDS = [
     "unrestricted",
     "uncensored",
 ]
+
+
+def _normalize_unicode(text: str) -> str:
+    """Normalize Unicode to NFKC form to eliminate full-width and zero-width character obfuscation.
+
+    NFKC normalization converts:
+    - Full-width Latin: ＩＧＮＯＲＥ → IGNORE
+    - Compatibility characters: ﬁ → fi
+    - Zero-width characters are stripped separately.
+    """
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", normalized)
+    return normalized
 
 
 def validate_prompt(prompt: str) -> tuple[bool, str]:
@@ -52,16 +76,25 @@ def validate_prompt(prompt: str) -> tuple[bool, str]:
     if len(prompt) > MAX_PROMPT_LENGTH:
         return False, "prompt_err_length"
 
+    normalized = _normalize_unicode(prompt)
+
     warnings = []
 
     for pattern in _INJECTION_PATTERNS:
-        match = pattern.search(prompt)
+        match = pattern.search(normalized)
         if match:
             warnings.append("prompt_err_injection")
             break
 
     if not warnings:
-        lower = prompt.lower()
+        for pattern in _CN_INJECTION_PATTERNS:
+            match = pattern.search(normalized)
+            if match:
+                warnings.append("prompt_err_injection")
+                break
+
+    if not warnings:
+        lower = normalized.lower()
         for kw in _INJECTION_WARNING_KEYWORDS:
             if kw.lower() in lower:
                 warnings.append("prompt_err_keyword")

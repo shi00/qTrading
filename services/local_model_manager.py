@@ -20,6 +20,93 @@ class LocalInferenceTimeoutError(RuntimeError):
     pass
 
 
+_SENTINEL = "__SHUTDOWN__"
+
+
+def _persistent_worker(
+    model_path: str,
+    config: dict,
+    request_queue: multiprocessing.Queue,
+    result_queue: multiprocessing.Queue,
+):
+    """Persistent subprocess worker that loads the model once and serves requests.
+
+    Communication protocol:
+    - Parent sends a tuple via request_queue:
+        (prompt, max_tokens, temperature, system_prompt)
+    - Worker puts result via result_queue:
+        ("ok", output_text) or ("error", error_message)
+    - Parent sends _SENTINEL to request graceful shutdown.
+    - On model load failure, worker puts ("error", ...) and exits.
+    """
+    try:
+        llama_cpp_module = importlib.import_module("llama_cpp")
+        Llama = llama_cpp_module.Llama
+        llama_types_module = importlib.import_module("llama_cpp.llama_types")
+        ChatCompletionRequestSystemMessage = llama_types_module.ChatCompletionRequestSystemMessage
+        ChatCompletionRequestUserMessage = llama_types_module.ChatCompletionRequestUserMessage
+    except (ImportError, AttributeError) as e:
+        result_queue.put(("error", f"llama-cpp-python import failed: {e}"))
+        return
+
+    try:
+        llm = Llama(
+            model_path=model_path,
+            n_threads=config.get("n_threads", 4),
+            n_batch=config.get("n_batch", 1024),
+            n_ctx=config.get("n_ctx", 4096),
+            n_gpu_layers=config.get("n_gpu_layers", 0),
+            flash_attn=config.get("flash_attn", True),
+            verbose=False,
+        )
+        result_queue.put(("ready", model_path))
+    except Exception as e:
+        result_queue.put(("error", f"Model load failed: {e}"))
+        return
+
+    while True:
+        try:
+            request = request_queue.get(timeout=1.0)
+        except Exception:
+            continue
+
+        if request is _SENTINEL:
+            result_queue.put(("shutdown", "ok"))
+            break
+
+        if not isinstance(request, tuple) or len(request) != 4:
+            result_queue.put(("error", f"Invalid request format: {type(request)}"))
+            continue
+
+        prompt, max_tokens, temperature, system_prompt = request
+        try:
+            messages = [
+                ChatCompletionRequestSystemMessage(role="system", content=system_prompt),
+                ChatCompletionRequestUserMessage(role="user", content=prompt),
+            ]
+
+            stream = llm.create_chat_completion(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=True,
+            )
+
+            collected_content: list[str] = []
+            for chunk in stream:
+                choices = chunk.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        collected_content.append(content)
+
+            output = "".join(collected_content)
+            result_queue.put(("ok", output))
+        except Exception as e:
+            result_queue.put(("error", str(e)))
+
+
 def _subprocess_inference_worker(
     model_path: str,
     prompt: str,
@@ -29,13 +116,7 @@ def _subprocess_inference_worker(
     config: dict,
     result_queue: multiprocessing.Queue,
 ):
-    """Run LLM inference in an isolated subprocess.
-
-    This function is the entry point for multiprocessing.Process.
-    On timeout, the parent process terminates this subprocess, which
-    guarantees that all native memory (llama.cpp mmap, CUDA buffers)
-    is released by the OS — no leaked threads or GPU allocations.
-    """
+    """One-shot inference worker (fallback). Kept for backward compatibility."""
     try:
         llama_cpp_module = importlib.import_module("llama_cpp")
         Llama = llama_cpp_module.Llama
@@ -131,13 +212,20 @@ class LocalModelManager:
     _last_config: dict = {}
     _is_loading: bool = False
     _cancel_event: threading.Event = threading.Event()
+    _worker_proc: multiprocessing.Process | None = None
+    _request_queue: multiprocessing.Queue | None = None
+    _result_queue: multiprocessing.Queue | None = None
+    _worker_ready: bool = False
+    _worker_lock: threading.Lock = threading.Lock()
 
     @classmethod
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
-            if cls._instance is not None and cls._instance._llm is not None:
-                cls._instance.unload_model()
+            if cls._instance is not None:
+                cls._instance._shutdown_worker()
+                if cls._instance._llm is not None:
+                    cls._instance.unload_model()
             cls._instance = None
             cls._initialized = False
 
@@ -163,6 +251,89 @@ class LocalModelManager:
             return
         self._llm = None
         self._last_config = {}
+        self._worker_proc = None
+        self._request_queue = None
+        self._result_queue = None
+        self._worker_ready = False
+
+    def _shutdown_worker(self):
+        """Gracefully shut down the persistent worker subprocess."""
+        with self._worker_lock:
+            if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
+                try:
+                    self._request_queue.put(_SENTINEL, timeout=2.0)
+                except Exception:
+                    pass
+                self._worker_proc.join(timeout=5)
+                if self._worker_proc.is_alive():
+                    self._worker_proc.terminate()
+                    self._worker_proc.join(timeout=3)
+                    if self._worker_proc.is_alive():
+                        self._worker_proc.kill()
+                        self._worker_proc.join(timeout=2)
+
+            if self._request_queue is not None:
+                try:
+                    self._request_queue.close()
+                    self._request_queue.join_thread()
+                except Exception:
+                    pass
+            if self._result_queue is not None:
+                try:
+                    self._result_queue.close()
+                    self._result_queue.join_thread()
+                except Exception:
+                    pass
+
+            self._worker_proc = None
+            self._request_queue = None
+            self._result_queue = None
+            self._worker_ready = False
+            logger.info("[LocalModel] Persistent worker shut down.")
+
+    def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
+        """Ensure a persistent worker subprocess is running with the given model.
+
+        Returns True if worker is ready, False on failure.
+        Thread-safe: protected by _worker_lock.
+        """
+        with self._worker_lock:
+            if (
+                self._worker_proc is not None
+                and self._worker_proc.is_alive()
+                and self._worker_ready
+                and self._model_path == model_path
+            ):
+                return True
+
+            self._shutdown_worker()
+
+            self._request_queue = multiprocessing.Queue()
+            self._result_queue = multiprocessing.Queue()
+
+            proc = multiprocessing.Process(
+                target=_persistent_worker,
+                args=(model_path, core_config, self._request_queue, self._result_queue),
+                daemon=True,
+            )
+            proc.start()
+            self._worker_proc = proc
+
+            try:
+                status, payload = self._result_queue.get(timeout=180)
+            except Exception:
+                logger.error("[LocalModel] Persistent worker failed to become ready within 180s.")
+                self._shutdown_worker()
+                return False
+
+            if status == "ready":
+                self._worker_ready = True
+                logger.info(f"[LocalModel] Persistent worker ready with model: {payload}")
+                return True
+            else:
+                logger.error(f"[LocalModel] Persistent worker failed: {payload}")
+                self._shutdown_worker()
+                return False
 
     def get_loaded_model_path(self) -> str:
         """Return the path of the currently loaded model, or empty string if none."""
@@ -309,11 +480,11 @@ class LocalModelManager:
         system_prompt: str = "You are a helpful assistant.",
     ) -> str:
         """
-        Run inference on the loaded model using subprocess isolation.
+        Run inference using a persistent subprocess worker.
 
-        The LLM runs in a child process so that on timeout the parent can
-        terminate() it and the OS reclaims all native memory (mmap, CUDA
-        buffers) immediately — no leaked threads or GPU allocations.
+        The model is loaded once in the worker and reused across calls.
+        On timeout, the worker is terminated and restarted on next call,
+        ensuring all native memory (mmap, CUDA) is reclaimed by the OS.
 
         Raises:
             RuntimeError: If model cannot be loaded or inference fails.
@@ -326,17 +497,8 @@ class LocalModelManager:
         config = ConfigHandler.get_local_ai_config()
         path = config.get("local_model_path", "")
 
-        if path:
-            success = await self.load_model(path)
-            if not success:
-                raise RuntimeError("Model failed to load/reload.")
-        else:
+        if not path:
             raise RuntimeError("Model not configured (no path set).")
-
-        if not self._llm:
-            raise RuntimeError("No model loaded.")
-
-        timeout_val = config.get("local_model_timeout", 90) or 90
 
         core_config = {
             "n_threads": config.get("n_threads", 4),
@@ -346,78 +508,69 @@ class LocalModelManager:
             "flash_attn": config.get("flash_attn", True),
         }
 
+        if not self._ensure_worker(path, core_config):
+            raise RuntimeError("Persistent worker failed to start. Check logs for details.")
+
+        timeout_val = config.get("local_model_timeout", 90) or 90
+
         logger.info(
-            f"[LocalModel] Scheduling subprocess inference. "
+            f"[LocalModel] Sending inference request to persistent worker. "
             f"Input len: {len(prompt)}, Max tokens: {max_tokens}, "
             f"Temp: {temperature}, Timeout: {timeout_val}s",
         )
         start_time = asyncio.get_running_loop().time()
 
-        result_queue = multiprocessing.Queue()
-        proc = multiprocessing.Process(
-            target=_subprocess_inference_worker,
-            args=(
-                self._model_path,
-                prompt,
-                max_tokens,
-                temperature,
-                system_prompt,
-                core_config,
-                result_queue,
-            ),
-            daemon=True,
-        )
-        proc.start()
+        try:
+            self._request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5)
+        except Exception as e:
+            logger.error(f"[LocalModel] Failed to send request to worker: {e}")
+            self._worker_ready = False
+            raise RuntimeError(f"Failed to send request to worker: {e}") from e
 
         result = None
+        worker_died = False
         try:
             deadline = asyncio.get_running_loop().time() + float(timeout_val)
-            while proc.is_alive():
+            while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     break
                 try:
-                    result = result_queue.get_nowait()
-                    if result is not None:
-                        break
+                    result = self._result_queue.get_nowait()
+                    break
                 except Exception:
                     pass
+                if self._worker_proc is not None and not self._worker_proc.is_alive():
+                    try:
+                        result = self._result_queue.get_nowait()
+                    except Exception:
+                        pass
+                    worker_died = True
+                    break
                 await asyncio.sleep(min(0.2, remaining))
 
             if result is None:
                 try:
-                    result = result_queue.get_nowait()
+                    result = self._result_queue.get_nowait()
                 except Exception:
                     pass
 
-            if result is None and proc.is_alive():
+            if result is None and not worker_died:
                 raise TimeoutError()
         except TimeoutError as te:
-            proc.terminate()
-            proc.join(timeout=5)
-            if proc.is_alive():
-                proc.kill()
-                proc.join(timeout=2)
             elapsed = asyncio.get_running_loop().time() - start_time
             logger.error(
-                f"[LocalModel] Subprocess inference timed out after {timeout_val}s "
-                f"(elapsed: {elapsed:.1f}s). Process terminated.",
+                f"[LocalModel] Persistent worker inference timed out after {timeout_val}s "
+                f"(elapsed: {elapsed:.1f}s). Terminating worker.",
             )
+            self._shutdown_worker()
             raise LocalInferenceTimeoutError(
-                f"Local inference timed out ({timeout_val}s). Subprocess terminated, memory freed by OS.",
+                f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
             ) from te
-        finally:
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=5)
-                if proc.is_alive():
-                    proc.kill()
-                    proc.join(timeout=2)
-            result_queue.close()
-            result_queue.join_thread()
 
         if result is None:
-            raise RuntimeError("Inference subprocess exited without producing a result.")
+            self._worker_ready = False
+            raise RuntimeError("Inference worker exited without producing a result.")
 
         status, payload = result
         elapsed = asyncio.get_running_loop().time() - start_time
@@ -426,8 +579,12 @@ class LocalModelManager:
             logger.error(f"[LocalModel] Inference error: {payload}")
             raise RuntimeError(f"Inference execution failed: {payload}")
 
+        if status == "shutdown":
+            self._worker_ready = False
+            raise RuntimeError("Worker shut down unexpectedly during inference.")
+
         logger.info(
-            f"[LocalModel] Subprocess inference completed in {elapsed:.2f}s. Output len: {len(payload)}",
+            f"[LocalModel] Persistent worker inference completed in {elapsed:.2f}s. Output len: {len(payload)}",
         )
         return payload
 
@@ -484,8 +641,8 @@ class LocalModelManager:
 
     def unload_model(self):
         """Free memory and signal any running inference to stop."""
-        # Ensure any in-flight streaming generation sees the cancel signal
         self._cancel_event.set()
+        self._shutdown_worker()
         if self._llm:
             del self._llm
             self._llm = None

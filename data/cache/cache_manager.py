@@ -961,10 +961,19 @@ class CacheManager:
 
         for key, df in batch_results.items():
             if df is not None and not df.empty:
-                for code in ts_codes:
-                    code_df = df[df["ts_code"] == code]
-                    if not code_df.empty:
-                        result[code][key] = code_df
+                if "ts_code" in df.columns:
+                    grouped = df.groupby("ts_code")
+                    for code in ts_codes:
+                        try:
+                            code_df = grouped.get_group(code)
+                            result[code][key] = code_df
+                        except KeyError:
+                            pass
+                else:
+                    for code in ts_codes:
+                        code_df = df[df["ts_code"] == code]
+                        if not code_df.empty:
+                            result[code][key] = code_df
 
         return result
 
