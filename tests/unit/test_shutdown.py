@@ -203,38 +203,38 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_mds_instance.stop_async.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_step2_close_processor_no_instance(self):
-        coord = ShutdownCoordinator()
-        with patch("data.data_processor.DataProcessor") as mock_dp:
-            mock_dp._instance = None
-            await coord._step2_close_processor()
-
-    @pytest.mark.asyncio
-    async def test_step2_close_processor_with_instance(self):
-        coord = ShutdownCoordinator()
-        with patch("data.data_processor.DataProcessor") as mock_dp:
-            mock_instance = MagicMock()
-            mock_instance.close = AsyncMock()
-            mock_dp._instance = mock_instance
-            await coord._step2_close_processor()
-            mock_instance.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_step3_flush_db_no_instance(self):
+    async def test_step2_flush_db_no_instance(self):
         coord = ShutdownCoordinator()
         with patch("services.task_manager.TaskManager") as mock_tm:
             mock_tm._instance = None
-            await coord._step3_flush_db_writes()
+            await coord._step2_flush_db_writes()
 
     @pytest.mark.asyncio
-    async def test_step3_flush_db_with_instance(self):
+    async def test_step2_flush_db_with_instance(self):
         coord = ShutdownCoordinator()
         with patch("services.task_manager.TaskManager") as mock_tm:
             mock_instance = MagicMock()
             mock_instance.flush_persistence = AsyncMock()
             mock_tm._instance = mock_instance
-            await coord._step3_flush_db_writes()
+            await coord._step2_flush_db_writes()
             mock_instance.flush_persistence.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_step3_close_processor_no_instance(self):
+        coord = ShutdownCoordinator()
+        with patch("data.data_processor.DataProcessor") as mock_dp:
+            mock_dp._instance = None
+            await coord._step3_close_processor()
+
+    @pytest.mark.asyncio
+    async def test_step3_close_processor_with_instance(self):
+        coord = ShutdownCoordinator()
+        with patch("data.data_processor.DataProcessor") as mock_dp:
+            mock_instance = MagicMock()
+            mock_instance.close = AsyncMock()
+            mock_dp._instance = mock_instance
+            await coord._step3_close_processor()
+            mock_instance.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_step4_clear_toast_no_page(self):
@@ -537,3 +537,32 @@ class TestMainPyCleanupTimeouts:
         source = main_path.read_text(encoding="utf-8")
         assert "timeout_s=12.0" in source
         assert "step_timeout_s=2.0" in source
+
+
+class TestShutdownStepOrdering:
+    def test_flush_db_before_close_processor(self):
+        flush_idx = None
+        close_idx = None
+        for i, (_name, method_name, _critical) in enumerate(_CLEANUP_STEPS):
+            if method_name == "_step2_flush_db_writes":
+                flush_idx = i
+            if method_name == "_step3_close_processor":
+                close_idx = i
+        assert flush_idx is not None, "_step2_flush_db_writes not found in cleanup steps"
+        assert close_idx is not None, "_step3_close_processor not found in cleanup steps"
+        assert flush_idx < close_idx, (
+            f"Flush DB writes (step {flush_idx}) must execute before "
+            f"close processor (step {close_idx}) to prevent data loss"
+        )
+
+    def test_cancel_tasks_is_first_step(self):
+        assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
+
+    def test_shutdown_pools_is_last_step(self):
+        assert _CLEANUP_STEPS[-1][1] == "_step6_shutdown_thread_pools"
+
+    def test_step2_is_flush_db_writes(self):
+        assert _CLEANUP_STEPS[2][1] == "_step2_flush_db_writes"
+
+    def test_step3_is_close_processor(self):
+        assert _CLEANUP_STEPS[3][1] == "_step3_close_processor"

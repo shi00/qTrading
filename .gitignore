@@ -77,6 +77,7 @@ logs/
 .env.*
 .secret.key
 .secret.key.bak
+.secret.legacy
 
 # 4. Data files (Quantitative/Cache prevention)
 *.csv

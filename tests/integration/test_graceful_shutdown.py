@@ -228,7 +228,7 @@ async def test_processor_close_called():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step2_close_processor()
+        await coordinator._step3_close_processor()
         DataProcessor._instance.close.assert_awaited_once()
     finally:
         DataProcessor._instance = orig
@@ -244,7 +244,7 @@ async def test_processor_close_skipped_when_absent():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step2_close_processor()
+        await coordinator._step3_close_processor()
     finally:
         DataProcessor._instance = orig
 
@@ -442,8 +442,8 @@ async def test_step5_timeout_marks_cleanup_failed(mock_singletons):
     with (
         patch.object(coordinator, "_step0_cancel_tasks", side_effect=_noop),
         patch.object(coordinator, "_step1_stop_services", side_effect=_noop),
-        patch.object(coordinator, "_step2_close_processor", side_effect=_noop),
-        patch.object(coordinator, "_step3_flush_db_writes", side_effect=_noop),
+        patch.object(coordinator, "_step2_flush_db_writes", side_effect=_noop),
+        patch.object(coordinator, "_step3_close_processor", side_effect=_noop),
         patch.object(coordinator, "_step4_clear_toast", side_effect=_noop),
         patch.object(coordinator, "_step5_unload_ai_model", side_effect=_blocking_unload),
     ):

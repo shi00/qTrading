@@ -16,6 +16,15 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 logger = logging.getLogger(__name__)
 
 
+class EngineDisposedError(RuntimeError):
+    """Raised when a DAO operation is attempted after the database engine has been disposed.
+
+    This is a P0 data-safety guard: silently dropping writes or returning empty
+    results on a disposed engine can cause data loss without any notification.
+    Callers must catch this explicitly if they want graceful degradation.
+    """
+
+
 class BaseDao:
     _maintenance_event = None
 
@@ -132,10 +141,10 @@ class BaseDao:
         from data.cache.cache_manager import CacheManager
 
         if CacheManager._instance is not None and CacheManager._instance._disposed:
-            logger.warning(
-                f"[{self.__class__.__name__}] Engine disposed, write silently dropped.",
+            raise EngineDisposedError(
+                f"[{self.__class__.__name__}] Engine disposed, write rejected. "
+                f"Call CacheManager.init_db() to reinitialize."
             )
-            return 0
 
         if is_many and not params:
             return 0
@@ -154,14 +163,12 @@ class BaseDao:
 
         # Check if engine is disposed/closed
         try:
-            # SQLAlchemy 1.4/2.0+ async engine check
             if hasattr(self.engine, "sync_engine") and self.engine.sync_engine is None:
-                logger.warning(
-                    f"[{self.__class__.__name__}] Engine disposed, skipping write.",
-                )
-                return 0
+                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine sync_engine is None, write rejected.")
+        except EngineDisposedError:
+            raise
         except Exception:
-            pass  # Safety check
+            pass
 
         start_time = time.perf_counter()
         try:
@@ -239,6 +246,14 @@ class BaseDao:
         if self.engine is None:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
+            )
+
+        from data.cache.cache_manager import CacheManager
+
+        if CacheManager._instance is not None and CacheManager._instance._disposed:
+            raise EngineDisposedError(
+                f"[{self.__class__.__name__}] Engine disposed, upsert rejected. "
+                f"Call CacheManager.init_db() to reinitialize."
             )
 
         if df is None or df.empty:
@@ -433,10 +448,10 @@ class BaseDao:
         from data.cache.cache_manager import CacheManager
 
         if CacheManager._instance is not None and CacheManager._instance._disposed:
-            logger.warning(
-                f"[{self.__class__.__name__}] Engine disposed, read returning empty.",
+            raise EngineDisposedError(
+                f"[{self.__class__.__name__}] Engine disposed, read rejected. "
+                f"Call CacheManager.init_db() to reinitialize."
             )
-            return []
 
         if params is not None and isinstance(params, list):
             params = tuple(params)
@@ -524,10 +539,10 @@ class BaseDao:
         from data.cache.cache_manager import CacheManager
 
         if CacheManager._instance is not None and CacheManager._instance._disposed:
-            logger.warning(
-                f"[{self.__class__.__name__}] Engine disposed, read returning empty.",
+            raise EngineDisposedError(
+                f"[{self.__class__.__name__}] Engine disposed, read rejected. "
+                f"Call CacheManager.init_db() to reinitialize."
             )
-            return []
 
         await self._get_maintenance_event().wait()
 

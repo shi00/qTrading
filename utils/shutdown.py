@@ -22,8 +22,8 @@ class StepResult:
 _CLEANUP_STEPS = [
     ("Step 0", "_step0_cancel_tasks", True),
     ("Step 1", "_step1_stop_services", True),
-    ("Step 2", "_step2_close_processor", True),
-    ("Step 3", "_step3_flush_db_writes", True),
+    ("Step 2", "_step2_flush_db_writes", True),
+    ("Step 3", "_step3_close_processor", True),
     ("Step 4", "_step4_clear_toast", False),
     ("Step 5", "_step5_unload_ai_model", True),
     ("Step 6", "_step6_shutdown_thread_pools", True),
@@ -279,18 +279,8 @@ class ShutdownCoordinator:
         if self._service_stop_delay > 0:
             await asyncio.sleep(self._service_stop_delay)
 
-    async def _step2_close_processor(self):
-        logger.info("[Shutdown] Step 2: Closing DataProcessor...")
-        from data.data_processor import DataProcessor
-
-        if DataProcessor._instance is not None:
-            await DataProcessor._instance.close()
-            logger.info("[Shutdown]   - DataProcessor closed (includes DB engine disposal).")
-        else:
-            logger.info("[Shutdown]   - DataProcessor not initialized, skipping.")
-
-    async def _step3_flush_db_writes(self):
-        logger.info("[Shutdown] Step 3: Flushing pending DB writes...")
+    async def _step2_flush_db_writes(self):
+        logger.info("[Shutdown] Step 2: Flushing pending DB writes...")
         from services.task_manager import TaskManager
 
         if TaskManager._instance is None:
@@ -299,6 +289,16 @@ class ShutdownCoordinator:
 
         await TaskManager._instance.flush_persistence(timeout_s=1.5)
         logger.info("[Shutdown]   - Task persistence flush completed.")
+
+    async def _step3_close_processor(self):
+        logger.info("[Shutdown] Step 3: Closing DataProcessor...")
+        from data.data_processor import DataProcessor
+
+        if DataProcessor._instance is not None:
+            await DataProcessor._instance.close()
+            logger.info("[Shutdown]   - DataProcessor closed (includes DB engine disposal).")
+        else:
+            logger.info("[Shutdown]   - DataProcessor not initialized, skipping.")
 
     async def _step4_clear_toast(self):
         logger.info("[Shutdown] Step 4: Clearing Toast Manager...")

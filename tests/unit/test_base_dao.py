@@ -4,8 +4,9 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
+import sqlalchemy as sa
 
-from data.persistence.daos.base_dao import BaseDao
+from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 
 
 class TestBaseDaoPrepareDataParams:
@@ -344,8 +345,8 @@ class TestBaseDaoWriteDbExtended:
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = True
-            result = await dao._write_db("INSERT INTO t VALUES ($1)")
-            assert result == 0
+            with pytest.raises(EngineDisposedError, match="Engine disposed"):
+                await dao._write_db("INSERT INTO t VALUES ($1)")
 
     @pytest.mark.asyncio
     async def test_write_sync_engine_none(self):
@@ -356,8 +357,8 @@ class TestBaseDaoWriteDbExtended:
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            result = await dao._write_db("INSERT INTO t VALUES ($1)")
-            assert result == 0
+            with pytest.raises(EngineDisposedError, match="sync_engine is None"):
+                await dao._write_db("INSERT INTO t VALUES ($1)")
 
     @pytest.mark.asyncio
     async def test_write_error_suppressed(self):
@@ -734,8 +735,8 @@ class TestBaseDaoReadDbExtended:
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = True
-            result = await dao._read_db("SELECT 1")
-            assert result == []
+            with pytest.raises(EngineDisposedError, match="Engine disposed"):
+                await dao._read_db("SELECT 1")
 
     @pytest.mark.asyncio
     async def test_read_cancelled_propagates(self):
@@ -824,3 +825,125 @@ class TestBaseDaoPrepareDataParamsExtended:
         df = pd.DataFrame({"col1": ["hello"]})
         result = BaseDao._prepare_data_params(df, ["col1"])
         assert result[0][0] == "hello"
+
+
+class TestEngineDisposedErrorDBP01:
+    @pytest.mark.asyncio
+    async def test_write_db_disposed_raises_engine_disposed_error(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            with pytest.raises(EngineDisposedError, match="Engine disposed, write rejected"):
+                await dao._write_db("INSERT INTO t VALUES ($1)")
+
+    @pytest.mark.asyncio
+    async def test_read_db_disposed_raises_engine_disposed_error(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
+                await dao._read_db("SELECT 1")
+
+    @pytest.mark.asyncio
+    async def test_read_db_select_disposed_raises_engine_disposed_error(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
+                await dao._read_db_select(sa.select(1))
+
+    @pytest.mark.asyncio
+    async def test_save_upsert_disposed_raises_engine_disposed_error(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            with pytest.raises(EngineDisposedError, match="Engine disposed, upsert rejected"):
+                await dao._save_upsert(
+                    pd.DataFrame({"a": [1]}),
+                    "test_table",
+                    ["a"],
+                    ["a"],
+                )
+
+    @pytest.mark.asyncio
+    async def test_write_db_sync_engine_none_raises_engine_disposed_error(self):
+        mock_engine = MagicMock()
+        mock_engine.sync_engine = None
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            with pytest.raises(EngineDisposedError, match="sync_engine is None"):
+                await dao._write_db("INSERT INTO t VALUES ($1)")
+
+    def test_engine_disposed_error_is_runtime_error(self):
+        assert issubclass(EngineDisposedError, RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_error_catchable_by_caller(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        caught = False
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            try:
+                await dao._write_db("INSERT INTO t VALUES ($1)")
+            except EngineDisposedError:
+                caught = True
+        assert caught
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_error_catchable_as_runtime_error(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        caught = False
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            try:
+                await dao._read_db("SELECT 1")
+            except RuntimeError:
+                caught = True
+        assert caught
+
+    @pytest.mark.asyncio
+    async def test_write_not_disposed_works_normally(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            result = await dao._write_db("INSERT INTO t VALUES ($1)", params=(1,), conn=mock_conn)
+            assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_read_not_disposed_works_normally(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(1, "test")]
+        mock_result.keys.return_value = ["id", "name"]
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame([(1, "test")], columns=["id", "name"]))
+            result = await dao._read_db("SELECT * FROM t")
+            assert isinstance(result, pd.DataFrame)

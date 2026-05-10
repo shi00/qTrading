@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from data.persistence.daos.base_dao import BaseDao
+    from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
     from data.persistence.daos.financial_dao import FinancialDao
     from data.persistence.daos.holder_dao import HolderDao
     from data.persistence.daos.macro_dao import MacroDao
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 def __getattr__(name):
     _mapping = {
         "BaseDao": "data.persistence.daos.base_dao",
+        "EngineDisposedError": "data.persistence.daos.base_dao",
         "FinancialDao": "data.persistence.daos.financial_dao",
         "HolderDao": "data.persistence.daos.holder_dao",
         "MacroDao": "data.persistence.daos.macro_dao",
@@ -36,6 +37,7 @@ def __getattr__(name):
 
 __all__ = [
     "BaseDao",
+    "EngineDisposedError",
     "FinancialDao",
     "HolderDao",
     "MacroDao",
