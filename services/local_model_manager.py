@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import importlib
@@ -5,7 +7,7 @@ import logging
 import multiprocessing
 import os
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
@@ -131,7 +133,7 @@ class LocalModelManager:
     the segfault risk that existed when inference ran in an in-process thread.
     """
 
-    _instance: Optional["LocalModelManager"] = None
+    _instance: LocalModelManager | None = None
     _initialized: bool = False
     _lock = threading.Lock()
     _model_path: str = ""
