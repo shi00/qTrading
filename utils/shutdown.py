@@ -47,6 +47,7 @@ class ShutdownCoordinator:
         *,
         service_stop_delay: float = 0.5,
         force_exit_callback: Callable[[int], None] | None = None,
+        watchdog_timeout_s: float = 10.0,
     ):
         self._page = page
         self._cleanup_started = False
@@ -58,7 +59,25 @@ class ShutdownCoordinator:
         self._watchdog_started = False
         self._watchdog_cancel_event: threading.Event | None = None
         self._service_stop_delay = service_stop_delay
-        self._force_exit = force_exit_callback or os._exit
+        self._watchdog_timeout_s = watchdog_timeout_s
+        self._force_exit = force_exit_callback or self._default_force_exit
+
+    @staticmethod
+    def _default_force_exit(code: int) -> None:
+        import sys
+
+        for handler in logging.root.handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        logger.critical(
+            f"[Shutdown] Force-exiting process with code {code}. Call stack and cleanup state have been logged above.",
+        )
+        try:
+            sys.exit(code)
+        except SystemExit:
+            os._exit(code)
 
     @property
     def cleanup_done(self) -> bool:
@@ -76,31 +95,32 @@ class ShutdownCoordinator:
     def step_results(self) -> list[StepResult]:
         return self._step_results[:]
 
-    def start_watchdog(self, timeout_s=10):
+    def start_watchdog(self, timeout_s: float | None = None):
         if (
             self._watchdog_started
             and self._watchdog_cancel_event is not None
             and not self._watchdog_cancel_event.is_set()
         ):
             return
+        effective_timeout = timeout_s if timeout_s is not None else self._watchdog_timeout_s
         self._watchdog_started = True
         self._watchdog_cancel_event = threading.Event()
         cancel_event = self._watchdog_cancel_event
         force_exit = self._force_exit
 
         def _force_exit_thread():
-            if cancel_event.wait(timeout_s):
+            if cancel_event.wait(effective_timeout):
                 logger.info("[Shutdown] Watchdog canceled before timeout.")
                 return
             logger.error(
-                f"[Shutdown] Watchdog timeout ({timeout_s}s) — forcing exit. "
+                f"[Shutdown] Watchdog timeout ({effective_timeout}s) — forcing exit. "
                 f"cleanup_done={self._cleanup_done}, "
                 f"cleanup_running={self._cleanup_running}",
             )
             force_exit(1)
 
         threading.Thread(target=_force_exit_thread, daemon=True).start()
-        logger.info(f"[Shutdown] Watchdog armed ({timeout_s}s).")
+        logger.info(f"[Shutdown] Watchdog armed ({effective_timeout}s).")
 
     def cancel_watchdog(self):
         if self._watchdog_cancel_event is not None:

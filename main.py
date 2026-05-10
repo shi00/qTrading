@@ -37,16 +37,7 @@ async def main(page: ft.Page):
     # ============================================================
     from utils.shutdown import ShutdownCoordinator
 
-    def _graceful_force_exit(code: int):
-        import sys
-        import os
-
-        try:
-            sys.exit(code)
-        except SystemExit:
-            os._exit(code)
-
-    coordinator = ShutdownCoordinator(page, force_exit_callback=_graceful_force_exit)
+    coordinator = ShutdownCoordinator(page, watchdog_timeout_s=10.0)
     close_confirm_dialog = None
     close_confirm_visible = False
     shutdown_requested = False
@@ -63,7 +54,7 @@ async def main(page: ft.Page):
         nonlocal shutdown_requested
         try:
             logger.info("[Main] Window close confirmed by user.")
-            coordinator.start_watchdog(10)
+            coordinator.start_watchdog()
 
             cleanup_ok = await coordinator.do_cleanup(timeout_s=8.0, step_timeout_s=3.0)
 
@@ -80,13 +71,7 @@ async def main(page: ft.Page):
 
             logger.error("[Main] Graceful shutdown incomplete, forcing process exit.")
             await asyncio.sleep(0.2)
-            import os
-            import sys
-
-            try:
-                sys.exit(1)
-            except SystemExit:
-                os._exit(1)
+            coordinator._force_exit(1)
         finally:
             shutdown_requested = False
 
@@ -237,9 +222,7 @@ async def main(page: ft.Page):
                 return
             logger.error("[Main] External disconnect cleanup incomplete, forcing process exit.")
             await asyncio.sleep(0.2)
-            import os
-
-            os._exit(0)
+            coordinator._force_exit(0)
 
     page.on_disconnect = _on_disconnect
 
@@ -382,7 +365,10 @@ async def main(page: ft.Page):
 
 
 if __name__ == "__main__":
+    import multiprocessing
     import os
+
+    multiprocessing.freeze_support()
 
     # Ensure assets are loaded correctly relative to this script,
     # preventing errors if run from a different working directory.

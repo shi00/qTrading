@@ -415,8 +415,18 @@ class TestGetLatestTradeDate:
         svc._offline.get_trade_dates = MagicMock(return_value=[])
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
-            result = await svc.get_latest_trade_date()
+            result = await svc.get_latest_trade_date(allow_fallback=True)
             assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_default_no_fallback_returns_none(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
+            result = await svc.get_latest_trade_date()
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_weekday_fallback_logs_error(self, caplog):
@@ -430,7 +440,7 @@ class TestGetLatestTradeDate:
             caplog.at_level(logging.ERROR, logger="data.domain_services.trade_calendar_service"),
         ):
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
-            await svc.get_latest_trade_date()
+            await svc.get_latest_trade_date(allow_fallback=True)
             assert any("Falling back to weekday heuristic" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import importlib
 import logging
+import multiprocessing
 import os
 import threading
 from typing import Any, Optional
@@ -17,6 +18,70 @@ class LocalInferenceTimeoutError(RuntimeError):
     """Raised when local model inference exceeds the configured timeout."""
 
     pass
+
+
+def _subprocess_inference_worker(
+    model_path: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    system_prompt: str,
+    config: dict,
+    result_queue: multiprocessing.Queue,
+):
+    """Run LLM inference in an isolated subprocess.
+
+    This function is the entry point for multiprocessing.Process.
+    On timeout, the parent process terminates this subprocess, which
+    guarantees that all native memory (llama.cpp mmap, CUDA buffers)
+    is released by the OS — no leaked threads or GPU allocations.
+    """
+    try:
+        llama_cpp_module = importlib.import_module("llama_cpp")
+        Llama = llama_cpp_module.Llama
+        llama_types_module = importlib.import_module("llama_cpp.llama_types")
+        ChatCompletionRequestSystemMessage = llama_types_module.ChatCompletionRequestSystemMessage
+        ChatCompletionRequestUserMessage = llama_types_module.ChatCompletionRequestUserMessage
+    except (ImportError, AttributeError) as e:
+        result_queue.put(("error", f"llama-cpp-python import failed: {e}"))
+        return
+
+    try:
+        llm = Llama(
+            model_path=model_path,
+            n_threads=config.get("n_threads", 4),
+            n_batch=config.get("n_batch", 1024),
+            n_ctx=config.get("n_ctx", 4096),
+            n_gpu_layers=config.get("n_gpu_layers", 0),
+            flash_attn=config.get("flash_attn", True),
+            verbose=False,
+        )
+
+        messages = [
+            ChatCompletionRequestSystemMessage(role="system", content=system_prompt),
+            ChatCompletionRequestUserMessage(role="user", content=prompt),
+        ]
+
+        stream = llm.create_chat_completion(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True,
+        )
+
+        collected_content: list[str] = []
+        for chunk in stream:
+            choices = chunk.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    collected_content.append(content)
+
+        output = "".join(collected_content)
+        result_queue.put(("ok", output))
+    except Exception as e:
+        result_queue.put(("error", str(e)))
 
 
 # Try importing llama_cpp dynamically, handle missing dependency gracefully.
@@ -174,7 +239,7 @@ class LocalModelManager:
             )
 
             self._is_loading = True
-            start_time = asyncio.get_event_loop().time()
+            start_time = asyncio.get_running_loop().time()
 
             try:
                 # 1. Calculate MD5 (Async IO) - Optional but good for logs
@@ -202,7 +267,7 @@ class LocalModelManager:
                 self._model_stat = current_stat
                 self._last_config = core_config
 
-                elapsed = asyncio.get_event_loop().time() - start_time
+                elapsed = asyncio.get_running_loop().time() - start_time
                 logger.info(
                     f"[LocalModel] Model loaded successfully in {elapsed:.2f}s.",
                 )
@@ -244,11 +309,16 @@ class LocalModelManager:
         system_prompt: str = "You are a helpful assistant.",
     ) -> str:
         """
-        Run inference on the loaded model.
-        Blocking call, must run in Executor.
+        Run inference on the loaded model using subprocess isolation.
+
+        The LLM runs in a child process so that on timeout the parent can
+        terminate() it and the OS reclaims all native memory (mmap, CUDA
+        buffers) immediately — no leaked threads or GPU allocations.
+
         Raises:
             RuntimeError: If model cannot be loaded or inference fails.
             ImportError: If llama-cpp-python is missing.
+            LocalInferenceTimeoutError: If inference exceeds the configured timeout.
         """
         if not _HAS_LLAMA_CPP:
             raise ImportError("llama-cpp-python not installed.")
@@ -256,9 +326,6 @@ class LocalModelManager:
         config = ConfigHandler.get_local_ai_config()
         path = config.get("local_model_path", "")
 
-        # UNIFIED LOADING LOGIC:
-        # We delegate everything to load_model(), which now has the smart "stat" check.
-        # This replaces the old weak logic that only checked path string and didn't detect file changes.
         if path:
             success = await self.load_model(path)
             if not success:
@@ -269,70 +336,110 @@ class LocalModelManager:
         if not self._llm:
             raise RuntimeError("No model loaded.")
 
-        # Get timeout from config (default 90s)
         timeout_val = config.get("local_model_timeout", 90) or 90
 
+        core_config = {
+            "n_threads": config.get("n_threads", 4),
+            "n_batch": config.get("n_batch", 1024),
+            "n_ctx": config.get("n_ctx", 4096),
+            "n_gpu_layers": config.get("n_gpu_layers", 0),
+            "flash_attn": config.get("flash_attn", True),
+        }
+
         logger.info(
-            f"[LocalModel] Scheduling inference on TaskType.CPU. Input len: {len(prompt)}, Max tokens: {max_tokens}, Temp: {temperature}, Timeout: {timeout_val}s",
+            f"[LocalModel] Scheduling subprocess inference. "
+            f"Input len: {len(prompt)}, Max tokens: {max_tokens}, "
+            f"Temp: {temperature}, Timeout: {timeout_val}s",
         )
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
 
-        # Clear cancel signal before starting new inference
-        self._cancel_event.clear()
+        result_queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_subprocess_inference_worker,
+            args=(
+                self._model_path,
+                prompt,
+                max_tokens,
+                temperature,
+                system_prompt,
+                core_config,
+                result_queue,
+            ),
+            daemon=True,
+        )
+        proc.start()
 
-        # Serialize inference to prevent native crash (Llama instance is not thread-safe)
-        async with self._get_load_lock():
-            try:
-                # Run in thread pool with timeout
-                output = await asyncio.wait_for(
-                    ThreadPoolManager().run_async(
-                        TaskType.CPU,
-                        self._generate_sync,
-                        prompt,
-                        max_tokens,
-                        temperature,
-                        system_prompt,
-                    ),
-                    timeout=float(timeout_val),
-                )
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.info(
-                    f"[LocalModel] Inference completed in {elapsed:.2f}s. Output len: {len(output)}",
-                )
-                return output
-            except TimeoutError as te:
-                logger.error(
-                    f"[LocalModel] Inference timed out after {timeout_val}s.",
-                    exc_info=False,
-                )
-                # Signal the running thread to stop at the next token yield.
-                # With stream=True, _generate_sync checks _cancel_event between tokens
-                # and breaks out of the loop, allowing the thread to exit naturally
-                # and release its reference to the Llama object.
-                self._cancel_event.set()
-                self.unload_model()
-                self._model_path = ""
-                self._model_stat = (0, 0)
-                raise LocalInferenceTimeoutError(
-                    f"Local inference timed out ({timeout_val}s). Memory freed.",
-                ) from te
-            except Exception as e:
-                logger.error(f"[LocalModel] Inference error: {e}", exc_info=True)
-                # Cleanup on unexpected errors as well just to be safe
-                self._cancel_event.set()
-                self.unload_model()
-                self._model_path = ""
-                self._model_stat = (0, 0)
-                raise RuntimeError(f"Inference execution failed: {e}") from e
+        result = None
+        try:
+            deadline = asyncio.get_running_loop().time() + float(timeout_val)
+            while proc.is_alive():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    result = result_queue.get_nowait()
+                    if result is not None:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(min(0.2, remaining))
+
+            if result is None:
+                try:
+                    result = result_queue.get_nowait()
+                except Exception:
+                    pass
+
+            if result is None and proc.is_alive():
+                raise TimeoutError()
+        except TimeoutError as te:
+            proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2)
+            elapsed = asyncio.get_running_loop().time() - start_time
+            logger.error(
+                f"[LocalModel] Subprocess inference timed out after {timeout_val}s "
+                f"(elapsed: {elapsed:.1f}s). Process terminated.",
+            )
+            raise LocalInferenceTimeoutError(
+                f"Local inference timed out ({timeout_val}s). Subprocess terminated, memory freed by OS.",
+            ) from te
+        finally:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+            result_queue.close()
+            result_queue.join_thread()
+
+        if result is None:
+            raise RuntimeError("Inference subprocess exited without producing a result.")
+
+        status, payload = result
+        elapsed = asyncio.get_running_loop().time() - start_time
+
+        if status == "error":
+            logger.error(f"[LocalModel] Inference error: {payload}")
+            raise RuntimeError(f"Inference execution failed: {payload}")
+
+        logger.info(
+            f"[LocalModel] Subprocess inference completed in {elapsed:.2f}s. Output len: {len(payload)}",
+        )
+        return payload
 
     def _generate_sync(self, prompt: str, max_tokens: int, temperature: float, system_prompt: str) -> str:
         """
         Sync generation logic using streaming to enable cooperative cancellation.
 
-        Uses stream=True so that the generation yields control back to Python
-        between tokens. The _cancel_event is checked at each yield point;
-        if set (e.g. by timeout handler), the loop breaks and the thread
-        exits naturally, releasing its reference to the Llama object.
+        .. deprecated::
+            This method is retained for backward compatibility only.
+            run_inference() now uses subprocess isolation via
+            _subprocess_inference_worker, which guarantees memory cleanup
+            on timeout. Prefer subprocess isolation for all new code.
         """
         logger.info(
             f"[LocalModel] Running generation in thread: {threading.current_thread().name}",

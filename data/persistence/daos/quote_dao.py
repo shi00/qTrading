@@ -4,6 +4,7 @@ import re
 import typing
 
 import pandas as pd
+import sqlalchemy as sa
 
 from data.constants import MAJOR_INDICES, attach_top_list_column_units
 from data.persistence.models import (
@@ -17,6 +18,7 @@ from data.persistence.models import (
     NorthboundHolding,
     SuspendD,
     TopList,
+    Base,
     get_model_columns,
     get_model_pk_columns,
 )
@@ -144,6 +146,10 @@ class QuoteDao(BaseDao):
             Use True for critical paths where "query failed" must not be confused with "data missing".
         :return: True if all tables have data for the given date
         """
+        if trade_date is None:
+            logger.warning("[QuoteDao] check_data_exists called with None trade_date")
+            return False
+
         if tables is None:
             tables = _get_default_synced_tables()
 
@@ -158,10 +164,28 @@ class QuoteDao(BaseDao):
         if not safe_tables:
             return True
 
-        union_parts = [f"SELECT '{t}' as tbl, 1 as val FROM {t} WHERE trade_date=$1 LIMIT 1" for t in safe_tables]
-        sql = " UNION ALL ".join(union_parts)
+        metadata = Base.metadata
+        union_parts = []
+        for t in safe_tables:
+            tbl = metadata.tables.get(t)
+            if tbl is None or "trade_date" not in tbl.c:
+                logger.warning(f"[QuoteDao] Table '{t}' not in metadata or missing trade_date column")
+                return False
+            part = (
+                sa.select(
+                    sa.literal(t).label("tbl"),
+                    sa.literal(1).label("val"),
+                )
+                .select_from(tbl)
+                .where(tbl.c.trade_date == trade_date)
+                .limit(1)
+            )
+            union_parts.append(part)
+        stmt = union_parts[0]
+        for part in union_parts[1:]:
+            stmt = stmt.union_all(part)
         try:
-            df = await self._read_db(sql, (trade_date,), suppress_errors=not raise_on_error)
+            df = await self._read_db_select(stmt, suppress_errors=not raise_on_error)
             if df is None or df.empty:
                 return False
             found_tables = set(df["tbl"].tolist())
@@ -335,9 +359,12 @@ class QuoteDao(BaseDao):
             return set()
 
         try:
-            df = await self._read_db(
-                f"SELECT DISTINCT {date_col} FROM {table_name} ORDER BY {date_col}",
-            )
+            tbl = Base.metadata.tables.get(table_name)
+            if tbl is None or date_col not in tbl.c:
+                logger.warning(f"[QuoteDao] Table '{table_name}' not in metadata or missing column '{date_col}'")
+                return set()
+            stmt = sa.select(sa.distinct(tbl.c[date_col])).order_by(tbl.c[date_col])
+            df = await self._read_db_select(stmt)
             if df is None or df.empty:
                 return set()
             return set(df[date_col])
@@ -591,15 +618,17 @@ class QuoteDao(BaseDao):
             return {}
 
         try:
-            df = await self._read_db(
-                f"""
-                SELECT trade_date, COUNT(*) as cnt
-                FROM {table_name}
-                WHERE trade_date BETWEEN $1 AND $2
-                GROUP BY trade_date
-                """,
-                (start_date, end_date),
+            tbl = Base.metadata.tables.get(table_name)
+            if tbl is None or "trade_date" not in tbl.c:
+                logger.warning(f"[QuoteDao] Table '{table_name}' not in metadata or missing trade_date column")
+                return {}
+            stmt = (
+                sa.select(tbl.c.trade_date, sa.func.count().label("cnt"))
+                .select_from(tbl)
+                .where(tbl.c.trade_date.between(start_date, end_date))
+                .group_by(tbl.c.trade_date)
             )
+            df = await self._read_db_select(stmt)
 
             if df is None or df.empty:
                 return {}

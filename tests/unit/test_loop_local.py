@@ -31,23 +31,23 @@ class TestGetLoopLocal:
         result_b = get_loop_local("key_b", list)
         assert result_a is not result_b
 
-    def test_outside_event_loop_logs_error(self, caplog):
-        with caplog.at_level(logging.ERROR, logger="utils.loop_local"):
+    def test_outside_event_loop_logs_warning(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="utils.loop_local"):
             result = get_loop_local("no_loop_key", list)
             assert isinstance(result, list)
             assert any("outside event loop" in r.message for r in caplog.records)
 
-    def test_outside_event_loop_no_caching(self):
+    def test_outside_event_loop_caches_in_fallback(self):
         call_count = [0]
 
         def factory():
             call_count[0] += 1
             return call_count[0]
 
-        result1 = get_loop_local("no_cache_key", factory)
-        result2 = get_loop_local("no_cache_key", factory)
-        assert result1 != result2
-        assert call_count[0] == 2
+        result1 = get_loop_local("fallback_cache_key", factory)
+        result2 = get_loop_local("fallback_cache_key", factory)
+        assert result1 == result2
+        assert call_count[0] == 1
 
 
 class TestDelLoopLocal:

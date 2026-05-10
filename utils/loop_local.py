@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import weakref
 from collections.abc import Callable
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _stores: dict[str, weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any]] = {}
+_fallback_store: dict[str, Any] = {}
+_fallback_lock = threading.Lock()
 
 
 def _get_store(key: str) -> weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Any]:
@@ -25,12 +28,15 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = False
                 f"get_loop_local('{key}') called outside event loop in strict mode. "
                 f"Callers must ensure they are inside an async context."
             ) from exc
-        logger.error(
+        logger.warning(
             f"[loop_local] get_loop_local('{key}') called outside event loop; "
-            f"factory() invoked but result will NOT be cached. "
-            f"Callers must ensure they are inside an async context.",
+            f"using module-level fallback cache. "
+            f"Callers should ensure they are inside an async context.",
         )
-        return factory()
+        with _fallback_lock:
+            if key not in _fallback_store:
+                _fallback_store[key] = factory()
+            return _fallback_store[key]
 
     if loop not in store:
         store[loop] = factory()
@@ -39,14 +45,17 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = False
 
 def del_loop_local(key: str) -> None:
     store = _stores.get(key)
-    if store is None:
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    store.pop(loop, None)
+    if store is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            store.pop(loop, None)
+        except RuntimeError:
+            pass
+    with _fallback_lock:
+        _fallback_store.pop(key, None)
 
 
 def clear_all_loop_locals() -> None:
     _stores.clear()
+    with _fallback_lock:
+        _fallback_store.clear()

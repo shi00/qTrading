@@ -257,6 +257,12 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """Delegated to HistoricalSyncStrategy"""
         if trade_date is None:
             trade_date = await self.get_latest_trade_date()
+        if trade_date is None:
+            trade_date = get_now().date()
+            logger.warning(
+                "[DataProcessor] sync_daily_market_snapshot | No trade date from calendar, falling back to today: %s",
+                trade_date,
+            )
 
         await self.strategies["historical"].sync_daily_market_snapshot(
             trade_date,

@@ -497,3 +497,81 @@ class BaseDao:
             if not suppress_errors:
                 raise
             return pd.DataFrame()
+
+    async def _read_db_select(
+        self,
+        stmt: sa.Select,
+        *,
+        suppress_errors: bool = True,
+    ):
+        """Execute a SQLAlchemy Core select statement and return DataFrame.
+
+        This is the preferred way to build dynamic queries — it uses
+        SQLAlchemy's identifier quoting and parameter binding, eliminating
+        SQL injection risk from f-string interpolation.
+        """
+        if self.engine is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
+            )
+
+        from data.cache.cache_manager import CacheManager
+
+        if CacheManager._instance is not None and CacheManager._instance._disposed:
+            raise RuntimeError(f"[{self.__class__.__name__}] Engine disposed, read rejected.")
+
+        await self._get_maintenance_event().wait()
+
+        start_time = time.perf_counter()
+        try:
+            async with self.engine.connect() as conn:
+                result = await conn.execute(stmt)
+                rows = result.fetchall()
+                cols = list(result.keys())
+
+                df = await ThreadPoolManager().run_async(
+                    TaskType.CPU,
+                    pd.DataFrame,
+                    rows,
+                    columns=cols,
+                )
+
+                elapsed = (time.perf_counter() - start_time) * 1000
+                if elapsed > 500:
+                    logger.warning(
+                        f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {str(stmt)[:200]}...",
+                    )
+                else:
+                    logger.debug(
+                        f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {str(stmt)[:200]}...",
+                    )
+
+                return df
+        except asyncio.CancelledError:
+            logger.warning(
+                f"[{self.__class__.__name__}] Read cancelled during shutdown.",
+            )
+            raise
+        except Exception as e:
+            elapsed = (time.perf_counter() - start_time) * 1000
+
+            err_str = str(e)
+            if any(
+                msg in err_str
+                for msg in [
+                    "no active connection",
+                    "database is closed",
+                    "ConnectionDoesNotExistError",
+                ]
+            ):
+                logger.warning(
+                    f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}",
+                )
+                return pd.DataFrame()
+
+            logger.warning(
+                f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
+            )
+            if not suppress_errors:
+                raise
+            return pd.DataFrame()

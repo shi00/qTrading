@@ -464,7 +464,7 @@ class TradeCalendarService:
         log_exceptions=True,
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
     )
-    async def get_latest_trade_date(self, *, allow_fallback: bool = True) -> datetime.date | None:
+    async def get_latest_trade_date(self, *, allow_fallback: bool = False) -> datetime.date | None:
         """
         获取最近的交易日。
 
@@ -473,8 +473,9 @@ class TradeCalendarService:
         - 当前时间 >= 15:00 → 返回今天 (如果是交易日) 或上一个交易日
 
         Args:
-            allow_fallback: If True (default), falls back to weekday heuristic when
-                calendar data is unavailable. If False, returns None instead of guessing,
+            allow_fallback: If True, falls back to weekday heuristic when
+                calendar data is unavailable (may be incorrect on Chinese holidays).
+                If False (default), returns None instead of guessing,
                 which prevents incorrect dates on Chinese holidays.
 
         Returns:

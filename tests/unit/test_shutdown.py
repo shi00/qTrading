@@ -471,17 +471,14 @@ class TestShutdownCoordinatorGracefulForceExit:
         coord._force_exit(1)
         assert ("force_exit", 1) in exit_calls
 
-    def test_default_callback_is_os_exit(self):
-        import os
-
+    def test_default_callback_is_graceful_exit(self):
         coord = ShutdownCoordinator()
-        assert coord._force_exit == os._exit
+        assert coord._force_exit == ShutdownCoordinator._default_force_exit
 
-    def test_main_py_uses_graceful_callback(self):
+    def test_main_py_uses_coordinator_force_exit(self):
         import pathlib
 
         main_path = pathlib.Path(__file__).resolve().parent.parent.parent / "main.py"
         source = main_path.read_text(encoding="utf-8")
-        assert "force_exit_callback=_graceful_force_exit" in source
-        assert "_graceful_force_exit" in source
-        assert "sys.exit" in source
+        assert "coordinator._force_exit" in source
+        assert "_default_force_exit" in source or "ShutdownCoordinator" in source

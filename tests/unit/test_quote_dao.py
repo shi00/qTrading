@@ -291,7 +291,7 @@ class TestQuoteDaoGetCachedDatesForTable:
     @pytest.mark.asyncio
     async def test_valid_table(self):
         dao = QuoteDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"]}))
         result = await dao.get_cached_dates_for_table("daily_quotes")
         assert isinstance(result, set)
 
@@ -304,7 +304,7 @@ class TestQuoteDaoGetCachedDatesForTable:
     @pytest.mark.asyncio
     async def test_empty(self):
         dao = QuoteDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         result = await dao.get_cached_dates_for_table("daily_quotes")
         assert result == set()
 
@@ -314,7 +314,7 @@ class TestQuoteDaoCheckDataExists:
     async def test_all_tables_have_data(self):
         dao = QuoteDao(MagicMock())
         with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
-            dao._read_db = AsyncMock(
+            dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
                         "tbl": ["daily_quotes"],
@@ -324,12 +324,13 @@ class TestQuoteDaoCheckDataExists:
             )
             result = await dao.check_data_exists("20240615", tables=["daily_quotes"])
             assert result is True
+            dao._read_db_select.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_missing_data(self):
         dao = QuoteDao(MagicMock())
         with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
-            dao._read_db = AsyncMock(return_value=pd.DataFrame())
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
             result = await dao.check_data_exists("20240615", tables=["daily_quotes"])
             assert result is False
 
@@ -346,6 +347,51 @@ class TestQuoteDaoCheckDataExists:
         with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=[]):
             result = await dao.check_data_exists("20240615", tables=[])
             assert result is True
+
+    @pytest.mark.asyncio
+    async def test_none_trade_date_returns_false(self):
+        dao = QuoteDao(MagicMock())
+        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+            result = await dao.check_data_exists(None, tables=["daily_quotes"])
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_sql_injection_table_rejected(self):
+        dao = QuoteDao(MagicMock())
+        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+            result = await dao.check_data_exists("20240615", tables=["daily_quotes; DROP TABLE users--"])
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_partial_data_returns_false(self):
+        dao = QuoteDao(MagicMock())
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes", "daily_indicators"],
+        ):
+            dao._read_db_select = AsyncMock(
+                return_value=pd.DataFrame(
+                    {
+                        "tbl": ["daily_quotes"],
+                        "val": [1],
+                    }
+                )
+            )
+            result = await dao.check_data_exists("20240615", tables=["daily_quotes", "daily_indicators"])
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_uses_sqlalchemy_core_not_raw_sql(self):
+        dao = QuoteDao(MagicMock())
+        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "val": [1]}))
+            await dao.check_data_exists("20240615", tables=["daily_quotes"])
+            call_args = dao._read_db_select.call_args
+            stmt = call_args[0][0]
+            import sqlalchemy as sa
+
+            assert isinstance(stmt, sa.Select)
 
 
 class TestQuoteDaoGetExpectedStockCount:
@@ -390,7 +436,7 @@ class TestQuoteDaoGetBulkTableCounts:
     async def test_with_data(self):
         dao = QuoteDao(MagicMock())
         with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
-            dao._read_db = AsyncMock(
+            dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
                         "trade_date": ["20240615"],
@@ -412,7 +458,7 @@ class TestQuoteDaoGetBulkTableCounts:
     async def test_empty(self):
         dao = QuoteDao(MagicMock())
         with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
-            dao._read_db = AsyncMock(return_value=pd.DataFrame())
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
             result = await dao.get_bulk_table_counts("daily_quotes", "20240615", "20240615")
             assert result == {}
 
