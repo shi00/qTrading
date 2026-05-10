@@ -524,7 +524,7 @@ class TradeCalendarService:
 
             logger.error(
                 "[TradeCalendarService] get_latest_trade_date: no trade calendar data available.%s",
-                " Falling back to weekday heuristic (may be incorrect on holidays)."
+                " Trying OfflineCalendar as last resort."
                 if allow_fallback
                 else " allow_fallback=False, returning None.",
             )
@@ -532,9 +532,15 @@ class TradeCalendarService:
                 return None
 
             dt = end_dt
-            while dt.weekday() >= 5:
+            for _ in range(10):
+                if self._offline.is_trading_day(dt):
+                    return dt
                 dt -= datetime.timedelta(days=1)
-            return dt
+
+            logger.error(
+                "[TradeCalendarService] get_latest_trade_date: OfflineCalendar found no trading day in 10-day window. Returning None.",
+            )
+            return None
 
     async def get_trade_dates_batch(self, ranges: list[tuple[datetime.date, datetime.date]]) -> dict:
         """

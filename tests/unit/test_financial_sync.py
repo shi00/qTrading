@@ -281,6 +281,39 @@ class TestFinancialSyncRepair:
             ctx.cache.save_financial_reports.assert_not_awaited()
             assert result == 0
 
+    @pytest.mark.asyncio
+    async def test_repair_fills_missing_schema_cols_with_none(self):
+        from data.constants import FINANCIAL_REPORT_SCHEMA_COLS
+
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]})
+        )
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
+        ctx.api.get_fina_audit = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            await strategy.repair_financial_data(["000001.SZ"])
+            saved_df = ctx.cache.save_financial_reports.call_args[0][0]
+            for col in FINANCIAL_REPORT_SCHEMA_COLS:
+                assert col in saved_df.columns, f"Missing column: {col}"
+
+    @pytest.mark.asyncio
+    async def test_repair_saves_only_schema_cols(self):
+        from data.constants import FINANCIAL_REPORT_SCHEMA_COLS
+
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            await strategy.repair_financial_data(["000001.SZ"])
+            saved_df = ctx.cache.save_financial_reports.call_args[0][0]
+            assert list(saved_df.columns) == FINANCIAL_REPORT_SCHEMA_COLS
+
 
 class TestFinancialSyncCorporateActions:
     @pytest.mark.asyncio

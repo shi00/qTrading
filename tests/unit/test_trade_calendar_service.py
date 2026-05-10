@@ -409,10 +409,11 @@ class TestGetLatestTradeDate:
             assert result is not None
 
     @pytest.mark.asyncio
-    async def test_weekday_fallback(self):
+    async def test_offline_fallback(self):
         svc = _make_service(cache_return=None, api_return=None)
         svc._offline = MagicMock()
         svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(side_effect=lambda d: d.weekday() < 5)
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
             result = await svc.get_latest_trade_date(allow_fallback=True)
@@ -429,19 +430,20 @@ class TestGetLatestTradeDate:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_weekday_fallback_logs_error(self, caplog):
+    async def test_offline_fallback_logs_error(self, caplog):
         import logging
 
         svc = _make_service(cache_return=None, api_return=None)
         svc._offline = MagicMock()
         svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(side_effect=lambda d: d.weekday() < 5)
         with (
             patch("data.domain_services.trade_calendar_service.get_now") as mock_now,
             caplog.at_level(logging.ERROR, logger="data.domain_services.trade_calendar_service"),
         ):
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
             await svc.get_latest_trade_date(allow_fallback=True)
-            assert any("Falling back to weekday heuristic" in r.message for r in caplog.records)
+            assert any("Trying OfflineCalendar" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_no_fallback_when_db_has_data(self, caplog):
@@ -455,7 +457,7 @@ class TestGetLatestTradeDate:
         ):
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
             await svc.get_latest_trade_date()
-            assert not any("falling back to weekday heuristic" in r.message for r in caplog.records)
+            assert not any("OfflineCalendar" in r.message for r in caplog.records)
 
 
 class TestGetLatestTradeDateAllowFallback:
@@ -470,10 +472,11 @@ class TestGetLatestTradeDateAllowFallback:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_allow_fallback_true_returns_weekday(self):
+    async def test_allow_fallback_true_returns_via_offline(self):
         svc = _make_service(cache_return=None, api_return=None)
         svc._offline = MagicMock()
         svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(side_effect=lambda d: d.weekday() < 5)
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
             result = await svc.get_latest_trade_date(allow_fallback=True)
@@ -572,3 +575,78 @@ class TestGetTradeCalDf:
         result = await svc.get_trade_cal_df(start_date="20240614", end_date="20240614")
         assert isinstance(result, pd.DataFrame)
         assert result.empty
+
+
+class TestGetLatestTradeDateOfflineFallback:
+    @pytest.mark.asyncio
+    async def test_offline_fallback_finds_trading_day(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(side_effect=lambda d: d.weekday() < 5)
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2025, 6, 13, 16, 0)
+            result = await svc.get_latest_trade_date(allow_fallback=True)
+            assert result == datetime.date(2025, 6, 13)
+
+    @pytest.mark.asyncio
+    async def test_offline_fallback_skips_holiday(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(
+            side_effect=lambda d: d != datetime.date(2025, 10, 1) and d.weekday() < 5
+        )
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2025, 10, 1, 16, 0)
+            result = await svc.get_latest_trade_date(allow_fallback=True)
+            assert result == datetime.date(2025, 9, 30)
+
+    @pytest.mark.asyncio
+    async def test_offline_fallback_skips_weekend(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(side_effect=lambda d: d.weekday() < 5)
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2025, 6, 14, 16, 0)
+            result = await svc.get_latest_trade_date(allow_fallback=True)
+            assert result == datetime.date(2025, 6, 13)
+
+    @pytest.mark.asyncio
+    async def test_offline_fallback_returns_none_when_no_trading_day(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(return_value=False)
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2025, 6, 13, 16, 0)
+            result = await svc.get_latest_trade_date(allow_fallback=True)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_offline_fallback_logs_no_trading_day(self, caplog):
+        import logging
+
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(return_value=False)
+        with (
+            patch("data.domain_services.trade_calendar_service.get_now") as mock_now,
+            caplog.at_level(logging.ERROR, logger="data.domain_services.trade_calendar_service"),
+        ):
+            mock_now.return_value = datetime.datetime(2025, 6, 13, 16, 0)
+            await svc.get_latest_trade_date(allow_fallback=True)
+            assert any("OfflineCalendar found no trading day" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_returns_none(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(return_value=True)
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2025, 6, 13, 16, 0)
+            result = await svc.get_latest_trade_date(allow_fallback=False)
+            assert result is None

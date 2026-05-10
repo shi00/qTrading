@@ -176,7 +176,7 @@ jobs:
             }
 
   ci-checks-windows:
-    name: Tests (Windows)
+    name: Code Quality & Tests (Windows)
     runs-on: windows-latest
     permissions:
       contents: read
@@ -199,18 +199,46 @@ jobs:
           database: test_astock
           port: 5432
 
+      - name: Setup Node for Pyright
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
       - name: Install dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install -r requirements-optional.txt || echo "Optional deps failed, continuing..."
+          pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           pip install -r requirements-dev.txt
+
+      - name: Report optional deps status
+        if: env.OPTIONAL_DEPS_FAILED == 'true'
+        run: |
+          echo "::warning::Optional dependencies failed to install. Some tests may be skipped."
+          cat optional-deps.log
+
+      - name: Install Node dependencies
+        run: npm ci
 
       - name: Ruff Check & Format
         run: |
           python -m ruff check .
           python -m ruff format --check .
+
+      - name: Pyright Type Check
+        continue-on-error: false
+        run: npx pyright
+
+      - name: Verify Alembic Migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
+        run: |
+          python -m alembic upgrade head
+          python -m alembic downgrade base
+          python -m alembic upgrade head
 
       - name: Run Pytest
         env:
@@ -219,7 +247,7 @@ jobs:
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
         run: |
-          python -m pytest tests/ -v --tb=short
+          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})

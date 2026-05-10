@@ -258,11 +258,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         if trade_date is None:
             trade_date = await self.get_latest_trade_date()
         if trade_date is None:
-            trade_date = get_now().date()
-            logger.warning(
-                "[DataProcessor] sync_daily_market_snapshot | No trade date from calendar, falling back to today: %s",
-                trade_date,
+            logger.error(
+                "[DataProcessor] sync_daily_market_snapshot | All calendar sources unavailable. "
+                "Returning cached screening data.",
             )
+            return await self.get_screening_data(get_now().date())
 
         await self.strategies["historical"].sync_daily_market_snapshot(
             trade_date,
@@ -537,7 +537,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         today_date = now.date()
         latest = await self.get_latest_trade_date()
         if latest is None:
-            logger.warning("[DataProcessor] prepare_market_data | No trade date, syncing today.")
+            logger.error(
+                "[DataProcessor] prepare_market_data | All calendar sources unavailable. Syncing today as last resort.",
+            )
             await self.sync_daily_market_snapshot(today_date)
             return today_date
         if latest != today_date:
@@ -557,11 +559,13 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         Uses batch query for indices to reduce DB/API round trips.
         """
         try:
-            now = get_now()
-            today_date = now.date()
-
             latest_date = await self.trade_calendar.get_latest_trade_date()
-            date = latest_date or today_date
+            if latest_date is None:
+                logger.error(
+                    "[DataProcessor] get_market_overview | All calendar sources unavailable. Skipping.",
+                )
+                return {}
+            date = latest_date
 
             INDICES_CONFIG = [
                 ("000001.SH", "home_index_sh"),
@@ -832,6 +836,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     end = parse_date(str(latest_closed_trade_date))
                 else:
                     end = get_now().date()
+                    logger.warning(
+                        "[DataProcessor] get_stock_history | All calendar sources unavailable, using %s.",
+                        end,
+                    )
             else:
                 if hasattr(end_date, "year"):
                     end = end_date if isinstance(end_date, datetime.date) else end_date.date()

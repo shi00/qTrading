@@ -42,7 +42,7 @@ def mock_singletons():
     CacheManager._instance.engine = AsyncMock()
     MarketDataService._instance = AsyncMock()
     LocalModelManager._instance = MagicMock()
-    LocalModelManager._instance._llm = MagicMock()
+    LocalModelManager._instance._worker_ready = True
     ThreadPoolManager._instance = MagicMock()
     svc.scheduler = MagicMock()
     svc.scheduler.running = True
@@ -191,7 +191,7 @@ async def test_ai_model_unloaded_when_present():
 
     orig = LocalModelManager._instance
     LocalModelManager._instance = MagicMock()
-    LocalModelManager._instance._llm = MagicMock()
+    LocalModelManager._instance._worker_ready = True
 
     try:
         coordinator = ShutdownCoordinator(page=None)
@@ -203,12 +203,13 @@ async def test_ai_model_unloaded_when_present():
 
 @pytest.mark.asyncio
 async def test_ai_model_skipped_when_absent():
-    """Verify AI model step is skipped when no LLM is loaded."""
+    """Verify AI model step is skipped when no worker is active."""
     from services.local_model_manager import LocalModelManager
 
     orig = LocalModelManager._instance
     LocalModelManager._instance = MagicMock()
-    LocalModelManager._instance._llm = None
+    LocalModelManager._instance._worker_ready = False
+    LocalModelManager._instance._model_path = ""
 
     try:
         coordinator = ShutdownCoordinator(page=None)
@@ -456,8 +457,8 @@ async def test_step5_timeout_marks_cleanup_failed(mock_singletons):
 
 
 @pytest.mark.asyncio
-async def test_step3_flush_exception_marks_cleanup_failed(mock_singletons):
-    """Verify Step 3 flush errors are propagated as cleanup failure."""
+async def test_step2_flush_exception_marks_cleanup_failed(mock_singletons):
+    """Verify Step 2 flush errors are propagated as cleanup failure."""
     coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
     mock_singletons["TaskManager"]._instance.flush_persistence = AsyncMock(side_effect=RuntimeError("flush failed"))
 
@@ -465,9 +466,9 @@ async def test_step3_flush_exception_marks_cleanup_failed(mock_singletons):
         ok = await coordinator.do_cleanup()
 
     assert ok is False
-    step3 = next(result for result in coordinator.step_results if result.name == "Step 3")
-    assert step3.ok is False
-    assert step3.timed_out is False
+    step2 = next(result for result in coordinator.step_results if result.name == "Step 2")
+    assert step2.ok is False
+    assert step2.timed_out is False
 
 
 @pytest.mark.asyncio

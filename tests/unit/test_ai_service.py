@@ -669,6 +669,56 @@ class TestAIServiceAnalyzeTimeoutHandling:
         assert result["error"] == "Analysis timeout"
         assert result["score"] == 0
 
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_httpx_timeout_exception_caught(self, mock_ch):
+        import httpx
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=httpx.TimeoutException("connect timeout"))
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "test"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] == "Analysis timeout"
+        assert result["score"] == 0
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_local_inference_timeout_error_caught(self, mock_ch):
+        from services.local_model_manager import LocalInferenceTimeoutError
+
+        mock_ch.get_ai_provider.return_value = "local"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "local",
+            "base_url": "http://localhost",
+        }
+        mock_ch.get_ai_model.return_value = "local-model"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://localhost"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=LocalInferenceTimeoutError("local timeout 90s"))
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "test"},
+            tech_info={},
+            news_list=[],
+        )
+        assert result["error"] == "Local model timeout"
+        assert result["score"] == 0
+
 
 class TestUniversalRulesSeparateSystemMessage:
     @pytest.mark.asyncio

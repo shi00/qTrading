@@ -31,21 +31,25 @@ class TestGetLoopLocal:
         result_b = get_loop_local("key_b", list)
         assert result_a is not result_b
 
-    def test_outside_event_loop_logs_warning(self, caplog):
+    def test_default_strict_outside_event_loop_raises(self):
+        with pytest.raises(RuntimeError, match="strict mode"):
+            get_loop_local("default_strict_key", list)
+
+    def test_non_strict_outside_event_loop_logs_warning(self, caplog):
         with caplog.at_level(logging.WARNING, logger="utils.loop_local"):
-            result = get_loop_local("no_loop_key", list)
+            result = get_loop_local("no_loop_key", list, strict=False)
             assert isinstance(result, list)
             assert any("outside event loop" in r.message for r in caplog.records)
 
-    def test_outside_event_loop_caches_in_fallback(self):
+    def test_non_strict_outside_event_loop_caches_in_fallback(self):
         call_count = [0]
 
         def factory():
             call_count[0] += 1
             return call_count[0]
 
-        result1 = get_loop_local("fallback_cache_key", factory)
-        result2 = get_loop_local("fallback_cache_key", factory)
+        result1 = get_loop_local("fallback_cache_key", factory, strict=False)
+        result2 = get_loop_local("fallback_cache_key", factory, strict=False)
         assert result1 == result2
         assert call_count[0] == 1
 

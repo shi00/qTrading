@@ -274,6 +274,55 @@ class TestMacroSyncSyncIndexWeights:
             await strategy._sync_index_weights(result)
 
     @pytest.mark.asyncio
+    async def test_index_weight_sync_status_uses_independent_count(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=3)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"index_code": ["399300.SZ"]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+            ctx.cache.update_sync_status.assert_called_once()
+            call_args = ctx.cache.update_sync_status.call_args
+            assert call_args[0][0] == "index_weight"
+            assert call_args[0][2] == 3
+
+    @pytest.mark.asyncio
+    async def test_index_weight_count_excludes_other_api_counts(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"index_code": ["399300.SZ"]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            result.added = 100
+            await strategy._sync_index_weights(result)
+            call_args = ctx.cache.update_sync_status.call_args
+            assert call_args[0][2] == 2
+
+    @pytest.mark.asyncio
     async def test_error(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()

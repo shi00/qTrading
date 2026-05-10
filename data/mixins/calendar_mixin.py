@@ -32,7 +32,7 @@ class CalendarMixin:
 
     trade_calendar: TradeCalendarService
 
-    async def get_latest_trade_date(self):
+    async def get_latest_trade_date(self, *, allow_fallback: bool = False):
         """
         Get absolute latest trading date (today or previous trading day).
 
@@ -44,7 +44,7 @@ class CalendarMixin:
             DeprecationWarning,
             stacklevel=2,
         )
-        return await self.trade_calendar.get_latest_trade_date()
+        return await self.trade_calendar.get_latest_trade_date(allow_fallback=allow_fallback)
 
     async def get_trade_dates(self, start_date, end_date):
         """

@@ -322,9 +322,11 @@ class ShutdownCoordinator:
     def _step5_unload_ai_model_sync(self):
         from services.local_model_manager import LocalModelManager
 
-        if LocalModelManager._instance is not None and LocalModelManager._instance._llm is not None:
+        if LocalModelManager._instance is not None and (
+            LocalModelManager._instance._worker_ready or LocalModelManager._instance._model_path
+        ):
             LocalModelManager._instance.unload_model()
-            logger.info("[Shutdown]   - Llama.cpp model evicted.")
+            logger.info("[Shutdown]   - Llama.cpp model evicted (subprocess terminated).")
         else:
             logger.info("[Shutdown]   - AI model not loaded, skipping.")
 

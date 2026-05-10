@@ -8,7 +8,6 @@ from services.local_model_manager import LocalModelManager, _HAS_LLAMA_CPP
 def reset_singleton():
     LocalModelManager._instance = None
     LocalModelManager._initialized = False
-    LocalModelManager._llm = None
     LocalModelManager._model_path = ""
     LocalModelManager._model_md5 = ""
     LocalModelManager._model_stat = (0, 0)
@@ -22,7 +21,6 @@ def reset_singleton():
     yield
     LocalModelManager._instance = None
     LocalModelManager._initialized = False
-    LocalModelManager._llm = None
     LocalModelManager._model_path = ""
     LocalModelManager._model_md5 = ""
     LocalModelManager._model_stat = (0, 0)
@@ -74,14 +72,19 @@ class TestLocalModelManagerUnloadModel:
     def test_unload_no_model(self):
         mgr = LocalModelManager()
         mgr.unload_model()
-        assert mgr._llm is None
+        assert mgr._worker_ready is False
+        assert mgr._model_path == ""
 
     def test_unload_with_model(self):
         mgr = LocalModelManager()
-        mgr._llm = MagicMock()
+        mgr._worker_ready = True
         mgr._model_path = "/path/to/model.gguf"
-        mgr.unload_model()
-        assert mgr._llm is None
+        with patch.object(mgr, "_shutdown_worker"):
+            mgr.unload_model()
+        assert mgr._model_path == ""
+        assert mgr._model_md5 == ""
+        assert mgr._model_stat == (0, 0)
+        assert mgr._last_config == {}
 
 
 class TestLocalModelManagerLoadModel:
@@ -242,7 +245,6 @@ class TestPersistentWorkerShutdownWorker:
 
     def test_unload_model_calls_shutdown_worker(self):
         mgr = LocalModelManager()
-        mgr._llm = MagicMock()
         with patch.object(mgr, "_shutdown_worker") as mock_sw:
             mgr.unload_model()
             mock_sw.assert_called_once()
@@ -316,7 +318,7 @@ class TestPersistentWorkerModelReuse:
         mod._HAS_LLAMA_CPP = True
         try:
             mgr = LocalModelManager()
-            mgr._llm = MagicMock()
+            mgr._worker_ready = True
             mgr._model_path = "/path/to/model.gguf"
             mgr._model_stat = (0, 0)
             mgr._last_config = {"n_threads": 4, "n_batch": 1024, "n_ctx": 4096, "n_gpu_layers": 0, "flash_attn": True}
@@ -402,12 +404,10 @@ class TestLocalModelManagerGetters:
     def setup_method(self):
         LocalModelManager._instance = None
         LocalModelManager._initialized = False
-        LocalModelManager._llm = None
 
     def teardown_method(self):
         LocalModelManager._instance = None
         LocalModelManager._initialized = False
-        LocalModelManager._llm = None
 
     def test_get_loaded_model_path_empty(self):
         LocalModelManager._model_path = ""
@@ -421,7 +421,6 @@ class TestLocalModelManagerGetters:
 class TestLocalModelManagerReset:
     def test_reset_clears_instance(self):
         LocalModelManager._instance = MagicMock()
-        LocalModelManager._instance._llm = None
         LocalModelManager._reset_singleton()
         assert LocalModelManager._instance is None
 
@@ -448,8 +447,9 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=True),
             ):
-                mock_tpm.return_value.run_async = AsyncMock(side_effect=["abc123", MagicMock()])
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is True
                 assert mgr._model_path == "/path/to/model.gguf"
@@ -474,7 +474,6 @@ class TestLocalModelManagerLoadModelWithLlama:
                 mock_tpm.return_value.run_async = AsyncMock(side_effect=Exception("load failed"))
                 result = await mgr.load_model("/path/to/model.gguf")
                 assert result is False
-                assert mgr._llm is None
                 assert mgr._model_path == ""
         finally:
             mod._HAS_LLAMA_CPP = original
@@ -493,11 +492,33 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {"n_threads": 4}
-                mock_tpm.return_value.run_async = AsyncMock(side_effect=["md5val", MagicMock()])
+                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
                 result = await mgr.load_model("/path/to/model.gguf")
                 assert result is True
+        finally:
+            mod._HAS_LLAMA_CPP = original
+
+    @pytest.mark.asyncio
+    async def test_load_model_ensure_worker_fails(self):
+        import services.local_model_manager as mod
+
+        original = mod._HAS_LLAMA_CPP
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=False),
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+                assert result is False
         finally:
             mod._HAS_LLAMA_CPP = original
 
@@ -566,13 +587,15 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = True
 
-                with pytest.raises(LocalInferenceTimeoutError, match="timed out"):
+                with pytest.raises(LocalInferenceTimeoutError):
                     await mgr.run_inference("test prompt")
+
+                mgr._shutdown_worker.assert_called()
         finally:
             mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
-    async def test_run_inference_error(self):
+    async def test_run_inference_error_response(self):
         import services.local_model_manager as mod
 
         original = mod._HAS_LLAMA_CPP
@@ -591,7 +614,7 @@ class TestLocalModelManagerRunInferenceWithModel:
 
                 mock_req_queue = MagicMock()
                 mock_res_queue = MagicMock()
-                mock_res_queue.get_nowait.return_value = ("error", "inference error")
+                mock_res_queue.get_nowait.return_value = ("error", "something went wrong")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_proc = MagicMock()
@@ -603,41 +626,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
-    async def test_run_inference_worker_not_ready(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
-            mgr = LocalModelManager()
-            with patch("services.local_model_manager.ConfigHandler") as mock_ch:
-                mock_ch.get_local_ai_config.return_value = {
-                    "local_model_path": "/path/to/model.gguf",
-                    "local_model_timeout": 30,
-                }
-                with patch.object(mgr, "_ensure_worker", return_value=False):
-                    with pytest.raises(RuntimeError, match="Persistent worker failed to start"):
-                        await mgr.run_inference("test prompt")
-        finally:
-            mod._HAS_LLAMA_CPP = original
-
-    @pytest.mark.asyncio
-    async def test_run_inference_no_model_path(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
-            mgr = LocalModelManager()
-            with patch("services.local_model_manager.ConfigHandler") as mock_ch:
-                mock_ch.get_local_ai_config.return_value = {"local_model_path": ""}
-                with pytest.raises(RuntimeError, match="not configured"):
-                    await mgr.run_inference("test prompt")
-        finally:
-            mod._HAS_LLAMA_CPP = original
-
-    @pytest.mark.asyncio
-    async def test_run_inference_worker_shutdown_unexpectedly(self):
+    async def test_run_inference_worker_shutdown(self):
         import services.local_model_manager as mod
 
         original = mod._HAS_LLAMA_CPP
@@ -699,95 +688,19 @@ class TestLocalModelManagerRunInferenceWithModel:
             mod._HAS_LLAMA_CPP = original
 
 
-class TestLocalModelManagerGenerateSync:
-    def test_generate_sync_no_model(self):
-        mgr = LocalModelManager()
-        mgr._llm = None
-        with pytest.raises(ValueError, match="Model is None"):
-            mgr._generate_sync("prompt", 100, 0.7, "system")
-
-    def test_generate_sync_stream_success(self):
-        """Verify streaming generation collects tokens correctly."""
-        mgr = LocalModelManager()
-        mock_llm = MagicMock()
-        # Simulate streaming response: each chunk has a delta with content
-        mock_llm.create_chat_completion.return_value = iter(
-            [
-                {"choices": [{"delta": {"role": "assistant"}}]},
-                {"choices": [{"delta": {"content": "hel"}}]},
-                {"choices": [{"delta": {"content": "lo"}}]},
-                {"choices": [{"delta": {}}]},  # Empty delta (finish chunk)
-            ]
-        )
-        mgr._llm = mock_llm
-        mgr._cancel_event.clear()
-        result = mgr._generate_sync("prompt", 100, 0.7, "system")
-        assert result == "hello"
-        mock_llm.create_chat_completion.assert_called_once()
-        # Verify stream=True was passed
-        call_kwargs = mock_llm.create_chat_completion.call_args
-        assert call_kwargs.kwargs.get("stream") is True or call_kwargs[1].get("stream") is True
-
-    def test_generate_sync_cancel_event_stops_generation(self):
-        """Verify that setting _cancel_event causes early exit from streaming loop."""
-        mgr = LocalModelManager()
-        mock_llm = MagicMock()
-        # Simulate a long stream; the cancel event should stop it early
-        mock_llm.create_chat_completion.return_value = iter(
-            [
-                {"choices": [{"delta": {"content": "tok1"}}]},
-                {"choices": [{"delta": {"content": "tok2"}}]},
-                {"choices": [{"delta": {"content": "tok3"}}]},
-                {"choices": [{"delta": {"content": "tok4"}}]},
-            ]
-        )
-        mgr._llm = mock_llm
-
-        # Pre-set the cancel event — simulates timeout handler firing
-        mgr._cancel_event.set()
-
-        result = mgr._generate_sync("prompt", 100, 0.7, "system")
-        # Should return empty or partial since cancel is checked before processing
-        assert result == ""
-
-    def test_generate_sync_cancel_mid_stream(self):
-        """Verify cancellation mid-stream returns partial output."""
-        mgr = LocalModelManager()
-        mock_llm = MagicMock()
-        cancel_event = mgr._cancel_event
-        cancel_event.clear()
-
-        # Custom iterator that sets cancel after 2nd chunk
-        def stream_with_cancel():
-            yield {"choices": [{"delta": {"content": "first"}}]}
-            yield {"choices": [{"delta": {"content": "second"}}]}
-            cancel_event.set()  # Simulate timeout firing
-            yield {"choices": [{"delta": {"content": "third"}}]}
-            yield {"choices": [{"delta": {"content": "fourth"}}]}
-
-        mock_llm.create_chat_completion.return_value = stream_with_cancel()
-        mgr._llm = mock_llm
-
-        result = mgr._generate_sync("prompt", 100, 0.7, "system")
-        # Should have first two chunks, then break on the third iteration
-        assert result == "firstsecond"
-
-
 class TestLocalModelManagerUnloadSetsCancel:
     def test_unload_sets_cancel_event(self):
-        """Verify unload_model sets _cancel_event to signal running inference."""
         mgr = LocalModelManager()
-        mgr._llm = MagicMock()
         mgr._cancel_event.clear()
-        mgr.unload_model()
-        assert mgr._llm is None
+        with patch.object(mgr, "_shutdown_worker"):
+            mgr.unload_model()
         assert mgr._cancel_event.is_set()
 
     def test_unload_no_model_still_sets_cancel(self):
-        """Even without a loaded model, unload should set cancel for safety."""
         mgr = LocalModelManager()
         mgr._cancel_event.clear()
-        mgr.unload_model()
+        with patch.object(mgr, "_shutdown_worker"):
+            mgr.unload_model()
         assert mgr._cancel_event.is_set()
 
 

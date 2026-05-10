@@ -18,7 +18,7 @@ def _get_store(key: str) -> weakref.WeakKeyDictionary[asyncio.AbstractEventLoop,
     return _stores[key]
 
 
-def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = False) -> Any:
+def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = True) -> Any:
     store = _get_store(key)
     try:
         loop = asyncio.get_running_loop()

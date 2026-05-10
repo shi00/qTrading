@@ -289,7 +289,8 @@ class TestShutdownCoordinatorCleanupSteps:
         coord = ShutdownCoordinator()
         with patch("services.local_model_manager.LocalModelManager") as mock_lmm:
             mock_instance = MagicMock()
-            mock_instance._llm = None
+            mock_instance._worker_ready = False
+            mock_instance._model_path = ""
             mock_lmm._instance = mock_instance
             await coord._step5_unload_ai_model()
 
@@ -298,7 +299,7 @@ class TestShutdownCoordinatorCleanupSteps:
         coord = ShutdownCoordinator()
         with patch("services.local_model_manager.LocalModelManager") as mock_lmm:
             mock_instance = MagicMock()
-            mock_instance._llm = MagicMock()
+            mock_instance._worker_ready = True
             mock_instance.unload_model = MagicMock()
             mock_lmm._instance = mock_instance
             await coord._step5_unload_ai_model()
