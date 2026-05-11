@@ -516,10 +516,11 @@ def _create_all_tables_fresh() -> None:
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
-        sa.UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
+        sa.UniqueConstraint("content_hash", name="uq_market_news_hash"),
     )
     op.create_index(op.f("ix_market_news_publish_time"), "market_news", ["publish_time"], unique=False)
     op.create_index(op.f("ix_market_news_source"), "market_news", ["source"], unique=False)
+    op.create_index("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
     op.create_table(
         "moneyflow_daily",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -1222,6 +1223,17 @@ def upgrade() -> None:
         _create_table_screening_history()
 
     _create_table_screening_thinking()
+
+    # Handle market_news constraint migration (legacy → single-column unique on content_hash)
+    if _table_exists("market_news"):
+        schema = _target_schema()
+        uq_names = {c["name"] for c in insp.get_unique_constraints("market_news", schema=schema)}
+        if "uq_market_news_hash_pub" in uq_names:
+            op.drop_constraint("uq_market_news_hash_pub", "market_news", type_="unique")
+        if "uq_market_news_hash" not in uq_names:
+            op.create_unique_constraint("uq_market_news_hash", "market_news", ["content_hash"])
+        if not _index_exists("market_news", "idx_market_news_pub_source"):
+            op.create_index("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
 
 
 def downgrade() -> None:
