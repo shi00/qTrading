@@ -78,9 +78,10 @@ class _FakeCoordinator:
         self.start_watchdog_calls = 0
         self.cancel_watchdog_calls = 0
         self.do_cleanup_calls = 0
+        self.step_results = []
         _FakeCoordinator.last = self
 
-    def start_watchdog(self, _timeout):
+    def start_watchdog(self, _timeout=None):
         self.start_watchdog_calls += 1
 
     def cancel_watchdog(self):
@@ -89,6 +90,11 @@ class _FakeCoordinator:
     async def do_cleanup(self, **_kwargs):
         self.do_cleanup_calls += 1
         return self.cleanup_result
+
+    def _force_exit(self, code):
+        import os
+
+        os._exit(code)
 
 
 class _FakeAlertDialog:
