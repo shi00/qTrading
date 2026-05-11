@@ -283,7 +283,7 @@ class MarketNews(Base):
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_pub"),
+        UniqueConstraint("content_hash", name="uq_market_news_hash"),
         Index("ix_market_news_publish_time", "publish_time"),
         Index("ix_market_news_source", "source"),
         Index("idx_market_news_pub_source", "publish_time", "source"),
@@ -521,8 +521,8 @@ class MacroEconomy(Base):
 
 class ShiborDaily(Base):
     __tablename__ = "shibor_daily"
-    date = Column(Date, primary_key=True)
-    on = Column(Float)
+    date = Column("date", Date, primary_key=True)
+    on = Column("on", Float)
     w1 = Column(Float, name="1w")
     w2 = Column(Float, name="2w")
     m1 = Column(Float, name="1m")
@@ -597,6 +597,11 @@ class TaskHistory(Base):
     created_at = Column(DateTime(timezone=False), server_default=func.now(), nullable=False, index=True)
     started_at = Column(DateTime(timezone=False))
     completed_at = Column(DateTime(timezone=False))
+
+    __table_args__ = (
+        Index("idx_task_history_status_created", "status", "created_at"),
+        Index("idx_task_history_completed", "completed_at"),
+    )
 
 
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:

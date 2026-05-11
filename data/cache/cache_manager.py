@@ -320,14 +320,14 @@ class CacheManager:
         Get concepts for stock list.
         Returns: Dict[ts_code, List[concept_name]]
         """
-        return await self.stock_dao.get_concepts(ts_codes)  # type: ignore  # DAO return type may vary from expected dict structure
+        return await self.stock_dao.get_concepts(ts_codes)  # type: ignore[return-value]  # DAO return type may vary from expected dict structure
 
     # --- Daily Quotes ---
     async def save_daily_quotes(
         self,
         df: pd.DataFrame,
         priority: int | None = None,
-        suppress_errors: bool = True,
+        suppress_errors: bool = False,
     ):
         return await self.quote_dao.save_daily_quotes(
             df,
@@ -356,7 +356,7 @@ class CacheManager:
         )
 
     # --- Daily Indicators ---
-    async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = True):
+    async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = False):
         return await self.market_dao.save_daily_indicators(
             df,
             suppress_errors=suppress_errors,

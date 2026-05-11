@@ -133,6 +133,41 @@ class TestHolderSyncTop10Holders:
         assert result >= 0
 
 
+class TestHolderSyncCancelReturnsMinusOne:
+    """B-P1-7: Verify that cancelled sync operations return -1."""
+
+    @pytest.mark.asyncio
+    async def test_top10_holders_cancelled_returns_minus_one(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
+        )
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        strategy.cancel()
+        result = await strategy._sync_top10_holders("20240331")
+        assert result == -1, "B-P1-7: Cancelled _sync_top10_holders should return -1"
+
+    @pytest.mark.asyncio
+    async def test_pledge_stat_cancelled_returns_minus_one(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        ctx.cache.save_pledge_stat = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy.cancel()
+        result = await strategy._sync_pledge_stat()
+        assert result[0] == -1, "B-P1-7: Cancelled _sync_pledge_stat should return -1"
+
+
 class TestHolderSyncGetExistingTop10TsCodes:
     @pytest.mark.asyncio
     async def test_success(self):

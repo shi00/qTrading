@@ -649,7 +649,7 @@ class AIService:
                 history_context = await rm.get_learning_context()
             except Exception as e:
                 logger.warning(
-                    f"[AIService] Analyze | ⚠️ Learning context fetch failed: {e}",
+                    f"[AIService] Analyze | ⚠️ Learning context fetch failed: {DataSanitizer.sanitize_error(e)}",
                 )
                 history_context = ""
         elif history_context is None:
@@ -788,10 +788,10 @@ class AIService:
             return {"error": "Local model timeout", "score": 0}
         except Exception as e:
             logger.error(
-                f"[AIService] Analyze | ❌ Top-level failure: {e}",
+                f"[AIService] Analyze | ❌ Top-level failure: {DataSanitizer.sanitize_error(e)}",
                 exc_info=True,
             )
-            return {"error": str(e), "score": 0}
+            return {"error": DataSanitizer.sanitize_error(e), "score": 0}
 
     async def _get_setup_lock(self):
         """Lazy-initialize the async lock dynamically per event loop to avoid cross-loop binding deadlocks."""
@@ -879,7 +879,7 @@ class AIService:
                 local_e,
             ):
                 logger.warning(
-                    f"[AIService] Classify | ⚠️ Local failed, falling back to cloud: {local_e}",
+                    f"[AIService] Classify | ⚠️ Local failed, falling back to cloud: {DataSanitizer.sanitize_error(local_e)}",
                 )
             else:
                 logger.warning(
@@ -904,10 +904,10 @@ class AIService:
             return result
         except Exception as e:
             logger.error(
-                f"[AIService] Classify | ❌ All providers failed: {e}",
+                f"[AIService] Classify | ❌ All providers failed: {DataSanitizer.sanitize_error(e)}",
                 exc_info=True,
             )
-            return {"category": "unknown", "sentiment": "neutral", "error": str(e)}
+            return {"category": "unknown", "sentiment": "neutral", "error": DataSanitizer.sanitize_error(e)}
 
     async def verify_connection(self) -> bool:
         """

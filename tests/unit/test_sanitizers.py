@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from utils.sanitizers import DataSanitizer
 
@@ -135,6 +136,44 @@ class TestSanitizeArgs:
     def test_basic_args(self):
         result = DataSanitizer.sanitize_args("hello", 42)
         assert isinstance(result, tuple)
+
+
+class TestAIServiceErrorSanitization:
+    """S-P1-3: Verify ai_service.py uses DataSanitizer for all exception logging."""
+
+    def test_analyze_top_level_failure_uses_sanitizer(self):
+        import pathlib
+
+        source = pathlib.Path("services/ai_service.py").read_text(encoding="utf-8")
+        analyze_start = source.find("async def analyze_stock")
+        analyze_end = source.find("\n    async def ", analyze_start + 1)
+        analyze_source = source[analyze_start:analyze_end]
+        assert "DataSanitizer.sanitize_error" in analyze_source, (
+            "analyze_stock must use DataSanitizer.sanitize_error for exception logging"
+        )
+
+    def test_classify_all_providers_failed_uses_sanitizer(self):
+        import pathlib
+
+        source = pathlib.Path("services/ai_service.py").read_text(encoding="utf-8")
+        classify_start = source.find("async def classify_news")
+        classify_end = source.find("\n    async def ", classify_start + 1)
+        classify_source = source[classify_start:classify_end]
+        assert "DataSanitizer.sanitize_error" in classify_source, (
+            "classify_news must use DataSanitizer.sanitize_error for exception logging"
+        )
+
+    def test_no_raw_str_e_in_error_returns(self):
+        import pathlib
+
+        source = pathlib.Path("services/ai_service.py").read_text(encoding="utf-8")
+        for method in ("analyze_stock", "classify_news", "test_connection"):
+            method_start = source.find(f"async def {method}")
+            method_end = source.find("\n    async def ", method_start + 1)
+            method_source = source[method_start:method_end]
+            for line in method_source.split("\n"):
+                if '"error"' in line and "str(e)" in line:
+                    pytest.fail(f"{method} returns str(e) in error dict - should use DataSanitizer.sanitize_error(e)")
 
     def test_kwargs_with_sensitive(self):
         result = DataSanitizer.sanitize_args(token="abc123456789")

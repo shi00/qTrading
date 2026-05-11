@@ -90,8 +90,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
             if trade_date is not None:
                 return trade_date
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[HistoricalSync] get_latest_trade_date failed, using today: {e}")
         return get_now().date()
 
     @log_async_operation(
@@ -148,6 +148,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
             result.status = "failed"
             result.errors.append(str(e))
+
+        if self._cancelled and result.status not in ("failed", "cancelled"):
+            result.status = "cancelled"
 
         return result
 
@@ -329,7 +332,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):
-            if self._shutdown_event.is_set() or abort_sync:
+            if self._shutdown_event.is_set() or abort_sync or self._check_cancelled(result):
                 break
 
             batch = trade_dates[batch_start : batch_start + BATCH_SIZE]
@@ -358,7 +361,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             await asyncio.sleep(0)
 
         # Smart Retry
-        if failed_dates and not self._shutdown_event.is_set() and not abort_sync:
+        if failed_dates and not self._shutdown_event.is_set() and not abort_sync and not self._cancelled:
             MAX_RETRIES = ConfigHandler.get_sync_retry_count()
             logger.debug(
                 f"[HistoricalSync] Retry | Retrying {len(failed_dates)} failed dates...",

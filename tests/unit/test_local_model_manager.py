@@ -1,3 +1,5 @@
+import queue
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -172,7 +174,7 @@ class TestPersistentWorkerEnsureWorker:
             patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
         ):
             mock_res_queue = MagicMock()
-            mock_res_queue.get.side_effect = Exception("timeout")
+            mock_res_queue.get.side_effect = queue.Empty()
             mock_req_queue = MagicMock()
             mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
 
@@ -581,7 +583,7 @@ class TestLocalModelManagerRunInferenceWithModel:
 
                 mock_req_queue = MagicMock()
                 mock_res_queue = MagicMock()
-                mock_res_queue.get_nowait.side_effect = Exception("empty")
+                mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_proc = MagicMock()
@@ -734,7 +736,7 @@ class TestLocalModelManagerSubprocessCleanup:
 
                 mock_req_queue = MagicMock()
                 mock_res_queue = MagicMock()
-                mock_res_queue.get_nowait.side_effect = Exception("empty")
+                mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_proc = MagicMock()
@@ -767,7 +769,7 @@ class TestLocalModelManagerSubprocessCleanup:
 
                 mock_req_queue = MagicMock()
                 mock_res_queue = MagicMock()
-                mock_res_queue.get_nowait.side_effect = Exception("empty")
+                mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_proc = MagicMock()
@@ -778,3 +780,34 @@ class TestLocalModelManagerSubprocessCleanup:
                 assert mgr._worker_ready is False
         finally:
             mod._HAS_LLAMA_CPP = original
+
+
+class TestLocalInferenceTimeoutErrorType:
+    """E-P1-4: Verify LocalInferenceTimeoutError is a distinct RuntimeError subclass."""
+
+    def test_is_runtime_error_subclass(self):
+        from services.local_model_manager import LocalInferenceTimeoutError
+
+        assert issubclass(LocalInferenceTimeoutError, RuntimeError), (
+            "E-P1-4: LocalInferenceTimeoutError should be a RuntimeError subclass"
+        )
+
+    def test_not_timeout_error_subclass(self):
+        from services.local_model_manager import LocalInferenceTimeoutError
+
+        assert not issubclass(LocalInferenceTimeoutError, TimeoutError), (
+            "E-P1-4: LocalInferenceTimeoutError should NOT be a TimeoutError subclass "
+            "to avoid being caught by generic asyncio.TimeoutError handlers"
+        )
+
+    def test_can_be_raised_and_caught(self):
+        from services.local_model_manager import LocalInferenceTimeoutError
+
+        with pytest.raises(LocalInferenceTimeoutError):
+            raise LocalInferenceTimeoutError("test timeout")
+
+    def test_caught_by_runtime_error(self):
+        from services.local_model_manager import LocalInferenceTimeoutError
+
+        with pytest.raises(RuntimeError):
+            raise LocalInferenceTimeoutError("test timeout")

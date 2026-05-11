@@ -69,8 +69,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
 
             for qe in quarter_ends:
-                if self._cancelled:
-                    logger.debug("[HolderSync] Stop | Cancelled by user.")
+                if self._check_cancelled(result):
                     break
 
                 count = await self._sync_stk_holdernumber(qe)
@@ -86,7 +85,7 @@ class HolderSyncStrategy(ISyncStrategy):
                             count,
                         )
 
-                if errors >= _MAX_ERRORS or self._cancelled:
+                if errors >= _MAX_ERRORS or self._check_cancelled(result):
                     break
 
                 count = await self._sync_top10_holders(qe)
@@ -102,7 +101,7 @@ class HolderSyncStrategy(ISyncStrategy):
                             count,
                         )
 
-                if errors >= _MAX_ERRORS or self._cancelled:
+                if errors >= _MAX_ERRORS or self._check_cancelled(result):
                     break
 
             if errors < _MAX_ERRORS and not self._cancelled:

@@ -1,6 +1,8 @@
 import inspect
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
 
@@ -381,3 +383,29 @@ class TestConfigHandlerGetTokenKeyringMigration:
         result = cfg_mod.ConfigHandler.get_token()
         assert result == "decrypted_token"
         mock_set_pw.assert_called_once()
+
+
+class TestConfigHandlerNoLockReentry:
+    """C-P1-7: Verify save_config does not call load_config inside write lock,
+    which would cause deadlock with RWLockFair (non-reentrant)."""
+
+    def test_save_config_does_not_call_load_config(self):
+        import inspect
+        import textwrap
+
+        source = textwrap.dedent(inspect.getsource(cfg_mod.ConfigHandler.save_config))
+        import ast
+
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "load_config":
+                    pytest.fail("C-P1-7: save_config must not call load_config() inside write lock (deadlock risk)")
+                if isinstance(node.func, ast.Name) and node.func.id == "load_config":
+                    pytest.fail("C-P1-7: save_config must not call load_config() inside write lock (deadlock risk)")
+
+    def test_save_config_has_reentry_warning_comment(self):
+        import inspect
+
+        source = inspect.getsource(cfg_mod.ConfigHandler.save_config)
+        assert "C-P1-7" in source, "C-P1-7: save_config should have reentry warning comment"

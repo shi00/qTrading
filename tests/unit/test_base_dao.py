@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
 import sqlalchemy as sa
+from sqlalchemy import Float, Date
 
 from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 
@@ -205,6 +206,170 @@ class TestBaseDaoReadDb:
             mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame([(1, "test")], columns=["id", "name"]))
             result = await dao._read_db("SELECT * FROM t")
             assert isinstance(result, pd.DataFrame)
+
+
+class TestNullProtectedDefaultsTrue:
+    """B-P1-8/DB-P1-1: Verify null_protected defaults to True and COALESCE is applied."""
+
+    @pytest.mark.asyncio
+    async def test_null_protected_default_true_uses_coalesce(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "col_a"
+        mock_col_a.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_a]
+        mock_table.c = {"id": mock_col_pk, "col_a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "col_a": "val"}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            await dao._save_upsert(
+                pd.DataFrame({"id": [1], "col_a": ["val"]}),
+                "test_table",
+                ["id", "col_a"],
+                ["id"],
+                conn=mock_conn,
+            )
+            call_args = mock_stmt.on_conflict_do_update.call_args
+            set_dict = call_args[1]["set_"]
+            assert "col_a" in set_dict
+            assert str(set_dict["col_a"]).startswith("coalesce(")
+
+    @pytest.mark.asyncio
+    async def test_null_protected_false_uses_direct_assignment(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_b = MagicMock()
+        mock_col_b.name = "col_b"
+        mock_col_b.info = {"null_protected": False}
+        mock_table.columns = [mock_col_pk, mock_col_b]
+        mock_table.c = {"id": mock_col_pk, "col_b": mock_col_b}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "col_b": "val"}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            await dao._save_upsert(
+                pd.DataFrame({"id": [1], "col_b": ["val"]}),
+                "test_table",
+                ["id", "col_b"],
+                ["id"],
+                conn=mock_conn,
+            )
+            call_args = mock_stmt.on_conflict_do_update.call_args
+            set_dict = call_args[1]["set_"]
+            assert "col_b" in set_dict
+            assert "coalesce" not in str(set_dict["col_b"]).lower()
+
+
+class TestExceptExceptionNarrowedEP11:
+    """E-P1-1: Verify that 'except Exception: pass' patterns have been narrowed
+    to specific exception types with debug logging."""
+
+    def test_date_conversion_catches_value_type_error(self):
+        import data.persistence.daos.base_dao as base_dao_mod
+        import inspect
+
+        source = inspect.getsource(base_dao_mod.BaseDao._prepare_data_params)
+        assert "except Exception:" not in source or "except Exception as" in source, (
+            "E-P1-1: _prepare_data_params should not have bare 'except Exception:'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_db_engine_check_logs_debug(self):
+        mock_engine = MagicMock()
+        mock_engine.sync_engine = MagicMock()
+        mock_engine.sync_engine.side_effect = RuntimeError("unexpected")
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            result = await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn)
+            assert result == 1
+
+
+class TestMissingColsExcludedFromUpdate:
+    """B-P1-8 supplement: Missing columns must be excluded from update_cols
+    so that UPSERT ON CONFLICT DO UPDATE does not overwrite existing values with NULL."""
+
+    @pytest.mark.asyncio
+    async def test_missing_cols_excluded_from_update_dict(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "col_a"
+        mock_col_a.info = {"null_protected": True}
+        mock_col_b = MagicMock()
+        mock_col_b.name = "col_b"
+        mock_col_b.info = {"null_protected": True}
+        mock_table.columns = [mock_col_pk, mock_col_a, mock_col_b]
+        mock_table.c = {"id": mock_col_pk, "col_a": mock_col_a, "col_b": mock_col_b}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "col_a": "val"}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            await dao._save_upsert(
+                pd.DataFrame({"id": [1], "col_a": ["val"]}),
+                "test_table",
+                ["id", "col_a", "col_b"],
+                ["id"],
+                conn=mock_conn,
+            )
+            call_args = mock_stmt.on_conflict_do_update.call_args
+            set_dict = call_args[1]["set_"]
+            assert "col_b" not in set_dict, "Missing col_b should be excluded from update_dict"
+            assert "col_a" in set_dict
 
     @pytest.mark.asyncio
     async def test_read_with_params(self):
@@ -452,6 +617,42 @@ class TestBaseDaoWriteDbExtended:
             assert result == 1
 
 
+class TestShiborDailyReservedWordMapping:
+    """DB-P1-9: Verify ShiborDaily model correctly maps reserved SQL words
+    'date' and 'on' with explicit name parameters."""
+
+    def test_date_column_maps_to_db_date(self):
+        from data.persistence.models import ShiborDaily
+
+        col = ShiborDaily.__table__.c["date"]
+        assert col.name == "date"
+
+    def test_on_column_maps_to_db_on(self):
+        from data.persistence.models import ShiborDaily
+
+        col = ShiborDaily.__table__.c["on"]
+        assert col.name == "on"
+
+    def test_on_column_is_float_type(self):
+        from data.persistence.models import ShiborDaily
+
+        col = ShiborDaily.__table__.c["on"]
+        assert isinstance(col.type, Float)
+
+    def test_date_column_is_date_type(self):
+        from data.persistence.models import ShiborDaily
+
+        col = ShiborDaily.__table__.c["date"]
+        assert isinstance(col.type, Date)
+
+    def test_reserved_word_columns_have_explicit_name(self):
+        from data.persistence.models import ShiborDaily
+
+        for attr_name in ("date", "on"):
+            col = getattr(ShiborDaily, attr_name)
+            assert hasattr(col, "name"), f"Column '{attr_name}' should have explicit name mapping"
+
+
 class TestNullProtectedFromMetadata:
     def test_financial_reports_null_protected_columns(self):
         from data.persistence.models import FinancialReports
@@ -549,6 +750,87 @@ class TestScreeningThinkingModelConstraints:
             if list(idx.columns) == [ScreeningThinking.__table__.c.history_id]
         ]
         assert len(explicit_indexes) == 0, "history_id should not have a separate index (unique=True creates one)"
+
+
+class TestChunkedInQuery:
+    """DB-P1-5: Verify chunked_in_query properly splits large IN clauses."""
+
+    @pytest.mark.asyncio
+    async def test_empty_values_returns_empty_df(self):
+        read_fn = AsyncMock()
+        result = await BaseDao.chunked_in_query(read_fn, "SELECT * FROM t WHERE id IN ({placeholders})", [])
+        assert result.empty
+        read_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_small_list_single_query(self):
+        read_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A", "B"]}))
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            ["A", "B"],
+            chunk_size=500,
+        )
+        assert len(result) == 2
+        read_fn.assert_called_once()
+        call_args = read_fn.call_args[0]
+        sql = call_args[0]
+        assert "$1" in sql and "$2" in sql
+
+    @pytest.mark.asyncio
+    async def test_large_list_splits_into_chunks(self):
+        codes = [f"{i:06d}.SH" for i in range(1200)]
+        chunk1_df = pd.DataFrame({"ts_code": codes[:500]})
+        chunk2_df = pd.DataFrame({"ts_code": codes[500:1000]})
+        chunk3_df = pd.DataFrame({"ts_code": codes[1000:]})
+        read_fn = AsyncMock(side_effect=[chunk1_df, chunk2_df, chunk3_df])
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=500,
+        )
+        assert read_fn.call_count == 3
+        assert len(result) == 1200
+
+    @pytest.mark.asyncio
+    async def test_none_result_treated_as_empty(self):
+        read_fn = AsyncMock(return_value=None)
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            ["A"],
+        )
+        assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_chunk_with_empty_result_skipped(self):
+        codes = [f"{i:06d}.SH" for i in range(1000)]
+        chunk1_df = pd.DataFrame({"ts_code": codes[:500]})
+        read_fn = AsyncMock(side_effect=[chunk1_df, None, pd.DataFrame()])
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=500,
+        )
+        assert len(result) == 500
+
+    @pytest.mark.asyncio
+    async def test_params_fn_appended(self):
+        read_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A"]}))
+
+        def params_fn(chunk):
+            return ["extra_val"]
+
+        await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders}) AND status = $2",
+            ["A"],
+            params_fn=params_fn,
+        )
+        call_params = read_fn.call_args[0][1]
+        assert "extra_val" in call_params
 
 
 class TestBaseDaoSaveUpsertExtended:

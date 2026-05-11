@@ -54,17 +54,30 @@ excludes = [
 ]
 
 import fnmatch
+import glob as _glob
+
+_key_patterns = ["*.key", "*.key.bak", "*.key.tmp", "*.salt", "*.salt.tmp", "*.legacy"]
 
 _datas_filtered = []
 for src, dst in datas:
     skip = False
-    for pattern in ["*.key", "*.key.bak", "*.key.tmp", "*.salt", "*.salt.tmp", "*.legacy"]:
+    for pattern in _key_patterns:
         if fnmatch.fnmatch(os.path.basename(src), pattern):
             skip = True
             break
     if not skip:
         _datas_filtered.append((src, dst))
 datas = _datas_filtered
+
+_binaries_filtered = []
+_binaries_key_excludes = []
+for root, dirs, files in os.walk(str(project_root)):
+    for f in files:
+        for pattern in _key_patterns:
+            if fnmatch.fnmatch(f, pattern):
+                rel = os.path.relpath(os.path.join(root, f), str(project_root))
+                _binaries_key_excludes.append(rel)
+                break
 
 icon_path = project_root / "assets" / "icon.ico"
 if not icon_path.exists():

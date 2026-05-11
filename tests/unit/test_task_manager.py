@@ -147,8 +147,8 @@ class TestTaskManagerNotifySubscribers:
 
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
-    def test_intermittent_errors_accumulate(self, mock_i18n, mock_tp):
-        """D-P1-5: Intermittent errors should accumulate even with successes in between."""
+    def test_intermittent_errors_do_not_accumulate(self, mock_i18n, mock_tp):
+        """B-P1-4: Intermittent errors should NOT accumulate — success resets consecutive count to 0."""
         mgr = TaskManager()
         call_count = [0]
 
@@ -163,29 +163,65 @@ class TestTaskManagerNotifySubscribers:
         for _ in range(8):
             mgr._notify_subscribers()
 
-        assert cb not in mgr._subscribers, "Flaky subscriber should be removed after accumulated intermittent errors"
+        assert cb in mgr._subscribers, (
+            "Intermittent-fail subscriber should NOT be removed (success resets consecutive count)"
+        )
 
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
-    def test_success_reduces_error_count_not_resets(self, mock_i18n, mock_tp):
-        """D-P1-5: Success should reduce error count by 1, not reset to zero."""
+    def test_consecutive_failures_remove_subscriber(self, mock_i18n, mock_tp):
+        """B-P1-4: Only CONSECUTIVE failures should trigger subscriber removal."""
+        mgr = TaskManager()
+        call_count = [0]
+
+        def always_failing_after_2(tasks):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                raise Exception("consecutive fail")
+
+        cb = MagicMock(side_effect=always_failing_after_2)
+        mgr.subscribe(cb)
+
+        for _ in range(5):
+            mgr._notify_subscribers()
+
+        assert cb not in mgr._subscribers, "Subscriber with consecutive failures should be removed"
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_success_resets_consecutive_error_count_to_zero(self, mock_i18n, mock_tp):
+        """B-P1-4: Success should reset consecutive error count to 0 (not decrement by 1)."""
         mgr = TaskManager()
         call_count = [0]
 
         def alternating_callback(tasks):
             call_count[0] += 1
-            if call_count[0] in (2, 4):
+            if call_count[0] in (3, 5):
                 raise Exception("fail")
 
         cb = MagicMock(side_effect=alternating_callback)
-        mgr.subscribe(cb)
+        mgr.subscribe(cb)  # call 1: success (initial push)
 
-        mgr._notify_subscribers()
-        mgr._notify_subscribers()
-        mgr._notify_subscribers()
+        mgr._notify_subscribers()  # call 2: success
+        mgr._notify_subscribers()  # call 3: fail → consecutive=1
+        mgr._notify_subscribers()  # call 4: success → reset to 0
 
         error_count = mgr._subscriber_error_counts.get(cb, 0)
-        assert error_count > 0, f"Error count should be non-zero after fail-success-fail pattern, got {error_count}"
+        assert error_count == 0, f"Consecutive error count should be 0 after success, got {error_count}"
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_error_count_removed_after_eviction(self, mock_i18n, mock_tp):
+        """B-P1-4: Error count entry should be cleaned up when subscriber is evicted."""
+        mgr = TaskManager()
+        cb = MagicMock(side_effect=Exception("fail"))
+        mgr.subscribe(cb)
+
+        for _ in range(3):
+            mgr._notify_subscribers()
+
+        assert cb not in mgr._subscribers
+        assert cb not in mgr._subscriber_error_counts
 
 
 class TestTaskManagerGetAllTasks:
@@ -455,8 +491,9 @@ class TestTaskManagerAutoEvictOld:
             t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
             t.completed_at = datetime.datetime(2024, 1, 1, 0, 0, 0)
             mgr._tasks[t.id] = t
-        while sum(1 for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES) > mgr._MAX_FINISHED_HISTORY:
-            mgr._evict_on_complete("dummy_id")
+            mgr._finished_order[t.id] = t.completed_at
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
         finished = [t for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES]
         assert len(finished) <= mgr._MAX_FINISHED_HISTORY
 
@@ -617,10 +654,62 @@ class TestTaskManagerAutoEvict:
             t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
             t.completed_at = get_now()
             mgr._tasks[t.id] = t
-        while sum(1 for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES) > mgr._MAX_FINISHED_HISTORY:
-            mgr._evict_on_complete("dummy_id")
+            mgr._finished_order[t.id] = t.completed_at
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
         finished = [t for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES]
         assert len(finished) <= mgr._MAX_FINISHED_HISTORY
+
+
+class TestTaskManagerEvictOrderedDict:
+    """C-P1-4: Verify _evict_on_complete uses OrderedDict for O(1) eviction."""
+
+    def setup_method(self):
+        TaskManager._reset_singleton()
+
+    def teardown_method(self):
+        TaskManager._reset_singleton()
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_finished_order_tracks_completed_tasks(self, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test_task", status=TaskStatus.COMPLETED)
+        t.completed_at = get_now()
+        mgr._tasks[t.id] = t
+        mgr._evict_on_complete(t.id)
+        assert t.id in mgr._finished_order
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_non_terminal_task_not_tracked(self, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="running_task", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        mgr._evict_on_complete(t.id)
+        assert t.id not in mgr._finished_order
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_eviction_removes_oldest_first(self, mock_tp):
+        mgr = TaskManager()
+        old_time = datetime.datetime(2024, 1, 1, 0, 0, 0)
+        new_time = datetime.datetime(2024, 6, 1, 0, 0, 0)
+        t_old = AppTask(name="old_task", status=TaskStatus.COMPLETED)
+        t_old.completed_at = old_time
+        t_new = AppTask(name="new_task", status=TaskStatus.COMPLETED)
+        t_new.completed_at = new_time
+        mgr._tasks[t_old.id] = t_old
+        mgr._tasks[t_new.id] = t_new
+        mgr._finished_order[t_old.id] = old_time
+        mgr._finished_order[t_new.id] = new_time
+        for i in range(mgr._MAX_FINISHED_HISTORY - 1):
+            t = AppTask(name=f"fill_{i}", status=TaskStatus.COMPLETED)
+            t.completed_at = new_time
+            mgr._tasks[t.id] = t
+            mgr._finished_order[t.id] = new_time
+        assert len(mgr._finished_order) == mgr._MAX_FINISHED_HISTORY + 1
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
+        assert t_old.id not in mgr._tasks, "Oldest inserted task should be evicted first"
+        assert len(mgr._finished_order) <= mgr._MAX_FINISHED_HISTORY
 
 
 class TestTaskManagerGetTasks:

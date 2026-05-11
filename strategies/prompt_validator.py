@@ -6,7 +6,10 @@ Prompt 数据声明校验器
 
 import random
 import typing
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -77,15 +80,17 @@ async def check_multi_period_data(field: str) -> bool:
             try:
                 df = await cache.get_financial_reports_history(ts_code, periods=8)
                 if df is not None and not df.empty:
-                    if field in df.columns and not df[field].isna().all():  # type: ignore
+                    if field in df.columns and not df[field].isna().all():  # type: ignore[union-attr]
                         passed += 1
-            except Exception:
+            except (ValueError, KeyError, RuntimeError) as e:
+                logger.debug(f"[PromptValidator] check_field_populous sample {ts_code} failed: {e}")
                 continue
 
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[PromptValidator] check_field_populous failed: {e}")
         return False
 
 
@@ -113,13 +118,15 @@ async def check_field_exists(field: str) -> bool:
                 df = await cache.get_financial_reports_history(ts_code, periods=1)
                 if df is not None and not df.empty and field in df.columns:
                     passed += 1
-            except Exception:
+            except (ValueError, KeyError, RuntimeError) as e:
+                logger.debug(f"[PromptValidator] check_field_exists sample {ts_code} failed: {e}")
                 continue
 
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
-    except Exception:
+    except Exception as e:
+        logger.debug(f"[PromptValidator] check_field_exists failed: {e}")
         return False
 
 
@@ -131,17 +138,17 @@ async def check_table_has_data(table_name: str) -> bool:
     return await cache.check_table_has_data(table_name)
 
 
-DECLARATIONS: list[DataDeclaration] = []
+_DECLARATIONS: list[DataDeclaration] = []
 _declarations_initialized = False
 
 
 def get_declarations() -> list[DataDeclaration]:
     """懒加载数据声明列表，避免 import 时触发 ORM/缓存依赖"""
-    global DECLARATIONS, _declarations_initialized
+    global _DECLARATIONS, _declarations_initialized
     if not _declarations_initialized:
-        DECLARATIONS = _init_declarations()
+        _DECLARATIONS = _init_declarations()
         _declarations_initialized = True
-    return DECLARATIONS
+    return _DECLARATIONS
 
 
 def _init_declarations() -> list[DataDeclaration]:

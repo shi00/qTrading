@@ -11,6 +11,18 @@ class MetaDataManager:
         cls._alias_cache.clear()
 
     @classmethod
+    def preload_aliases(cls):
+        """B-P1-9: Preload all table and column aliases at startup to avoid
+        blocking the event loop during UI rendering."""
+        for table_name, table_def in TABLE_DEFINITIONS.items():
+            cls.get_table_alias(table_name)
+            columns = table_def.get("columns", {})
+            for col_name in columns:
+                cls.get_column_alias(table_name, col_name)
+        for col_name in COMMON_COLUMNS:
+            cls.get_column_alias(None, col_name)
+
+    @classmethod
     def get_table_alias(cls, table_name: str) -> str:
         cache_key = ("table", table_name)
         cached = cls._alias_cache.get(cache_key)

@@ -54,6 +54,13 @@ class TestHideFileWindows:
                 mock_windll.kernel32 = mock_kernel32
                 _hide_file_windows("C:\\test\\file.key")
 
+    def test_no_subprocess_run_usage(self):
+        """S-P1-6: _hide_file_windows must use ctypes, not subprocess.run."""
+        import inspect
+
+        source = inspect.getsource(_hide_file_windows)
+        assert "subprocess" not in source, "_hide_file_windows should use ctypes.windll instead of subprocess.run"
+
 
 class TestSecurityManagerGetKey:
     def setup_method(self):
@@ -307,3 +314,29 @@ class TestMigrateToDerivedKey:
         with patch.object(SecurityManager, "_load_key_file", side_effect=Exception("unreadable")):
             result = SecurityManager.migrate_to_derived_key()
             assert result is False
+
+
+class TestPyInstallerSpecExcludesKeyFiles:
+    """S-P1-4: Verify .spec file excludes sensitive key files from packaging."""
+
+    def test_spec_has_key_exclusion_patterns(self):
+        import os
+
+        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "AStockScreener.spec")
+        if not os.path.exists(spec_path):
+            pytest.skip("AStockScreener.spec not found")
+        with open(spec_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "*.key" in content, "S-P1-4: .spec should exclude *.key files"
+        assert "*.salt" in content, "S-P1-4: .spec should exclude *.salt files"
+
+    def test_spec_datas_filtered(self):
+        import os
+
+        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "AStockScreener.spec")
+        if not os.path.exists(spec_path):
+            pytest.skip("AStockScreener.spec not found")
+        with open(spec_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "_key_patterns" in content, "S-P1-4: .spec should define _key_patterns for exclusion"
+        assert "_datas_filtered" in content, "S-P1-4: .spec should filter datas list"

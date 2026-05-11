@@ -292,6 +292,9 @@ class ConfigHandler:
         """
         try:
             with ConfigHandler._lock.gen_wlock():
+                # C-P1-7: Do NOT call load_config() inside write lock!
+                # RWLockFair does NOT support same-thread wlock->rlock reentry (deadlock).
+                # Read directly from _config_cache or file instead.
                 if replace:
                     current_config = config_data.copy()
                 else:
@@ -386,7 +389,7 @@ class ConfigHandler:
     def get_init_history_years(cls) -> int:
         """获取初始化数据年限，默认 3 年"""
         # Note: Using get_setting internally via class method or static
-        return int(ConfigHandler.get_setting("init_history_years", 3))  # type: ignore
+        return int(ConfigHandler.get_setting("init_history_years", 3))  # type: ignore[arg-type]
 
     @classmethod
     def set_init_history_years(cls, years: int):
@@ -778,10 +781,10 @@ class ConfigHandler:
         """
         try:
             val = ConfigHandler.get_setting("local_model_timeout")
-            return int(val) if val is not None else None  # type: ignore
+            return int(val) if val is not None else None  # type: ignore[arg-type]
         except (ValueError, TypeError):
             # If config is corrupted/invalid, treat as not set (no default provided)
-            return None  # type: ignore
+            return None  # type: ignore[return-value]
 
     @staticmethod
     def set_local_ai_timeout(seconds: int):
@@ -1021,7 +1024,7 @@ class ConfigHandler:
     def get_max_cpu_workers():
         """Get max CPU threads from config."""
         config = ConfigHandler.load_config()
-        val = config.get("max_cpu_workers", os.cpu_count() / 2)  # type: ignore
+        val = config.get("max_cpu_workers", os.cpu_count() / 2)  # type: ignore[operator]
         try:
             return int(val)
         except (ValueError, TypeError):

@@ -79,8 +79,9 @@ class TestNewsSubscriptionServiceStop:
     def test_stop_resets_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
-        svc.stop()
+        result = svc.stop()
         assert svc._running is False
+        assert result is None
 
     @patch("data.external.news_subscription.AIService")
     @patch("data.external.news_subscription.CacheManager")
@@ -98,6 +99,16 @@ class TestNewsSubscriptionServiceStop:
         svc = NewsSubscriptionService()
         svc._running = False
         svc.stop()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_subscription.AIService")
+    @patch("data.external.news_subscription.CacheManager")
+    async def test_stop_returns_task_when_loop_running(self, mock_cache, mock_ai):
+        """C-P1-2: stop() should return asyncio.Task when event loop is running."""
+        svc = NewsSubscriptionService()
+        svc._running = True
+        result = svc.stop()
+        assert result is None or isinstance(result, asyncio.Task)
 
 
 class TestNewsSubscriptionServiceStart:

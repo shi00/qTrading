@@ -7,6 +7,7 @@ import time as _time
 import traceback
 import uuid
 from collections.abc import Callable
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -105,6 +106,7 @@ class TaskManager:
                 return
 
             self._tasks: dict[str, AppTask] = {}
+            self._finished_order: OrderedDict[str, datetime.datetime] = OrderedDict()
             self._subscribers: list[Callable[[list[AppTask]], None]] = []
             self._subscriber_error_counts: dict[Callable[[list[AppTask]], None], int] = {}
             self._MAX_SUBSCRIBER_ERRORS: int = 3
@@ -172,9 +174,8 @@ class TaskManager:
         for cb in self._subscribers[:]:
             try:
                 cb(tasks_snapshot)
-                current = self._subscriber_error_counts.get(cb, 0)
-                if current > 0:
-                    self._subscriber_error_counts[cb] = current - 1
+                if cb in self._subscriber_error_counts:
+                    self._subscriber_error_counts[cb] = 0
             except Exception as e:
                 consecutive_errors = self._subscriber_error_counts.get(cb, 0) + 1
                 self._subscriber_error_counts[cb] = consecutive_errors
@@ -378,20 +379,21 @@ class TaskManager:
     _MAX_FINISHED_HISTORY = 200
 
     def _evict_on_complete(self, task_id: str):
-        """Evict oldest finished task if history exceeds limit, O(1) amortized."""
-        finished_count = sum(1 for t in self._tasks.values() if t.status in TERMINAL_STATUSES)
-        if finished_count <= self._MAX_FINISHED_HISTORY:
+        """Evict oldest finished task if history exceeds limit, O(1) amortized.
+
+        Uses _finished_order OrderedDict to track completion order,
+        avoiding O(n) scan of all tasks on each completion.
+        """
+        task = self._tasks.get(task_id)
+        if task is None or task.status not in TERMINAL_STATUSES:
             return
-        oldest_tid = None
-        oldest_time = None
-        for tid, t in self._tasks.items():
-            if t.status in TERMINAL_STATUSES:
-                t_time = t.completed_at or datetime.datetime.min
-                if oldest_time is None or t_time < oldest_time:
-                    oldest_tid = tid
-                    oldest_time = t_time
-        if oldest_tid is not None:
-            del self._tasks[oldest_tid]
+        completed_time = task.completed_at or datetime.datetime.min
+        self._finished_order[task_id] = completed_time
+        self._finished_order.move_to_end(task_id)
+        while len(self._finished_order) > self._MAX_FINISHED_HISTORY:
+            oldest_tid, _ = self._finished_order.popitem(last=False)
+            if oldest_tid in self._tasks:
+                del self._tasks[oldest_tid]
 
     # --- Internal Runner ---
 
@@ -573,7 +575,8 @@ class TaskManager:
             clipped = text[:max_len]
         try:
             return clipped.encode("utf-8", "replace").decode("utf-8", "ignore")
-        except Exception:
+        except (UnicodeDecodeError, UnicodeEncodeError) as e:
+            logger.debug(f"[TaskManager] UTF-8 sanitize failed, using raw clipped: {e}")
             return clipped
 
     def _queue_persist_snapshot(self, snapshot: tuple):

@@ -311,6 +311,10 @@ async def main(page: ft.Page):
             )
             return
 
+        from data.persistence.metadata_manager import MetaDataManager
+
+        MetaDataManager.preload_aliases()
+
         if cache_manager.engine is None:
             logger.error("[Main] Database engine not created after init_db().")
             show_toast(I18n.get("error_db_engine_missing", default="数据库引擎未创建，请检查配置"), "error")

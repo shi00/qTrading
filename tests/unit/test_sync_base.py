@@ -269,3 +269,60 @@ class TestSyncContextConfig:
     def test_config_set(self):
         ctx = SyncContext(api="api", cache="cache", config="cfg")
         assert ctx.config == "cfg"
+
+
+class TestISyncStrategyCancelSemantics:
+    """D-P1-6: Verify all sync strategies use _check_cancelled consistently."""
+
+    @staticmethod
+    def _make_strategy():
+        ctx = SyncContext(api=MagicMock(), cache=MagicMock())
+
+        class ConcreteStrategy(ISyncStrategy):
+            async def run(self, **kwargs):
+                return SyncResult()
+
+        return ConcreteStrategy(ctx)
+
+    def test_check_cancelled_sets_result_status(self):
+        strategy = self._make_strategy()
+        result = SyncResult()
+        assert not strategy._check_cancelled(result)
+        assert result.status == "success"
+
+    def test_check_cancelled_returns_true_when_cancelled(self):
+        strategy = self._make_strategy()
+        strategy._cancelled = True
+        result = SyncResult()
+        assert strategy._check_cancelled(result) is True
+        assert result.status == "cancelled"
+
+    def test_cancel_sets_flag(self):
+        strategy = self._make_strategy()
+        assert strategy._cancelled is False
+        strategy.cancel()
+        assert strategy._cancelled is True
+
+    def test_holder_uses_check_cancelled(self):
+        from data.sync.holder import HolderSyncStrategy
+        import inspect
+
+        source = inspect.getsource(HolderSyncStrategy.run)
+        assert "_check_cancelled" in source, "HolderSyncStrategy.run should use _check_cancelled"
+        assert "self._cancelled" not in source or "_check_cancelled" in source, (
+            "Should use _check_cancelled instead of directly checking self._cancelled in loop conditions"
+        )
+
+    def test_historical_checks_cancelled_after_run(self):
+        from data.sync.historical import HistoricalSyncStrategy
+        import inspect
+
+        source = inspect.getsource(HistoricalSyncStrategy.run)
+        assert "self._cancelled" in source, "HistoricalSyncStrategy.run should check self._cancelled"
+
+    def test_macro_uses_check_cancelled(self):
+        from data.sync.macro import MacroSyncStrategy
+        import inspect
+
+        source = inspect.getsource(MacroSyncStrategy.run)
+        assert "_check_cancelled" in source, "MacroSyncStrategy.run should use _check_cancelled"

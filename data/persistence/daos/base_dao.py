@@ -25,8 +25,47 @@ class EngineDisposedError(RuntimeError):
     """
 
 
+_IN_CHUNK_SIZE = 500
+
+
 class BaseDao:
     _maintenance_event = None
+
+    @staticmethod
+    async def chunked_in_query(read_db_fn, sql_template, values, *, chunk_size=_IN_CHUNK_SIZE, params_fn=None):
+        """
+        Execute a SQL query with IN clause in chunks to avoid PostgreSQL parameter limit.
+
+        Args:
+            read_db_fn: async _read_db method
+            sql_template: SQL with {placeholders} marker
+            values: list of values for the IN clause
+            chunk_size: maximum items per IN clause (default 500)
+            params_fn: callable(values_chunk) -> extra params list, appended after values
+        """
+        if not values:
+            return pd.DataFrame()
+
+        if len(values) <= chunk_size:
+            placeholders = ",".join([f"${i + 1}" for i in range(len(values))])
+            extra = params_fn(values) if params_fn else []
+            sql = sql_template.format(placeholders=placeholders)
+            df = await read_db_fn(sql, values + extra)
+            return df if df is not None else pd.DataFrame()
+
+        all_results = []
+        for i in range(0, len(values), chunk_size):
+            chunk = values[i : i + chunk_size]
+            placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
+            extra = params_fn(chunk) if params_fn else []
+            sql = sql_template.format(placeholders=placeholders)
+            df = await read_db_fn(sql, chunk + extra)
+            if df is not None and not df.empty:
+                all_results.append(df)
+
+        if all_results:
+            return pd.concat(all_results, ignore_index=True)
+        return pd.DataFrame()
 
     @staticmethod
     def _to_date_str(val: datetime.date | str | None) -> str | None:
@@ -74,8 +113,8 @@ class BaseDao:
                     if col in df.columns:
                         try:
                             df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce").dt.date
-                        except Exception:
-                            pass
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"[BaseDao] Date conversion skipped for column '{col}': {e}")
                 for col in target_datetime_cols:
                     if col in df.columns:
                         with contextlib.suppress(Exception):
@@ -167,8 +206,8 @@ class BaseDao:
                 raise EngineDisposedError(f"[{self.__class__.__name__}] Engine sync_engine is None, write rejected.")
         except EngineDisposedError:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[BaseDao] Engine sync_engine check skipped: {e}")
 
         start_time = time.perf_counter()
         try:
@@ -325,7 +364,7 @@ class BaseDao:
         records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
 
         stmt = pg_insert(table)
-        update_cols = [c for c in columns if c not in pk_columns and c != "created_at"]
+        update_cols = [c for c in columns if c not in pk_columns and c != "created_at" and c not in missing_cols]
 
         if not update_cols:
             stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
@@ -430,8 +469,8 @@ class BaseDao:
                         import pandas as pd
 
                         return pd.to_datetime(clean_val).date()
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"[BaseDao] Pandas date parse skipped for '{clean_val}': {e}")
             except (ValueError, TypeError):
                 logger.warning(f"[BaseDao] Failed to convert date string: {val}")
                 pass

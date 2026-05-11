@@ -192,12 +192,18 @@ class NewsSubscriptionService:
         logger.info("[NewsService] Started news polling service [STARTED]")
 
     def stop(self):
-        """Stop the service and reset state."""
+        """Stop the service and reset state.
+
+        Returns:
+            asyncio.Task | None: The stop_async task if scheduled on a running loop,
+            or None if stopped synchronously. Callers should await the task when possible.
+        """
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                loop.create_task(self.stop_async())
-                return
+                task = loop.create_task(self.stop_async())
+                logger.debug("[NewsService] stop() scheduled stop_async as task (fire-and-forget)")
+                return task
         except RuntimeError:
             pass
 
@@ -216,12 +222,8 @@ class NewsSubscriptionService:
         self._last_news_time = None
         self._last_news_content = None
 
-        # U-2 fix: Do NOT clear listeners on stop() - they should persist across restarts
-        # Listeners are only removed via explicit remove_listener() call
-        # self._listeners.clear()
-        # self._alert_listeners.clear()
-
         logger.info("[NewsService] Stopped news polling service")
+        return None
 
     async def _poll_loop(self):
         """Main polling loop"""

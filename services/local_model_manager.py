@@ -72,7 +72,8 @@ def _persistent_worker(
             request = request_queue.get(timeout=1.0)
         except queue.Empty:
             continue
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[LocalModel] Worker queue get error: {e}")
             continue
 
         if request is _SENTINEL:
@@ -251,8 +252,8 @@ class LocalModelManager:
 
             try:
                 status, payload = self._result_queue.get(timeout=180)
-            except Exception:
-                logger.error("[LocalModel] Persistent worker failed to become ready within 180s.")
+            except (queue.Empty, TimeoutError, OSError) as e:
+                logger.error(f"[LocalModel] Persistent worker failed to become ready within 180s: {e}")
                 self._shutdown_worker()
                 return False
 
@@ -435,12 +436,12 @@ class LocalModelManager:
                 try:
                     result = self._result_queue.get_nowait()
                     break
-                except Exception:
+                except queue.Empty:
                     pass
                 if self._worker_proc is not None and not self._worker_proc.is_alive():
                     try:
                         result = self._result_queue.get_nowait()
-                    except Exception:
+                    except queue.Empty:
                         pass
                     worker_died = True
                     break
@@ -449,7 +450,7 @@ class LocalModelManager:
             if result is None:
                 try:
                     result = self._result_queue.get_nowait()
-                except Exception:
+                except queue.Empty:
                     pass
 
             if result is None and not worker_died:

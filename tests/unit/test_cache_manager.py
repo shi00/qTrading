@@ -1425,3 +1425,35 @@ class TestCacheManagerUsesMetadataTables:
         source = inspect.getsource(CacheManager.check_comprehensive_health)
         assert "ModelsBase.metadata.tables" in source
         assert "sa.table(" not in source
+
+
+class TestSuppressErrorsDefaultFalse:
+    """E-P1-5: Verify write operations default suppress_errors=False."""
+
+    def test_save_daily_quotes_default_is_false(self):
+        import inspect
+        from data.cache.cache_manager import CacheManager
+
+        sig = inspect.signature(CacheManager.save_daily_quotes)
+        default = sig.parameters["suppress_errors"].default
+        assert default is False, f"E-P1-5: save_daily_quotes suppress_errors should default to False, got {default!r}"
+
+    def test_save_daily_indicators_default_is_false(self):
+        import inspect
+        from data.cache.cache_manager import CacheManager
+
+        sig = inspect.signature(CacheManager.save_daily_indicators)
+        default = sig.parameters["suppress_errors"].default
+        assert default is False, (
+            f"E-P1-5: save_daily_indicators suppress_errors should default to False, got {default!r}"
+        )
+
+    def test_quote_dao_save_daily_quotes_default_is_false(self):
+        import inspect
+        from data.persistence.daos.quote_dao import QuoteDao
+
+        sig = inspect.signature(QuoteDao.save_daily_quotes)
+        default = sig.parameters["suppress_errors"].default
+        assert default is False, (
+            f"E-P1-5: QuoteDao.save_daily_quotes suppress_errors should default to False, got {default!r}"
+        )

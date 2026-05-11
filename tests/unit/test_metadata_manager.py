@@ -117,3 +117,47 @@ class TestMetadataManagerCaching:
         MetaDataManager.invalidate_cache()
         MetaDataManager.get_column_alias(None, "trade_date")
         assert mock_i18n.get.call_count == 2
+
+
+class TestPreloadAliases:
+    """B-P1-9: Verify preload_aliases populates cache at startup."""
+
+    @patch("core.i18n.I18n")
+    def test_preload_populates_cache(self, mock_i18n):
+        mock_i18n.get.return_value = "翻译"
+        MetaDataManager.invalidate_cache()
+        assert len(MetaDataManager._alias_cache) == 0
+        MetaDataManager.preload_aliases()
+        assert len(MetaDataManager._alias_cache) > 0
+
+    @patch("core.i18n.I18n")
+    def test_preload_covers_all_tables(self, mock_i18n):
+        mock_i18n.get.return_value = "翻译"
+        MetaDataManager.invalidate_cache()
+        MetaDataManager.preload_aliases()
+        for table_name in TABLE_DEFINITIONS:
+            cache_key = ("table", table_name)
+            assert cache_key in MetaDataManager._alias_cache, f"Table {table_name} not preloaded"
+
+    @patch("core.i18n.I18n")
+    def test_preload_makes_subsequent_calls_use_cache(self, mock_i18n):
+        mock_i18n.get.return_value = "翻译"
+        MetaDataManager.invalidate_cache()
+        MetaDataManager.preload_aliases()
+        call_count_after_preload = mock_i18n.get.call_count
+        MetaDataManager.get_column_alias(None, "trade_date")
+        assert mock_i18n.get.call_count == call_count_after_preload
+
+
+class TestPreloadAliasesCalledAtStartup:
+    """B-P1-9: Verify that main.py calls preload_aliases after init_db."""
+
+    def test_main_source_contains_preload_aliases(self):
+        import pathlib
+
+        main_path = pathlib.Path(__file__).resolve().parent.parent.parent / "main.py"
+        source = main_path.read_text(encoding="utf-8")
+        assert "preload_aliases" in source, (
+            "B-P1-9: main.py should call MetaDataManager.preload_aliases() "
+            "after init_db() to avoid blocking the event loop during UI rendering."
+        )

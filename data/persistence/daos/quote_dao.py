@@ -120,7 +120,7 @@ class QuoteDao(BaseDao):
         self,
         df: pd.DataFrame,
         priority: int | None = None,
-        suppress_errors: bool = True,
+        suppress_errors: bool = False,
     ):
         cols = get_model_columns(DailyQuotes)
         pk_columns = get_model_pk_columns(DailyQuotes)
@@ -457,6 +457,23 @@ class QuoteDao(BaseDao):
             sql += f" AND trade_date <= ${idx}"
             params.append(ed)
             idx += 1
+
+        chunk_size = 500
+        if len(ts_code_list) > chunk_size:
+            all_results = []
+            base_sql = sql
+            base_params = params.copy()
+            base_idx = idx
+            for i in range(0, len(ts_code_list), chunk_size):
+                chunk = ts_code_list[i : i + chunk_size]
+                placeholders = ",".join([f"${base_idx + j}" for j in range(len(chunk))])
+                chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
+                df_chunk = await self._read_db(chunk_sql, base_params + chunk)
+                if df_chunk is not None and not df_chunk.empty:
+                    all_results.append(df_chunk)
+            if all_results:
+                return pd.concat(all_results, ignore_index=True)
+            return pd.DataFrame()
 
         placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])
         sql += f" AND ts_code IN ({placeholders})"

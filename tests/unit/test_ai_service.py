@@ -1062,6 +1062,29 @@ class TestAIServiceClassifyNewsFallback:
         assert result.get("error") is not None
         assert result.get("category") == "unknown"
 
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_classify_news_failure_returns_complete_structure(self, mock_ch):
+        """E-P1-6: classify_news failure must return a dict with all expected keys."""
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_news_prompt.return_value = "Classify this news"
+        svc = AIService()
+        svc._chat_completion = AsyncMock(side_effect=Exception("All down"))
+        result = await svc.classify_news("央行降息")
+        assert isinstance(result, dict), "E-P1-6: classify_news should always return a dict"
+        assert "error" in result, "E-P1-6: failure result must contain 'error' key"
+        assert "category" in result, "E-P1-6: failure result must contain 'category' key"
+        assert result["category"] == "unknown", "E-P1-6: failure category should be 'unknown'"
+
 
 class TestAIServiceGetSemaphore:
     @pytest.mark.asyncio

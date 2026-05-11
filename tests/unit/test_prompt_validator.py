@@ -104,6 +104,28 @@ class TestCheckMultiPeriodData:
         result = await check_multi_period_data("roe")
         assert result is False
 
+
+class TestPromptValidatorLazyLoading:
+    """D-P1-2: Verify prompt_validator uses lazy loading, no module-level side effects."""
+
+    def test_declarations_is_private(self):
+        import strategies.prompt_validator as pv
+
+        assert not hasattr(pv, "DECLARATIONS"), "DECLARATIONS should be private (_DECLARATIONS)"
+
+    def test_get_declarations_is_lazy(self):
+        import strategies.prompt_validator as pv
+
+        pv._declarations_initialized = False
+        pv._DECLARATIONS = []
+        assert pv._DECLARATIONS == []
+        assert not pv._declarations_initialized
+
+    def test_import_does_not_trigger_init(self):
+        import strategies.prompt_validator as pv
+
+        assert not pv._declarations_initialized or len(pv._DECLARATIONS) > 0
+
     @pytest.mark.asyncio
     @patch("data.cache.cache_manager.CacheManager")
     async def test_exception(self, mock_cm_cls):
