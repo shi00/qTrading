@@ -23,7 +23,7 @@ class TestCheckDataExistsUnionAll:
         with open(dao_path, encoding="utf-8") as f:
             source = f.read()
 
-        assert "UNION ALL" in source, "P1-3: quote_dao should use UNION ALL"
+        assert "union_all(" in source, "P1-3: quote_dao should use union_all() for efficiency"
 
     def test_union_all_sql_construction(self):
         """SQL should use UNION ALL to combine table checks"""

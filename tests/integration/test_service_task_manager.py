@@ -369,9 +369,7 @@ class TestTaskManagerAutoEvict(unittest.TestCase):
                 completed_at=datetime.datetime.now(),
             )
             self.manager._tasks[f"task{i}"] = task
-
-        for _ in range(60):
-            self.manager._evict_on_complete("task249")
+            self.manager._evict_on_complete(f"task{i}")
 
         self.assertLessEqual(len(self.manager._tasks), 200)
 

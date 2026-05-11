@@ -150,6 +150,8 @@ class QuoteDao(BaseDao):
             logger.warning("[QuoteDao] check_data_exists called with None trade_date")
             return False
 
+        trade_date = _normalize_trade_date(trade_date)
+
         if tables is None:
             tables = _get_default_synced_tables()
 
