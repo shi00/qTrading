@@ -565,34 +565,35 @@ class TestMacroContextSimplifiedCheck:
         assert "hasattr" not in source or "macro_context" not in source.split("hasattr")[0].split("\n")[-1]
 
 
-class TestAIStrategyMixinTimeoutHandling:
-    def _make_mock_dp(self):
-        dp = MagicMock()
-        dates = pd.date_range("2025-01-01", periods=30, freq="B")
-        dp.get_stock_history = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "trade_date": dates,
-                    "close": [10.0] * 30,
-                    "high": [10.5] * 30,
-                    "low": [9.5] * 30,
-                    "open": [10.0] * 30,
-                    "vol": [1000] * 30,
-                    "amount": [10000] * 30,
-                }
-            )
+def make_mock_dp():
+    dp = MagicMock()
+    dates = pd.date_range("2025-01-01", periods=30, freq="B")
+    dp.get_stock_history = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "trade_date": dates,
+                "close": [10.0] * 30,
+                "high": [10.5] * 30,
+                "low": [9.5] * 30,
+                "open": [10.0] * 30,
+                "vol": [1000] * 30,
+                "amount": [10000] * 30,
+            }
         )
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound_holding = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound_flow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_financial_summary = AsyncMock(return_value=None)
-        dp.cache.get_stock_news = AsyncMock(return_value=[])
-        return dp
+    )
+    dp.cache = MagicMock()
+    dp.cache.get_concepts = AsyncMock(return_value={})
+    dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_northbound_holding = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_northbound_flow = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_financial_summary = AsyncMock(return_value=None)
+    dp.cache.get_stock_news = AsyncMock(return_value=[])
+    return dp
 
+
+class TestAIStrategyMixinTimeoutHandling:
     @pytest.mark.asyncio
     async def test_httpx_timeout_exception_reraises(self):
         import httpx
@@ -600,7 +601,7 @@ class TestAIStrategyMixinTimeoutHandling:
         s = ConcreteStrategy()
         row = pd.Series({"ts_code": "000001.SZ", "name": "test"})
         prefetched = PreFetchedContext()
-        mock_dp = self._make_mock_dp()
+        mock_dp = make_mock_dp()
         with patch("strategies.ai_mixin.AIService") as mock_ai_cls:
             mock_ai = mock_ai_cls.return_value
             mock_ai.is_cloud_available.return_value = True
@@ -608,12 +609,53 @@ class TestAIStrategyMixinTimeoutHandling:
             with pytest.raises(httpx.ReadTimeout):
                 await s._mixin_analyze_single(row, mock_dp, mock_ai, prefetched)
 
+
+class TestBuildMacroContextLookaheadGuard:
+    @pytest.mark.asyncio
+    async def test_build_macro_context_passes_as_of_date(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame())
+        cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
+        as_of = datetime.date(2024, 6, 1)
+        await s._build_macro_context(cache, as_of_date=as_of)
+        cache.get_macro_economy.assert_called_once_with(as_of_date=as_of)
+        cache.get_shibor_latest.assert_called_once_with(as_of_date=as_of)
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_no_as_of_date_passes_none(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame())
+        cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
+        await s._build_macro_context(cache)
+        cache.get_macro_economy.assert_called_once_with(as_of_date=None)
+        cache.get_shibor_latest.assert_called_once_with(as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_no_future_data(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cutoff = datetime.date(2024, 6, 1)
+        macro_df = pd.DataFrame(
+            {
+                "m2_yoy": [8.5],
+                "cpi": [0.2],
+                "ppi": [-1.5],
+            }
+        )
+        cache.get_macro_economy = AsyncMock(return_value=macro_df)
+        cache.get_shibor_latest = AsyncMock(return_value=None)
+        result = await s._build_macro_context(cache, as_of_date=cutoff)
+        assert "M2" in result
+        cache.get_macro_economy.assert_called_once_with(as_of_date=cutoff)
+
     @pytest.mark.asyncio
     async def test_asyncio_timeout_error_reraises(self):
         s = ConcreteStrategy()
         row = pd.Series({"ts_code": "000001.SZ", "name": "test"})
         prefetched = PreFetchedContext()
-        mock_dp = self._make_mock_dp()
+        mock_dp = make_mock_dp()
         with patch("strategies.ai_mixin.AIService") as mock_ai_cls:
             mock_ai = mock_ai_cls.return_value
             mock_ai.is_cloud_available.return_value = True
@@ -626,7 +668,7 @@ class TestAIStrategyMixinTimeoutHandling:
         s = ConcreteStrategy()
         row = pd.Series({"ts_code": "000001.SZ", "name": "test"})
         prefetched = PreFetchedContext()
-        mock_dp = self._make_mock_dp()
+        mock_dp = make_mock_dp()
         with patch("strategies.ai_mixin.AIService") as mock_ai_cls:
             mock_ai = mock_ai_cls.return_value
             mock_ai.is_cloud_available.return_value = True

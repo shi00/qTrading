@@ -51,7 +51,8 @@ class TestDataProcessorRefreshToken:
 
 
 class TestDataProcessorCancel:
-    def test_get_cancel_event(self):
+    @pytest.mark.asyncio
+    async def test_get_cancel_event(self):
         dp = _make_dp()
         try:
             evt = dp._get_cancel_event()
@@ -883,21 +884,23 @@ class TestDataProcessorCancelEvent:
     def teardown_method(self):
         DataProcessor._reset_singleton()
 
+    @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")
     @patch("data.data_processor.TradeCalendarService")
     @patch("data.data_processor.ConfigHandler")
-    def test_get_cancel_event(self, mock_ch, mock_tc, mock_cache, mock_api):
+    async def test_get_cancel_event(self, mock_ch, mock_tc, mock_cache, mock_api):
         mock_ch.get_token.return_value = "test-token"
         dp = DataProcessor()
         evt = dp._get_cancel_event()
         assert evt is not None
 
+    @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")
     @patch("data.data_processor.TradeCalendarService")
     @patch("data.data_processor.ConfigHandler")
-    def test_is_cancelled_initially_false(self, mock_ch, mock_tc, mock_cache, mock_api):
+    async def test_is_cancelled_initially_false(self, mock_ch, mock_tc, mock_cache, mock_api):
         mock_ch.get_token.return_value = "test-token"
         dp = DataProcessor()
         assert dp.is_cancelled() is False
@@ -910,11 +913,12 @@ class TestDataProcessorClearCancel:
     def teardown_method(self):
         DataProcessor._reset_singleton()
 
+    @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")
     @patch("data.data_processor.TradeCalendarService")
     @patch("data.data_processor.ConfigHandler")
-    def test_clear_cancel(self, mock_ch, mock_tc, mock_cache, mock_api):
+    async def test_clear_cancel(self, mock_ch, mock_tc, mock_cache, mock_api):
         mock_ch.get_token.return_value = "test-token"
         dp = DataProcessor()
         dp._get_cancel_event().set()
