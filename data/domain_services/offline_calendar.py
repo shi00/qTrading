@@ -5,7 +5,6 @@ import typing
 import pandas as pd
 from pandas_market_calendars import get_calendar
 
-from utils.time_utils import parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +35,9 @@ class OfflineCalendar:
         try:
             cal = OfflineCalendar.get_instance()
             if cal is None:
-                if isinstance(date_obj, str):
-                    date_obj = parse_date(date_obj)
-                if hasattr(date_obj, "weekday"):
-                    is_weekday = date_obj.weekday() < 5
-                    if is_weekday:
-                        logger.warning(
-                            f"[OfflineCalendar] Calendar unavailable, treating {date_obj} as trading day (weekday fallback)",
-                        )
-                    return is_weekday
-                logger.error(f"[OfflineCalendar] Cannot determine date type for {date_obj}, assuming non-trading day")
+                logger.error(
+                    f"[OfflineCalendar] Calendar unavailable, treating {date_obj} as non-trading day (conservative fallback)",
+                )
                 return False
 
             if isinstance(date_obj, (str, datetime.date, datetime.datetime)):

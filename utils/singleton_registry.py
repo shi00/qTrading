@@ -35,6 +35,17 @@ def reset_all_singletons() -> None:
                 except Exception as e:
                     logger.warning(f"[SingletonRegistry] Failed to reset {cls.__name__}: {e}")
             elif hasattr(cls, "_instance"):
+                logger.error(
+                    f"[SingletonRegistry] {cls.__name__} lacks _reset_singleton — "
+                    f"falling back to _instance = None (resources may leak). "
+                    f"Implement _reset_singleton for proper cleanup."
+                )
+                instance = cls._instance
+                if instance is not None and hasattr(instance, "close"):
+                    try:
+                        instance.close()
+                    except Exception as e:
+                        logger.warning(f"[SingletonRegistry] {cls.__name__}.close() failed: {e}")
                 cls._instance = None
 
 

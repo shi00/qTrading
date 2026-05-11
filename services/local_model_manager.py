@@ -6,6 +6,7 @@ import importlib
 import logging
 import multiprocessing
 import os
+import queue
 import threading
 from typing import Any
 
@@ -69,6 +70,8 @@ def _persistent_worker(
     while True:
         try:
             request = request_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
         except Exception:
             continue
 
@@ -189,8 +192,8 @@ class LocalModelManager:
             if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
                 try:
                     self._request_queue.put(_SENTINEL, timeout=2.0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[LocalModel] Failed to send sentinel to worker: {e}")
                 self._worker_proc.join(timeout=5)
                 if self._worker_proc.is_alive():
                     self._worker_proc.terminate()
@@ -203,14 +206,14 @@ class LocalModelManager:
                 try:
                     self._request_queue.close()
                     self._request_queue.join_thread()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[LocalModel] Failed to close request queue: {e}")
             if self._result_queue is not None:
                 try:
                     self._result_queue.close()
                     self._result_queue.join_thread()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[LocalModel] Failed to close result queue: {e}")
 
             self._worker_proc = None
             self._request_queue = None

@@ -367,13 +367,15 @@ class TestBaseDaoBoundaryConditions:
     def _source(self):
         self.source = read_source(os.path.join("data", "persistence", "daos", "base_dao.py"))
 
-    def test_read_db_suppress_errors_default_true(self):
+    def test_read_db_suppress_errors_default_false(self):
         read_src = extract_method_source(self.source, "_read_db")
         assert "suppress_errors" in read_src, "_read_db must have suppress_errors parameter"
+        assert "suppress_errors: bool = False" in read_src, "E-P1-5: _read_db suppress_errors default must be False"
 
-    def test_write_db_suppress_errors_default_true(self):
+    def test_write_db_suppress_errors_default_false(self):
         write_src = extract_method_source(self.source, "_write_db")
         assert "suppress_errors" in write_src, "_write_db must have suppress_errors parameter"
+        assert "suppress_errors: bool = False" in write_src, "E-P1-5: _write_db suppress_errors default must be False"
 
     def test_read_db_suppress_errors_false_reraises(self):
         read_src = extract_method_source(self.source, "_read_db")

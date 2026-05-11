@@ -211,7 +211,8 @@ class CacheManager:
         elif isinstance(publish_time, str):
             try:
                 publish_time = pd.to_datetime(publish_time).to_pydatetime()
-            except Exception:
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[CacheManager] Failed to parse publish_time '{publish_time}': {e}")
                 publish_time = get_now().replace(tzinfo=None)
 
         return {
@@ -223,15 +224,12 @@ class CacheManager:
 
     # Backward compatibility for direct SQL usage if any
     async def _write_db(self, sql: typing.Any, params: typing.Any = None, is_many: typing.Any = False):
-        # We can implement a temporary BaseDao to run this?
-        # Or just instantiate a base dao for ad-hoc queries.
-        # Ideally, usages should be migrated, but for now:
         dao = BaseDao(self.engine)
-        return await dao._write_db(sql, params, is_many)
+        return await dao._write_db(sql, params, is_many, suppress_errors=True)
 
     async def _read_db(self, sql: typing.Any, params: typing.Any = None):
         dao = BaseDao(self.engine)
-        return await dao._read_db(sql, params)
+        return await dao._read_db(sql, params, suppress_errors=True)
 
     # --- Init & Reset ---
     async def init_db(self, force: bool = False):
@@ -296,8 +294,8 @@ class CacheManager:
                 from data.persistence.daos.base_dao import BaseDao
 
                 BaseDao._get_maintenance_event().set()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[CacheManager] Failed to set BaseDao maintenance event: {e}")
             self._maintenance_event.set()
 
     # --- DELAGATIONS START HERE ---

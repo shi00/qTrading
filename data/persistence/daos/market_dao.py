@@ -60,7 +60,7 @@ class MarketDao(BaseDao):
         return await self._read_db(sql, params)
 
     # --- Daily Indicators ---
-    async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = True):
+    async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = False):
         """
         Save Daily Indicators (PE, PB, etc.). Table: daily_indicators
         :param suppress_errors: If True (default), log errors but returns 0. If False, raises Exception.

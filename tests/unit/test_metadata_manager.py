@@ -88,3 +88,32 @@ class TestGetRawAlias:
         mock_i18n.get.return_value = "日期"
         result = MetaDataManager.get_raw_alias("trade_date", context_table=None)
         assert result is not None
+
+
+class TestMetadataManagerCaching:
+    @patch("core.i18n.I18n")
+    def test_get_column_alias_caches_repeated_calls(self, mock_i18n):
+        mock_i18n.get.return_value = "交易日期"
+        MetaDataManager.invalidate_cache()
+        r1 = MetaDataManager.get_column_alias(None, "trade_date")
+        r2 = MetaDataManager.get_column_alias(None, "trade_date")
+        assert r1 == r2
+        assert mock_i18n.get.call_count == 1
+
+    @patch("core.i18n.I18n")
+    def test_get_table_alias_caches_repeated_calls(self, mock_i18n):
+        mock_i18n.get.return_value = "股票列表"
+        MetaDataManager.invalidate_cache()
+        r1 = MetaDataManager.get_table_alias("stock_basic")
+        r2 = MetaDataManager.get_table_alias("stock_basic")
+        assert r1 == r2
+        assert mock_i18n.get.call_count == 1
+
+    @patch("core.i18n.I18n")
+    def test_invalidate_cache_resets(self, mock_i18n):
+        mock_i18n.get.return_value = "交易日期"
+        MetaDataManager.invalidate_cache()
+        MetaDataManager.get_column_alias(None, "trade_date")
+        MetaDataManager.invalidate_cache()
+        MetaDataManager.get_column_alias(None, "trade_date")
+        assert mock_i18n.get.call_count == 2

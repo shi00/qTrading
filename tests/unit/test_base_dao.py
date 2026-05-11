@@ -126,7 +126,8 @@ class TestBaseDaoWriteDb:
 
 
 class TestBaseDaoMaintenanceEvent:
-    def test_get_maintenance_event(self):
+    @pytest.mark.asyncio
+    async def test_get_maintenance_event(self):
         evt = BaseDao._get_maintenance_event()
         assert evt is not None
 
@@ -253,6 +254,20 @@ class TestBaseDaoReadDb:
             mock_cm._instance = None
             with pytest.raises(Exception, match="Read Error"):
                 await dao._read_db("SELECT * FROM t", suppress_errors=False)
+
+    @pytest.mark.asyncio
+    async def test_read_default_suppress_errors_is_false(self):
+        """E-P1-5: _read_db default suppress_errors should be False (raises on error)."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = Exception("Read Error")
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            with pytest.raises(Exception, match="Read Error"):
+                await dao._read_db("SELECT * FROM t")
 
 
 class TestBaseDaoSaveUpsert:
@@ -413,6 +428,18 @@ class TestBaseDaoWriteDbExtended:
             mock_cm._instance = None
             result = await dao._write_db("INSERT INTO t VALUES ($1)", params=(1,), conn=mock_conn)
             assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_write_default_suppress_errors_is_false(self):
+        """E-P1-5: _write_db default suppress_errors should be False (raises on error)."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = Exception("Write failed")
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            with pytest.raises(Exception, match="Write failed"):
+                await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn)
 
     @pytest.mark.asyncio
     async def test_write_no_params(self):
@@ -695,6 +722,36 @@ class TestBaseDaoSaveUpsertExtended:
             mock_stmt.on_conflict_do_update.return_value = mock_stmt
             result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
             assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_upsert_default_suppress_errors_is_false(self):
+        """E-P1-5: _save_upsert default suppress_errors should be False (raises on error)."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("Upsert failed")
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            with pytest.raises(Exception, match="Upsert failed"):
+                await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
 
     @pytest.mark.asyncio
     async def test_upsert_without_conn(self):

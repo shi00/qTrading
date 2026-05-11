@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   ci-checks:
-    name: Code Quality & Tests
+    name: Code Quality & Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read

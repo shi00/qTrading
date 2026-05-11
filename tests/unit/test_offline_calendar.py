@@ -10,10 +10,10 @@ class TestOfflineCalendarIsTradingDayFallback:
             result = OfflineCalendar.is_trading_day("2024-06-15")
             assert result is False
 
-    def test_calendar_none_weekday_returns_true(self):
+    def test_calendar_none_weekday_returns_false(self):
         with patch.object(OfflineCalendar, "get_instance", return_value=None):
             result = OfflineCalendar.is_trading_day("2024-06-14")
-            assert result is True
+            assert result is False
 
     def test_calendar_none_weekend_returns_false(self):
         with patch.object(OfflineCalendar, "get_instance", return_value=None):
@@ -23,7 +23,7 @@ class TestOfflineCalendarIsTradingDayFallback:
     def test_calendar_none_date_obj_weekday(self):
         with patch.object(OfflineCalendar, "get_instance", return_value=None):
             result = OfflineCalendar.is_trading_day(datetime.date(2024, 6, 14))
-            assert result is True
+            assert result is False
 
     def test_calendar_none_date_obj_weekend(self):
         with patch.object(OfflineCalendar, "get_instance", return_value=None):

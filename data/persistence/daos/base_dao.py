@@ -113,7 +113,7 @@ class BaseDao:
         sql: typing.Any,
         params: typing.Any = None,
         is_many: typing.Any = False,
-        suppress_errors: bool = True,
+        suppress_errors: bool = False,
         conn: typing.Any = None,
     ):
         """Execute a single SQL statement. For bulk operations, use _save_upsert.
@@ -236,7 +236,7 @@ class BaseDao:
         table_name: str,
         columns: typing.Any,
         pk_columns: typing.Any,
-        suppress_errors: bool = True,
+        suppress_errors: bool = False,
         conn: typing.Any = None,
     ):
         """
@@ -438,7 +438,7 @@ class BaseDao:
 
         return val
 
-    async def _read_db(self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = True):
+    async def _read_db(self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = False):
         """Generic Read returning DataFrame (Offloaded CSV conversion)"""
         if self.engine is None:
             raise RuntimeError(

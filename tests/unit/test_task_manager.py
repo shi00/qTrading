@@ -145,6 +145,48 @@ class TestTaskManagerNotifySubscribers:
             mgr._notify_subscribers()
         assert cb not in mgr._subscribers
 
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_intermittent_errors_accumulate(self, mock_i18n, mock_tp):
+        """D-P1-5: Intermittent errors should accumulate even with successes in between."""
+        mgr = TaskManager()
+        call_count = [0]
+
+        def flaky_callback(tasks):
+            call_count[0] += 1
+            if call_count[0] % 3 != 0:
+                raise Exception("intermittent fail")
+
+        cb = MagicMock(side_effect=flaky_callback)
+        mgr.subscribe(cb)
+
+        for _ in range(8):
+            mgr._notify_subscribers()
+
+        assert cb not in mgr._subscribers, "Flaky subscriber should be removed after accumulated intermittent errors"
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_success_reduces_error_count_not_resets(self, mock_i18n, mock_tp):
+        """D-P1-5: Success should reduce error count by 1, not reset to zero."""
+        mgr = TaskManager()
+        call_count = [0]
+
+        def alternating_callback(tasks):
+            call_count[0] += 1
+            if call_count[0] in (2, 4):
+                raise Exception("fail")
+
+        cb = MagicMock(side_effect=alternating_callback)
+        mgr.subscribe(cb)
+
+        mgr._notify_subscribers()
+        mgr._notify_subscribers()
+        mgr._notify_subscribers()
+
+        error_count = mgr._subscriber_error_counts.get(cb, 0)
+        assert error_count > 0, f"Error count should be non-zero after fail-success-fail pattern, got {error_count}"
+
 
 class TestTaskManagerGetAllTasks:
     @patch("services.task_manager.ThreadPoolManager")
@@ -266,6 +308,43 @@ class TestTaskManagerUpdateProgress:
         mgr._tasks[t.id] = t
         mgr.update_progress(t.id, 0.5)
         assert t.progress == 0.0
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancelled_task_returns_false(self, mock_i18n, mock_tp):
+        """B-P1-5: update_progress should return False for cancelled tasks."""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.CANCELLED)
+        mgr._tasks[t.id] = t
+        result = mgr.update_progress(t.id, 0.5)
+        assert result is False
+
+
+class TestTaskManagerIsCancelled:
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancelled_task(self, mock_i18n, mock_tp):
+        """B-P1-5: is_cancelled should return True for cancelled tasks."""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.CANCELLED)
+        mgr._tasks[t.id] = t
+        assert mgr.is_cancelled(t.id) is True
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_running_task(self, mock_i18n, mock_tp):
+        """B-P1-5: is_cancelled should return False for running tasks."""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        assert mgr.is_cancelled(t.id) is False
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_nonexistent_task(self, mock_i18n, mock_tp):
+        """B-P1-5: is_cancelled should return False for nonexistent tasks."""
+        mgr = TaskManager()
+        assert mgr.is_cancelled("nonexistent") is False
 
 
 class TestTaskManagerCancelTask:
@@ -784,3 +863,53 @@ class TestTaskManagerFlushPersistenceTimeout:
         mgr._persist_pending_count = 5
         with pytest.raises(TimeoutError, match="timed out"):
             await mgr.flush_persistence(timeout_s=0.01)
+
+
+class TestUpdateProgressReturnStatus:
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_returns_true_when_running(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", cancellable=True)
+        t.status = TaskStatus.RUNNING
+        mgr._tasks[t.id] = t
+        result = mgr.update_progress(t.id, 0.5)
+        assert result is True
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_returns_false_when_cancelled(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", cancellable=True)
+        t.status = TaskStatus.CANCELLED
+        mgr._tasks[t.id] = t
+        result = mgr.update_progress(t.id, 0.5)
+        assert result is False
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_returns_false_when_completed(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test")
+        t.status = TaskStatus.COMPLETED
+        mgr._tasks[t.id] = t
+        result = mgr.update_progress(t.id, 0.5)
+        assert result is False
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_returns_false_when_task_not_found(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        result = mgr.update_progress("nonexistent", 0.5)
+        assert result is False
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_progress_not_updated_when_cancelled(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", cancellable=True)
+        t.status = TaskStatus.CANCELLED
+        t.progress = 0.3
+        mgr._tasks[t.id] = t
+        mgr.update_progress(t.id, 0.8)
+        assert t.progress == 0.3

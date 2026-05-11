@@ -172,7 +172,9 @@ class TaskManager:
         for cb in self._subscribers[:]:
             try:
                 cb(tasks_snapshot)
-                self._subscriber_error_counts[cb] = 0
+                current = self._subscriber_error_counts.get(cb, 0)
+                if current > 0:
+                    self._subscriber_error_counts[cb] = current - 1
             except Exception as e:
                 consecutive_errors = self._subscriber_error_counts.get(cb, 0) + 1
                 self._subscriber_error_counts[cb] = consecutive_errors
@@ -263,20 +265,38 @@ class TaskManager:
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
-    def update_progress(self, task_id: str, progress: float, description: str = None):  # type: ignore[assignment]
+    def update_progress(self, task_id: str, progress: float, description: str = None) -> bool:
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
-        Throttled to avoid flooding subscribers with high-frequency updates."""
-        task = self._tasks.get(task_id)
-        if task and task.status == TaskStatus.RUNNING:
-            task.progress = max(0.0, min(1.0, progress))
-            if description is not None:
-                task.description = description
+        Throttled to avoid flooding subscribers with high-frequency updates.
 
-            # Throttle: only broadcast to subscribers at most every _NOTIFY_THROTTLE_S seconds
-            now = _time.monotonic()
-            if (now - self._last_notify_time) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
-                self._last_notify_time = now
-                self._notify_subscribers()
+        Returns True if the progress was accepted (task is RUNNING),
+        False if the task is not RUNNING (e.g. CANCELLED, COMPLETED)
+        or does not exist. Workers should check the return value and
+        exit early when False to avoid wasting resources on a cancelled task.
+        """
+        task = self._tasks.get(task_id)
+        if not task or task.status != TaskStatus.RUNNING:
+            if task and task.status == TaskStatus.CANCELLED:
+                logger.debug(
+                    f"[TaskManager] update_progress ignored for cancelled task {task_id[:8]}. "
+                    f"Worker should check is_cancelled() or update_progress return value."
+                )
+            return False
+        task.progress = max(0.0, min(1.0, progress))
+        if description is not None:
+            task.description = description
+
+        now = _time.monotonic()
+        if (now - self._last_notify_time) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
+            self._last_notify_time = now
+            self._notify_subscribers()
+        return True
+
+    def is_cancelled(self, task_id: str) -> bool:
+        """B-P1-5: Check if a task has been cancelled. Workers should call this
+        periodically to detect cancellation and exit early."""
+        task = self._tasks.get(task_id)
+        return task is not None and task.status == TaskStatus.CANCELLED
 
     def cancel_task(self, task_id: str):
         """User requested cancellation.  Thread-safe."""
