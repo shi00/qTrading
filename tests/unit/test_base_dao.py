@@ -93,6 +93,14 @@ class TestBaseDaoQuoteColumns:
         result = BaseDao._quote_columns(["date"])
         assert result == '"date"'
 
+    def test_double_quote_in_column_name_escaped(self):
+        result = BaseDao._quote_columns(['col"; DROP TABLE foo;--'])
+        assert result == '"col""; DROP TABLE foo;--"'
+
+    def test_normal_column_unaffected_by_escaping(self):
+        result = BaseDao._quote_columns(["trade_date", "ts_code"])
+        assert result == '"trade_date","ts_code"'
+
 
 class TestBaseDaoInit:
     def test_engine_stored(self):

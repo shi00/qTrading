@@ -76,7 +76,7 @@ def _persistent_worker(
             logger.debug(f"[LocalModel] Worker queue get error: {e}")
             continue
 
-        if request is _SENTINEL:
+        if request == _SENTINEL:
             result_queue.put(("shutdown", "ok"))
             break
 
@@ -430,6 +430,10 @@ class LocalModelManager:
         try:
             deadline = asyncio.get_running_loop().time() + float(timeout_val)
             while True:
+                if self._cancel_event.is_set():
+                    logger.info("[LocalModel] Cancel event detected during inference polling, aborting.")
+                    self._shutdown_worker()
+                    raise RuntimeError("Inference cancelled by user (unload_model called).")
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     break
@@ -494,4 +498,5 @@ class LocalModelManager:
         self._model_md5 = ""
         self._model_stat = (0, 0)
         self._last_config = {}
+        self._cancel_event.clear()
         logger.info("[LocalModel] Model unloaded (worker terminated).")

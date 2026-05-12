@@ -57,11 +57,13 @@ class FinancialSyncStrategy(ISyncStrategy):
         """Prefer the latest closed trade date for default sync windows."""
         try:
             trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()
-            if isinstance(trade_date, datetime.datetime):
+            if trade_date is None:
+                logger.warning("[FinancialSync] get_latest_trade_date returned None, falling back to today.")
+            elif isinstance(trade_date, datetime.datetime):
                 return trade_date.date()
-            if isinstance(trade_date, datetime.date):
+            elif isinstance(trade_date, datetime.date):
                 return trade_date
-            if trade_date:
+            elif trade_date:
                 return parse_date(str(trade_date))
         except Exception as e:
             logger.debug(f"[FinancialSync] Effective trade date fallback: {e}")
@@ -702,6 +704,13 @@ class FinancialSyncStrategy(ISyncStrategy):
             # Unpack Core Results
             # results[0-3] are core, results[4-5] are aux (row_counts)
             df_inc, df_bal, df_fina, df_cf = results[0], results[1], results[2], results[3]
+
+            core_names = ["income", "balance", "indicator", "cashflow"]
+            for name, result in zip(core_names, results[:4], strict=False):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        f"[FinancialSync] Fetch | Core table '{name}' failed for {ts_code}: {result}",
+                    )
 
             # Return aux counts as dict (for caller to accumulate)
             aux_counts = {

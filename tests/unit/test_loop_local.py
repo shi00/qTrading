@@ -1,4 +1,5 @@
 import logging
+import threading
 
 import pytest
 
@@ -110,3 +111,64 @@ class TestGetLoopLocalStrict:
     def test_strict_error_message_contains_key(self):
         with pytest.raises(RuntimeError, match="my_special_key"):
             get_loop_local("my_special_key", list, strict=True)
+
+
+class TestLoopLocalFallbackThreadSafety:
+    """C-P0-3/D-P0-1: Verify fallback cache is thread-safe when accessed
+    from multiple threads outside an event loop."""
+
+    def test_concurrent_fallback_access_single_factory_call(self):
+        call_count = [0]
+
+        def factory():
+            call_count[0] += 1
+            return object()
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                r = get_loop_local("thread_safe_key", factory, strict=False)
+                results.append(r)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors in threads: {errors}"
+        assert call_count[0] == 1, f"Factory called {call_count[0]} times, expected 1"
+        assert all(r is results[0] for r in results), "All threads should get the same cached object"
+
+    def test_del_loop_local_clears_fallback_from_another_thread(self):
+        get_loop_local("del_fallback_key", list, strict=False)
+        del_loop_local("del_fallback_key")
+
+        call_count = [0]
+
+        def factory():
+            call_count[0] += 1
+            return list()
+
+        result = get_loop_local("del_fallback_key", factory, strict=False)
+        assert isinstance(result, list)
+        assert call_count[0] == 1
+
+    def test_clear_all_resets_fallback_across_threads(self):
+        get_loop_local("clear_fallback_a", list, strict=False)
+        get_loop_local("clear_fallback_b", dict, strict=False)
+        clear_all_loop_locals()
+
+        call_count = [0]
+
+        def factory():
+            call_count[0] += 1
+            return list()
+
+        result = get_loop_local("clear_fallback_a", factory, strict=False)
+        assert isinstance(result, list)
+        assert call_count[0] == 1

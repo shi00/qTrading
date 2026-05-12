@@ -157,6 +157,14 @@ class TestFinancialSyncGetEffectiveTradeDate:
         result = await strategy._get_effective_trade_date()
         assert isinstance(result, datetime.date)
 
+    @pytest.mark.asyncio
+    async def test_none_return_falls_back_to_today(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
 
 class TestFinancialSyncRunModes:
     @pytest.mark.asyncio
@@ -233,6 +241,17 @@ class TestFinancialSyncFetchComprehensive:
         df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
         assert aux["mainbz"] == 0
         assert aux["audit"] == 0
+
+    @pytest.mark.asyncio
+    async def test_core_table_exception_logs_warning(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("income API failed"))
+        ctx.api.get_balancesheet = AsyncMock(side_effect=RuntimeError("balance API failed"))
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.logger") as mock_logger:
+            df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+            warning_calls = [c for c in mock_logger.warning.call_args_list if "Core table" in str(c)]
+            assert len(warning_calls) >= 2
 
 
 class TestFinancialSyncRepair:

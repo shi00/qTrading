@@ -59,6 +59,17 @@ class TestMacroSyncGetEffectiveTradeDate:
         result = await strategy._get_effective_trade_date()
         assert isinstance(result, datetime.date)
 
+    @pytest.mark.asyncio
+    async def test_none_return_falls_back_to_today(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        strategy = MacroSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
 
 class TestMacroSyncMergeMacroData:
     def test_all_none(self):

@@ -57,11 +57,13 @@ class MacroSyncStrategy(ISyncStrategy):
         """Prefer the latest closed trade date for default sync windows."""
         try:
             trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()
-            if isinstance(trade_date, datetime.datetime):
+            if trade_date is None:
+                logger.warning("[MacroSync] get_latest_trade_date returned None, falling back to today.")
+            elif isinstance(trade_date, datetime.datetime):
                 return trade_date.date()
-            if isinstance(trade_date, datetime.date):
+            elif isinstance(trade_date, datetime.date):
                 return trade_date
-            if trade_date:
+            elif trade_date:
                 parsed = parse_date(str(trade_date))
                 return parsed.date() if hasattr(parsed, "date") else parsed
         except Exception as e:

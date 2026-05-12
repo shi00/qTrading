@@ -691,19 +691,19 @@ class TestLocalModelManagerRunInferenceWithModel:
 
 
 class TestLocalModelManagerUnloadSetsCancel:
-    def test_unload_sets_cancel_event(self):
+    def test_unload_clears_cancel_event_after_shutdown(self):
         mgr = LocalModelManager()
-        mgr._cancel_event.clear()
+        mgr._cancel_event.set()
         with patch.object(mgr, "_shutdown_worker"):
             mgr.unload_model()
-        assert mgr._cancel_event.is_set()
+        assert not mgr._cancel_event.is_set()
 
-    def test_unload_no_model_still_sets_cancel(self):
+    def test_unload_no_model_still_clears_cancel(self):
         mgr = LocalModelManager()
-        mgr._cancel_event.clear()
+        mgr._cancel_event.set()
         with patch.object(mgr, "_shutdown_worker"):
             mgr.unload_model()
-        assert mgr._cancel_event.is_set()
+        assert not mgr._cancel_event.is_set()
 
 
 class TestLocalModelManagerGetLoadLock:
@@ -811,3 +811,48 @@ class TestLocalInferenceTimeoutErrorType:
 
         with pytest.raises(RuntimeError):
             raise LocalInferenceTimeoutError("test timeout")
+
+
+class TestSentinelEqualityComparison:
+    """BUG-1: _SENTINEL must use == not is for cross-process comparison."""
+
+    def test_sentinel_eq_works_for_equal_string(self):
+        from services.local_model_manager import _SENTINEL
+
+        reconstructed = "__SHUTDOWN__"
+        assert reconstructed == _SENTINEL
+
+    def test_normal_request_not_equal_to_sentinel(self):
+        from services.local_model_manager import _SENTINEL
+
+        normal_request = ("prompt", 100, 0.7, "system")
+        assert normal_request != _SENTINEL
+
+
+class TestCancelEventInterruptsInference:
+    """BUG-2: _cancel_event should be checked in run_inference polling loop."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_raises_runtime_error(self):
+        import services.local_model_manager as mod
+
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            mgr._worker_ready = True
+            mgr._model_path = "/fake/model.gguf"
+            mgr._worker_proc = MagicMock()
+            mgr._worker_proc.is_alive.return_value = True
+            mgr._request_queue = MagicMock()
+            mgr._result_queue = MagicMock()
+            mgr._result_queue.get_nowait.side_effect = queue.Empty
+            mgr._cancel_event.set()
+
+            with patch(
+                "services.local_model_manager.ConfigHandler.get_local_ai_config",
+                return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
+            ):
+                with pytest.raises(RuntimeError, match="Inference cancelled"):
+                    await mgr.run_inference("test prompt")
+        finally:
+            mod._HAS_LLAMA_CPP = False

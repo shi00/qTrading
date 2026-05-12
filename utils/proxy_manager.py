@@ -30,7 +30,7 @@ class ProxyManager:
     _initialized: bool = False
     _original_no_proxy: set[str] | None = None
     _env_written: bool = False
-    _env_lock: threading.Lock = threading.Lock()
+    _env_lock: threading.RLock = threading.RLock()
 
     @staticmethod
     def apply_smart_proxy_policy():

@@ -266,8 +266,13 @@ class BaseDao:
 
     @staticmethod
     def _quote_columns(columns: typing.Any):
-        """Quote column names for safe use in SQL (handles reserved words like 'date', 'on')."""
-        return ",".join(['"' + c + '"' for c in columns])
+        """Quote column names for safe use in SQL (handles reserved words like 'date', 'on').
+
+        Doubles any embedded double-quote characters to prevent injection.
+        All current callers pass hardcoded schema column names, but this
+        defensive measure guards against future misuse.
+        """
+        return ",".join(['"' + c.replace('"', '""') + '"' for c in columns])
 
     async def _save_upsert(
         self,

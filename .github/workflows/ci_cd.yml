@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
 
 env:
-  CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+  CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD || 'ci_astock_default_pwd' }}
 
 concurrency:
   group: ci-${{ github.ref }}

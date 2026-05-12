@@ -45,9 +45,11 @@ class HolderSyncStrategy(ISyncStrategy):
             processor = getattr(self.context, "processor", None)
             if processor is not None:
                 trade_date = await processor.trade_calendar.get_latest_trade_date()
-                if isinstance(trade_date, datetime.datetime):
+                if trade_date is None:
+                    logger.warning("[HolderSync] get_latest_trade_date returned None, falling back to today.")
+                elif isinstance(trade_date, datetime.datetime):
                     return trade_date.date()
-                if isinstance(trade_date, datetime.date):
+                elif isinstance(trade_date, datetime.date):
                     return trade_date
         except Exception as e:
             logger.debug(f"[HolderSync] Effective trade date fallback: {e}")
