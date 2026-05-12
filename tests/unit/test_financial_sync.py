@@ -374,7 +374,7 @@ class TestFinancialSyncGatherTolerance:
         for r in results:
             if isinstance(r, Exception):
                 continue
-            saved += r["saved"]
+            saved += r["saved"]  # type: ignore[index]
         assert saved == 5
 
     @pytest.mark.asyncio

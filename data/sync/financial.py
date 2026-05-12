@@ -481,9 +481,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                     if isinstance(r, Exception):
                         logger.warning(f"[FinancialSync] Batch task failed: {r}")
                         continue
-                    total_saved += r["saved"]
-                    total_mainbz_rows += r["mainbz"]
-                    total_audit_rows += r["audit"]
+                    total_saved += r["saved"]  # type: ignore[index]
+                    total_mainbz_rows += r["mainbz"]  # type: ignore[index]
+                    total_audit_rows += r["audit"]  # type: ignore[index]
 
             day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()
             await self.context.cache.update_sync_status(
