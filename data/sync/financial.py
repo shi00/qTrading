@@ -717,6 +717,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                 "mainbz": results[4] if isinstance(results[4], int) else 0,
                 "audit": results[5] if isinstance(results[5], int) else 0,
             }
+            for aux_name, aux_idx in [("mainbz", 4), ("audit", 5)]:
+                if isinstance(results[aux_idx], Exception):
+                    logger.debug(
+                        f"[FinancialSync] Fetch | Aux table '{aux_name}' failed for {ts_code}: {results[aux_idx]}",
+                    )
 
             # 2. Proceed with Core Financial Merging (Income/Balance/Indicator)
             dfs = []

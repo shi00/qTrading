@@ -355,6 +355,7 @@ class LocalModelManager:
                 self._model_md5 = target_md5
                 self._model_stat = current_stat
                 self._last_config = core_config
+                self._cancel_event.clear()
 
                 elapsed = asyncio.get_running_loop().time() - start_time
                 logger.info(
@@ -498,5 +499,4 @@ class LocalModelManager:
         self._model_md5 = ""
         self._model_stat = (0, 0)
         self._last_config = {}
-        self._cancel_event.clear()
         logger.info("[LocalModel] Model unloaded (worker terminated).")

@@ -691,19 +691,19 @@ class TestLocalModelManagerRunInferenceWithModel:
 
 
 class TestLocalModelManagerUnloadSetsCancel:
-    def test_unload_clears_cancel_event_after_shutdown(self):
+    def test_unload_leaves_cancel_event_set(self):
         mgr = LocalModelManager()
-        mgr._cancel_event.set()
+        mgr._cancel_event.clear()
         with patch.object(mgr, "_shutdown_worker"):
             mgr.unload_model()
-        assert not mgr._cancel_event.is_set()
+        assert mgr._cancel_event.is_set()
 
-    def test_unload_no_model_still_clears_cancel(self):
+    def test_unload_no_model_still_sets_cancel(self):
         mgr = LocalModelManager()
-        mgr._cancel_event.set()
+        mgr._cancel_event.clear()
         with patch.object(mgr, "_shutdown_worker"):
             mgr.unload_model()
-        assert not mgr._cancel_event.is_set()
+        assert mgr._cancel_event.is_set()
 
 
 class TestLocalModelManagerGetLoadLock:
@@ -854,5 +854,32 @@ class TestCancelEventInterruptsInference:
             ):
                 with pytest.raises(RuntimeError, match="Inference cancelled"):
                     await mgr.run_inference("test prompt")
+        finally:
+            mod._HAS_LLAMA_CPP = False
+
+
+class TestLoadModelClearsCancelEvent:
+    """load_model should clear _cancel_event on success so a fresh inference is not blocked."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_cleared_on_load_success(self):
+        import services.local_model_manager as mod
+
+        mod._HAS_LLAMA_CPP = True
+        try:
+            mgr = LocalModelManager()
+            mgr._cancel_event.set()
+
+            with patch(
+                "services.local_model_manager.ConfigHandler.get_local_ai_config",
+                return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
+            ):
+                with patch.object(mgr, "_ensure_worker", return_value=True):
+                    with patch.object(mgr, "calculate_file_md5", return_value="abc123"):
+                        with patch("os.path.exists", return_value=True):
+                            with patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)):
+                                result = await mgr.load_model("/fake/model.gguf")
+                                assert result is True
+                                assert not mgr._cancel_event.is_set()
         finally:
             mod._HAS_LLAMA_CPP = False
