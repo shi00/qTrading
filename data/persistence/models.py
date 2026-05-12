@@ -551,7 +551,7 @@ class Top10Holders(Base):
     ts_code = Column(String, primary_key=True)
     end_date = Column(Date, primary_key=True)
     ann_date = Column(Date)
-    holder_name = Column(String, primary_key=True, index=True)
+    holder_name = Column(String, primary_key=True, index=True, nullable=False)
     hold_amount = Column(Float)
     hold_ratio = Column(Float)
     hold_float_ratio = Column(Float)

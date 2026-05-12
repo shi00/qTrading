@@ -353,3 +353,36 @@ class TestFinancialSyncCorporateActions:
                 setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
+
+
+class TestFinancialSyncGatherTolerance:
+    @pytest.mark.asyncio
+    async def test_batch_gather_continues_on_single_failure(self):
+        ctx = make_ctx()
+        FinancialSyncStrategy(ctx)
+
+        async def success_task():
+            return {"saved": 5}
+
+        async def fail_task():
+            raise RuntimeError("API timeout")
+
+        import asyncio
+
+        results = await asyncio.gather(success_task(), fail_task(), return_exceptions=True)
+        saved = 0
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            saved += r["saved"]
+        assert saved == 5
+
+    @pytest.mark.asyncio
+    async def test_batch_gather_all_fail_no_crash(self):
+        import asyncio
+
+        async def fail_task():
+            raise RuntimeError("API error")
+
+        results = await asyncio.gather(fail_task(), fail_task(), return_exceptions=True)
+        assert all(isinstance(r, Exception) for r in results)

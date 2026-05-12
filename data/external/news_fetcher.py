@@ -16,6 +16,8 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 _US_MOVES_CACHE: TTLCache = TTLCache(maxsize=1, ttl=300)
+_SINA_CONSECUTIVE_EMPTY = {"us_api": 0, "concept": 0}
+_SINA_EMPTY_THRESHOLD = 3
 
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
@@ -282,17 +284,36 @@ class NewsFetcher:
             resp = requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {}))
             content = resp.text
 
-            # Robust JSONP parsing: IO( {Data} );
             start = content.find("(")
             end = content.rfind(")")
             if start != -1 and end != -1 and start < end:
                 json_str = content[start + 1 : end]
                 try:
                     data = json.loads(json_str)
-                    return data.get("data", [])
+                    result = data.get("data", [])
+                    if result:
+                        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+                    else:
+                        _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                        count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+                        if count >= _SINA_EMPTY_THRESHOLD:
+                            logger.error(
+                                "[News] Sina US API returned empty data %d consecutive times. Data source may be degraded.",
+                                count,
+                            )
+                        else:
+                            logger.warning("[News] Sina US API returned empty data (consecutive: %d)", count)
+                    return result
                 except json.JSONDecodeError:
-                    logger.warning("[News] Failed to decode JSON from Sina US API")
+                    _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                    count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+                    log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning
+                    log_fn("[News] Failed to decode JSON from Sina US API (consecutive: %d)", count)
                     return []
+            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+            count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+            log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning
+            log_fn("[News] Sina US API JSONP structure invalid (consecutive: %d)", count)
             return []
 
         data_list = None
@@ -388,7 +409,16 @@ class NewsFetcher:
             )
 
             if df is None or df.empty:
+                _SINA_CONSECUTIVE_EMPTY["concept"] += 1
+                count = _SINA_CONSECUTIVE_EMPTY["concept"]
+                if count >= _SINA_EMPTY_THRESHOLD:
+                    logger.error(
+                        "[News] Concept boards data empty %d consecutive times. Data source may be degraded.",
+                        count,
+                    )
                 return []
+
+            _SINA_CONSECUTIVE_EMPTY["concept"] = 0
 
             # Sina returns: 板块, 涨跌幅
             if "涨跌幅" in df.columns:

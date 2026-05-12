@@ -476,8 +476,11 @@ class FinancialSyncStrategy(ISyncStrategy):
             _BATCH_SIZE = 100
             for batch_start in range(0, len(tasks), _BATCH_SIZE):
                 batch = tasks[batch_start : batch_start + _BATCH_SIZE]
-                batch_results = await asyncio.gather(*batch)
+                batch_results = await asyncio.gather(*batch, return_exceptions=True)
                 for r in batch_results:
+                    if isinstance(r, Exception):
+                        logger.warning(f"[FinancialSync] Batch task failed: {r}")
+                        continue
                     total_saved += r["saved"]
                     total_mainbz_rows += r["mainbz"]
                     total_audit_rows += r["audit"]
@@ -593,7 +596,10 @@ class FinancialSyncStrategy(ISyncStrategy):
 
             # Each date: 3 tables in parallel
             coros = [sync_one_date_table(d, tbl, cfg) for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
-            await asyncio.gather(*coros)
+            gather_results = await asyncio.gather(*coros, return_exceptions=True)
+            for gr in gather_results:
+                if isinstance(gr, Exception):
+                    logger.warning(f"[FinancialSync] Batch table sync failed for date {d}: {gr}")
 
             # Report progress every 10 days
             if progress_callback and (i + 1) % 10 == 0:

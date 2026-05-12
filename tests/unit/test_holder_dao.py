@@ -230,3 +230,50 @@ class TestGetExistingTop10TsCodes:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_existing_top10_ts_codes("20240630")
         assert result == set()
+
+
+class TestSaveTop10HoldersNullFilter:
+    @pytest.mark.asyncio
+    async def test_filters_null_holder_name(self):
+        dao = _make_dao()
+        dao._save_upsert = AsyncMock(return_value=2)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "holder_name": ["张三", None, "李四"],
+            }
+        )
+        result = await dao.save_top10_holders(df)
+        assert result == 2
+        call_args = dao._save_upsert.call_args
+        saved_df = call_args[0][0]
+        assert len(saved_df) == 2
+        assert saved_df["holder_name"].isna().sum() == 0
+
+    @pytest.mark.asyncio
+    async def test_all_null_holder_name_returns_zero(self):
+        dao = _make_dao()
+        dao._save_upsert = AsyncMock(return_value=0)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "holder_name": [None, None],
+            }
+        )
+        result = await dao.save_top10_holders(df)
+        assert result == 0
+        dao._save_upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_null_holder_name_passes_through(self):
+        dao = _make_dao()
+        dao._save_upsert = AsyncMock(return_value=5)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "holder_name": ["张三", "李四"],
+            }
+        )
+        result = await dao.save_top10_holders(df)
+        assert result == 5
+        dao._save_upsert.assert_called_once()

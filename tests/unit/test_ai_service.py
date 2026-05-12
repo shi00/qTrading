@@ -1,4 +1,5 @@
 import pytest
+import httpx
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from services.ai_service import (
@@ -144,6 +145,109 @@ class TestValidateAiAnalysisResponse:
         assert "error" in result
         assert result["score"] == 0
 
+
+class TestJsonParsingNoRfindFallback:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    @patch("services.ai_service.LocalModelManager")
+    async def test_raw_decode_extracts_first_json_object(self, mock_lmm, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_ai_model.return_value = "gpt-4"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_llm_config.return_value = {
+            "provider": "openai",
+            "model": "gpt-4",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_setting.return_value = False
+
+        svc = AIService()
+        svc._chat_completion_litellm = AsyncMock(
+            return_value={"content": '{"category_L1": "finance", "sentiment": "Positive"} extra garbage'}
+        )
+        result = await svc._chat_completion(
+            messages=[{"role": "user", "content": "test"}],
+            provider="cloud",
+            json_mode=True,
+        )
+        assert isinstance(result, dict)
+        assert result["category_L1"] == "finance"
+        assert result["sentiment"] == "Positive"
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    @patch("services.ai_service.LocalModelManager")
+    async def test_invalid_json_raises_value_error(self, mock_lmm, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_ai_model.return_value = "gpt-4"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_llm_config.return_value = {
+            "provider": "openai",
+            "model": "gpt-4",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_setting.return_value = False
+
+        svc = AIService()
+        svc._chat_completion_litellm = AsyncMock(return_value={"content": "{invalid json structure no closing brace"})
+        with pytest.raises(ValueError, match="Invalid JSON response"):
+            await svc._chat_completion(
+                messages=[{"role": "user", "content": "test"}],
+                provider="cloud",
+                json_mode=True,
+            )
+
+
+class TestStreamInterruptPartialResult:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    @patch("services.ai_service.acompletion", new_callable=AsyncMock)
+    async def test_stream_interrupt_returns_partial(self, mock_acomp, mock_ch):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_ai_model.return_value = "gpt-4"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_llm_config.return_value = {
+            "provider": "openai",
+            "model": "gpt-4",
+            "api_key": "key",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_setting.return_value = False
+
+        chunks = [
+            MagicMock(choices=[MagicMock(delta=MagicMock(content="Hello "))]),
+            MagicMock(choices=[MagicMock(delta=MagicMock(content="wor"))]),
+        ]
+
+        class BrokenStream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                for c in chunks:
+                    yield c
+                raise httpx.ReadTimeout("connection lost")
+
+        mock_acomp.return_value = BrokenStream()
+
+        received_chunks = []
+        svc = AIService()
+        result = await svc._chat_completion_litellm(
+            messages=[{"role": "user", "content": "hi"}],
+            on_chunk=lambda content, is_reasoning: received_chunks.append(content),
+        )
+        assert "content" in result
+        assert "Hello wor" in result["content"]
+        assert len(received_chunks) > 0
+        assert "Hello wor" in "".join(received_chunks)
+
+
+class TestValidateAiAnalysisResponseContinued:
     def test_valid_score_and_recommendation(self):
         result = validate_ai_analysis_response({"score": 75, "recommendation": "buy"})
         assert result["score"] == 75

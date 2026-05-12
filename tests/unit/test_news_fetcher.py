@@ -4,7 +4,13 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
-from data.external.news_fetcher import NewsFetcher, _run_with_python_string_storage, _US_MOVES_CACHE
+from data.external.news_fetcher import (
+    NewsFetcher,
+    _run_with_python_string_storage,
+    _US_MOVES_CACHE,
+    _SINA_CONSECUTIVE_EMPTY,
+    _SINA_EMPTY_THRESHOLD,
+)
 
 
 class TestRunWithPythonStringStorage:
@@ -696,3 +702,35 @@ class TestGetHotConceptsTimeout:
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert len(result) == 1
         assert result[0]["color"] == "grey"
+
+
+class TestSinaConsecutiveEmptyAlert:
+    def test_threshold_defined(self):
+        assert _SINA_EMPTY_THRESHOLD >= 2
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_concept_empty_increments_counter(self, mock_tpm, mock_run):
+        _SINA_CONSECUTIVE_EMPTY["concept"] = 0
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=None)
+
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] == 1
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_concept_success_resets_counter(self, mock_tpm, mock_run):
+        _SINA_CONSECUTIVE_EMPTY["concept"] = 5
+        df = pd.DataFrame({"板块": ["AI"], "涨跌幅": [3.0]})
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert len(result) == 1
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] == 0

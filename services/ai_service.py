@@ -404,36 +404,56 @@ class AIService:
                         on_chunk("".join(_reasoning_buf), True)
                     _reasoning_buf = []
 
-                async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
-                    if not chunk.choices:
-                        if hasattr(chunk, "usage") and chunk.usage:
-                            usage = {
-                                "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
-                                "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
-                                "total_tokens": getattr(chunk.usage, "total_tokens", 0),
-                            }
-                        continue
+                try:
+                    async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
+                        if not chunk.choices:
+                            if hasattr(chunk, "usage") and chunk.usage:
+                                usage = {
+                                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
+                                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
+                                    "total_tokens": getattr(chunk.usage, "total_tokens", 0),
+                                }
+                            continue
 
-                    delta = chunk.choices[0].delta
+                        delta = chunk.choices[0].delta
 
-                    if supports_reasoning:
-                        reasoning = getattr(delta, "reasoning_content", None)
-                        if reasoning:
-                            reasoning_content += reasoning
+                        if supports_reasoning:
+                            reasoning = getattr(delta, "reasoning_content", None)
+                            if reasoning:
+                                reasoning_content += reasoning
+                                if on_chunk:
+                                    _reasoning_buf.append(reasoning)
+                                    if sum(len(s) for s in _reasoning_buf) >= _CHUNK_BUFFER_CHARS:
+                                        _flush_reasoning_buf()
+
+                        if delta.content:
+                            response_content += delta.content
                             if on_chunk:
-                                _reasoning_buf.append(reasoning)
-                                if sum(len(s) for s in _reasoning_buf) >= _CHUNK_BUFFER_CHARS:
-                                    _flush_reasoning_buf()
+                                _content_buf.append(delta.content)
+                                if sum(len(s) for s in _content_buf) >= _CHUNK_BUFFER_CHARS:
+                                    _flush_content_buf()
+                except (
+                    httpx.ReadTimeout,
+                    httpx.ConnectTimeout,
+                    httpx.ReadError,
+                    httpx.ConnectError,
+                    ConnectionError,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                    OSError,
+                    TimeoutError,
+                ) as stream_err:
+                    logger.warning(
+                        "[AIService] Stream interrupted after %d chars: %s. Returning partial result.",
+                        len(response_content),
+                        stream_err,
+                    )
 
-                    if delta.content:
-                        response_content += delta.content
-                        if on_chunk:
-                            _content_buf.append(delta.content)
-                            if sum(len(s) for s in _content_buf) >= _CHUNK_BUFFER_CHARS:
-                                _flush_content_buf()
-
-                _flush_content_buf()
-                _flush_reasoning_buf()
+                try:
+                    _flush_content_buf()
+                    _flush_reasoning_buf()
+                except Exception as flush_err:
+                    logger.debug("[AIService] Failed to flush chunk buffer after stream: %s", flush_err)
 
                 if not response_content and reasoning_content:
                     response_content = reasoning_content
@@ -540,22 +560,11 @@ class AIService:
             try:
                 start = response_content.find("{")
                 if start != -1:
-                    # Use raw_decode to extract ONLY the first valid JSON object
-                    # ignoring trailing garbage (like "Extra data")
                     try:
                         obj, idx = json.JSONDecoder().raw_decode(
                             response_content[start:],
                         )
                         return obj
-                    except json.JSONDecodeError:
-                        pass
-
-                # 3. Fallback: Last Resort (rfind approach, but risky)
-                end = response_content.rfind("}") + 1
-                if end > start:
-                    try:
-                        json_str = response_content[start:end]
-                        return json.loads(json_str)
                     except json.JSONDecodeError:
                         pass
             except Exception as e:
