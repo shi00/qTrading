@@ -1,8 +1,4 @@
-import inspect
 from unittest.mock import patch, MagicMock
-
-import pytest
-
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
 
@@ -117,9 +113,26 @@ class TestDbUrlPasswordMasking:
     """db_url 明文口令落盘防护"""
 
     def test_get_db_url_restores_password(self):
-        source = inspect.getsource(cfg_mod.ConfigHandler.get_db_url)
-        assert "****" in source
-        assert "replace" in source
+        with (
+            patch.object(
+                cfg_mod.ConfigHandler, "load_config", return_value={"db_url": "postgresql://user:****@host/db"}
+            ),
+            patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="secret123"),
+        ):
+            url = cfg_mod.ConfigHandler.get_db_url()
+            assert "****" not in url
+            assert "secret123" in url
+            assert url == "postgresql://user:secret123@host/db"
+
+    def test_get_db_url_no_mask_returns_as_is(self):
+        with (
+            patch.object(
+                cfg_mod.ConfigHandler, "load_config", return_value={"db_url": "postgresql://user:pass@host/db"}
+            ),
+            patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="secret123"),
+        ):
+            url = cfg_mod.ConfigHandler.get_db_url()
+            assert url == "postgresql://user:pass@host/db"
 
 
 class TestSaveDbPasswordEncryptFallback:
@@ -390,22 +403,19 @@ class TestConfigHandlerNoLockReentry:
     which would cause deadlock with RWLockFair (non-reentrant)."""
 
     def test_save_config_does_not_call_load_config(self):
-        import inspect
-        import textwrap
+        with patch.object(cfg_mod.ConfigHandler, "load_config") as mock_load:
+            mock_load.return_value = {"test_key": "test_val"}
+            with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True):
+                cfg_mod.ConfigHandler._config_cache = {"test_key": "old_val"}
+                cfg_mod.ConfigHandler.save_config({"test_key": "new_val"})
+                mock_load.assert_not_called()
 
-        source = textwrap.dedent(inspect.getsource(cfg_mod.ConfigHandler.save_config))
-        import ast
-
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Attribute) and node.func.attr == "load_config":
-                    pytest.fail("C-P1-7: save_config must not call load_config() inside write lock (deadlock risk)")
-                if isinstance(node.func, ast.Name) and node.func.id == "load_config":
-                    pytest.fail("C-P1-7: save_config must not call load_config() inside write lock (deadlock risk)")
-
-    def test_save_config_has_reentry_warning_comment(self):
-        import inspect
-
-        source = inspect.getsource(cfg_mod.ConfigHandler.save_config)
-        assert "C-P1-7" in source, "C-P1-7: save_config should have reentry warning comment"
+    def test_save_config_no_deadlock_on_reentry(self):
+        original_cache = cfg_mod.ConfigHandler._config_cache
+        try:
+            cfg_mod.ConfigHandler._config_cache = {"key": "val"}
+            with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True):
+                result = cfg_mod.ConfigHandler.save_config({"key": "updated"})
+                assert result is True
+        finally:
+            cfg_mod.ConfigHandler._config_cache = original_cache

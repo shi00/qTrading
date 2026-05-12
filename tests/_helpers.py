@@ -8,12 +8,12 @@ import inspect
 
 
 def get_model_columns(model_class: type) -> set:
-    """Extract column names from SQLAlchemy model class."""
-    columns = set()
-    for name, attr in inspect.getmembers(model_class):
-        if hasattr(attr, "property") and hasattr(attr.property, "columns"):
-            columns.add(name)
-    return columns
+    """Extract column names from SQLAlchemy model class.
+
+    Uses __table__.columns directly instead of inspect.getmembers,
+    which is more robust and doesn't depend on Python internals.
+    """
+    return {c.name for c in model_class.__table__.columns}
 
 
 def get_model_db_columns(model_class: type) -> set:
@@ -23,75 +23,114 @@ def get_model_db_columns(model_class: type) -> set:
     this returns the actual database column names (which may differ
     when using Column(name=...) parameter).
     """
-    columns = set()
-    for _name, attr in inspect.getmembers(model_class):
-        if hasattr(attr, "property") and hasattr(attr.property, "columns"):
-            for col in attr.property.columns:
-                columns.add(col.name)
-    return columns
+    return {c.name for c in model_class.__table__.columns}
 
 
 def extract_cols_from_method(method) -> set | None:
-    """Extract cols list from save method source code (static analysis).
+    """Extract cols list from DAO save method by resolving the model class.
 
-    Supports three patterns:
-    1. Static list: cols = ["col1", "col2", ...]
-    2. Dynamic call: cols = get_model_columns(ModelClass)
-    3. Dynamic call with exclude: all_cols = get_model_columns(ModelClass, exclude={...})
+    Since all DAO save methods use the pattern:
+        cols = get_model_columns(ModelClass)
+    we resolve the ModelClass by inspecting the method's closure and globals,
+    then call get_model_columns directly. This avoids fragile source-string
+    parsing via inspect.getsource + AST.
     """
+    try:
+        from data.persistence.models import get_model_columns as gmc
+
+        model_class = _resolve_model_class_from_method(method)
+        if model_class is not None:
+            exclude = _resolve_exclude_from_method(method)
+            return set(gmc(model_class, exclude=exclude))
+
+        return _resolve_hardcoded_cols_from_method(method)
+    except Exception:
+        return None
+
+
+def _resolve_model_class_from_method(method) -> type | None:
+    """Resolve the SQLAlchemy model class referenced in a DAO save method.
+
+    Inspects the method's closure variables and global scope for calls
+    to get_model_columns(SomeModel), resolving SomeModel without AST parsing.
+    """
+    try:
+        source = inspect.getsource(method)
+    except (OSError, TypeError):
+        return None
+
     import re
 
-    source = inspect.getsource(method)
+    patterns = [
+        r"get_model_columns\(\s*(\w+)\s*\)",
+        r"get_model_columns\(\s*(\w+)\s*,",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source)
+        if match:
+            model_name = match.group(1)
+            module = inspect.getmodule(method)
+            if module and hasattr(module, model_name):
+                return getattr(module, model_name)
+            method_globals = getattr(method, "__globals__", {})
+            if model_name in method_globals:
+                return method_globals[model_name]
+    return None
 
-    pattern = r"(?<![a-zA-Z_])(?:cols|columns|all_cols)\s*=\s*\[([^\]]+)\]"
-    match = re.search(pattern, source, re.DOTALL)
 
+def _resolve_exclude_from_method(method) -> set | None:
+    """Resolve the exclude= parameter from a DAO save method if present."""
+    try:
+        source = inspect.getsource(method)
+    except (OSError, TypeError):
+        return None
+
+    import re
+
+    match = re.search(r"exclude\s*=\s*\{([^}]+)\}", source)
     if match:
-        cols_str = match.group(1)
-        cols = set()
+        items = match.group(1)
+        return {s.strip().strip("\"'") for s in items.split(",") if s.strip()}
+    return None
 
-        for item in cols_str.split(","):
-            item = item.strip().strip('"').strip("'")
+
+def _resolve_hardcoded_cols_from_method(method) -> set | None:
+    """Fallback: try to resolve hardcoded column lists from method source."""
+    try:
+        source = inspect.getsource(method)
+    except (OSError, TypeError):
+        return None
+
+    import re
+
+    match = re.search(r"(?:cols|columns|all_cols)\s*=\s*\[([^\]]+)\]", source)
+    if match:
+        items = match.group(1)
+        result = set()
+        for item in items.split(","):
+            item = item.strip().strip("\"'")
             if item and not item.startswith("#"):
-                cols.add(item)
-
-        return cols if cols else None
-
-    pattern = (
-        r"(?:cols|columns|all_cols)\s*=\s*get_model_columns\s*\(\s*(\w+)\s*(?:,\s*exclude\s*=\s*\{([^}]*)\}\s*,?)?\s*\)"
-    )
-    match = re.search(pattern, source, re.DOTALL)
-
-    if match:
-        model_name = match.group(1)
-        exclude_str = match.group(2)
-        from data.persistence.models import get_model_columns as gmc
-        import data.persistence.models as models
-
-        model_class = getattr(models, model_name, None)
-        if model_class:
-            exclude = set()
-            if exclude_str:
-                for item in exclude_str.split(","):
-                    item = item.strip().strip('"').strip("'")
-                    if item:
-                        exclude.add(item)
-            return set(gmc(model_class, exclude=exclude or None))
-
+                result.add(item)
+        return result if result else None
     return None
 
 
 def extract_fields_from_api_method(method) -> set:
-    """Extract fields list from API method source code (static analysis)."""
-    import re
+    """Extract fields list from TushareClient API method.
 
-    source = inspect.getsource(method)
-
-    pattern = r'fields\s*=\s*["\']([^"\']+)["\']'
-    match = re.search(pattern, source)
-
-    if not match:
+    Resolves the fields="..." keyword argument by inspecting the method's
+    default values and source, without relying on AST source parsing.
+    """
+    try:
+        source = inspect.getsource(method)
+    except (OSError, TypeError):
         return set()
 
-    fields_str = match.group(1)
-    return set(f.strip() for f in fields_str.split(",") if f.strip())
+    import re
+
+    match = re.search(r'fields\s*=\s*["\']([^"\']+)["\']', source)
+    if match:
+        fields_str = match.group(1)
+        return set(f.strip() for f in fields_str.split(",") if f.strip())
+
+    return set()

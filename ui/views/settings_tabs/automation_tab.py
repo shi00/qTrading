@@ -319,7 +319,7 @@ class AutomationTab(ft.Container):
 
     def on_doubao_time_change(self, e):
         selected_time = self.doubao_time.value
-        ConfigHandler.set_doubao_schedule_time(selected_time)  # type: ignore
+        ConfigHandler.set_doubao_schedule_time(selected_time)  # type: ignore[untyped]
         self.update()
         if self.show_snack:
             self.show_snack(
@@ -487,7 +487,7 @@ class NotificationsTab(ft.Container):
     def on_interval_change(self, e):
         """处理拉取间隔变更"""
         try:
-            val = int(self.news_interval.value)  # type: ignore
+            val = int(self.news_interval.value)  # type: ignore[untyped]
             ConfigHandler.save_config({"news_poll_interval": val})
             if self.show_snack:
                 self.show_snack(

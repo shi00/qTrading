@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
 
 from data.persistence.daos.screener_dao import ScreenerDao
@@ -268,3 +268,130 @@ class TestScreenerDaoBuildScreeningSql:
         sql = dao._build_screening_sql()
         assert "ROW_NUMBER() OVER" in sql
         assert "PARTITION BY ts_code" in sql
+
+
+class TestScreenerDaoGetLatestClosedTradeDate:
+    @pytest.mark.asyncio
+    async def test_returns_date_string(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"max_td": ["20240615"]}))
+        result = await dao._get_latest_closed_trade_date()
+        assert result == "20240615"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_empty(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"max_td": [None]}))
+        result = await dao._get_latest_closed_trade_date()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_nan(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"max_td": [float("nan")]}))
+        result = await dao._get_latest_closed_trade_date()
+        assert result is None
+
+
+class TestScreenerDaoGetScreeningDataNoTradeDate:
+    @pytest.mark.asyncio
+    async def test_no_trade_date_and_db_empty(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"max_td": [None]}))
+        result = await dao.get_screening_data()
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestScreenerDaoGetFundamentalScreeningData:
+    @pytest.mark.asyncio
+    async def test_with_trade_date(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_fundamental_screening_data(trade_date="20240615")
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_without_trade_date_auto_resolve(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(
+            side_effect=[
+                pd.DataFrame({"max_td": ["20240615"]}),
+                pd.DataFrame({"ts_code": ["000001.SZ"]}),
+            ]
+        )
+        result = await dao.get_fundamental_screening_data()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_no_trade_date_and_db_empty(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"max_td": [None]}))
+        result = await dao.get_fundamental_screening_data()
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestScreenerDaoUpdatePredictionResultEdgeCases:
+    @pytest.mark.asyncio
+    async def test_table_not_in_metadata(self):
+        dao = ScreenerDao(MagicMock())
+        with patch("data.persistence.daos.screener_dao.Base") as mock_base:
+            mock_base.metadata.tables.get.return_value = None
+            await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
+
+    @pytest.mark.asyncio
+    async def test_engine_not_initialized(self):
+        dao = ScreenerDao(MagicMock())
+        dao.engine = None
+        with patch("data.persistence.daos.screener_dao.sa.update") as mock_update:
+            mock_update.return_value.where.return_value.values.return_value = MagicMock()
+            with pytest.raises(RuntimeError, match="Engine not initialized"):
+                await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
+
+    @pytest.mark.asyncio
+    async def test_default_status_t1_done_when_no_t5(self):
+        dao = ScreenerDao(MagicMock())
+        dao._write_db = AsyncMock(return_value=1)
+        with patch("data.persistence.daos.screener_dao.sa.update") as mock_update:
+            mock_update.return_value.where.return_value.values.return_value = MagicMock()
+            await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
+
+
+class TestScreenerDaoSaveScreeningResultsTuple:
+    @pytest.mark.asyncio
+    async def test_with_tuple_records(self):
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        with patch(
+            "data.persistence.daos.screener_dao.get_model_columns",
+            return_value=["run_id", "ts_code", "name", "trade_date"],
+        ):
+            records = [("r1", "000001.SZ", "Test", "20240615")]
+            await dao.save_screening_results(records)
+            dao._save_upsert.assert_called_once()
+
+
+class TestScreenerDaoSaveThinking:
+    @pytest.mark.asyncio
+    async def test_save_thinking_with_matching_ids(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1], "run_id": ["r1"], "ts_code": ["000001.SZ"]}))
+        dao._save_upsert = AsyncMock(return_value=1)
+        thinking_records = [{"run_id": "r1", "ts_code": "000001.SZ", "thinking": "analysis"}]
+        await dao._save_thinking(thinking_records)
+        dao._save_upsert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_save_thinking_no_matching_ids(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1], "run_id": ["r2"], "ts_code": ["000002.SZ"]}))
+        thinking_records = [{"run_id": "r1", "ts_code": "000001.SZ", "thinking": "analysis"}]
+        await dao._save_thinking(thinking_records)
+
+    @pytest.mark.asyncio
+    async def test_save_thinking_empty_read(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        thinking_records = [{"run_id": "r1", "ts_code": "000001.SZ", "thinking": "analysis"}]
+        await dao._save_thinking(thinking_records)

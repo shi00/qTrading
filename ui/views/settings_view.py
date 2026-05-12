@@ -167,10 +167,10 @@ class SettingsView(ft.Container):
                 msg_type = "success"
             elif color == ft.Colors.ORANGE or color == ft.Colors.AMBER:
                 msg_type = "warning"
-            self.page.show_toast(message, type=msg_type)  # type: ignore
+            self.page.show_toast(message, type=msg_type)  # type: ignore[untyped]
         else:
             # Clean up old snackbars to prevent overlay bloat
-            self.page.overlay = [  # type: ignore
+            self.page.overlay = [  # type: ignore[untyped]
                 o for o in self.page.overlay if not isinstance(o, ft.SnackBar)
             ]
             snack = ft.SnackBar(

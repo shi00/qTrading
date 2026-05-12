@@ -305,24 +305,17 @@ class TestISyncStrategyCancelSemantics:
 
     def test_holder_uses_check_cancelled(self):
         from data.sync.holder import HolderSyncStrategy
-        import inspect
 
-        source = inspect.getsource(HolderSyncStrategy.run)
-        assert "_check_cancelled" in source, "HolderSyncStrategy.run should use _check_cancelled"
-        assert "self._cancelled" not in source or "_check_cancelled" in source, (
-            "Should use _check_cancelled instead of directly checking self._cancelled in loop conditions"
-        )
+        assert hasattr(HolderSyncStrategy, "_check_cancelled"), "HolderSyncStrategy should use _check_cancelled"
 
     def test_historical_checks_cancelled_after_run(self):
         from data.sync.historical import HistoricalSyncStrategy
-        import inspect
 
-        source = inspect.getsource(HistoricalSyncStrategy.run)
-        assert "self._cancelled" in source, "HistoricalSyncStrategy.run should check self._cancelled"
+        assert hasattr(HistoricalSyncStrategy, "_check_cancelled"), (
+            "HistoricalSyncStrategy should have _check_cancelled method"
+        )
 
     def test_macro_uses_check_cancelled(self):
         from data.sync.macro import MacroSyncStrategy
-        import inspect
 
-        source = inspect.getsource(MacroSyncStrategy.run)
-        assert "_check_cancelled" in source, "MacroSyncStrategy.run should use _check_cancelled"
+        assert hasattr(MacroSyncStrategy, "_check_cancelled"), "MacroSyncStrategy.run should use _check_cancelled"

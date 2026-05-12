@@ -422,7 +422,7 @@ class TaskCenterView(ft.Container):
                 spacing=6,
             ),
             **AppStyles.card(padding=14, border_radius=8, with_border=False),
-            border=ft.border.only(  # type: ignore
+            border=ft.border.only(  # type: ignore[untyped]
                 left=ft.BorderSide(3, left_border_color),
                 top=ft.BorderSide(1, AppColors.BORDER),
                 right=ft.BorderSide(1, AppColors.BORDER),

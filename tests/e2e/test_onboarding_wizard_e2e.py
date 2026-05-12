@@ -1,9 +1,20 @@
 """
 E2E Tests for Onboarding Wizard
 
-Prerequisites: pip install playwright pytest-playwright && playwright install
+Prerequisites:
+    pip install playwright pytest-playwright && playwright install
 
-Run: pytest tests/e2e/test_onboarding_wizard_e2e.py --headed
+Run:
+    1. Start the application server first:
+       python -m core.main
+    2. Run E2E tests (remove skip marker or use --override-ini):
+       pytest tests/e2e/test_onboarding_wizard_e2e.py -m e2e --headed
+       pytest tests/e2e/ -m e2e --override-ini="markers=e2e" -k "not skip"
+
+Note: These tests are skipped by default because they require:
+    - A running application server on localhost:8550
+    - Playwright browser binaries installed
+    - A test database configured
 """
 
 import os

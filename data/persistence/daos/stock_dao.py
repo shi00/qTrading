@@ -198,7 +198,7 @@ class StockDao(BaseDao):
                 if params:
                     await conn.exec_driver_sql(sql_insert, params)
 
-            return len(params)  # type: ignore
+            return len(params)  # type: ignore[untyped]
         except Exception as e:
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
             raise e
@@ -211,7 +211,7 @@ class StockDao(BaseDao):
     async def get_stocks_without_ai_concepts(
         self,
         batch_size: int,
-        exclude_codes: list = None,  # type: ignore
+        exclude_codes: list = None,  # type: ignore[untyped]
     ) -> list:
         sql = """
             SELECT ts_code, name FROM stock_basic
@@ -228,11 +228,11 @@ class StockDao(BaseDao):
             df = df[~df["ts_code"].isin(exclude_codes)]
         return list(
             df[["ts_code", "name"]].itertuples(index=False, name=None)
-        )[  # type: ignore
+        )[  # type: ignore[untyped]
             :batch_size
         ]
 
-    async def get_concepts(self, ts_codes: list = None):  # type: ignore
+    async def get_concepts(self, ts_codes: list = None):  # type: ignore[untyped]
         """
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]

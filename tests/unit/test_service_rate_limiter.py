@@ -208,8 +208,7 @@ class TestTokenBucketEdgeCases(unittest.TestCase):
         """分数令牌"""
         bucket = TokenBucket(start_tokens=5.5, capacity=10, rate=5.0)
 
-        bucket.consume(2.5)  # type: ignore
-
+        bucket.consume(2.5)  # type: ignore[untyped]
         self.assertAlmostEqual(bucket.tokens, 3.0, places=1)
 
 

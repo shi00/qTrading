@@ -36,7 +36,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["data", "services", "strategies", "utils"]
+source = ["core", "data", "services", "strategies", "utils"]
 omit = [
     "data/tiktoken_cache/*",
     "data/domain_services/offline_calendar.py",
@@ -44,6 +44,8 @@ omit = [
 ]
 
 [tool.coverage.report]
+fail_under = 85
+per_file_minimum = 80
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",

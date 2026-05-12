@@ -38,7 +38,7 @@ from data.persistence.models import (
     TradeCal,
 )
 
-from .helpers import get_model_db_columns
+from tests._helpers import get_model_db_columns
 
 EXCLUDED_COLS = {"updated_at", "created_at"}
 ALL_MODELS = [

@@ -429,9 +429,8 @@ class DataSourceTab(ft.Container):
         # Historical Data Card
         self.sync_button.text = I18n.get("settings_init_data")
         self.sync_button.tooltip = I18n.get("settings_init_desc")
-        self.row_init.title = I18n.get("settings_init_data")  # type: ignore
-        self.row_init.subtitle = I18n.get("settings_hint_first_run")  # type: ignore
-
+        self.row_init.title = I18n.get("settings_init_data")  # type: ignore[untyped]
+        self.row_init.subtitle = I18n.get("settings_hint_first_run")  # type: ignore[untyped]
         self.history_years_dropdown.label = I18n.get(
             "settings_history_range",
             "History Range",
@@ -957,7 +956,7 @@ class DataSourceTab(ft.Container):
     async def init_historical_data(self, e):
         if self.is_syncing and self._init_sync_cancellable:
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
-            self.page.run_task(self._processor.request_cancel)  # type: ignore
+            self.page.run_task(self._processor.request_cancel)  # type: ignore[untyped]
             task_id = self._active_task_ids.get("system_init_sync")
             if task_id:
                 self._tm.cancel_task(task_id)

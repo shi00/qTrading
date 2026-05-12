@@ -306,7 +306,7 @@ class ScreenerView(ft.Container):
         TaskManager().subscribe(self._on_tasks_updated)
 
         # Load Strategies Async
-        self.page.run_task(self._load_strategies)  # type: ignore
+        self.page.run_task(self._load_strategies)  # type: ignore[untyped]
 
     def will_unmount(self):
         TaskManager().unsubscribe(self._on_tasks_updated)
@@ -594,9 +594,9 @@ class ScreenerView(ft.Container):
             return
         mode = list(selected)[0]
         if mode == "HISTORY":
-            self.page.run_task(self._switch_to_history_mode)  # type: ignore
+            self.page.run_task(self._switch_to_history_mode)  # type: ignore[untyped]
         else:
-            self.page.run_task(self._switch_to_realtime_mode)  # type: ignore
+            self.page.run_task(self._switch_to_realtime_mode)  # type: ignore[untyped]
 
     async def _switch_to_history_mode(self):
         """Activate history viewing mode."""
@@ -819,7 +819,7 @@ class ScreenerView(ft.Container):
         self.log_view.update()  # Refresh immediately to clear stale cards
         # Collect dynamic params from UI controls
         params = self._collect_params()
-        self.page.run_task(self.vm.run_strategy, self.selected_strategy, params=params)  # type: ignore
+        self.page.run_task(self.vm.run_strategy, self.selected_strategy, params=params)  # type: ignore[untyped]
 
     def _render_strategy_params(self):
         """Dynamically render UI controls based on the selected strategy's parameter definitions."""
@@ -859,7 +859,7 @@ class ScreenerView(ft.Container):
                 if group_controls:
                     title = self._resolve_group_title(
                         group_name,
-                        group_labels.get(group_name),  # type: ignore
+                        group_labels.get(group_name),  # type: ignore[untyped]
                     )
                     rendered_groups.append((group_name, title, group_controls))
 
@@ -868,7 +868,7 @@ class ScreenerView(ft.Container):
             if default_controls:
                 title = self._resolve_group_title(
                     "default",
-                    group_labels.get("default"),  # type: ignore
+                    group_labels.get("default"),  # type: ignore[untyped]
                 )
                 rendered_groups.append(("default", title, default_controls))
 
@@ -929,7 +929,7 @@ class ScreenerView(ft.Container):
 
         self.params_container.update()
 
-    def _resolve_group_title(self, group_name: str, label_key: str = None) -> str:  # type: ignore
+    def _resolve_group_title(self, group_name: str, label_key: str = None) -> str:  # type: ignore[untyped]
         """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
         from ui.theme import DEFAULT_GROUP_LABELS
 
@@ -1064,7 +1064,7 @@ class ScreenerView(ft.Container):
                             ctrl_field.value = str(get_base_prompt(strat))
                             ctrl_field.update()
                             if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(  # type: ignore
+                                self.page.show_toast(  # type: ignore[untyped]
                                     I18n.get(
                                         "ai_settings_restored",
                                         "系统提示词已恢复默认",
@@ -1099,7 +1099,7 @@ class ScreenerView(ft.Container):
                                 f"strategy={strat}",
                             )
                             if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(  # type: ignore
+                                self.page.show_toast(  # type: ignore[untyped]
                                     I18n.get("ai_settings_saved", "系统提示词已保存"),
                                     "success",
                                 )
@@ -1186,7 +1186,7 @@ class ScreenerView(ft.Container):
                         params[name] = ctrl.value
                     else:
                         try:
-                            params[name] = float(ctrl.value)  # type: ignore
+                            params[name] = float(ctrl.value)  # type: ignore[untyped]
                         except (ValueError, TypeError):
                             params[name] = ctrl.value
                 elif isinstance(ctrl, ft.Dropdown):
@@ -1219,7 +1219,7 @@ class ScreenerView(ft.Container):
         df = self.vm.get_export_data()
         if df is None:
             if hasattr(self.page, "show_toast"):
-                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore
+                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore[untyped]
             return
 
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
@@ -1247,12 +1247,12 @@ class ScreenerView(ft.Container):
                 if path:
                     filename = os.path.basename(filepath)
                     if hasattr(self.page, "show_toast"):
-                        self.page.show_toast(  # type: ignore
+                        self.page.show_toast(  # type: ignore[untyped]
                             I18n.get("data_export_success", file=filename),
                             "success",
                         )
                 elif hasattr(self.page, "show_toast"):
-                    self.page.show_toast(  # type: ignore
+                    self.page.show_toast(  # type: ignore[untyped]
                         I18n.get("data_export_fail", error=error),
                         "error",
                     )
@@ -1262,11 +1262,11 @@ class ScreenerView(ft.Container):
                 self.export_btn.disabled = False
                 self.export_btn.update()
 
-        self.page.run_task(_do_export, e.path)  # type: ignore
+        self.page.run_task(_do_export, e.path)  # type: ignore[untyped]
 
     def _on_page_size_change(self, e):
         try:
-            new_size = int(self.page_size_dropdown.value)  # type: ignore
+            new_size = int(self.page_size_dropdown.value)  # type: ignore[untyped]
             self.vm.change_page_size(new_size)
         except ValueError:
             pass
@@ -1324,7 +1324,7 @@ class ScreenerView(ft.Container):
             # 3. Enable Export if data exists
             self.export_btn.disabled = getattr(self.vm, "total_items", 0) == 0
 
-            self.page.update()  # type: ignore
+            self.page.update()  # type: ignore[untyped]
 
         self.page.run_task(_do_update)
 
@@ -1391,14 +1391,14 @@ class ScreenerView(ft.Container):
             "",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-            code_theme="atom-one-dark",  # type: ignore
+            code_theme="atom-one-dark",  # type: ignore[untyped]
         )
 
         content_md = ft.Markdown(
             "",
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-            code_theme="atom-one-dark",  # type: ignore
+            code_theme="atom-one-dark",  # type: ignore[untyped]
         )
 
         reasoning_tile = ft.ExpansionTile(

@@ -3,6 +3,7 @@ import hashlib
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import asyncpg
@@ -26,6 +27,47 @@ def event_loop_policy():
     if sys.platform == "win32":
         return asyncio.WindowsSelectorEventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
+
+
+@contextmanager
+def reset_singleton(cls, extra_attrs=None):
+    """Context manager that saves and restores a singleton class's _instance.
+
+    Usage:
+        with reset_singleton(TaskManager):
+            mgr = TaskManager()
+            ...
+
+        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+            svc = AIService()
+            ...
+    """
+    saved = {"_instance": cls._instance}
+    cls._instance = None
+    if extra_attrs:
+        for attr in extra_attrs:
+            saved[attr] = getattr(cls, attr, None)
+            if attr == "_initialized":
+                setattr(cls, attr, False)
+            else:
+                setattr(cls, attr, None)
+    try:
+        yield
+    finally:
+        for attr, value in saved.items():
+            setattr(cls, attr, value)
+
+
+@pytest.fixture
+def singleton_reset():
+    """Fixture that provides the reset_singleton context manager.
+
+    Usage in tests:
+        def test_something(self, singleton_reset):
+            with singleton_reset(TaskManager):
+                mgr = TaskManager()
+    """
+    return reset_singleton
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -59,12 +101,46 @@ _original_keyring = sys.modules.get("keyring")
 sys.modules["keyring"] = _create_mock_keyring()
 
 
+def _create_mock_litellm():
+    from unittest.mock import AsyncMock
+
+    mock_lt = MagicMock()
+    mock_lt.suppress_debug_info = True
+    mock_lt.set_verbose = False
+    mock_lt.drop_params = True
+    mock_lt.set_timeout = 30.0
+    mock_lt.max_retries = 2
+    mock_lt.success_callback = []
+    mock_lt.failure_callback = []
+    mock_lt.modify_params = True
+    mock_lt.acompletion = AsyncMock()
+    mock_lt.utils = MagicMock()
+
+    _REASONING_PATTERNS = ("deepseek-reasoner", "o3", "o4-mini")
+
+    def _supports_reasoning(model=""):
+        m = model.lower()
+        return any(p in m for p in _REASONING_PATTERNS)
+
+    mock_lt.utils.supports_reasoning = MagicMock(side_effect=_supports_reasoning)
+    return mock_lt
+
+
+_original_litellm = sys.modules.get("litellm")
+sys.modules["litellm"] = _create_mock_litellm()
+
+
 def pytest_unconfigure(config):
     """Restore original keyring module after test session."""
     if _original_keyring is not None:
         sys.modules["keyring"] = _original_keyring
     else:
         sys.modules.pop("keyring", None)
+
+    if _original_litellm is not None:
+        sys.modules["litellm"] = _original_litellm
+    else:
+        sys.modules.pop("litellm", None)
 
     import shutil
 

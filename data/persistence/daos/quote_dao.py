@@ -322,7 +322,7 @@ class QuoteDao(BaseDao):
             return df["max_td"].iloc[0]
         return None
 
-    async def get_cached_trade_dates(self):
+    async def get_cached_trade_dates(self) -> set[datetime.date]:
         df = await self._read_db(
             "SELECT DISTINCT trade_date FROM daily_quotes ORDER BY trade_date",
         )

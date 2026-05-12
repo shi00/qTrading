@@ -427,7 +427,7 @@ class TushareClient:
         """
         Get trade calendar.
         Note: This is the raw API wrapper. For is_trading_day checks, use is_trading_day()
-        which implements optimized year-based caching.  # type: ignore
+        which implements optimized year-based caching.  # type: ignore[untyped]
         """
         kwargs = dict(exchange=exchange, start_date=start_date, end_date=end_date)
         if is_open is not None:
@@ -474,7 +474,7 @@ class TushareClient:
         ts_code: str | None = None,
     ):
         """Get daily quotes with adj_factor joined"""
-        # type: ignore
+        # type: ignore[untyped]
         # 1. Fetch Daily Quotes
         df_daily = await self._handle_api_call(
             self.pro.daily,
@@ -488,7 +488,7 @@ class TushareClient:
             return df_daily
 
         # 2. Fetch Adj Factor
-        # Tushare adj_factor API has same signature logic  # type: ignore
+        # Tushare adj_factor API has same signature logic  # type: ignore[untyped]
         try:
             df_adj = await self._handle_api_call(
                 self.pro.adj_factor,
@@ -520,7 +520,7 @@ class TushareClient:
 
         return df_daily
 
-    async def get_daily_basic(self, trade_date: str | None = None, ts_code: str | None = None):  # type: ignore
+    async def get_daily_basic(self, trade_date: str | None = None, ts_code: str | None = None):  # type: ignore[untyped]
         """Get daily basic indicators (PE, PB, Turnover, etc.)"""
         return await self._handle_api_call(
             self.pro.daily_basic,
@@ -536,8 +536,7 @@ class TushareClient:
         end_date: str | None = None,
         ts_code: str | None = None,
     ):
-        """Get income statement data"""  # type: ignore
-
+        """Get income statement data"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.income,
             period=period,
@@ -554,8 +553,7 @@ class TushareClient:
         end_date: str | None = None,
         ts_code: str | None = None,
     ):
-        """Get cashflow statement data"""  # type: ignore
-
+        """Get cashflow statement data"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.cashflow,
             period=period,
@@ -572,8 +570,7 @@ class TushareClient:
         end_date: str | None = None,
         ts_code: str | None = None,
     ):
-        """Get balance sheet data"""  # type: ignore
-
+        """Get balance sheet data"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.balancesheet,
             period=period,
@@ -583,7 +580,7 @@ class TushareClient:
             fields="ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill",
         )
 
-    async def get_top_list(self, trade_date: str | None):  # type: ignore
+    async def get_top_list(self, trade_date: str | None):  # type: ignore[untyped]
         """Dragon Tiger Board (LHB) data. top_list.net_amount is stored in yuan."""
 
         df = await self._handle_api_call(
@@ -593,12 +590,12 @@ class TushareClient:
         )
         return attach_top_list_column_units(df)
 
-    async def get_top_inst(self, trade_date: str | None):  # type: ignore
+    async def get_top_inst(self, trade_date: str | None):  # type: ignore[untyped]
         """LHB Institutional Seat Transaction Detail"""
 
         return await self._handle_api_call(self.pro.top_inst, trade_date=trade_date)
 
-    async def get_hk_hold(self, trade_date: str | None):  # type: ignore
+    async def get_hk_hold(self, trade_date: str | None):  # type: ignore[untyped]
         """Northbound (HK->Connect) holdings"""
 
         return await self._handle_api_call(
@@ -607,7 +604,7 @@ class TushareClient:
             fields="ts_code,trade_date,name,vol,ratio,exchange",
         )
 
-    async def get_moneyflow(self, trade_date: str | None):  # type: ignore
+    async def get_moneyflow(self, trade_date: str | None):  # type: ignore[untyped]
         """Individual stock money flow (Main force)"""
 
         return await self._handle_api_call(
@@ -616,7 +613,7 @@ class TushareClient:
             fields="ts_code,trade_date,buy_sm_vol,buy_sm_amount,sell_sm_vol,sell_sm_amount,buy_md_vol,buy_md_amount,sell_md_vol,sell_md_amount,buy_lg_vol,buy_lg_amount,sell_lg_vol,sell_lg_amount,buy_elg_vol,buy_elg_amount,sell_elg_vol,sell_elg_amount,net_mf_vol,net_mf_amount",
         )
 
-    async def get_block_trade(self, trade_date: str | None):  # type: ignore
+    async def get_block_trade(self, trade_date: str | None):  # type: ignore[untyped]
         """Block trade data"""
 
         return await self._handle_api_call(
@@ -637,8 +634,7 @@ class TushareClient:
         Can query by:
         1. ts_code + start_date/end_date (Get history for one stock)
         2. period (Get all stocks for one quarter - Requires permissions)
-        """  # type: ignore
-
+        """  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.fina_indicator,
             ts_code=ts_code,
@@ -652,22 +648,21 @@ class TushareClient:
         """
         Get disclosure list for a specific date (Incremental Sync).
         Uses 'actual_date' to find reports released on this day.
-        """  # type: ignore
-
+        """  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.disclosure_date,
             actual_date=date,
             fields="ts_code,ann_date,end_date,actual_date",
         )
 
-    # type: ignore
+    # type: ignore[untyped]
     async def get_concept_list(self, src: str = "ts"):
         """Get all concept categories"""
         return await self._handle_api_call(self.pro.concept, src=src)
 
     async def get_concept_detail_by_id(self, concept_id: str):
         """
-        Get all stocks in a specific concept group by concept ID.  # type: ignore
+        Get all stocks in a specific concept group by concept ID.  # type: ignore[untyped]
         Unlike get_concept_detail(ts_code), this fetches members of a concept.
         """
         return await self._handle_api_call(
@@ -679,8 +674,7 @@ class TushareClient:
     async def get_concept_detail(self, ts_code: str | None):
         """
         Get concepts for a specific stock (e.g. Lithium, Sora, etc.)
-        """  # type: ignore
-
+        """  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.concept_detail,
             ts_code=ts_code,
@@ -695,7 +689,7 @@ class TushareClient:
         end_date: str | None = None,
     ):
         """Get index daily data"""
-        # type: ignore
+        # type: ignore[untyped]
         # Index Daily
         return await self._handle_api_call(
             self.pro.index_daily,
@@ -707,8 +701,7 @@ class TushareClient:
         )
 
     async def get_moneyflow_hsgt(self, trade_date: str | None = None):
-        """Get Northbound (HSGT) money flow"""  # type: ignore
-
+        """Get Northbound (HSGT) money flow"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.moneyflow_hsgt,
             trade_date=trade_date,
@@ -716,8 +709,7 @@ class TushareClient:
         )
 
     async def get_index_dailybasic(self, trade_date: str | None = None, ts_code: str | None = None):
-        """Get index daily indicators (PE, PB, etc.)"""  # type: ignore
-
+        """Get index daily indicators (PE, PB, etc.)"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.index_dailybasic,
             trade_date=trade_date,
@@ -743,8 +735,7 @@ class TushareClient:
         - open_times: 打开次数
         - strth: 涨跌停强度
         - limit: D跌停U涨停
-        """  # type: ignore
-
+        """  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.limit_list,
             trade_date=trade_date,
@@ -752,8 +743,7 @@ class TushareClient:
         )
 
     async def get_suspend_d(self, trade_date: str | None = None, ts_code: str | None = None):
-        """Get daily suspension list"""  # type: ignore
-
+        """Get daily suspension list"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.suspend_d,
             trade_date=trade_date,
@@ -778,8 +768,7 @@ class TushareClient:
         start_date: str | None = None,
         end_date: str | None = None,
     ):
-        """Get financial audit opinion"""  # type: ignore
-
+        """Get financial audit opinion"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.fina_audit,
             ts_code=ts_code,
@@ -796,8 +785,7 @@ class TushareClient:
         end_date: str | None = None,
         ann_date: str | None = None,
     ):
-        """Get performance forecast"""  # type: ignore
-
+        """Get performance forecast"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.forecast,
             ts_code=ts_code,
@@ -815,8 +803,7 @@ class TushareClient:
         start_date: str | None = None,
         end_date: str | None = None,
     ):
-        """Get main business composition"""  # type: ignore
-
+        """Get main business composition"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.fina_mainbz,
             ts_code=ts_code,
@@ -828,8 +815,7 @@ class TushareClient:
         )
 
     async def get_pledge_stat(self, ts_code: str | None = None, end_date: str | None = None):
-        """Get share pledge statistics"""  # type: ignore
-
+        """Get share pledge statistics"""  # type: ignore[untyped]
         return await self._handle_api_call_paginated(
             self.pro.pledge_stat,
             ts_code=ts_code,
@@ -844,8 +830,7 @@ class TushareClient:
         end_date: str | None = None,
         ann_date: str | None = None,
     ):
-        """Get share repurchase"""  # type: ignore
-
+        """Get share repurchase"""  # type: ignore[untyped]
         return await self._handle_api_call(
             self.pro.repurchase,
             ts_code=ts_code,
@@ -872,7 +857,7 @@ class TushareClient:
             fields="ts_code,end_date,ann_date,div_proc,stk_div,stk_bo_rate,stk_co_rate,cash_div,cash_div_tax,record_date,ex_date",
         )
 
-    async def get_shibor(self, start_date: str | None = None, end_date: str | None = None):  # type: ignore
+    async def get_shibor(self, start_date: str | None = None, end_date: str | None = None):  # type: ignore[untyped]
         """Get Shibor rates"""
         return await self._handle_api_call(
             self.pro.shibor,
@@ -888,7 +873,7 @@ class TushareClient:
         end_date: str | None = None,
         start_date: str | None = None,
         ann_date: str | None = None,
-    ):  # type: ignore
+    ):  # type: ignore[untyped]
         """Get Top 10 Holders
 
         Args:
@@ -911,7 +896,7 @@ class TushareClient:
         trade_date: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
-    ):  # type: ignore
+    ):  # type: ignore[untyped]
         """Get Index Component Weights"""
         return await self._handle_api_call(
             self.pro.index_weight,
@@ -929,7 +914,7 @@ class TushareClient:
         end_date: str | None = None,
         start_date: str | None = None,
         ann_date: str | None = None,
-    ):  # type: ignore
+    ):  # type: ignore[untyped]
         """Get Stock Holder Number (Chip Concentration)
 
         Args:

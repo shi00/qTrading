@@ -62,8 +62,7 @@ class TestDataProcessor(unittest.TestCase):
         # Inject mocks
         self.processor.api = self.mock_api
         self.processor.cache = self.mock_cache
-        self.processor._cancel_event = asyncio.Event()  # Updated from _shutdown_event  # type: ignore
-
+        self.processor._cancel_event = asyncio.Event()  # Updated from _shutdown_event  # type: ignore[untyped]
         # CRITICAL: Inject mocks into TradeCalendarService
         if hasattr(self.processor, "trade_calendar"):
             self.processor.trade_calendar._cache = self.mock_cache
@@ -73,8 +72,7 @@ class TestDataProcessor(unittest.TestCase):
         if hasattr(self.processor, "context"):
             self.processor.context.api = self.processor.api
             self.processor.context.cache = self.processor.cache
-            self.processor.context.processor = self.processor  # type: ignore
-
+            self.processor.context.processor = self.processor  # type: ignore[untyped]
         from unittest.mock import MagicMock
 
         self.mock_cache.engine = MagicMock()
@@ -654,7 +652,7 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_init_data(self):
         await self.processor.init_data()
-        self.processor.cache.init_db.assert_called_once()  # type: ignore
+        self.processor.cache.init_db.assert_called_once()  # type: ignore[untyped]
 
     def test_init_data(self):
         asyncio.run(self.async_test_init_data())
@@ -673,8 +671,8 @@ class TestDataProcessor(unittest.TestCase):
 
         await self.processor.sync_daily_market_snapshot(trade_date)
 
-        self.processor.cache.check_data_exists.assert_called_with(trade_date)  # type: ignore
-        self.processor.api.get_daily_quotes.assert_not_called()  # type: ignore
+        self.processor.cache.check_data_exists.assert_called_with(trade_date)  # type: ignore[untyped]
+        self.processor.api.get_daily_quotes.assert_not_called()  # type: ignore[untyped]
 
     async def async_test_sync_daily_market_cache_miss(self):
         """Test cache miss fetches from API and saves"""

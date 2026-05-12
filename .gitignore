@@ -49,6 +49,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+coverage.json
 *.cover
 .hypothesis/
 .pytest_cache/
@@ -78,6 +79,7 @@ logs/
 .secret.key
 .secret.key.bak
 .secret.legacy
+.secret.salt
 
 # 4. Data files (Quantitative/Cache prevention)
 *.csv

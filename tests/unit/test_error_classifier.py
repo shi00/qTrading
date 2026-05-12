@@ -1,6 +1,10 @@
+import asyncio
 import json
 
+import pytest
+
 from utils.error_classifier import classify_error, classify_severity, get_error_message
+from utils.time_utils import get_now
 
 
 class TestClassifyErrorTokenContext:
@@ -192,18 +196,22 @@ class TestClassifyErrorGeneralContext:
 class TestClassifyErrorNoI18nDependency:
     def test_classify_error_does_not_import_ui(self):
         import utils.error_classifier as mod
+
+        assert "I18n" not in dir(mod), "error_classifier module should not expose I18n"
         import inspect
 
-        source = inspect.getsource(mod.classify_error)
-        assert "I18n" not in source, "classify_error should not reference I18n"
+        members = dict(inspect.getmembers(mod.classify_error))
+        assert "I18n" not in members, "classify_error should not reference I18n"
+
+    def test_classify_error_returns_result_without_i18n(self):
+        result = classify_error(Exception("invalid token"), context="token")
+        assert "code" in result
+        assert "message_key" in result
+        assert not result.get("message_key", "").startswith("I18n")
 
     def test_no_ui_import_at_module_level(self):
         import utils.error_classifier as mod
 
-        for name in dir(mod):
-            obj = getattr(mod, name)
-            if obj is mod:
-                continue
         assert not hasattr(mod, "I18n"), "error_classifier should not have I18n at module level"
 
 
@@ -322,26 +330,79 @@ class TestClassifySeverity:
 
 class TestClassifySeverityIntegration:
     def test_task_manager_imports_classify_severity(self):
-        import inspect
         from services.task_manager import TaskManager
 
-        source = inspect.getsource(TaskManager)
-        assert "classify_severity" in source
+        assert hasattr(TaskManager, "_task_runner"), "TaskManager should have _task_runner method"
 
-    def test_task_manager_system_error_uses_critical_log(self):
-        import inspect
-        from services.task_manager import TaskManager
+    @pytest.mark.asyncio
+    async def test_task_manager_system_error_uses_critical_log(self, caplog):
+        import logging
 
-        source = inspect.getsource(TaskManager)
-        assert "logger.critical" in source
-        assert 'severity == "system"' in source or "severity=='system'" in source
+        from services.task_manager import TaskManager, AppTask, TaskStatus
 
-    def test_task_manager_includes_severity_in_error_log(self):
-        import inspect
-        from services.task_manager import TaskManager
+        tm = TaskManager()
+        tm._initialized = True
+        tm._tasks = {}
+        tm._subscribers = []
+        tm._background_tasks = set()
+        tm._db_ready = False
 
-        source = inspect.getsource(TaskManager)
-        assert "severity" in source
+        task = AppTask(
+            name="test_system_error",
+            task_type="System",
+            cancellable=True,
+        )
+        task.status = TaskStatus.RUNNING
+        task.started_at = get_now()
+        task._cancel_event = asyncio.Event()
+        task._coroutine_gen = lambda: self._raise_system()
+
+        tm._tasks[task.id] = task
+
+        with caplog.at_level(logging.CRITICAL, logger="services.task_manager"):
+            await tm._task_runner(task.id)
+
+        assert task.status == TaskStatus.FAILED
+        assert any("SYSTEM-LEVEL" in r.message for r in caplog.records if r.levelno == logging.CRITICAL)
+
+    @pytest.mark.asyncio
+    async def test_task_manager_includes_severity_in_error_log(self, caplog):
+        import logging
+
+        from services.task_manager import TaskManager, AppTask, TaskStatus
+
+        tm = TaskManager()
+        tm._initialized = True
+        tm._tasks = {}
+        tm._subscribers = []
+        tm._background_tasks = set()
+        tm._db_ready = False
+
+        task = AppTask(
+            name="test_operational_error",
+            task_type="System",
+            cancellable=True,
+        )
+        task.status = TaskStatus.RUNNING
+        task.started_at = get_now()
+        task._cancel_event = asyncio.Event()
+        task._coroutine_gen = lambda: self._raise_operational()
+
+        tm._tasks[task.id] = task
+
+        with caplog.at_level(logging.ERROR, logger="services.task_manager"):
+            await tm._task_runner(task.id)
+
+        assert task.status == TaskStatus.FAILED
+        assert any("operational" in r.message.lower() for r in caplog.records)
+
+    @staticmethod
+    async def _raise_system():
+        raise MemoryError("out of memory")
+
+    @staticmethod
+    async def _raise_operational():
+        raise ValueError("bad input")
 
 
 class TestClassifyErrorDBTypeMatching:

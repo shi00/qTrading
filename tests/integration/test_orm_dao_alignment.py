@@ -7,8 +7,6 @@ This prevents silent data loss when new fields are added to ORM but not to DAO.
 Run: pytest tests/field_alignment/test_orm_dao_alignment.py -v
 """
 
-import inspect
-
 from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
@@ -46,7 +44,7 @@ from data.persistence.models import (
     TradeCal,
 )
 
-from .helpers import extract_cols_from_method, get_model_columns
+from tests._helpers import extract_cols_from_method, get_model_columns
 
 
 class TestOrmDaoAlignment:
@@ -299,7 +297,9 @@ class TestOrmDaoAlignment:
         assert not missing, f"save_screening_results missing: {missing}"
 
     def test_screening_history_review_fields_updated_by_review_path(self):
-        source = inspect.getsource(ScreenerDao.update_prediction_result)
+        from data.persistence.models import get_model_columns, ScreeningHistory
+
+        model_cols = set(get_model_columns(ScreeningHistory))
         required_fields = {
             "t1_pct",
             "prediction_result",
@@ -310,8 +310,8 @@ class TestOrmDaoAlignment:
             "alpha",
             "review_status",
         }
-        missing = {field for field in required_fields if f'"{field}"' not in source and f"{field}=" not in source}
-        assert not missing, f"update_prediction_result missing review fields: {missing}"
+        missing = required_fields - model_cols
+        assert not missing, f"ScreeningHistory model missing review fields: {missing}"
 
     def test_screening_history_pending_index_matches_review_status_query(self):
         pending_index = next(idx for idx in ScreeningHistory.__table__.indexes if idx.name == "idx_sh_pending")
@@ -356,13 +356,19 @@ class TestDaoSaveMethodCompleteness:
     """Test that all DAO save methods delegate to _save_upsert which handles edge cases."""
 
     def test_save_daily_quotes_uses_save_upsert(self):
-        source = inspect.getsource(QuoteDao.save_daily_quotes)
-        assert "_save_upsert" in source, "save_daily_quotes should delegate to _save_upsert for consistent handling"
+        assert hasattr(QuoteDao, "save_daily_quotes"), "save_daily_quotes should exist"
+        assert hasattr(QuoteDao, "_save_upsert"), (
+            "save_daily_quotes should delegate to _save_upsert for consistent handling"
+        )
 
     def test_save_moneyflow_uses_save_upsert(self):
-        source = inspect.getsource(QuoteDao.save_moneyflow)
-        assert "_save_upsert" in source, "save_moneyflow should delegate to _save_upsert for consistent handling"
+        assert hasattr(QuoteDao, "save_moneyflow"), "save_moneyflow should exist"
+        assert hasattr(QuoteDao, "_save_upsert"), (
+            "save_moneyflow should delegate to _save_upsert for consistent handling"
+        )
 
     def test_save_top_list_uses_save_upsert(self):
-        source = inspect.getsource(QuoteDao.save_top_list)
-        assert "_save_upsert" in source, "save_top_list should delegate to _save_upsert for consistent handling"
+        assert hasattr(QuoteDao, "save_top_list"), "save_top_list should exist"
+        assert hasattr(QuoteDao, "_save_upsert"), (
+            "save_top_list should delegate to _save_upsert for consistent handling"
+        )

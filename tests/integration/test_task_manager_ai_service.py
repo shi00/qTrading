@@ -1,106 +1,146 @@
 """
-Tests for TaskManager and AIService.
+Tests for TaskManager and AIService integration.
 
-S1-1: reload_config resets semaphore.
-S1-4: Real-time reasoning support detection.
+S3-3: TaskManager resets semaphore on task cancellation.
+S3-4: AIService detects reasoning model support.
 """
 
 import asyncio
-import os
-import sys
 from unittest.mock import patch
 
+import pytest
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from tests.conftest import reset_singleton
+
+
+@pytest.fixture
+def task_manager():
+    from services.task_manager import TaskManager
+
+    TaskManager._reset_singleton()
+    with patch("services.task_manager.ConfigHandler") as mock_ch, patch("services.task_manager.ThreadPoolManager"):
+        mock_ch.get_max_concurrent_tasks.return_value = 2
+        tm = TaskManager()
+        yield tm
+    TaskManager._reset_singleton()
+
+
+@pytest.fixture
+def semaphore(task_manager):
+    return task_manager._get_semaphore()
 
 
 class TestTaskManagerSemaphoreReset:
-    """S1-1: reload_config resets semaphore so new limit takes effect"""
+    """S3-3: TaskManager must reset semaphore on task cancellation"""
 
-    def test_reload_config_clears_semaphore_in_source(self):
-        """reload_config should set _semaphore_instance to None"""
-        tm_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "services", "task_manager.py"))
-        with open(tm_path, encoding="utf-8") as f:
-            source = f.read()
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_cancellation(self, semaphore):
+        assert semaphore._value == 2
 
-        assert "reload_config" in source, "TaskManager should have reload_config method"
-        assert "_semaphore_instance" in source, "TaskManager should have _semaphore_instance"
-        has_reset = "_semaphore_instance = None" in source or "_semaphore_instance=None" in source
-        assert has_reset, "S1-1: reload_config should reset _semaphore_instance to None"
+        async def long_task():
+            async with semaphore:
+                await asyncio.sleep(100)
 
-    def test_get_semaphore_creates_new(self):
-        """_get_semaphore should create a new Semaphore instance"""
-        tm_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "services", "task_manager.py"))
-        with open(tm_path, encoding="utf-8") as f:
-            source = f.read()
+        task = asyncio.create_task(long_task())
+        await asyncio.sleep(0.05)
+        assert semaphore._value == 1
 
-        assert "_get_semaphore" in source, "TaskManager should have _get_semaphore method"
-        assert "Semaphore" in source, "_get_semaphore should create Semaphore"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await asyncio.sleep(0.05)
+        assert semaphore._value == 2
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_exception(self, semaphore):
+        async def failing_task():
+            async with semaphore:
+                raise ValueError("test error")
+
+        with pytest.raises(ValueError):
+            await failing_task()
+
+        assert semaphore._value == 2
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_normal_completion(self, semaphore):
+        async def quick_task():
+            async with semaphore:
+                return 42
+
+        result = await quick_task()
+        assert result == 42
+        assert semaphore._value == 2
+
+    @pytest.mark.asyncio
+    async def test_multiple_tasks_semaphore_tracking(self):
+        from services.task_manager import TaskManager
+
+        TaskManager._reset_singleton()
+        with patch("services.task_manager.ConfigHandler") as mock_ch, patch("services.task_manager.ThreadPoolManager"):
+            mock_ch.get_max_concurrent_tasks.return_value = 3
+            tm = TaskManager()
+            sem = tm._get_semaphore()
+            assert sem._value == 3
+
+            async def brief_task():
+                async with sem:
+                    await asyncio.sleep(0.01)
+                    return True
+
+            results = await asyncio.gather(brief_task(), brief_task(), brief_task())
+            assert all(results)
+            assert sem._value == 3
+
+        TaskManager._reset_singleton()
 
 
-class TestReasoningSupportDetection:
-    """S1-4: Real-time reasoning support check per request"""
-
-    def test_check_reasoning_in_source(self):
-        """AIService should have _check_reasoning_support function"""
-        ai_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "services", "ai_service.py"))
-        with open(ai_path, encoding="utf-8") as f:
-            source = f.read()
-
-        assert "_check_reasoning_support" in source, "S1-4: ai_service should have _check_reasoning_support"
-
-    def test_reasoning_models_in_source(self):
-        """_check_reasoning_support should reference known reasoning models"""
-        ai_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "services", "ai_service.py"))
-        with open(ai_path, encoding="utf-8") as f:
-            source = f.read()
-
-        has_deepseek = "deepseek" in source.lower() and "v4-pro" in source.lower()
-        assert has_deepseek, "S1-4: _check_reasoning_support should detect DeepSeek reasoning models"
-
-    def test_check_reasoning_deepseek(self):
-        """DeepSeek V4 Pro should be detected as reasoning-capable"""
-        REASONING_PATTERNS = ["deepseek-v4-pro", "o3-pro", "o4-mini", "magistral"]
-        model = "deepseek-v4-pro"
-        is_reasoning = any(p in model.lower() for p in REASONING_PATTERNS)
-        assert is_reasoning is True
-
-    def test_check_reasoning_gpt4_not_reasoning(self):
-        """GPT-4 should not be in the reasoning list"""
-        REASONING_PATTERNS = ["deepseek-v4-pro", "o3-pro", "o4-mini", "magistral"]
-        model = "gpt-4"
-        is_reasoning = any(p in model.lower() for p in REASONING_PATTERNS)
-        assert is_reasoning is False
+_REASONING_MODEL_CASES = [
+    ("deepseek-reasoner", "deepseek", "https://api.deepseek.com", True),
+    ("o3", "openai", "https://api.openai.com/v1", True),
+    ("o4-mini", "openai", "https://api.openai.com/v1", True),
+    ("gpt-4o", "openai", "https://api.openai.com/v1", False),
+    ("deepseek-chat", "deepseek", "https://api.deepseek.com", False),
+]
 
 
-class TestAIServiceSemaphoreReloadIntegration:
-    """M-5: 配置热更新后，下一次并发获取应使用新值。"""
+class TestAIServiceReasoningSupport:
+    """S3-4: AIService must detect reasoning model support"""
 
-    def test_reload_config_rebuilds_ai_semaphore_with_new_limit(self):
+    @pytest.mark.parametrize(
+        "model,provider,base_url,expected",
+        _REASONING_MODEL_CASES,
+        ids=[c[0] for c in _REASONING_MODEL_CASES],
+    )
+    def test_reasoning_detection(self, model, provider, base_url, expected):
         from services.ai_service import AIService
-        from utils.loop_local import clear_all_loop_locals
 
-        async def run_test():
-            clear_all_loop_locals()
-            service = AIService.__new__(AIService)
-            service._setup_client = lambda: None
-            service._cleanup_prompt_dumps = lambda: None
+        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+            with patch("services.ai_service.ConfigHandler") as mock_ch:
+                mock_ch.get_llm_config.return_value = {
+                    "api_key": "test-key",
+                    "provider": provider,
+                    "model": model,
+                    "base_url": base_url,
+                }
+                mock_ch.get_setting.return_value = False
+                svc = AIService()
+                assert svc._supports_reasoning is expected
 
-            with patch(
-                "services.ai_service.ConfigHandler.get_ai_max_concurrent_analysis",
-                side_effect=[2, 4],
-            ):
-                sem_before = await service._get_semaphore()
-                # 未 reload 前应复用同一 semaphore
-                sem_before_again = await service._get_semaphore()
-                assert sem_before is sem_before_again
-                assert sem_before._value == 2
+    @pytest.mark.asyncio
+    async def test_reasoning_model_attribute_set(self):
+        from services.ai_service import AIService
 
-                await service.reload_config()
-                sem_after = await service._get_semaphore()
-
-            assert sem_after is not sem_before
-            assert sem_after._value == 4
-            clear_all_loop_locals()
-
-        asyncio.run(run_test())
+        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+            with patch("services.ai_service.ConfigHandler") as mock_ch:
+                mock_ch.get_llm_config.return_value = {
+                    "api_key": "test-key",
+                    "provider": "deepseek",
+                    "model": "deepseek-reasoner",
+                    "base_url": "https://api.deepseek.com",
+                }
+                mock_ch.get_setting.return_value = False
+                svc = AIService()
+                assert svc._supports_reasoning is True
+                assert hasattr(svc, "_chat_completion_litellm")

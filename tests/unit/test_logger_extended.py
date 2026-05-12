@@ -55,11 +55,11 @@ class TestLogger(unittest.TestCase):
             file_handler = [
                 h
                 for h in logger.handlers
-                if isinstance(h, logging.handlers.RotatingFileHandler)  # type: ignore
-                and "app.log" in h.baseFilename  # type: ignore
+                if isinstance(h, logging.handlers.RotatingFileHandler)  # type: ignore[untyped]
+                and "app.log" in h.baseFilename  # type: ignore[untyped]
             ][0]
-            self.assertEqual(file_handler.maxBytes, 5 * 1024 * 1024)  # type: ignore
-            self.assertEqual(file_handler.backupCount, 5)  # type: ignore
+            self.assertEqual(file_handler.maxBytes, 5 * 1024 * 1024)  # type: ignore[untyped]
+            self.assertEqual(file_handler.backupCount, 5)  # type: ignore[untyped]
 
     def test_setup_logging_custom_config(self):
         """Test logging setup with custom configuration"""
@@ -75,11 +75,11 @@ class TestLogger(unittest.TestCase):
             file_handler = [
                 h
                 for h in logger.handlers
-                if isinstance(h, logging.handlers.RotatingFileHandler)  # type: ignore
-                and "app.log" in h.baseFilename  # type: ignore
+                if isinstance(h, logging.handlers.RotatingFileHandler)  # type: ignore[untyped]
+                and "app.log" in h.baseFilename  # type: ignore[untyped]
             ][0]
-            self.assertEqual(file_handler.maxBytes, 1 * 1024 * 1024)  # type: ignore
-            self.assertEqual(file_handler.backupCount, 2)  # type: ignore
+            self.assertEqual(file_handler.maxBytes, 1 * 1024 * 1024)  # type: ignore[untyped]
+            self.assertEqual(file_handler.backupCount, 2)  # type: ignore[untyped]
 
     def test_logger_writing(self):
         """Test that logger actually writes to file"""

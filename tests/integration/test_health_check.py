@@ -6,57 +6,130 @@ P1-6: quality_scan includes delisted stocks (list_status D).
 P1-7: API trade_cal used as gold standard for lag calculation.
 """
 
-import os
-import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
+import pytest
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from data.mixins.health_mixin import _compute_tier
 
 
 class TestHealthCacheInvalidation:
     """P1-5: Health cache must be cleared after sync operations"""
 
-    def test_sync_clears_health_cache_in_source(self):
-        """Verify sync methods contain _health_cache reset logic in data_processor.py"""
-        dp_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "data_processor.py"))
-        with open(dp_path, encoding="utf-8") as f:
-            source = f.read()
+    @pytest.mark.asyncio
+    async def test_sync_historical_clears_health_cache(self):
+        from data.data_processor import DataProcessor
 
-        assert '_health_cache = {"time": 0, "data": None}' in source, "P1-5: sync methods should reset _health_cache"
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
 
-    def test_multiple_sync_methods_clear_cache(self):
-        """Multiple sync methods should each clear _health_cache"""
-        dp_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "data_processor.py"))
-        with open(dp_path, encoding="utf-8") as f:
-            source = f.read()
+        with (
+            patch("data.data_processor.TushareClient"),
+            patch("data.data_processor.CacheManager"),
+            patch("data.data_processor.TradeCalendarService"),
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_token.return_value = "test_token"
+            mock_ch.get_sync_max_concurrent_heavy.return_value = 5
+            processor = DataProcessor()
+            processor._health_cache = {"time": 100, "data": {"status": "green"}}
 
-        count = source.count('_health_cache = {"time": 0, "data": None}')
-        assert count >= 3, f"P1-5: Expected at least 3 cache resets, found {count}"
+            with patch.object(processor.strategies["historical"], "run", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = MagicMock(added=10)
+                await processor.sync_historical_data()
+
+            assert processor._health_cache == {"time": 0, "data": None}
+
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
+
+    @pytest.mark.asyncio
+    async def test_sync_financial_clears_health_cache(self):
+        from data.data_processor import DataProcessor
+
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
+
+        with (
+            patch("data.data_processor.TushareClient"),
+            patch("data.data_processor.CacheManager"),
+            patch("data.data_processor.TradeCalendarService"),
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_token.return_value = "test_token"
+            mock_ch.get_sync_max_concurrent_heavy.return_value = 5
+            processor = DataProcessor()
+            processor._health_cache = {"time": 100, "data": {"status": "green"}}
+
+            with patch.object(processor.strategies["financial"], "run", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = MagicMock(added=5)
+                await processor.sync_financial_reports()
+
+            assert processor._health_cache == {"time": 0, "data": None}
+
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
+
+    @pytest.mark.asyncio
+    async def test_sync_comprehensive_clears_health_cache(self):
+        from data.data_processor import DataProcessor
+
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
+
+        with (
+            patch("data.data_processor.TushareClient"),
+            patch("data.data_processor.CacheManager"),
+            patch("data.data_processor.TradeCalendarService"),
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_token.return_value = "test_token"
+            mock_ch.get_sync_max_concurrent_heavy.return_value = 5
+            processor = DataProcessor()
+            processor._health_cache = {"time": 100, "data": {"status": "green"}}
+
+            with patch.object(processor.strategies["financial"], "run", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = MagicMock(added=5)
+                await processor.sync_comprehensive_fundamentals()
+
+            assert processor._health_cache == {"time": 0, "data": None}
+
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
 
 
 class TestQualityScanDelisted:
     """P1-6: quality_scan should include delisted stocks (list_status D)"""
 
-    def test_scan_includes_delisted_status(self):
-        """run_quality_scan should filter for both L and D list_status"""
-        mixin_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "data", "mixins", "health_mixin.py")
+    def test_scan_filter_includes_delisted_status(self):
+        basics_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
+                "list_status": ["L", "D", "L", "P"],
+            }
         )
-        with open(mixin_path, encoding="utf-8") as f:
-            source = f.read()
+        active_stocks = basics_df[basics_df["list_status"].isin(["L", "D"])]["ts_code"].tolist()
+        assert "000001.SZ" in active_stocks
+        assert "000002.SZ" in active_stocks
+        assert "000004.SZ" not in active_stocks
 
-        has_d_status = '"D"' in source or "'D'" in source
-        has_l_status = '"L"' in source or "'L'" in source
-
-        assert has_l_status, "P1-6: health_mixin should include list_status L"
-        assert has_d_status, "P1-6: health_mixin should include list_status D (delisted)"
+    def test_delisted_stocks_counted_in_sample(self):
+        basics_df = pd.DataFrame(
+            {
+                "ts_code": [f"{i:06d}.SZ" for i in range(1, 101)] + ["900001.SZ"],
+                "list_status": ["L"] * 100 + ["D"],
+            }
+        )
+        active_stocks = basics_df[basics_df["list_status"].isin(["L", "D"])]["ts_code"].tolist()
+        assert "900001.SZ" in active_stocks
+        assert len(active_stocks) == 101
 
 
 class TestLagDaysGoldStandard:
     """P1-7: API trade_cal used as gold standard for lag calculation"""
 
     def test_api_extends_official_dates(self):
-        """When API returns newer date, gold_standard_dates should extend"""
         official_dates = ["20240101", "20240102", "20240103"]
         api_latest = "20240105"
         local_dates = {"20240101", "20240102"}
@@ -72,7 +145,6 @@ class TestLagDaysGoldStandard:
         assert "20240105" in gold_standard
 
     def test_no_api_falls_back_to_official(self):
-        """Without API data, fall back to official dates"""
         official_dates = ["20240101", "20240102", "20240103"]
         api_latest = None
 
@@ -82,13 +154,10 @@ class TestLagDaysGoldStandard:
 
         assert gold_standard == official_dates
 
-    def test_gold_standard_in_health_check_code(self):
-        """check_data_health should use gold_standard_dates variable"""
-        mixin_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "data", "mixins", "health_mixin.py")
-        )
-        with open(mixin_path, encoding="utf-8") as f:
-            source = f.read()
+    def test_compute_tier_uses_lag_days(self):
+        result_no_lag = _compute_tier(lag_days=0, fin_fresh_ratio=0.9, missing_critical=False)
+        result_with_lag = _compute_tier(lag_days=10, fin_fresh_ratio=0.9, missing_critical=False)
+        assert result_no_lag >= result_with_lag
 
-        assert "gold_standard_dates" in source, "P1-7: health_mixin should use gold_standard_dates"
-        assert "api_latest_official" in source, "P1-7: health_mixin should track api_latest_official"
+
+import pytest

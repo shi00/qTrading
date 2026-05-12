@@ -273,8 +273,7 @@ class MarketDashboard(ft.Column):
         # Update content of all controls
         for i, item in enumerate(hot_concepts):
             if i < len(self.concepts_row.controls):
-                self._update_concept_card(self.concepts_row.controls[i], item)  # type: ignore
-
+                self._update_concept_card(self.concepts_row.controls[i], item)  # type: ignore[untyped]
         if self.page:
             self.concepts_row.update()
 

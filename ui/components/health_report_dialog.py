@@ -111,7 +111,7 @@ class MetricTile(ft.Container):
         label: str,
         value: str,
         trend_color: str = AppColors.TEXT_PRIMARY,
-        sub_text: str = None,  # type: ignore
+        sub_text: str = None,  # type: ignore[untyped]
     ):
         super().__init__()
         self.content = ft.Column(

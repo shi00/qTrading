@@ -17,8 +17,8 @@ class DashboardCard(ft.Container):
             content=content,
             padding=padding,
             expand=expand,
-            border_radius=style["border_radius"],  # type: ignore
-            bgcolor=style["bgcolor"],  # ft.Colors.SURFACE — auto-resolves  # type: ignore
+            border_radius=style["border_radius"],  # type: ignore[untyped]
+            bgcolor=style["bgcolor"],  # ft.Colors.SURFACE — auto-resolves  # type: ignore[untyped]
             border=style.get("border"),
             shadow=style.get("shadow"),
         )
@@ -181,7 +181,7 @@ class ActionChip(ft.Container):
         if is_loading:
             # Show Spinner
             color = ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.PRIMARY
-            self.content.controls[-1] = ft.ProgressRing(  # type: ignore
+            self.content.controls[-1] = ft.ProgressRing(  # type: ignore[untyped]
                 width=16,
                 height=16,
                 stroke_width=2,
@@ -195,7 +195,7 @@ class ActionChip(ft.Container):
                 0.8,
                 ft.Colors.ON_PRIMARY if self.is_primary else ft.Colors.ON_SURFACE,
             )
-            self.content.controls[-1] = ft.Icon(  # type: ignore
+            self.content.controls[-1] = ft.Icon(  # type: ignore[untyped]
                 ft.Icons.CHEVRON_RIGHT,
                 color=sub_color,
                 size=16,
@@ -217,8 +217,7 @@ class StatusBadge(ft.Container):
         super().__init__()
         content_row = [ft.Text(text, size=10, color=color, weight=ft.FontWeight.BOLD)]
         if icon:
-            content_row.insert(0, ft.Icon(icon, size=10, color=color))  # type: ignore
-
+            content_row.insert(0, ft.Icon(icon, size=10, color=color))  # type: ignore[untyped]
         self.content = ft.Row(
             content_row,
             spacing=4,

@@ -171,7 +171,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 21), 10)
 
         self.assertIsNotNone(result)
-        self.assertLess(result, datetime.date(2024, 3, 21))  # type: ignore
+        self.assertLess(result, datetime.date(2024, 3, 21))  # type: ignore[untyped]
 
     async def test_get_prev_trade_date(self):
         """Test get_prev_trade_date returns previous trading day."""
@@ -395,7 +395,7 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
         result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 22), 100)
 
         self.assertIsNotNone(result)
-        self.assertLess(result, datetime.date(2024, 3, 22))  # type: ignore
+        self.assertLess(result, datetime.date(2024, 3, 22))  # type: ignore[untyped]
 
     async def test_get_prev_trade_date_first_available(self):
         """Test get_prev_trade_date when at first available trading day."""
@@ -404,7 +404,7 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
         result = await self.service.get_prev_trade_date(datetime.date(2024, 3, 18))
 
         self.assertIsNotNone(result)
-        self.assertLess(result, datetime.date(2024, 3, 18))  # type: ignore
+        self.assertLess(result, datetime.date(2024, 3, 18))  # type: ignore[untyped]
 
     async def test_get_next_trade_date_last_available(self):
         """Test get_next_trade_date when at last available trading day."""
@@ -413,7 +413,7 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
         result = await self.service.get_next_trade_date(datetime.date(2024, 3, 22))
 
         self.assertIsNotNone(result)
-        self.assertGreater(result, datetime.date(2024, 3, 22))  # type: ignore
+        self.assertGreater(result, datetime.date(2024, 3, 22))  # type: ignore[untyped]
 
     async def test_count_trade_days_empty_range(self):
         """Test count_trade_days with no trading days in range."""
@@ -912,7 +912,7 @@ class TestTradeCalendarServiceYearBoundary(TestDatabaseBase):
         result = await self.service.get_prev_trade_date(datetime.date(2024, 1, 1))
 
         self.assertIsNotNone(result)
-        self.assertLessEqual(result.year, 2023)  # type: ignore
+        self.assertLessEqual(result.year, 2023)  # type: ignore[untyped]
 
     async def test_year_start_trading_day(self):
         """Test first trading day of year."""
@@ -921,7 +921,7 @@ class TestTradeCalendarServiceYearBoundary(TestDatabaseBase):
         result = await self.service.get_next_trade_date(datetime.date(2023, 12, 29))
 
         self.assertIsNotNone(result)
-        self.assertGreaterEqual(result, datetime.date(2024, 1, 1))  # type: ignore
+        self.assertGreaterEqual(result, datetime.date(2024, 1, 1))  # type: ignore[untyped]
 
 
 class TestTradeCalendarServicePersistence(TestDatabaseBase):

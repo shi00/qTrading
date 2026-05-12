@@ -14,7 +14,7 @@ class StockDetailDialog(ft.AlertDialog):
     Stock detail popup dialog showing comprehensive stock information.
     """
 
-    def __init__(self, stock_data: dict = None, data_processor=None):  # type: ignore
+    def __init__(self, stock_data: dict = None, data_processor=None):  # type: ignore[untyped]
         self.stock_data = stock_data or {}
         self.data_processor = data_processor
 

@@ -228,7 +228,7 @@ class DoubaoTagger:
                 elif bubbles:
                     all_text = await bubbles[-1].text_content()
                     # 用增强正则硬抓数组 [...]，跳过前面可能的胡言乱语
-                    match = re.search(r"\[\s*\{.*?\}\s*\]", all_text, re.DOTALL)  # type: ignore
+                    match = re.search(r"\[\s*\{.*?\}\s*\]", all_text, re.DOTALL)  # type: ignore[untyped]
                     potential_json = match.group(0) if match else ""
 
                 # 清洗不可见字符
@@ -267,7 +267,7 @@ class DoubaoTagger:
                     )
                     return True
 
-                count = await self.dao.upsert_ai_concepts(data)  # type: ignore
+                count = await self.dao.upsert_ai_concepts(data)  # type: ignore[untyped]
                 print(f"🎉 成果入库完成！写入 {count} 条专属概念。", flush=True)
                 return True
             except json.JSONDecodeError as e:
@@ -332,7 +332,7 @@ class DoubaoTagger:
                 else:
                     batch_limit = random.randint(30, 50)
 
-                stocks = await self.dao.get_stocks_without_ai_concepts(  # type: ignore
+                stocks = await self.dao.get_stocks_without_ai_concepts(  # type: ignore[untyped]
                     batch_limit,
                     exclude_codes,
                 )
@@ -350,7 +350,7 @@ class DoubaoTagger:
                     if not exclude_codes:
                         print("🚫 错题本重试全线溃败或已清空，彻底结束。", flush=True)
                         break
-                    stocks = await self.dao.get_stocks_without_ai_concepts(  # type: ignore
+                    stocks = await self.dao.get_stocks_without_ai_concepts(  # type: ignore[untyped]
                         20,
                         [],
                     )  # 降低批次大小攻坚

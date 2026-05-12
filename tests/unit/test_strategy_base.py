@@ -512,5 +512,147 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertIn("northbound_holding", result["missing_tables"])
 
 
+class TestPolarsBaseFilterBranches(unittest.IsolatedAsyncioTestCase):
+    def _make_dp(self):
+        dp = MagicMock()
+        dp._quality_tier = QualityTier.GOLD
+        dp.cache = MagicMock()
+        return dp
+
+    def _make_strategy(self, **kwargs):
+        from strategies.polars_base import PolarsBaseStrategy
+
+        class TestStrategy(PolarsBaseStrategy):
+            key = "test_polars"
+
+            def __init__(self):
+                super().__init__("test_name", "test_desc")
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+            def _filter_logic(self, lf, context):
+                return lf
+
+        return TestStrategy()
+
+    async def test_degraded_dependency(self):
+        s = self._make_strategy()
+        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        dp = self._make_dp()
+        context = {
+            "screening_data": data,
+            "data_processor": dp,
+            "params": {},
+            "_dependency_status": {"status": "degraded", "empty_keys": ["northbound_data"]},
+        }
+        with patch.object(
+            s,
+            "check_dependencies",
+            return_value={
+                "status": "degraded",
+                "empty_keys": ["northbound_data"],
+                "missing_keys": [],
+                "missing_tables": [],
+            },
+        ):
+            with patch("strategies.ai_mixin.AIService") as mock_ai:
+                mock_ai.return_value.is_cloud_available.return_value = False
+                result = await s.filter(context)
+                self.assertEqual(len(result), 1)
+
+    async def test_fundamental_coverage_unavailable(self):
+        s = self._make_strategy(requires_fundamental_coverage=True)
+        dp = self._make_dp()
+        context = {"data_processor": dp, "params": {}}
+        with patch.object(
+            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
+        ):
+            result = await s.filter(context)
+            self.assertTrue(result.empty)
+
+    async def test_fundamental_coverage_available(self):
+        s = self._make_strategy(requires_fundamental_coverage=True)
+        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        dp = self._make_dp()
+        context = {"fundamental_screening_data": data, "data_processor": dp, "params": {}}
+        with patch.object(
+            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
+        ):
+            with patch("strategies.ai_mixin.AIService") as mock_ai:
+                mock_ai.return_value.is_cloud_available.return_value = False
+                result = await s.filter(context)
+                self.assertEqual(len(result), 1)
+
+    async def test_screening_data_fallback_to_data_key(self):
+        s = self._make_strategy()
+        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        dp = self._make_dp()
+        context = {"data": data, "data_processor": dp, "params": {}}
+        with patch.object(
+            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
+        ):
+            with patch("strategies.ai_mixin.AIService") as mock_ai:
+                mock_ai.return_value.is_cloud_available.return_value = False
+                result = await s.filter(context)
+                self.assertEqual(len(result), 1)
+
+    async def test_filter_logic_exception_reraises(self):
+        from strategies.polars_base import PolarsBaseStrategy
+
+        class FailStrategy(PolarsBaseStrategy):
+            key = "fail_polars"
+
+            def __init__(self):
+                super().__init__("fail_name", "fail_desc")
+
+            def _filter_logic(self, lf, context):
+                raise ValueError("test error")
+
+        s = FailStrategy()
+        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        dp = self._make_dp()
+        context = {"screening_data": data, "data_processor": dp, "params": {}}
+        with patch.object(
+            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                await s.filter(context)
+            self.assertIn("test error", str(cm.exception))
+
+    async def test_empty_candidates_returns_empty(self):
+        from strategies.polars_base import PolarsBaseStrategy
+
+        class EmptyStrategy(PolarsBaseStrategy):
+            key = "empty_polars"
+
+            def __init__(self):
+                super().__init__("empty_name", "empty_desc")
+
+            def _filter_logic(self, lf, context):
+                return lf.filter(pl.lit(False))
+
+        import polars as pl
+
+        s = EmptyStrategy()
+        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        dp = self._make_dp()
+        context = {"screening_data": data, "data_processor": dp, "params": {}}
+        with patch.object(
+            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
+        ):
+            result = await s.filter(context)
+            self.assertTrue(result.empty)
+
+    async def test_no_screening_data_returns_empty(self):
+        s = self._make_strategy()
+        dp = self._make_dp()
+        context = {"data_processor": dp, "params": {}}
+        with patch.object(
+            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
+        ):
+            result = await s.filter(context)
+            self.assertTrue(result.empty)
+
+
 if __name__ == "__main__":
     unittest.main()

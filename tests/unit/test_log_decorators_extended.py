@@ -74,7 +74,7 @@ class TestDataSanitizer:
     def test_sanitize_token_short(self):
         assert DataSanitizer.sanitize_token("short") == "***"
         assert DataSanitizer.sanitize_token("") == "***"
-        assert DataSanitizer.sanitize_token(None) == "***"  # type: ignore
+        assert DataSanitizer.sanitize_token(None) == "***"  # type: ignore[untyped]
 
     def test_sanitize_dataframe_normal(self):
         df = pd.DataFrame({"col1": [1, 2, 3], "col2": [4, 5, 6]})

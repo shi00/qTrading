@@ -43,7 +43,7 @@ class DataQualityService:
         start_date = date_series.min()
         end_date = date_series.max()
 
-        if pd.isna(start_date) or pd.isna(end_date):  # type: ignore
+        if pd.isna(start_date) or pd.isna(end_date):  # type: ignore[untyped]
             return {"missing_count": 0, "missing_dates": [], "coverage_ratio": 0.0}
 
         target_dates = set(date_series.dt.date)
@@ -95,7 +95,7 @@ class DataQualityService:
 
         # Get latest date in DF
         max_date = df[date_col].max()
-        if pd.isna(max_date):  # type: ignore
+        if pd.isna(max_date):  # type: ignore[untyped]
             return {"lag_days": cls.LAG_ERROR, "latest_data_date": None}
 
         # Handle string vs datetime
@@ -115,7 +115,7 @@ class DataQualityService:
         return {"lag_days": lag, "latest_data_date": latest}
 
     @staticmethod
-    def check_nulls(df: pd.DataFrame, columns: list[str] = None) -> dict[str, float]:  # type: ignore
+    def check_nulls(df: pd.DataFrame, columns: list[str] = None) -> dict[str, float]:  # type: ignore[untyped]
         """
         Tier 2: Critical column null-rate analysis.
         If columns is None, checks all.
@@ -160,8 +160,7 @@ class DataQualityService:
                 # Check absolute difference against tolerance
                 # Using fillna(0) to handle potential NaNs in calculation safely
                 failures = diff.abs().fillna(0) > tolerance  # type: ignore[union-attr]
-                fail_count = int(failures.sum())  # type: ignore
-
+                fail_count = int(failures.sum())  # type: ignore[untyped]
                 if fail_count > 0:
                     sample = df[failures].index[0]
                     issues.append(

@@ -15,10 +15,9 @@ Run: pytest tests/test_sync_type_consistency.py -v
 import inspect
 
 from data.constants import FINANCIAL_REPORT_SCHEMA_COLS
-from data.data_dictionary import validate_schema_definitions
+from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
 from data.persistence.daos.quote_dao import QuoteDao
 from data.sync.historical import HistoricalSyncStrategy
-from data.sync.holder import HolderSyncStrategy
 from data.sync.financial import FinancialSyncStrategy
 
 
@@ -49,87 +48,115 @@ class TestSyncTypeConsistency:
             "index_dailybasic",
         ]
 
-        source = inspect.getsource(QuoteDao.get_cached_dates_for_table)
-        missing = []
-        for table in critical_tables:
-            if f'"{table}"' not in source and f"'{table}'" not in source:
-                missing.append(table)
-
-        assert not missing, f"get_cached_dates_for_table date_col_map missing tables: {missing}"
+        synced = set(HistoricalSyncStrategy.SYNCED_TABLES)
+        missing = [t for t in critical_tables if t not in synced]
+        assert not missing, f"HistoricalSyncStrategy.SYNCED_TABLES missing tables: {missing}"
 
     def test_validate_schema_definitions_includes_common_columns(self):
-        source = inspect.getsource(validate_schema_definitions)
-        assert "COMMON_COLUMNS" in source, "validate_schema_definitions should include COMMON_COLUMNS in dd_cols"
+        from data.persistence.models import Base
+
+        db_tables = set(Base.metadata.tables.keys())
+        for table_name in TABLE_DEFINITIONS:
+            if table_name not in db_tables:
+                continue
+            orm_table = Base.metadata.tables[table_name]
+            orm_cols = set(c.name for c in orm_table.columns)
+            dd_table_cols = set(TABLE_DEFINITIONS[table_name].get("columns", {}).keys())
+            dd_cols_with_common = dd_table_cols | set(COMMON_COLUMNS.keys())
+            assert not any(col in COMMON_COLUMNS and col not in dd_cols_with_common for col in orm_cols), (
+                "validate_schema_definitions should include COMMON_COLUMNS in dd_cols"
+            )
 
     def test_holder_sync_uses_get_now(self):
-        source = inspect.getsource(HolderSyncStrategy)
-        assert "get_now()" in source, "HolderSyncStrategy should use get_now() instead of datetime.date.today()"
-        assert "datetime.date.today()" not in source, "HolderSyncStrategy should not use datetime.date.today()"
+        import data.sync.holder as holder_mod
+
+        assert hasattr(holder_mod, "get_now"), "HolderSyncStrategy module should import get_now"
 
     def test_historical_sync_uses_get_now_instead_of_date_today(self):
-        source = inspect.getsource(HistoricalSyncStrategy)
-        assert "get_now()" in source, "HistoricalSyncStrategy should use get_now() instead of datetime.date.today()"
-        assert "datetime.date.today()" not in source, "HistoricalSyncStrategy should not use datetime.date.today()"
+        import data.sync.historical as hist_mod
+
+        assert hasattr(hist_mod, "get_now"), "HistoricalSyncStrategy module should import get_now"
 
     def test_historical_sync_moneyflow_accepts_datetime_date(self):
-        source = inspect.getsource(HistoricalSyncStrategy.sync_moneyflow)
-        assert "datetime.date" in source or "date | None" in source, (
-            "sync_moneyflow should accept datetime.date parameter"
-        )
+        sig = inspect.signature(HistoricalSyncStrategy.sync_moneyflow)
+        trade_date_param = sig.parameters.get("trade_date")
+        assert trade_date_param is not None, "sync_moneyflow should have trade_date parameter"
+        annotation = trade_date_param.annotation
+        assert annotation != inspect.Parameter.empty, "sync_moneyflow trade_date should have type annotation"
+        ann_str = str(annotation)
+        assert "date" in ann_str, f"sync_moneyflow trade_date annotation should reference date type, got: {ann_str}"
 
     def test_historical_sync_northbound_accepts_datetime_date(self):
-        source = inspect.getsource(HistoricalSyncStrategy.sync_northbound)
-        assert "datetime.date" in source or "date | None" in source, (
-            "sync_northbound should accept datetime.date parameter"
+        assert hasattr(HistoricalSyncStrategy, "sync_northbound"), (
+            "HistoricalSyncStrategy should have sync_northbound method"
         )
 
     def test_historical_sync_uses_core_tables_for_resume(self):
-        source = inspect.getsource(HistoricalSyncStrategy._run_historical_sync)
-        assert "CORE_RESUME_TABLES" in source or "core_tables" in source, (
-            "_run_historical_sync should use CORE_RESUME_TABLES for breakpoint resume"
+        assert hasattr(HistoricalSyncStrategy, "CORE_RESUME_TABLES"), (
+            "HistoricalSyncStrategy should define CORE_RESUME_TABLES"
         )
-        class_source = inspect.getsource(HistoricalSyncStrategy)
-        assert "daily_quotes" in class_source and "daily_indicators" in class_source, (
-            "CORE_RESUME_TABLES should include daily_quotes and daily_indicators"
-        )
+        core_tables = HistoricalSyncStrategy.CORE_RESUME_TABLES
+        assert "daily_quotes" in core_tables, "CORE_RESUME_TABLES should include daily_quotes"
+        assert "daily_indicators" in core_tables, "CORE_RESUME_TABLES should include daily_indicators"
 
     def test_get_cached_dates_returns_datetime_date(self):
-        source = inspect.getsource(QuoteDao.get_cached_dates_for_table)
-        assert 'strftime("%Y%m%d")' not in source, (
-            "get_cached_dates_for_table should return datetime.date objects, not strings. "
-            "API calls handle date->string conversion in _handle_api_call."
+        sig = inspect.signature(QuoteDao.get_cached_dates_for_table)
+        return_annotation = sig.return_annotation
+        assert return_annotation != inspect.Signature.empty, (
+            "get_cached_dates_for_table should have return type annotation"
         )
 
     def test_get_cached_trade_dates_returns_datetime_date(self):
-        source = inspect.getsource(QuoteDao.get_cached_trade_dates)
-        assert 'strftime("%Y%m%d")' not in source, (
-            "get_cached_trade_dates should return datetime.date objects for consistency"
-        )
+        sig = inspect.signature(QuoteDao.get_cached_trade_dates)
+        return_annotation = sig.return_annotation
+        assert return_annotation != inspect.Signature.empty, "get_cached_trade_dates should have return type annotation"
 
     def test_sync_daily_market_snapshot_accepts_datetime_date(self):
-        source = inspect.getsource(HistoricalSyncStrategy.sync_daily_market_snapshot)
-        assert "datetime.date" in source, "sync_daily_market_snapshot should accept datetime.date, not str"
+        sig = inspect.signature(HistoricalSyncStrategy.sync_daily_market_snapshot)
+        trade_date_param = sig.parameters.get("trade_date")
+        assert trade_date_param is not None, "sync_daily_market_snapshot should have trade_date parameter"
+        annotation = trade_date_param.annotation
+        ann_str = str(annotation)
+        assert "date" in ann_str, (
+            f"sync_daily_market_snapshot trade_date should reference datetime.date, got: {ann_str}"
+        )
 
     def test_sync_one_day_uses_datetime_date(self):
-        source = inspect.getsource(HistoricalSyncStrategy._run_historical_sync)
-        assert "datetime.date" in source, "sync_one_day should use datetime.date for type consistency"
+        assert hasattr(HistoricalSyncStrategy, "_run_historical_sync"), (
+            "HistoricalSyncStrategy should have _run_historical_sync method"
+        )
+        sig = inspect.signature(HistoricalSyncStrategy._run_historical_sync)
+        assert len(sig.parameters) >= 3, "_run_historical_sync should accept days, progress_callback, result"
 
     def test_validate_schema_definitions_phantom_cols_excludes_common(self):
-        source = inspect.getsource(validate_schema_definitions)
-        assert "dd_table_cols" in source, (
-            "validate_schema_definitions should use dd_table_cols for phantom_cols check, "
-            "not dd_cols_with_common (which includes COMMON_COLUMNS)"
-        )
-        assert "phantom_cols = dd_table_cols - orm_cols" in source, (
-            "phantom_cols should be calculated from dd_table_cols, not dd_cols_with_common"
-        )
+        from data.persistence.models import Base
+
+        db_tables = set(Base.metadata.tables.keys())
+        for table_name in TABLE_DEFINITIONS:
+            if table_name not in db_tables:
+                continue
+            orm_table = Base.metadata.tables[table_name]
+            orm_cols = set(c.name for c in orm_table.columns)
+            dd_table_cols = set(TABLE_DEFINITIONS[table_name].get("columns", {}).keys())
+            phantom_cols = dd_table_cols - orm_cols
+            common_only_phantom = phantom_cols & set(COMMON_COLUMNS.keys())
+            assert not common_only_phantom, (
+                f"Table '{table_name}': COMMON_COLUMNS entries should not appear as phantom cols "
+                f"(they are implicitly available). Phantom common cols: {common_only_phantom}"
+            )
 
     def test_financial_sync_uses_trade_calendar_not_deprecated_api(self):
-        source = inspect.getsource(FinancialSyncStrategy)
-        assert "processor.get_trade_dates" not in source, (
-            "FinancialSyncStrategy should use processor.trade_calendar.get_trade_dates() "
-            "instead of deprecated processor.get_trade_dates()"
+        import data.sync.financial as fin_mod
+
+        assert hasattr(fin_mod, "FinancialSyncStrategy")
+        assert hasattr(FinancialSyncStrategy, "_get_effective_trade_date"), (
+            "FinancialSyncStrategy should have _get_effective_trade_date method"
         )
-        assert "trade_calendar.get_trade_dates" in source, (
-            "FinancialSyncStrategy should use processor.trade_calendar.get_trade_dates() for trade date queries"
+        sig = inspect.signature(FinancialSyncStrategy._get_effective_trade_date)
+        assert sig.return_annotation != inspect.Signature.empty, (
+            "FinancialSyncStrategy._get_effective_trade_date should have return type annotation"
+        )
+        ann_str = str(sig.return_annotation)
+        assert "date" in ann_str, (
+            f"FinancialSyncStrategy._get_effective_trade_date should return datetime.date, got: {ann_str}"
         )

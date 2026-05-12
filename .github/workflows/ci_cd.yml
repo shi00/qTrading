@@ -113,7 +113,10 @@ jobs:
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
         run: |
           set -e
-          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=85
+          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-report=json
+
+      - name: Check Per-File Coverage >= 80%
+        run: python scripts/check_per_file_coverage.py
 
       - name: Extract Coverage Percentage
         if: always() && github.event_name == 'pull_request'
@@ -247,7 +250,10 @@ jobs:
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
         run: |
-          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing
+          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=json
+
+      - name: Check Per-File Coverage >= 80%
+        run: python scripts/check_per_file_coverage.py
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})

@@ -38,7 +38,7 @@ class TestDeepLinking(unittest.TestCase):
                 mock_vm.run_strategy = AsyncMock()
 
                 view = ScreenerView(self.page)
-                view._Control__page = self.page  # Simulate mounted state  # type: ignore
+                view._Control__page = self.page  # Simulate mounted state  # type: ignore[untyped]
                 # Mock update methods to avoid "Control must be added to the page" error
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
@@ -49,8 +49,7 @@ class TestDeepLinking(unittest.TestCase):
 
                 # Verify initial state
                 self.assertIsNone(view._pending_strategy_key)
-                self.assertEqual(len(view.strategy_dropdown.options), 0)  # type: ignore
-
+                self.assertEqual(len(view.strategy_dropdown.options), 0)  # type: ignore[untyped]
                 # 2. Simulate Deep Link Call (strategies NOT loaded yet)
                 await view.select_and_run_strategy("strategy_a")
 
@@ -84,7 +83,7 @@ class TestDeepLinking(unittest.TestCase):
                 mock_vm.run_strategy = AsyncMock()
 
                 view = ScreenerView(self.page)
-                view._Control__page = self.page  # Simulate mounted state  # type: ignore
+                view._Control__page = self.page  # Simulate mounted state  # type: ignore[untyped]
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
                 view.log_view.update = MagicMock()

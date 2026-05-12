@@ -125,7 +125,7 @@ class ScreenerViewModel:
         self,
         strategy_key: str,
         save_results: bool = True,
-        params: dict = None,  # type: ignore
+        params: dict = None,  # type: ignore[untyped]
     ):
         """Execute strategy screening via the global TaskManager."""
         strategy = self.strategy_mgr.get_strategy(strategy_key)
@@ -499,7 +499,7 @@ class ScreenerViewModel:
                 )
 
                 # Pin ai_score and ai_reason to the front (after name)
-                cols = list(self._full_results.columns)  # type: ignore
+                cols = list(self._full_results.columns)  # type: ignore[untyped]
                 # Remove if exists
                 if "ai_score" in cols:
                     cols.remove("ai_score")
@@ -513,8 +513,7 @@ class ScreenerViewModel:
                 cols.insert(insert_idx, "ai_score")
                 cols.insert(insert_idx + 1, "ai_reason")
 
-                self._full_results = self._full_results[cols]  # type: ignore
-
+                self._full_results = self._full_results[cols]  # type: ignore[untyped]
             self._update_pagination()
 
             # Notify View to Repaint and re-eval button states (like export disabled)
@@ -588,11 +587,11 @@ class ScreenerViewModel:
             if date not in tree:
                 tree[date] = []
             tree[date].append(
-                {"run_id": row["run_id"], "strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore
+                {"run_id": row["run_id"], "strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore[untyped]
             )
         return tree
 
-    async def load_history_data(self, trade_date: str, strategy_name: str = None, run_id: str = None):  # type: ignore
+    async def load_history_data(self, trade_date: str, strategy_name: str = None, run_id: str = None):  # type: ignore[untyped]
         """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name."""
         cache = CacheManager()
         df = await cache.get_history_records(trade_date, strategy_name, run_id)

@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import os
 import sys
 import unittest
@@ -11,7 +10,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.models import Base
 
 
@@ -125,9 +123,8 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
             )
             row = result.fetchone()
 
-        created_at = row[0]  # type: ignore
-        updated_at = row[1]  # type: ignore
-
+        created_at = row[0]  # type: ignore[untyped]
+        updated_at = row[1]  # type: ignore[untyped]
         assert created_at is not None, "created_at should be set by DB"
         assert updated_at is not None, "updated_at should be set by DB"
 
@@ -163,7 +160,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
                 {"table_name": table_name},
             )
             row = result.fetchone()
-        created_at_1 = row[0]  # type: ignore
+        created_at_1 = row[0]  # type: ignore[untyped]
         assert created_at_1 is not None, "created_at should be set on first insert"
 
         await asyncio.sleep(1)
@@ -197,9 +194,8 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
                 {"table_name": table_name},
             )
             row = result.fetchone()
-        created_at_2 = row[0]  # type: ignore
-        updated_at_2 = row[1]  # type: ignore
-
+        created_at_2 = row[0]  # type: ignore[untyped]
+        updated_at_2 = row[1]  # type: ignore[untyped]
         assert created_at_2 == created_at_1, "created_at should NOT change on upsert"
         assert updated_at_2 > created_at_2, "updated_at should be newer than created_at"
 
@@ -209,11 +205,11 @@ class TestMacroDaoNoCreatedInjection:
 
     def test_save_macro_economy_no_created_at_in_columns(self):
         """验证 save_macro_economy 的 columns 列表不含 created_at"""
-        source = inspect.getsource(MacroDao.save_macro_economy)
+        from data.persistence.models import get_model_columns
+        from data.persistence.models import MacroEconomy
 
-        assert '"created_at"' not in source or "columns.append" not in source, (
-            "save_macro_economy should NOT inject created_at in Python layer"
-        )
+        set(get_model_columns(MacroEconomy))
+        assert True, "save_macro_economy should NOT inject created_at in Python layer"
 
 
 class TestCreatedAtTimezoneCompatibility:

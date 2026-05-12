@@ -132,7 +132,7 @@ class DataSanitizer:
         return msg
 
     @staticmethod
-    def sanitize_dict(data: dict, sensitive_keys: list = None) -> dict:  # type: ignore
+    def sanitize_dict(data: dict, sensitive_keys: list = None) -> dict:  # type: ignore[untyped]
         """
         字典脱敏处理
 
@@ -163,7 +163,7 @@ class DataSanitizer:
         return result
 
     @staticmethod
-    def sanitize_args(*args, sensitive_patterns: list = None, **kwargs) -> tuple:  # type: ignore
+    def sanitize_args(*args, sensitive_patterns: list = None, **kwargs) -> tuple:  # type: ignore[untyped]
         """
         函数参数脱敏
 

@@ -6,8 +6,9 @@ Tests for TaskManager service.
 
 import asyncio
 import datetime
-import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from services.task_manager import (
     TERMINAL_STATUSES,
@@ -15,66 +16,60 @@ from services.task_manager import (
     TaskManager,
     TaskStatus,
 )
+from tests.conftest import reset_singleton as _reset_singleton_ctx
 
 
-class TestTaskStatus(unittest.TestCase):
-    """测试任务状态枚举"""
+@pytest.fixture(autouse=True)
+def _reset_task_manager_singleton():
+    with _reset_singleton_ctx(TaskManager):
+        yield
 
+
+class TestTaskStatus:
     def test_status_values(self):
-        """状态值正确"""
-        self.assertEqual(TaskStatus.QUEUED.value, "QUEUED")
-        self.assertEqual(TaskStatus.RUNNING.value, "RUNNING")
-        self.assertEqual(TaskStatus.COMPLETED.value, "COMPLETED")
-        self.assertEqual(TaskStatus.FAILED.value, "FAILED")
-        self.assertEqual(TaskStatus.CANCELLED.value, "CANCELLED")
-        self.assertEqual(TaskStatus.INTERRUPTED.value, "INTERRUPTED")
+        assert TaskStatus.QUEUED.value == "QUEUED"
+        assert TaskStatus.RUNNING.value == "RUNNING"
+        assert TaskStatus.COMPLETED.value == "COMPLETED"
+        assert TaskStatus.FAILED.value == "FAILED"
+        assert TaskStatus.CANCELLED.value == "CANCELLED"
+        assert TaskStatus.INTERRUPTED.value == "INTERRUPTED"
 
     def test_terminal_statuses(self):
-        """终态状态集合"""
-        self.assertIn(TaskStatus.COMPLETED, TERMINAL_STATUSES)
-        self.assertIn(TaskStatus.FAILED, TERMINAL_STATUSES)
-        self.assertIn(TaskStatus.CANCELLED, TERMINAL_STATUSES)
-        self.assertIn(TaskStatus.INTERRUPTED, TERMINAL_STATUSES)
-        self.assertNotIn(TaskStatus.QUEUED, TERMINAL_STATUSES)
-        self.assertNotIn(TaskStatus.RUNNING, TERMINAL_STATUSES)
+        assert TaskStatus.COMPLETED in TERMINAL_STATUSES
+        assert TaskStatus.FAILED in TERMINAL_STATUSES
+        assert TaskStatus.CANCELLED in TERMINAL_STATUSES
+        assert TaskStatus.INTERRUPTED in TERMINAL_STATUSES
+        assert TaskStatus.QUEUED not in TERMINAL_STATUSES
+        assert TaskStatus.RUNNING not in TERMINAL_STATUSES
 
 
-class TestAppTask(unittest.TestCase):
-    """测试任务数据类"""
-
+class TestAppTask:
     def test_task_creation(self):
-        """任务创建"""
         task = AppTask(name="Test Task", task_type="Test")
-
-        self.assertEqual(task.name, "Test Task")
-        self.assertEqual(task.task_type, "Test")
-        self.assertEqual(task.status, TaskStatus.QUEUED)
-        self.assertEqual(task.progress, 0.0)
-        self.assertIsNotNone(task.id)
-        self.assertIsNotNone(task.created_at)
+        assert task.name == "Test Task"
+        assert task.task_type == "Test"
+        assert task.status == TaskStatus.QUEUED
+        assert task.progress == 0.0
+        assert task.id is not None
+        assert task.created_at is not None
 
     def test_task_default_values(self):
-        """默认值"""
         task = AppTask()
-
-        self.assertEqual(task.name, "Unknown Task")
-        self.assertEqual(task.task_type, "System")
-        self.assertEqual(task.description, "Waiting...")
-        self.assertFalse(task.cancellable)
-        self.assertIsNone(task.started_at)
-        self.assertIsNone(task.completed_at)
-        self.assertIsNone(task.result)
-        self.assertEqual(task.error, "")
+        assert task.name == "Unknown Task"
+        assert task.task_type == "System"
+        assert task.description == "Waiting..."
+        assert task.cancellable is False
+        assert task.started_at is None
+        assert task.completed_at is None
+        assert task.result is None
+        assert task.error == ""
 
     def test_task_id_uniqueness(self):
-        """ID 唯一性"""
         task1 = AppTask()
         task2 = AppTask()
-
-        self.assertNotEqual(task1.id, task2.id)
+        assert task1.id != task2.id
 
     def test_task_custom_values(self):
-        """自定义值"""
         now = datetime.datetime.now()
         task = AppTask(
             id="custom_id",
@@ -87,28 +82,19 @@ class TestAppTask(unittest.TestCase):
             created_at=now,
             started_at=now,
         )
+        assert task.id == "custom_id"
+        assert task.status == TaskStatus.RUNNING
+        assert task.progress == 0.5
+        assert task.cancellable is True
 
-        self.assertEqual(task.id, "custom_id")
-        self.assertEqual(task.status, TaskStatus.RUNNING)
-        self.assertEqual(task.progress, 0.5)
-        self.assertTrue(task.cancellable)
 
-
-class TestTaskManagerSingleton(unittest.TestCase):
-    """测试任务管理器单例模式"""
-
-    def setUp(self):
-        TaskManager._instance = None
-
+class TestTaskManagerSingleton:
     def test_singleton(self):
-        """单例模式"""
         manager1 = TaskManager()
         manager2 = TaskManager()
-
-        self.assertIs(manager1, manager2)
+        assert manager1 is manager2
 
     def test_singleton_thread_safety(self):
-        """单例线程安全"""
         import threading
 
         instances = []
@@ -122,55 +108,45 @@ class TestTaskManagerSingleton(unittest.TestCase):
         for t in threads:
             t.join()
 
-        self.assertTrue(all(inst is instances[0] for inst in instances))
+        assert all(inst is instances[0] for inst in instances)
 
 
-class TestTaskManagerSubscribe(unittest.TestCase):
-    """测试任务管理器订阅机制"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-
+class TestTaskManagerSubscribe:
     def test_subscribe(self):
-        """订阅回调"""
+        manager = TaskManager()
         callback = MagicMock()
-        self.manager.subscribe(callback)
-
-        self.assertIn(callback, self.manager._subscribers)
+        manager.subscribe(callback)
+        assert callback in manager._subscribers
 
     def test_unsubscribe(self):
-        """取消订阅"""
+        manager = TaskManager()
         callback = MagicMock()
-        self.manager.subscribe(callback)
-        self.manager.unsubscribe(callback)
-
-        self.assertNotIn(callback, self.manager._subscribers)
+        manager.subscribe(callback)
+        manager.unsubscribe(callback)
+        assert callback not in manager._subscribers
 
     def test_notify_subscribers(self):
-        """通知订阅者"""
+        manager = TaskManager()
         callback = MagicMock()
-        self.manager.subscribe(callback)
+        manager.subscribe(callback)
         callback.reset_mock()
-
-        self.manager._notify_subscribers()
-
+        manager._notify_subscribers()
         callback.assert_called_once()
 
     def test_notify_multiple_subscribers(self):
-        """通知多个订阅者"""
+        manager = TaskManager()
         callbacks = [MagicMock() for _ in range(3)]
         for cb in callbacks:
-            self.manager.subscribe(cb)
+            manager.subscribe(cb)
             cb.reset_mock()
-
-        self.manager._notify_subscribers()
-
+        manager._notify_subscribers()
         for cb in callbacks:
-            self.assertEqual(cb.call_count, 1)
+            assert cb.call_count == 1
 
-    def test_subscriber_disabled_after_repeated_callback_failures(self):
-        """O-7: 连续失败达到阈值后自动禁用订阅者，避免无限重试刷日志。"""
+    def test_subscriber_disabled_after_repeated_callback_failures(self, caplog):
+        import logging
+
+        manager = TaskManager()
         state = {"calls": 0}
 
         def flaky_callback(_tasks):
@@ -178,111 +154,82 @@ class TestTaskManagerSubscribe(unittest.TestCase):
             if state["calls"] > 1:
                 raise RuntimeError("boom")
 
-        self.manager.subscribe(flaky_callback)  # first call succeeds on initial push
+        manager.subscribe(flaky_callback)
 
-        with self.assertLogs("services.task_manager", level="WARNING") as cm:
-            self.manager._notify_subscribers()  # fail 1
-            self.manager._notify_subscribers()  # fail 2
-            self.manager._notify_subscribers()  # fail 3 -> disabled
+        with caplog.at_level(logging.WARNING, logger="services.task_manager"):
+            manager._notify_subscribers()
+            manager._notify_subscribers()
+            manager._notify_subscribers()
 
-        self.assertNotIn(flaky_callback, self.manager._subscribers)
-        self.assertTrue(any("Subscriber disabled" in msg for msg in cm.output))
+        assert flaky_callback not in manager._subscribers
+        assert any("Subscriber disabled" in r.message for r in caplog.records)
 
     def test_subscriber_error_count_resets_after_success(self):
-        """O-7: 失败后若恢复成功，应重置错误计数，避免误禁用。"""
+        manager = TaskManager()
         callback = MagicMock(side_effect=[None, RuntimeError("tmp"), None, None])
-        self.manager.subscribe(callback)  # first None from side_effect
+        manager.subscribe(callback)
 
-        self.manager._notify_subscribers()  # RuntimeError -> count = 1
-        self.assertEqual(self.manager._subscriber_error_counts.get(callback), 1)
-        self.manager._notify_subscribers()  # success -> reset to 0
+        manager._notify_subscribers()
+        assert manager._subscriber_error_counts.get(callback) == 1
+        manager._notify_subscribers()
+        assert manager._subscriber_error_counts.get(callback) == 0
+        assert callback in manager._subscribers
 
-        self.assertEqual(self.manager._subscriber_error_counts.get(callback), 0)
-        self.assertIn(callback, self.manager._subscribers)
 
-
-class TestTaskManagerGetTasks(unittest.TestCase):
-    """测试任务管理器查询功能"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-
+class TestTaskManagerGetTasks:
     def test_get_all_tasks_empty(self):
-        """空任务列表"""
-        tasks = self.manager.get_all_tasks()
-
-        self.assertEqual(len(tasks), 0)
+        manager = TaskManager()
+        tasks = manager.get_all_tasks()
+        assert len(tasks) == 0
 
     def test_get_task_not_found(self):
-        """查询不存在的任务"""
-        task = self.manager.get_task("nonexistent")
-
-        self.assertIsNone(task)
+        manager = TaskManager()
+        task = manager.get_task("nonexistent")
+        assert task is None
 
     def test_get_all_tasks_with_tasks(self):
-        """查询所有任务"""
+        manager = TaskManager()
         task1 = AppTask(id="task1", name="Task 1")
         task2 = AppTask(id="task2", name="Task 2")
-        self.manager._tasks = {"task1": task1, "task2": task2}
-
-        tasks = self.manager.get_all_tasks()
-
-        self.assertEqual(len(tasks), 2)
+        manager._tasks = {"task1": task1, "task2": task2}
+        tasks = manager.get_all_tasks()
+        assert len(tasks) == 2
         task_ids = [t.id for t in tasks]
-        self.assertIn("task1", task_ids)
-        self.assertIn("task2", task_ids)
+        assert "task1" in task_ids
+        assert "task2" in task_ids
 
 
-class TestTaskManagerUpdateProgress(unittest.TestCase):
-    """测试任务管理器进度更新"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-
+class TestTaskManagerUpdateProgress:
     def test_update_progress_running_task(self):
-        """更新运行中任务进度"""
+        manager = TaskManager()
         task = AppTask(id="task1", name="Test", status=TaskStatus.RUNNING)
-        self.manager._tasks = {"task1": task}
-
-        self.manager.update_progress("task1", 0.5, "Half done")
-
-        self.assertEqual(task.progress, 0.5)
-        self.assertEqual(task.description, "Half done")
+        manager._tasks = {"task1": task}
+        manager.update_progress("task1", 0.5, "Half done")
+        assert task.progress == 0.5
+        assert task.description == "Half done"
 
     def test_update_progress_clamp_values(self):
-        """进度值钳制"""
+        manager = TaskManager()
         task = AppTask(id="task1", name="Test", status=TaskStatus.RUNNING)
-        self.manager._tasks = {"task1": task}
-
-        self.manager.update_progress("task1", 1.5)
-        self.assertEqual(task.progress, 1.0)
-
-        self.manager.update_progress("task1", -0.5)
-        self.assertEqual(task.progress, 0.0)
+        manager._tasks = {"task1": task}
+        manager.update_progress("task1", 1.5)
+        assert task.progress == 1.0
+        manager.update_progress("task1", -0.5)
+        assert task.progress == 0.0
 
     def test_update_progress_non_running_task(self):
-        """非运行任务不更新"""
+        manager = TaskManager()
         task = AppTask(id="task1", name="Test", status=TaskStatus.QUEUED)
-        self.manager._tasks = {"task1": task}
-
-        self.manager.update_progress("task1", 0.5)
-
-        self.assertEqual(task.progress, 0.0)
+        manager._tasks = {"task1": task}
+        manager.update_progress("task1", 0.5)
+        assert task.progress == 0.0
 
 
-class TestTaskManagerCancel(unittest.TestCase):
-    """测试任务管理器取消功能"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-        self.manager._loop = MagicMock()
-        self.manager._loop.is_running.return_value = True
-
+class TestTaskManagerCancel:
     def test_cancel_cancellable_task(self):
-        """取消可取消任务"""
+        manager = TaskManager()
+        manager._loop = MagicMock()
+        manager._loop.is_running.return_value = True
         task = AppTask(
             id="task1",
             name="Test",
@@ -290,77 +237,57 @@ class TestTaskManagerCancel(unittest.TestCase):
             cancellable=True,
         )
         task._cancel_event = asyncio.Event()
-        self.manager._tasks = {"task1": task}
-
-        self.manager._cancel_task_impl("task1")
-
-        self.assertEqual(task.status, TaskStatus.CANCELLED)
+        manager._tasks = {"task1": task}
+        manager._cancel_task_impl("task1")
+        assert task.status == TaskStatus.CANCELLED
 
     def test_cancel_non_cancellable_task(self):
-        """不可取消任务"""
+        manager = TaskManager()
         task = AppTask(
             id="task1",
             name="Test",
             status=TaskStatus.RUNNING,
             cancellable=False,
         )
-        self.manager._tasks = {"task1": task}
-
-        self.manager._cancel_task_impl("task1")
-
-        self.assertEqual(task.status, TaskStatus.RUNNING)
+        manager._tasks = {"task1": task}
+        manager._cancel_task_impl("task1")
+        assert task.status == TaskStatus.RUNNING
 
     def test_cancel_nonexistent_task(self):
-        """取消不存在的任务"""
-        self.manager._cancel_task_impl("nonexistent")
+        manager = TaskManager()
+        manager._cancel_task_impl("nonexistent")
 
     def test_cancel_finished_task(self):
-        """取消已完成任务"""
+        manager = TaskManager()
         task = AppTask(
             id="task1",
             name="Test",
             status=TaskStatus.COMPLETED,
             cancellable=True,
         )
-        self.manager._tasks = {"task1": task}
-
-        self.manager._cancel_task_impl("task1")
-
-        self.assertEqual(task.status, TaskStatus.COMPLETED)
+        manager._tasks = {"task1": task}
+        manager._cancel_task_impl("task1")
+        assert task.status == TaskStatus.COMPLETED
 
 
-class TestTaskManagerClearFinished(unittest.TestCase):
-    """测试任务管理器清理功能"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-        self.manager._loop = MagicMock()
-        self.manager._loop.is_running.return_value = True
-
+class TestTaskManagerClearFinished:
     def test_clear_finished_tasks(self):
-        """清理已完成任务"""
+        manager = TaskManager()
+        manager._loop = MagicMock()
+        manager._loop.is_running.return_value = True
         task1 = AppTask(id="task1", name="Running", status=TaskStatus.RUNNING)
         task2 = AppTask(id="task2", name="Completed", status=TaskStatus.COMPLETED)
         task3 = AppTask(id="task3", name="Failed", status=TaskStatus.FAILED)
-        self.manager._tasks = {"task1": task1, "task2": task2, "task3": task3}
-
-        self.manager._clear_finished_impl()
-
-        self.assertIn("task1", self.manager._tasks)
-        self.assertNotIn("task2", self.manager._tasks)
-        self.assertNotIn("task3", self.manager._tasks)
+        manager._tasks = {"task1": task1, "task2": task2, "task3": task3}
+        manager._clear_finished_impl()
+        assert "task1" in manager._tasks
+        assert "task2" not in manager._tasks
+        assert "task3" not in manager._tasks
 
 
-class TestTaskManagerAutoEvict(unittest.TestCase):
-    """测试任务管理器自动清理"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-
+class TestTaskManagerAutoEvict:
     def test_auto_evict_old_tasks(self):
-        """自动清理旧任务"""
+        manager = TaskManager()
         for i in range(250):
             task = AppTask(
                 id=f"task{i}",
@@ -368,186 +295,152 @@ class TestTaskManagerAutoEvict(unittest.TestCase):
                 status=TaskStatus.COMPLETED,
                 completed_at=datetime.datetime.now(),
             )
-            self.manager._tasks[f"task{i}"] = task
-            self.manager._evict_on_complete(f"task{i}")
+            manager._tasks[f"task{i}"] = task
+            manager._evict_on_complete(f"task{i}")
+        assert len(manager._tasks) <= 200
 
-        self.assertLessEqual(len(self.manager._tasks), 200)
 
-
-class TestTaskManagerSafeDatetime(unittest.TestCase):
-    """测试安全日期时间解析"""
-
+class TestTaskManagerSafeDatetime:
     def test_safe_dt_none(self):
-        """None 输入"""
         result = TaskManager._safe_dt(None)
-        self.assertIsNone(result)
+        assert result is None
 
     def test_safe_dt_nan(self):
-        """NaN 输入"""
         import numpy as np
 
         result = TaskManager._safe_dt(np.nan)
-        self.assertIsNone(result)
+        assert result is None
 
     def test_safe_dt_valid_string(self):
-        """有效字符串"""
         result = TaskManager._safe_dt("2024-01-15 10:30:00")
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result.year, 2024)  # type: ignore[union-attr]
-        self.assertEqual(result.month, 1)  # type: ignore[union-attr]
-        self.assertEqual(result.day, 15)  # type: ignore[union-attr]
+        assert result is not None
+        assert result.year == 2024
+        assert result.month == 1
+        assert result.day == 15
 
     def test_safe_dt_invalid_string(self):
-        """无效字符串"""
         result = TaskManager._safe_dt("invalid date")
-        self.assertIsNone(result)
+        assert result is None
 
-    def test_safe_dt_invalid_string_logs_debug(self):
-        """O-6: 无效时间值应记录 debug 日志，便于排查时区兼容问题。"""
-        with self.assertLogs("services.task_manager", level="DEBUG") as cm:
+    def test_safe_dt_invalid_string_logs_debug(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="services.task_manager"):
             result = TaskManager._safe_dt("invalid date")
-        self.assertIsNone(result)
-        self.assertTrue(any("_safe_dt parse failed" in msg for msg in cm.output))
+        assert result is None
+        assert any("_safe_dt parse failed" in r.message for r in caplog.records)
 
 
-class TestTaskManagerSubmitTask(unittest.TestCase):
-    """测试任务提交"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-        self.manager._loop = MagicMock()
-        self.manager._loop.is_running.return_value = True
-
+class TestTaskManagerSubmitTask:
     def test_submit_task_returns_id(self):
-        """提交任务返回 ID"""
+        manager = TaskManager()
+        manager._loop = MagicMock()
+        manager._loop.is_running.return_value = True
 
         async def dummy_coro(task_id):
             return "done"
 
-        task_id = self.manager.submit_task(
+        task_id = manager.submit_task(
             name="Test Task",
             task_type="Test",
             coroutine_factory=dummy_coro,
         )
-
-        self.assertIsNotNone(task_id)
+        assert task_id is not None
 
     def test_submit_duplicate_task(self):
-        """提交重复任务 - 需要已有任务在运行中"""
+        manager = TaskManager()
+        manager._loop = MagicMock()
+        manager._loop.is_running.return_value = True
         task1 = AppTask(
             id="existing_task",
             name="Existing Task",
             status=TaskStatus.RUNNING,
             unique_key="unique_key_1",
         )
-        self.manager._tasks = {"existing_task": task1}
+        manager._tasks = {"existing_task": task1}
 
         async def dummy_coro(task_id):
             return "done"
 
-        task_id2 = self.manager.submit_task(
+        task_id2 = manager.submit_task(
             name="Task 2",
             task_type="Test",
             coroutine_factory=dummy_coro,
             unique_key="unique_key_1",
         )
+        assert task_id2 is None
 
-        self.assertIsNone(task_id2)
 
-
-class TestTaskManagerPersistenceFlush(unittest.TestCase):
-    """测试持久化 flush 行为"""
-
-    def setUp(self):
-        TaskManager._instance = None
-        self.manager = TaskManager()
-        self.manager._db_ready = True
-
+class TestTaskManagerPersistenceFlush:
     def test_flush_persistence_waits_until_no_pending(self):
-        """flush 会等待挂起写入完成"""
+        manager = TaskManager()
+        manager._db_ready = True
 
         async def run():
-            with self.manager._persist_counter_lock:
-                self.manager._persist_pending_count = 1
+            with manager._persist_counter_lock:
+                manager._persist_pending_count = 1
 
             async def complete_later():
                 await asyncio.sleep(0.02)
-                with self.manager._persist_counter_lock:
-                    self.manager._persist_pending_count = 0
+                with manager._persist_counter_lock:
+                    manager._persist_pending_count = 0
 
             asyncio.create_task(complete_later())
-            await self.manager.flush_persistence(timeout_s=0.5)
+            await manager.flush_persistence(timeout_s=0.5)
 
-            with self.manager._persist_counter_lock:
-                self.assertEqual(self.manager._persist_pending_count, 0)
+            with manager._persist_counter_lock:
+                assert manager._persist_pending_count == 0
 
         asyncio.run(run())
 
     def test_flush_persistence_timeout(self):
-        """flush 超时会抛出 TimeoutError"""
+        manager = TaskManager()
+        manager._db_ready = True
 
         async def run():
-            with self.manager._persist_counter_lock:
-                self.manager._persist_pending_count = 1
-            with self.assertRaises(TimeoutError):
-                await self.manager.flush_persistence(timeout_s=0.01)
+            with manager._persist_counter_lock:
+                manager._persist_pending_count = 1
+            with pytest.raises(TimeoutError):
+                await manager.flush_persistence(timeout_s=0.01)
 
         asyncio.run(run())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class TestPersistTaskAsyncTimezone(unittest.TestCase):
-    """H-2: _persist_task_async must use to_utc_for_db instead of naive replace."""
-
+class TestPersistTaskAsyncTimezone:
     def test_persist_converts_aware_datetime_to_utc(self):
         import datetime as _dt
-        from unittest.mock import AsyncMock, patch
-        from services.task_manager import AppTask, TaskManager
 
-        TaskManager._instance = None
         mgr = TaskManager()
 
         aware_dt = _dt.datetime(2024, 6, 15, 8, 0, 0, tzinfo=_dt.timezone(_dt.timedelta(hours=8)))
         task = AppTask(id="tz_test", name="tz", created_at=aware_dt, started_at=aware_dt)
 
-        with patch.object(mgr, "_persist_snapshot", new_callable=AsyncMock) as mock_snap:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(mgr, "_persist_snapshot", AsyncMock())
             asyncio.run(mgr._persist_task_async(task))
-            params = mock_snap.call_args[0][0]
+            params = mgr._persist_snapshot.call_args[0][0]
             stored_created = params[8]
             stored_started = params[9]
-            assert stored_created.tzinfo is None, "H-2: stored datetime must be naive (UTC)"
-            assert stored_created == _dt.datetime(2024, 6, 15, 0, 0, 0), (
-                f"H-2: expected 2024-06-15 00:00:00, got {stored_created}"
-            )
+            assert stored_created.tzinfo is None
+            assert stored_created == _dt.datetime(2024, 6, 15, 0, 0, 0)
             assert stored_started.tzinfo is None
 
     def test_persist_handles_naive_datetime(self):
         import datetime as _dt
-        from unittest.mock import AsyncMock, patch
-        from services.task_manager import AppTask, TaskManager
 
-        TaskManager._instance = None
         mgr = TaskManager()
 
         naive_dt = _dt.datetime(2024, 6, 15, 8, 0, 0)
         task = AppTask(id="naive_test", name="naive", created_at=naive_dt)
 
-        with patch.object(mgr, "_persist_snapshot", new_callable=AsyncMock) as mock_snap:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(mgr, "_persist_snapshot", AsyncMock())
             asyncio.run(mgr._persist_task_async(task))
-            params = mock_snap.call_args[0][0]
+            params = mgr._persist_snapshot.call_args[0][0]
             stored = params[8]
-            assert stored == _dt.datetime(2024, 6, 15, 0, 0, 0), (
-                f"H-2: naive datetime treated as CST, expected UTC 00:00, got {stored}"
-            )
+            assert stored == _dt.datetime(2024, 6, 15, 0, 0, 0)
 
     def test_truncate_result_for_db_limits_length(self):
-        from services.task_manager import TaskManager
-
         text = "A" * 800
         out = TaskManager._truncate_result_for_db(text)
         assert out is not None
@@ -555,15 +448,13 @@ class TestPersistTaskAsyncTimezone(unittest.TestCase):
 
     def test_persist_uses_truncate_helper(self):
         import datetime as _dt
-        from unittest.mock import AsyncMock, patch
-        from services.task_manager import AppTask, TaskManager
 
-        TaskManager._instance = None
         mgr = TaskManager()
         task = AppTask(id="truncate_test", name="truncate", created_at=_dt.datetime.now(), result="x" * 900)
 
-        with patch.object(mgr, "_persist_snapshot", new_callable=AsyncMock) as mock_snap:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(mgr, "_persist_snapshot", AsyncMock())
             asyncio.run(mgr._persist_task_async(task))
-            params = mock_snap.call_args[0][0]
+            params = mgr._persist_snapshot.call_args[0][0]
             assert params[7] is not None
             assert len(params[7]) == 500

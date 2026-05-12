@@ -56,10 +56,11 @@ class TestHideFileWindows:
 
     def test_no_subprocess_run_usage(self):
         """S-P1-6: _hide_file_windows must use ctypes, not subprocess.run."""
-        import inspect
+        import utils.security_utils as sec_mod
 
-        source = inspect.getsource(_hide_file_windows)
-        assert "subprocess" not in source, "_hide_file_windows should use ctypes.windll instead of subprocess.run"
+        assert not hasattr(sec_mod, "subprocess"), (
+            "_hide_file_windows should use ctypes.windll instead of subprocess.run"
+        )
 
 
 class TestSecurityManagerGetKey:

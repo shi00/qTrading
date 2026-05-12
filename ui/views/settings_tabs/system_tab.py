@@ -329,7 +329,7 @@ class SystemTab(ft.Container):
             from ui.theme import apply_page_theme
 
             if self.page:
-                apply_page_theme(self.page, theme_name)  # type: ignore
+                apply_page_theme(self.page, theme_name)  # type: ignore[untyped]
                 self.page.update()
 
             self.show_snack(I18n.get("settings_snack_theme_updated"))
@@ -349,12 +349,12 @@ class SystemTab(ft.Container):
         from utils.logger import update_log_level
 
         update_log_level(level)
-        self.show_snack(I18n.get("sys_log_label") + ": " + level)  # type: ignore
+        self.show_snack(I18n.get("sys_log_label") + ": " + level)  # type: ignore[untyped]
 
     def save_concurrency(self, e):
         """Save concurrency setting"""
         try:
-            val = int(self.concurrency_input.value)  # type: ignore
+            val = int(self.concurrency_input.value)  # type: ignore[untyped]
             if val < 1 or val > 32:
                 self.show_snack(
                     I18n.get("sys_snack_concurrency_range"),
@@ -372,10 +372,9 @@ class SystemTab(ft.Container):
     def save_db_pool_settings(self, e):
         """Save DB connection pool settings (pool_size, max_overflow, timeout)"""
         try:
-            pool_size = int(self.pool_size_input.value)  # type: ignore
-            max_overflow = int(self.db_overflow_input.value)  # type: ignore
-            timeout = int(self.db_timeout_input.value)  # type: ignore
-
+            pool_size = int(self.pool_size_input.value)  # type: ignore[untyped]
+            max_overflow = int(self.db_overflow_input.value)  # type: ignore[untyped]
+            timeout = int(self.db_timeout_input.value)  # type: ignore[untyped]
             if pool_size < 1 or pool_size > 50:
                 self.show_snack(I18n.get("sys_snack_pool_range"), color=AppColors.ERROR)
                 return
@@ -432,9 +431,8 @@ class SystemTab(ft.Container):
         from utils.thread_pool import ThreadPoolManager
 
         try:
-            io_str = self.io_workers_input.value.strip()  # type: ignore
-            cpu_str = self.cpu_workers_input.value.strip()  # type: ignore
-
+            io_str = self.io_workers_input.value.strip()  # type: ignore[untyped]
+            cpu_str = self.cpu_workers_input.value.strip()  # type: ignore[untyped]
             if not io_str or not cpu_str:
                 self.show_snack(
                     I18n.get("sys_snack_threads_empty"),
@@ -479,8 +477,7 @@ class SystemTab(ft.Container):
     def save_rate_limit(self, e):
         """Save API rate limit setting."""
         try:
-            limit_str = self.rate_limit_input.value.strip()  # type: ignore
-
+            limit_str = self.rate_limit_input.value.strip()  # type: ignore[untyped]
             if not limit_str:
                 ConfigHandler.set_tushare_api_limit(0)
                 self.show_snack(I18n.get("sys_snack_limit_off"))

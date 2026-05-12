@@ -7,8 +7,6 @@ and validates column-level consistency.
 Run: pytest tests/test_data_dictionary_alignment.py -v
 """
 
-import inspect
-
 from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
 from data.persistence.models import (
     Base,
@@ -24,7 +22,7 @@ from data.persistence.models import (
     TopList,
 )
 
-from .helpers import get_model_columns
+from tests._helpers import extract_fields_from_api_method, get_model_columns
 
 
 def get_data_dict_columns(table_name: str) -> set:
@@ -164,8 +162,8 @@ class TestFinaAuditAuditSign:
     def test_audit_sign_in_api_request(self):
         from data.external.tushare_client import TushareClient
 
-        source = inspect.getsource(TushareClient.get_fina_audit)
-        assert "audit_sign" in source, "get_fina_audit API requests audit_sign field"
+        api_fields = extract_fields_from_api_method(TushareClient.get_fina_audit)
+        assert "audit_sign" in api_fields, "get_fina_audit API requests audit_sign field"
 
     def test_fina_audit_dao_includes_audit_sign(self):
         dao_cols = get_model_columns(FinaAudit)

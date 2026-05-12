@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 import pandas as pd
 import pytest
 
@@ -139,41 +141,115 @@ class TestSanitizeArgs:
 
 
 class TestAIServiceErrorSanitization:
-    """S-P1-3: Verify ai_service.py uses DataSanitizer for all exception logging."""
+    """S-P1-3: Verify ai_service.py uses DataSanitizer for all exception logging.
 
-    def test_analyze_top_level_failure_uses_sanitizer(self):
-        import pathlib
+    These tests validate BEHAVIOR: trigger exceptions containing sensitive data
+    (file paths, API keys) and verify the returned error messages are sanitized.
+    """
 
-        source = pathlib.Path("services/ai_service.py").read_text(encoding="utf-8")
-        analyze_start = source.find("async def analyze_stock")
-        analyze_end = source.find("\n    async def ", analyze_start + 1)
-        analyze_source = source[analyze_start:analyze_end]
-        assert "DataSanitizer.sanitize_error" in analyze_source, (
-            "analyze_stock must use DataSanitizer.sanitize_error for exception logging"
+    @pytest.mark.asyncio
+    async def test_analyze_top_level_failure_sanitizes_error(self):
+        from services.ai_service import AIService
+
+        svc = AIService.__new__(AIService)
+        svc._is_cloud_configured = True
+        svc._litellm_config = {"api_key": "test-key"}
+        svc._local_model_loaded = False
+        svc._supports_reasoning = False
+        svc._initialized = True
+        sensitive_path = "D:\\workspace\\secret\\api_key_sk-abc123.py"
+        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive_path))
+        svc._get_prompt_dump_dir = lambda: "/tmp"
+
+        with patch("services.ai_service.ConfigHandler") as mock_cfg:
+            mock_cfg.get_ai_system_prompt.return_value = ""
+            mock_cfg.get_ai_news_prompt.return_value = ""
+            mock_cfg.get_setting.return_value = False
+            mock_cfg.get_ai_provider.return_value = "cloud"
+
+            with patch("services.ai_service.DataSanitizer") as mock_sanitizer:
+                mock_sanitizer.sanitize_error.side_effect = lambda e: "<SANITIZED>"
+                with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    result = await svc.analyze_stock(
+                        stock_info={"ts_code": "000001.SZ", "name": "test"},
+                        tech_info={},
+                        news_list=[],
+                        strategy_key="value",
+                    )
+
+        assert result["error"] == "<SANITIZED>", (
+            "analyze_stock must sanitize exceptions via DataSanitizer.sanitize_error, "
+            f"but got raw error: {result['error']}"
         )
+        assert sensitive_path not in result["error"], f"Sensitive path leaked into error result: {result['error']}"
 
-    def test_classify_all_providers_failed_uses_sanitizer(self):
-        import pathlib
+    @pytest.mark.asyncio
+    async def test_classify_all_providers_failed_sanitizes_error(self):
+        from services.ai_service import AIService
 
-        source = pathlib.Path("services/ai_service.py").read_text(encoding="utf-8")
-        classify_start = source.find("async def classify_news")
-        classify_end = source.find("\n    async def ", classify_start + 1)
-        classify_source = source[classify_start:classify_end]
-        assert "DataSanitizer.sanitize_error" in classify_source, (
-            "classify_news must use DataSanitizer.sanitize_error for exception logging"
+        svc = AIService.__new__(AIService)
+        svc._is_cloud_configured = True
+        svc._litellm_config = {"api_key": "test-key"}
+        svc._local_model_loaded = False
+        svc._supports_reasoning = False
+        svc._initialized = True
+        sensitive_token = "Bearer sk-proj-LEAKED-KEY-12345"
+        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive_token))
+        svc._get_prompt_dump_dir = lambda: "/tmp"
+
+        with patch("services.ai_service.ConfigHandler") as mock_cfg:
+            mock_cfg.get_ai_system_prompt.return_value = ""
+            mock_cfg.get_ai_news_prompt.return_value = ""
+            mock_cfg.get_setting.return_value = False
+            mock_cfg.get_ai_provider.return_value = "cloud"
+
+            with patch("services.ai_service.DataSanitizer") as mock_sanitizer:
+                mock_sanitizer.sanitize_error.side_effect = lambda e: "<SANITIZED>"
+                result = await svc.classify_news(text="test news text")
+
+        assert result["error"] == "<SANITIZED>", (
+            "classify_news must sanitize exceptions via DataSanitizer.sanitize_error, "
+            f"but got raw error: {result['error']}"
         )
+        assert sensitive_token not in result["error"], f"Sensitive token leaked into error result: {result['error']}"
 
-    def test_no_raw_str_e_in_error_returns(self):
-        import pathlib
+    @pytest.mark.asyncio
+    async def test_no_raw_str_e_in_error_returns(self):
+        from services.ai_service import AIService
 
-        source = pathlib.Path("services/ai_service.py").read_text(encoding="utf-8")
-        for method in ("analyze_stock", "classify_news", "test_connection"):
-            method_start = source.find(f"async def {method}")
-            method_end = source.find("\n    async def ", method_start + 1)
-            method_source = source[method_start:method_end]
-            for line in method_source.split("\n"):
-                if '"error"' in line and "str(e)" in line:
-                    pytest.fail(f"{method} returns str(e) in error dict - should use DataSanitizer.sanitize_error(e)")
+        svc = AIService.__new__(AIService)
+        svc._is_cloud_configured = True
+        svc._litellm_config = {"api_key": "test-key"}
+        svc._local_model_loaded = False
+        svc._supports_reasoning = False
+        svc._initialized = True
+        sensitive_data = "api_key=sk-LEAKED123&token=secret_value"
+        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive_data))
+        svc._get_prompt_dump_dir = lambda: "/tmp"
+
+        with patch("services.ai_service.ConfigHandler") as mock_cfg:
+            mock_cfg.get_ai_system_prompt.return_value = ""
+            mock_cfg.get_ai_news_prompt.return_value = ""
+            mock_cfg.get_setting.return_value = False
+            mock_cfg.get_ai_provider.return_value = "cloud"
+
+            with patch("services.ai_service.DataSanitizer") as mock_sanitizer:
+                mock_sanitizer.sanitize_error.side_effect = lambda e: "<SANITIZED>"
+                with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    result = await svc.analyze_stock(
+                        stock_info={"ts_code": "000001.SZ", "name": "test"},
+                        tech_info={},
+                        news_list=[],
+                        strategy_key="value",
+                    )
+
+        assert sensitive_data not in result["error"], (
+            f"Raw str(e) leaked into error return. "
+            f"Error methods must use DataSanitizer.sanitize_error(e), not str(e). "
+            f"Leaked data: {result['error']}"
+        )
 
     def test_kwargs_with_sensitive(self):
         result = DataSanitizer.sanitize_args(token="abc123456789")

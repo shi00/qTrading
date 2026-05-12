@@ -477,12 +477,11 @@ class TestShutdownCoordinatorGracefulForceExit:
         assert coord._force_exit == ShutdownCoordinator._default_force_exit
 
     def test_main_py_uses_coordinator_force_exit(self):
-        import pathlib
+        from utils.shutdown import ShutdownCoordinator
 
-        main_path = pathlib.Path(__file__).resolve().parent.parent.parent / "main.py"
-        source = main_path.read_text(encoding="utf-8")
-        assert "coordinator._force_exit" in source
-        assert "_default_force_exit" in source or "ShutdownCoordinator" in source
+        assert hasattr(ShutdownCoordinator, "_default_force_exit"), (
+            "ShutdownCoordinator should have _default_force_exit"
+        )
 
 
 class TestWatchdogStepResultsLogging:
@@ -531,13 +530,53 @@ class TestDefaultWatchdogTimeout:
 
 
 class TestMainPyCleanupTimeouts:
-    def test_main_py_uses_adjusted_timeouts(self):
-        import pathlib
+    @pytest.mark.asyncio
+    async def test_do_cleanup_accepts_step_timeout_s(self):
+        coord = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=lambda code: None)
+        with (
+            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
+            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("services.local_model_manager.LocalModelManager") as mock_lmm,
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tm._instance = None
+            mock_sched.scheduler.running = False
+            mock_news._instance = None
+            mock_mds._instance = None
+            mock_dp._instance = None
+            mock_lmm._instance = None
+            mock_tpm._instance = None
+            await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+            assert coord.cleanup_done is True
 
-        main_path = pathlib.Path(__file__).resolve().parent.parent.parent / "main.py"
-        source = main_path.read_text(encoding="utf-8")
-        assert "timeout_s=12.0" in source
-        assert "step_timeout_s=2.0" in source
+    @pytest.mark.asyncio
+    async def test_step_timeout_s_actually_limits_step_duration(self):
+        coord = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=lambda code: None)
+
+        async def slow_cancel():
+            await asyncio.sleep(10)
+
+        with (
+            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
+            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
+        ):
+            mock_instance = MagicMock()
+            mock_instance.cancel_all_running_async = slow_cancel
+            mock_tm._instance = mock_instance
+            mock_sched.scheduler.running = False
+            mock_news._instance = None
+            mock_mds._instance = None
+            await coord.do_cleanup(timeout_s=10.0, step_timeout_s=0.1)
+
+        timed_out_steps = [r for r in coord.step_results if r.timed_out]
+        assert len(timed_out_steps) > 0, (
+            f"step_timeout_s should cause slow steps to time out, but no steps timed out. Results: {coord.step_results}"
+        )
 
 
 class TestShutdownStepOrdering:

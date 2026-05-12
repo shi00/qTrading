@@ -186,11 +186,11 @@ class AppLayout(ft.Container):
         if index == NavTabs.MARKET:
             view = HomeView(on_run_strategy=self.run_strategy_from_home)
         elif index == NavTabs.SCREENER:
-            view = ScreenerView(self.page)  # type: ignore
+            view = ScreenerView(self.page)  # type: ignore[untyped]
         elif index == NavTabs.DATA:
             view = DataExplorerView()
         elif index == NavTabs.TASKS:
-            view = TaskCenterView(self.page)  # type: ignore
+            view = TaskCenterView(self.page)  # type: ignore[untyped]
         elif index == NavTabs.SETTINGS:
             view = SettingsView()
         else:
@@ -204,9 +204,9 @@ class AppLayout(ft.Container):
 
     def show(self):
         """Mount this layout to the page"""
-        self.page.clean()  # type: ignore
-        self.page.add(self)  # type: ignore
-        self.page.update()  # type: ignore
+        self.page.clean()  # type: ignore[untyped]
+        self.page.add(self)  # type: ignore[untyped]
+        self.page.update()  # type: ignore[untyped]
 
     def _subscribe_events(self):
         """Subscribe to global events"""
@@ -214,7 +214,7 @@ class AppLayout(ft.Container):
 
     def _on_locale_change(self):
         """Handle i18n locale change"""
-        self.page.title = I18n.get("app_title")  # type: ignore
+        self.page.title = I18n.get("app_title")  # type: ignore[untyped]
         if self.nav_rail:
             nav_keys = [
                 "nav_market",
@@ -224,12 +224,12 @@ class AppLayout(ft.Container):
                 "nav_settings",
             ]
             for i, key in enumerate(nav_keys):
-                if i < len(self.nav_rail.destinations):  # type: ignore
+                if i < len(self.nav_rail.destinations):  # type: ignore[untyped]
                     text = I18n.get(key)
-                    self.nav_rail.destinations[i].label = text  # type: ignore
-                    self.nav_rail.destinations[i].label_content.value = text  # type: ignore
+                    self.nav_rail.destinations[i].label = text  # type: ignore[untyped]
+                    self.nav_rail.destinations[i].label_content.value = text  # type: ignore[untyped]
             self.nav_rail.update()
-        self.page.update()  # type: ignore
+        self.page.update()  # type: ignore[untyped]
 
     def _on_nav_change(self, e):
         """Handle Navigation Rail Change"""
@@ -254,14 +254,14 @@ class AppLayout(ft.Container):
         for _tab_index, view in self._view_cache.items():
             if hasattr(view, "update_theme"):
                 try:
-                    view.update_theme()  # type: ignore
+                    view.update_theme()  # type: ignore[untyped]
                 except Exception as e:
                     logger.error(
                         f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}",
                     )
 
         # 3. Single page update — Flet redraws all semantic-token-based colors automatically
-        self.page.update()  # type: ignore
+        self.page.update()  # type: ignore[untyped]
 
     def change_tab(self, index: int):
         """Change tab with debounce logic"""
@@ -275,7 +275,7 @@ class AppLayout(ft.Container):
             self._debounce_task.cancel()
 
         # Schedule new switch
-        self._debounce_task = self.page.run_task(self._execute_tab_switch)  # type: ignore
+        self._debounce_task = self.page.run_task(self._execute_tab_switch)  # type: ignore[untyped]
 
     async def _execute_tab_switch(self):
         """Async execution of tab switch"""
@@ -294,18 +294,14 @@ class AppLayout(ft.Container):
         # Optimize HomeView visibility for background resource saving
         home_view = self._get_view(NavTabs.MARKET)
         if hasattr(home_view, "set_visible"):
-            home_view.set_visible(index == NavTabs.MARKET)  # type: ignore
-
+            home_view.set_visible(index == NavTabs.MARKET)  # type: ignore[untyped]
         # Switch Content (Lazy Load here)
         new_view = self._get_view(index)
-        self.body.content = new_view  # type: ignore
-
+        self.body.content = new_view  # type: ignore[untyped]
         self._current_tab_index = index
-        self.nav_rail.selected_index = index  # type: ignore
-
-        self.body.update()  # type: ignore
-        self.nav_rail.update()  # type: ignore
-
+        self.nav_rail.selected_index = index  # type: ignore[untyped]
+        self.body.update()  # type: ignore[untyped]
+        self.nav_rail.update()  # type: ignore[untyped]
         logger.debug(
             f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms",
         )

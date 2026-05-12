@@ -204,7 +204,7 @@ class PaginatedTable(ft.Column):
                                 "." + parts[1],
                                 ft.TextStyle(
                                     size=10,
-                                    color=AppColors.TEXT_TERTIARY  # type: ignore
+                                    color=AppColors.TEXT_TERTIARY  # type: ignore[untyped]
                                     if hasattr(AppColors, "TEXT_TERTIARY")
                                     else "#888888",
                                 ),

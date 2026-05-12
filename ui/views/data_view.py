@@ -379,7 +379,7 @@ class TableViewerTab(ft.Container):
         except Exception as e:
             logger.error(f"Error loading tables: {e}")
             if self.page:
-                self.page.show_toast(f"Error loading tables: {e}", "error")  # type: ignore
+                self.page.show_toast(f"Error loading tables: {e}", "error")  # type: ignore[untyped]
 
     async def _on_table_changed(self, e):
         self.current_table = self.table_selector.value
@@ -469,13 +469,13 @@ class TableViewerTab(ft.Container):
                             # Allow clicking header to sort
                             # Use page.run_task to bridge sync event to async method
                             # Pass INDEX, not name
-                            on_click=lambda e, i=idx: self.page.run_task(  # type: ignore
+                            on_click=lambda e, i=idx: self.page.run_task(  # type: ignore[untyped]
                                 self._on_sort,
                                 i,
                             ),
                         ),
                         numeric=is_numeric,
-                        on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),  # type: ignore
+                        on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),  # type: ignore[untyped]
                     ),
                 )
 
@@ -493,7 +493,7 @@ class TableViewerTab(ft.Container):
         except Exception as e:
             logger.error(f"Error loading schema: {e}", exc_info=True)
             if self.page:
-                self.page.show_toast(  # type: ignore
+                self.page.show_toast(  # type: ignore[untyped]
                     I18n.get("data_err_load_schema", error="内部读取错误"),
                     "error",
                 )
@@ -647,7 +647,7 @@ class TableViewerTab(ft.Container):
         except Exception as e:
             logger.error(f"Error fetching data: {e}", exc_info=True)
             if self.page:
-                self.page.show_toast(  # type: ignore
+                self.page.show_toast(  # type: ignore[untyped]
                     I18n.get("data_err_fetch", error="内部读取错误"),
                     "error",
                 )
@@ -731,7 +731,7 @@ class TableViewerTab(ft.Container):
             df = await ThreadPoolManager().run_async(TaskType.CPU, query_func)
 
             if df.empty:
-                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore
+                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore[untyped]
                 await self._toggle_loading(False)
                 return
 
@@ -748,7 +748,7 @@ class TableViewerTab(ft.Container):
 
         except Exception as e:
             logger.error(f"Export failed: {e}", exc_info=True)
-            self.page.show_toast(  # type: ignore
+            self.page.show_toast(  # type: ignore[untyped]
                 I18n.get("data_export_fail", error=str(e)),
                 "error",
             )
@@ -771,20 +771,20 @@ class TableViewerTab(ft.Container):
                     )
                     filename = os.path.basename(filepath)
                     msg = I18n.get("data_export_success", file=filename)
-                    self.page.show_toast(msg, "success")  # type: ignore
+                    self.page.show_toast(msg, "success")  # type: ignore[untyped]
                 except Exception as ex:
                     logger.error(f"Export write failed: {ex}", exc_info=True)
-                    self.page.show_toast(  # type: ignore
+                    self.page.show_toast(  # type: ignore[untyped]
                         I18n.get("data_export_fail", error=str(ex)),
                         "error",
                     )
                 finally:
                     await self._toggle_loading(False)
 
-            self.page.run_task(_do_save, e.path)  # type: ignore
+            self.page.run_task(_do_save, e.path)  # type: ignore[untyped]
         else:
             self._pending_export_df = None
-            self.page.run_task(self._toggle_loading, False)  # type: ignore
+            self.page.run_task(self._toggle_loading, False)  # type: ignore[untyped]
 
     def update_theme(self):
         """Update styles on theme change"""
@@ -821,7 +821,7 @@ class TableViewerTab(ft.Container):
                 col.label.content.color = AppColors.TABLE_HEADER_TEXT
 
         # Update Rows
-        for i, row in enumerate(self.data_table.rows):  # type: ignore
+        for i, row in enumerate(self.data_table.rows):  # type: ignore[untyped]
             row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
             for cell in row.cells:
                 content = cell.content
@@ -1117,7 +1117,7 @@ class SQLConsoleTab(ft.Container):
                 col.label.color = AppColors.TABLE_HEADER_TEXT
 
         # Table Rows
-        for i, row in enumerate(self.result_table.rows):  # type: ignore
+        for i, row in enumerate(self.result_table.rows):  # type: ignore[untyped]
             row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
             for cell in row.cells:
                 if isinstance(cell.content, ft.Text):
@@ -1175,14 +1175,14 @@ class DataExplorerView(ft.Container):
             return
         self._mounted = True
         if self.page:
-            self._mount_task = self.page.run_task(self.did_mount_async)  # type: ignore
+            self._mount_task = self.page.run_task(self.did_mount_async)  # type: ignore[untyped]
 
     def will_unmount(self):
         """Clean up subscriptions when view is detached"""
         self._mounted = False
         if self.page and getattr(self, "_pubsub_subscribed", False):
             try:
-                self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore
+                self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
             except Exception:
                 pass
             self._pubsub_subscribed = False
@@ -1290,7 +1290,7 @@ class DataExplorerView(ft.Container):
         # Trigger async mount for logic if needed
         # We can use the page task to run async methods
         if self.tabs.selected_index == 0:
-            self.page.run_task(self.table_tab.did_mount_async)  # type: ignore
+            self.page.run_task(self.table_tab.did_mount_async)  # type: ignore[untyped]
 
     def _on_broadcast_message(self, message):
         """Handle broadcast messages like cache_cleared"""

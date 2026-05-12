@@ -7,38 +7,29 @@ to prevent silent data loss when Tushare adds new fields.
 Run: pytest tests/test_tushare_api_fields.py -v
 """
 
-import inspect
-
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.quote_dao import QuoteDao
 
-from .helpers import extract_cols_from_method, extract_fields_from_api_method
+from tests._helpers import extract_cols_from_method, extract_fields_from_api_method
 
 
 class TestTushareApiFieldNames:
     """Test that Tushare API methods have correct field name documentation."""
 
     def test_limit_list_field_documentation(self):
-        source = inspect.getsource(TushareClient.get_limit_list)
-        assert "limit:" in source.lower() or "limit " in source.lower(), (
-            "get_limit_list should document 'limit' field (not 'limit_type')"
-        )
-        assert "limit_type" not in source or "limit:" in source.lower(), (
-            "get_limit_list should use 'limit' field name, not 'limit_type'"
-        )
+        api_fields = extract_fields_from_api_method(TushareClient.get_limit_list)
+        assert "limit" in api_fields, "get_limit_list should include 'limit' field (not 'limit_type')"
 
     def test_top_list_field_documentation(self):
-        source = inspect.getsource(TushareClient.get_top_list)
-        assert "top_list" in source.lower() or "dragon" in source.lower() or "lhb" in source.lower(), (
-            "get_top_list should be documented"
-        )
+        api_fields = extract_fields_from_api_method(TushareClient.get_top_list)
+        assert len(api_fields) > 0, "get_top_list should specify explicit fields"
 
     def test_suspend_d_field_documentation(self):
-        source = inspect.getsource(TushareClient.get_suspend_d)
-        assert "suspend_type" in source, "get_suspend_d should document 'suspend_type' field"
+        api_fields = extract_fields_from_api_method(TushareClient.get_suspend_d)
+        assert "suspend_type" in api_fields, "get_suspend_d should include 'suspend_type' field"
 
 
 class TestApiFieldsExplicit:
@@ -68,8 +59,8 @@ class TestApiFieldsExplicit:
 
         for method_name in self.CRITICAL_APIS:
             if hasattr(TushareClient, method_name):
-                source = inspect.getsource(getattr(TushareClient, method_name))
-                if "fields=" in source or "fields =" in source:
+                api_fields = extract_fields_from_api_method(getattr(TushareClient, method_name))
+                if api_fields:
                     apis_with_fields.append(method_name)
                 else:
                     apis_without_fields.append(method_name)
