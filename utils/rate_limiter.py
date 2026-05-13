@@ -66,16 +66,18 @@ class TokenBucket:
     def consume(self, tokens=1):
         """
         Consume tokens from the bucket. Blocks thread if insufficient tokens.
-        S3-2 fix: Warn if called from async context (should use consume_async instead).
+        Raises RuntimeError if called from async context (use consume_async instead).
         """
         try:
             loop = asyncio.get_running_loop()
             if loop is not None:
-                logger.warning(
-                    "[TokenBucket] consume() called from async context. "
+                raise RuntimeError(
+                    "TokenBucket.consume() called from async context. "
                     "Use consume_async() instead to avoid blocking the event loop."
                 )
-        except RuntimeError:
+        except RuntimeError as exc:
+            if "TokenBucket.consume()" in str(exc):
+                raise
             pass
 
         wait_time = self._consume_reserve(tokens)

@@ -441,11 +441,6 @@ class ScreenerViewModel:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._flush_ai_buffer())
                 except RuntimeError:
-                    if self._main_loop is None:
-                        try:
-                            self._main_loop = asyncio.get_running_loop()
-                        except RuntimeError:
-                            pass
                     if self._main_loop and self._main_loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             self._flush_ai_buffer(),

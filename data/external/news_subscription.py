@@ -194,22 +194,11 @@ class NewsSubscriptionService:
     def stop(self):
         """Stop the service and reset state.
 
-        Returns:
-            asyncio.Task | None: The stop_async task if scheduled on a running loop,
-            or None if stopped synchronously. Callers should await the task when possible.
+        Always cancels tasks immediately. If called from a running event loop,
+        also schedules stop_async() for graceful queue draining.
         """
-        try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                task = loop.create_task(self.stop_async())
-                logger.debug("[NewsService] stop() scheduled stop_async as task (fire-and-forget)")
-                return task
-        except RuntimeError:
-            pass
-
         self._running = False
 
-        # Also cancel the detached fetch task if running
         if self._current_fetch_task and not self._current_fetch_task.done():
             self._current_fetch_task.cancel()
             self._current_fetch_task = None
@@ -218,12 +207,18 @@ class NewsSubscriptionService:
             self._processing_task.cancel()
             self._processing_task = None
 
-        # 清理状态，确保下次 start() 时能正确执行首次同步
         self._last_news_time = None
         self._last_news_content = None
 
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(self.stop_async())
+                logger.debug("[NewsService] stop() scheduled stop_async for graceful drain")
+        except RuntimeError:
+            pass
+
         logger.info("[NewsService] Stopped news polling service")
-        return None
 
     async def _poll_loop(self):
         """Main polling loop"""

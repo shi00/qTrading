@@ -101,13 +101,24 @@ class MarketDataService:
         logger.info("[MarketDataService] Started market data polling service")
 
     def stop(self):
-        """停止服务并重置状态"""
+        """停止服务并重置状态
+
+        Always cancels the task immediately. If called from a running event
+        loop, also schedules stop_async() for graceful await.
+        """
         self._running = False
-        if self._task:
+        if self._task and not self._task.done():
             self._task.cancel()
-            self._task = None
+        self._task = None
 
         self._cached_data = None
+
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(self.stop_async())
+        except RuntimeError:
+            pass
 
         logger.info("[MarketDataService] Stopped market data polling service")
 

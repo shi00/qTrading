@@ -231,7 +231,7 @@ class ThreadPoolManager:
                 logger.info("Shutting down CPU Pool...")
             except (ValueError, OSError):
                 pass
-            self._cpu_pool.shutdown(wait=False, cancel_futures=True)
+            self._cpu_pool.shutdown(wait=wait, cancel_futures=True)
             self._cpu_pool = None
             shutdown_performed = True
 
