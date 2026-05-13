@@ -1,0 +1,6 @@
+# Dev dependencies
+# Source: pyproject.toml [project.optional-dependencies.dev]
+# Regenerate: pip-compile --extra dev pyproject.toml -o requirements-dev.txt
+# NOTE: This file is intentionally empty. All dependencies are declared in pyproject.toml.
+# This file exists only to document the pip-compile command and as a pre-commit trigger.
+# The generated requirements-dev.txt will include both core and dev dependencies.

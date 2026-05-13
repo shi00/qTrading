@@ -1,0 +1,6 @@
+# Optional/heavy dependencies
+# Source: pyproject.toml [project.optional-dependencies.optional]
+# Regenerate: pip-compile --extra optional pyproject.toml -o requirements-optional.txt
+# NOTE: This file is intentionally empty. All dependencies are declared in pyproject.toml.
+# This file exists only to document the pip-compile command and as a pre-commit trigger.
+# The generated requirements-optional.txt will include both core and optional dependencies.

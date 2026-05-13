@@ -9,6 +9,7 @@ on:
     paths:
       - '**.py'
       - 'requirements*.txt'
+      - 'requirements*.in'
       - 'pyproject.toml'
       - 'pyrightconfig.json'
       - 'alembic.ini'
@@ -69,8 +70,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          set -o pipefail
           pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           pip install -r requirements-dev.txt
+
+      - name: Verify requirements.txt is up to date
+        run: |
+          pip install pip-tools
+          pip-compile pyproject.toml -o requirements_check.txt
+          diff requirements.txt requirements_check.txt || (echo "::error::requirements.txt is out of date. Run: pip-compile pyproject.toml -o requirements.txt" && exit 1)
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
@@ -214,6 +222,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          set -o pipefail
           pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           pip install -r requirements-dev.txt
 
