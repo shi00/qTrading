@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import config
-from conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
+from tests.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 from data.persistence.database_manager import DatabaseManager
 from tests.integration.test_infra_base import TEST_DB_URL, TestDatabaseBase
 

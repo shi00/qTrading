@@ -6,6 +6,15 @@ import tempfile
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
+try:
+    from dotenv import load_dotenv
+
+    _env_test = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env.test")
+    if os.path.isfile(_env_test):
+        load_dotenv(_env_test, override=False)
+except ImportError:
+    pass
+
 import asyncpg
 import pytest
 import pytest_asyncio

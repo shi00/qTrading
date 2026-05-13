@@ -73,7 +73,7 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """使用独立的 test_astock 数据库进行测试"""
 
-        from conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
+        from tests.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 
         self.test_db_url = (
             f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"

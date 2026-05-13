@@ -734,3 +734,371 @@ class TestSinaConsecutiveEmptyAlert:
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert len(result) == 1
         assert _SINA_CONSECUTIVE_EMPTY["concept"] == 0
+
+
+class TestGetStockNewsDirectExecution:
+    """Tests that exercise the _fetch/_fetch_locked inner functions directly."""
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_cninfo_direct_success(self, mock_ak):
+        df_cninfo = pd.DataFrame(
+            {
+                "代码": ["000001"],
+                "简称": ["平安银行"],
+                "公告标题": ["2024年半年度报告"],
+                "公告时间": ["2024-08-30"],
+                "公告链接": ["http://example.com"],
+            }
+        )
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = df_cninfo
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert result[0]["source"] == "巨潮公告"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_cninfo_empty_em_fallback_direct(self, mock_ak):
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+        df_em = pd.DataFrame(
+            {
+                "新闻标题": ["银行股上涨"],
+                "新闻内容": ["详细内容"],
+                "新闻时间": ["2024-06-14 10:00:00"],
+                "文章来源": ["东财新闻"],
+            }
+        )
+        mock_ak.stock_news_em.return_value = df_em
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert result[0]["source"] == "东财新闻"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_both_layers_fail_direct(self, mock_ak):
+        mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
+        mock_ak.stock_news_em.side_effect = Exception("em error")
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_cninfo_no_title_col_returns_empty(self, mock_ak):
+        df_cninfo = pd.DataFrame({"col_a": [1], "col_b": [2]})
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = df_cninfo
+        mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_cninfo_positional_fallback_columns(self, mock_ak):
+        df_cninfo = pd.DataFrame(
+            {
+                "代码": ["000001"],
+                "简称": ["平安银行"],
+                "col2": ["公告标题fallback"],
+                "col3": ["2024-08-30"],
+            }
+        )
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = df_cninfo
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_em_news_content_fallback(self, mock_ak):
+        mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
+        df_em = pd.DataFrame(
+            {
+                "新闻内容": ["详细内容作为标题"],
+                "发布时间": ["2024-06-14 10:00:00"],
+                "文章来源": ["东财新闻"],
+            }
+        )
+        mock_ak.stock_news_em.return_value = df_em
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
+        assert isinstance(result, list)
+        assert result[0]["title"] == "详细内容作为标题"
+
+    @pytest.mark.asyncio
+    async def test_market_import_fallback(self):
+        with patch("data.external.news_fetcher.ak") as mock_ak:
+            import akshare.stock_feature.stock_disclosure_cninfo as mod
+
+            original_fn = getattr(mod, "stock_zh_a_disclosure_report_cninfo", None)
+            if original_fn is not None:
+                delattr(mod, "stock_zh_a_disclosure_report_cninfo")
+
+            mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+            mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+                mock_tpm_instance = MagicMock()
+                mock_tpm.return_value = mock_tpm_instance
+                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+                result = await NewsFetcher.get_stock_news("000001.SZ")
+            assert result == []
+
+            if original_fn is not None:
+                mod.stock_zh_a_disclosure_report_cninfo = original_fn
+
+
+class TestGetLatestGlobalNewsDirectExecution:
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_time_only_yesterday_logic(self, mock_ak):
+        from datetime import datetime
+
+        now = datetime(2024, 6, 14, 1, 5, 0)
+        df = pd.DataFrame(
+            {
+                "标题": ["夜间新闻"],
+                "内容": ["内容"],
+                "发布时间": ["23:55:00"],
+            }
+        )
+        mock_ak.stock_info_global_cls.return_value = df
+
+        with patch("data.external.news_fetcher.get_now", return_value=now):
+            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+                mock_tpm_instance = MagicMock()
+                mock_tpm.return_value = mock_tpm_instance
+                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+                result = await NewsFetcher.get_latest_global_news(limit=1)
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert "2024-06-13" in result[0]["time"]
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_time_parse_fallback_short_time(self, mock_ak):
+        from datetime import datetime
+
+        now = datetime(2024, 6, 14, 10, 0, 0)
+        df = pd.DataFrame(
+            {
+                "标题": ["新闻"],
+                "内容": ["内容"],
+                "发布时间": ["093000"],
+            }
+        )
+        mock_ak.stock_info_global_cls.return_value = df
+
+        with patch("data.external.news_fetcher.get_now", return_value=now):
+            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+                mock_tpm_instance = MagicMock()
+                mock_tpm.return_value = mock_tpm_instance
+                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+                result = await NewsFetcher.get_latest_global_news(limit=1)
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_pandas_time_standardize_fallback(self, mock_ak):
+        from datetime import datetime
+
+        now = datetime(2024, 6, 14, 10, 0, 0)
+        df = pd.DataFrame(
+            {
+                "标题": ["新闻"],
+                "内容": ["内容"],
+                "发布时间": ["not-a-date"],
+            }
+        )
+        mock_ak.stock_info_global_cls.return_value = df
+
+        with patch("data.external.news_fetcher.get_now", return_value=now):
+            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+                mock_tpm_instance = MagicMock()
+                mock_tpm.return_value = mock_tpm_instance
+                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+                result = await NewsFetcher.get_latest_global_news(limit=1)
+        assert isinstance(result, list)
+
+
+class TestGetUsMajorMovesDirectExecution:
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_sina_fetch_direct_success(self, mock_get):
+        _US_MOVES_CACHE.clear()
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        assert "NVDA" in result
+        _US_MOVES_CACHE.clear()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_sina_empty_data_warning(self, mock_get):
+        _US_MOVES_CACHE.clear()
+        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": []});'
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= 1
+        _US_MOVES_CACHE.clear()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_sina_json_decode_error(self, mock_get):
+        _US_MOVES_CACHE.clear()
+        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+        mock_resp = MagicMock()
+        mock_resp.text = "IO(not valid json);"
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        _US_MOVES_CACHE.clear()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_sina_invalid_jsonp_structure(self, mock_get):
+        _US_MOVES_CACHE.clear()
+        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+        mock_resp = MagicMock()
+        mock_resp.text = "no jsonp structure here"
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        _US_MOVES_CACHE.clear()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_sina_consecutive_empty_threshold_error(self, mock_get):
+        _US_MOVES_CACHE.clear()
+        _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": []});'
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= _SINA_EMPTY_THRESHOLD
+        _US_MOVES_CACHE.clear()
+        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_us_moves_processing_exception(self, mock_get):
+        _US_MOVES_CACHE.clear()
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            with patch("data.external.news_fetcher.json.loads", side_effect=Exception("parse error")):
+                result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        _US_MOVES_CACHE.clear()
+
+
+class TestGetHotConceptsDirectExecution:
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_sina_concept_exception_in_fetch(self, mock_ak):
+        mock_ak.stock_sector_spot.side_effect = Exception("sina error")
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_concept_consecutive_empty_threshold(self, mock_ak):
+        _SINA_CONSECUTIVE_EMPTY["concept"] = _SINA_EMPTY_THRESHOLD - 1
+        mock_ak.stock_sector_spot.return_value = pd.DataFrame()
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
+        _SINA_CONSECUTIVE_EMPTY["concept"] = 0
