@@ -71,7 +71,7 @@ def _check_reasoning_support(model: str) -> bool:
         return False
     try:
         return litellm.utils.supports_reasoning(model=model)
-    except (AttributeError, ImportError, TypeError, ValueError) as exc:
+    except Exception as exc:
         logger.debug(f"[AIService] supports_reasoning check failed for {model}: {exc}, using fallback list")
         reasoning_models = {
             "deepseek-v4-pro",

@@ -127,7 +127,7 @@ class ReviewManager:
                                         index_cache[trade_date_str] = None
                                 except (ValueError, TypeError, KeyError):
                                     index_cache[trade_date_str] = None
-                        except (ValueError, RuntimeError, OSError) as exc:
+                        except Exception as exc:
                             logger.warning(
                                 f"[Review] Cache index lookup failed for {index_code} on {trade_date_str}: {exc}"
                             )

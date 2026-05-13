@@ -82,7 +82,7 @@ async def check_multi_period_data(field: str) -> bool:
                 if df is not None and not df.empty:
                     if field in df.columns and not df[field].isna().all():  # type: ignore[union-attr]
                         passed += 1
-            except (ValueError, KeyError, RuntimeError) as e:
+            except Exception as e:
                 logger.debug(f"[PromptValidator] check_field_populous sample {ts_code} failed: {e}")
                 continue
 
@@ -118,7 +118,7 @@ async def check_field_exists(field: str) -> bool:
                 df = await cache.get_financial_reports_history(ts_code, periods=1)
                 if df is not None and not df.empty and field in df.columns:
                     passed += 1
-            except (ValueError, KeyError, RuntimeError) as e:
+            except Exception as e:
                 logger.debug(f"[PromptValidator] check_field_exists sample {ts_code} failed: {e}")
                 continue
 

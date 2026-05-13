@@ -192,7 +192,7 @@ class QuoteDao(BaseDao):
                 return False
             found_tables = set(df["tbl"].tolist())
             return found_tables == set(safe_tables)
-        except (ValueError, KeyError, RuntimeError) as exc:
+        except Exception as exc:
             if raise_on_error:
                 raise
             logger.debug(f"[QuoteDao] Table existence check failed: {exc}")

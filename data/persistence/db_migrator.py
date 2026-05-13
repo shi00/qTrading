@@ -120,6 +120,6 @@ class DatabaseMigrator:
                     return row[0] if row else None
 
                 return await conn.run_sync(_sync_get_rev)
-        except (ValueError, RuntimeError, OSError) as exc:
+        except Exception as exc:
             logger.debug(f"[DBMigrator] get_alembic_rev failed: {exc}")
             return None

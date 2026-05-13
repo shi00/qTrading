@@ -276,7 +276,7 @@ class StockDao(BaseDao):
             if df is not None and not df.empty:
                 return df["cnt"].iloc[0] or 0
             return 0
-        except (ValueError, RuntimeError, OSError) as exc:
+        except Exception as exc:
             logger.debug(f"[StockDao] get_concept_count failed: {exc}")
             return 0
 

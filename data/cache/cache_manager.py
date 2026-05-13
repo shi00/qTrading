@@ -615,7 +615,7 @@ class CacheManager:
                             )
                             actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
-                        except (ValueError, RuntimeError) as exc:
+                        except Exception as exc:
                             logger.debug(
                                 f"[CacheManager] Health | Breadth calc failed for {table}: {exc}",
                             )
