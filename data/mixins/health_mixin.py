@@ -508,7 +508,8 @@ class HealthCheckMixin:
                         fin_date_str = fin_info.iloc[0].get("last_data_date", "")
                         if fin_date_str:
                             fin_lag_days = (get_now() - parse_date(str(fin_date_str), "%Y%m%d")).days
-            except Exception:
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.debug(f"[HealthMixin] Financial freshness calc skipped: {exc}")
                 pass
 
             self._quality_tier = _compute_tier(
@@ -742,7 +743,8 @@ class HealthCheckMixin:
                             )
                             fin_lag_days = (end_as_date - fin_dt_date).days
                             fin_recency_ok = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS
-            except Exception:
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.debug(f"[HealthMixin] Composite tier calc skipped: {exc}")
                 pass
 
             # 7. Composite Score & Tier

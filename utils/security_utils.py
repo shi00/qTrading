@@ -140,8 +140,8 @@ class SecurityManager:
                 with open(_LEGACY_MARKER, "w", encoding="utf-8") as f:
                     f.write("legacy-file-key\n")
                 _hide_file_windows(_LEGACY_MARKER)
-            except Exception:
-                pass
+            except (OSError, PermissionError) as exc:
+                logger.debug(f"[SecurityManager] Failed to write legacy marker: {exc}")
 
     @classmethod
     def migrate_to_derived_key(cls, decrypt_fn=None, encrypt_fn=None):
@@ -191,7 +191,7 @@ class SecurityManager:
 
         for path in (cls.KEY_FILE, cls.KEY_FILE_BAK, _LEGACY_MARKER):
             if os.path.exists(path):
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(OSError):
                     os.remove(path)
 
         cls._key = new_key
@@ -207,8 +207,8 @@ class SecurityManager:
                     salt = f.read()
                     if len(salt) >= 16:
                         return salt
-            except Exception:
-                pass
+            except (OSError, ValueError) as exc:
+                logger.debug(f"[SecurityManager] Salt file read failed, will generate: {exc}")
 
         salt = secrets.token_bytes(32)
         tmp_file = _MACHINE_SALT_FILE + ".tmp"
@@ -222,7 +222,7 @@ class SecurityManager:
         except Exception as e:
             logger.error(f"Error saving salt file: {e}")
             if os.path.exists(tmp_file):
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(OSError):
                     os.remove(tmp_file)
             raise
         return salt
@@ -260,7 +260,7 @@ class SecurityManager:
         except Exception as e:
             logger.error(f"Error saving key: {e}")
             if os.path.exists(tmp_file):
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(OSError):
                     os.remove(tmp_file)
             raise e
 

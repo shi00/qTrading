@@ -50,7 +50,7 @@ class TechnicalAnalysis:
                     df_adj[vol_col] = (df_adj[vol_col] / safe_ratio).where(safe_ratio.notna(), df_adj[vol_col])
 
             return df_adj
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             return df
 
     @staticmethod

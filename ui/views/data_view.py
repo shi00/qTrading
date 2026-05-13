@@ -1183,8 +1183,8 @@ class DataExplorerView(ft.Container):
         if self.page and getattr(self, "_pubsub_subscribed", False):
             try:
                 self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[DataView] PubSub unsubscribe skipped: {exc}")
             self._pubsub_subscribed = False
         if self._mount_task:
             self._mount_task.cancel()

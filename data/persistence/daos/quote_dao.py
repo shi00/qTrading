@@ -192,9 +192,10 @@ class QuoteDao(BaseDao):
                 return False
             found_tables = set(df["tbl"].tolist())
             return found_tables == set(safe_tables)
-        except Exception:
+        except (ValueError, KeyError, RuntimeError) as exc:
             if raise_on_error:
                 raise
+            logger.debug(f"[QuoteDao] Table existence check failed: {exc}")
             return False
 
     async def get_expected_stock_count(self, trade_date: datetime.date | str) -> int:

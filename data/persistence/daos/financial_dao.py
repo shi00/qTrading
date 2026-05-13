@@ -422,7 +422,8 @@ class FinancialDao(BaseDao):
                 )
                 count = df["cnt"].iloc[0] if df is not None and not df.empty else 0
                 result["tables"]["fina_audit"] = count
-            except Exception:
+            except (ValueError, KeyError, RuntimeError) as exc:
+                logger.debug(f"[FinancialDao] fina_audit count query failed: {exc}")
                 result["tables"]["fina_audit"] = 0
 
         except Exception as e:

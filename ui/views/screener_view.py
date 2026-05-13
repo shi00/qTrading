@@ -105,7 +105,7 @@ def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
         label = MetaDataManager.get_column_alias("screening_history", col)
         vt_columns.append({"id": col, "label": label, "width": width})
 
-    records = df[visible_cols].to_dict("records")
+    records = df[visible_cols].to_dict("records")  # type: ignore[call-overload]
     formatted_rows = [{col: _format_cell_value(col, val) for col, val in row.items()} for row in records]
     return vt_columns, formatted_rows
 
@@ -316,7 +316,7 @@ class ScreenerView(ft.Container):
             self.page.overlay.remove(self.save_file_picker)
             self.page.update()
 
-        # P1-11 Fix: Detach the thousands of Flet Row references inside the PaginatedTable
+        # Detach Flet Row references inside PaginatedTable to prevent memory leak
         if hasattr(self, "result_table") and self.result_table:
             self.result_table.list_view.controls.clear()
 

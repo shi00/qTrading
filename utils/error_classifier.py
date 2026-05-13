@@ -38,7 +38,7 @@ RECOVERABLE_CODES = {
 }
 
 try:
-    import asyncpg  # pyright: ignore[reportMissingImports]
+    import asyncpg  # type: ignore[import-untyped]
 
     _ASYNCPG_AVAILABLE = True
 except ImportError:

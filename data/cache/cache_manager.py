@@ -223,13 +223,16 @@ class CacheManager:
         }
 
     # Backward compatibility for direct SQL usage if any
-    async def _write_db(self, sql: typing.Any, params: typing.Any = None, is_many: typing.Any = False):
+    async def write_db(self, sql: typing.Any, params: typing.Any = None, is_many: typing.Any = False):
         dao = BaseDao(self.engine)
         return await dao._write_db(sql, params, is_many, suppress_errors=True)
 
-    async def _read_db(self, sql: typing.Any, params: typing.Any = None):
+    async def read_db(self, sql: typing.Any, params: typing.Any = None):
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params, suppress_errors=True)
+
+    _write_db = write_db
+    _read_db = read_db
 
     # --- Init & Reset ---
     async def init_db(self, force: bool = False):
@@ -576,7 +579,8 @@ class CacheManager:
                                     if val:
                                         max_date = val
                                         break
-                                except Exception:
+                                except Exception as exc:
+                                    logger.debug(f"[CacheManager] Health | Date probe failed for {table}.{dc}: {exc}")
                                     continue
                             if max_date:
                                 from utils.time_utils import parse_date
@@ -590,9 +594,9 @@ class CacheManager:
 
                             if ratio < 0.01:
                                 fresh_ratio = 0.0
-                        except Exception:
+                        except (ValueError, TypeError, RuntimeError) as exc:
                             logger.debug(
-                                f"[CacheManager] Health | Freshness check skipped for {table}: no valid date column",
+                                f"[CacheManager] Health | Freshness check skipped for {table}: {exc}",
                             )
 
                     depth_ratio = None
@@ -611,9 +615,9 @@ class CacheManager:
                             )
                             actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
-                        except Exception:
+                        except (ValueError, RuntimeError) as exc:
                             logger.debug(
-                                f"[CacheManager] Health | Breadth calc failed for {table}",
+                                f"[CacheManager] Health | Breadth calc failed for {table}: {exc}",
                             )
 
                     is_sparse = meta.get("quality_config", {}).get("sparse", False)

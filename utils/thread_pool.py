@@ -52,7 +52,7 @@ class ThreadPoolManager:
             if cls._instance is not None:
                 try:
                     cls._instance.shutdown(wait=False)
-                except Exception:
+                except (RuntimeError, ValueError, OSError):
                     pass
             cls._instance = None
             cls._initialized = False
@@ -80,7 +80,7 @@ class ThreadPoolManager:
             except (ValueError, OSError):
                 try:
                     logger.removeHandler(handler)
-                except Exception:
+                except (ValueError, RuntimeError):
                     pass
         try:
             self.shutdown(wait=False)

@@ -229,6 +229,45 @@ class TestBaseDaoReadDb:
             assert isinstance(result, pd.DataFrame)
 
 
+class TestSlowQueryThresholdConstants:
+    """Q-P2-7: Slow query thresholds should be defined as module-level constants,
+    not hardcoded magic numbers."""
+
+    def test_slow_write_threshold_exists(self):
+        import data.persistence.daos.base_dao as base_dao_mod
+
+        assert hasattr(base_dao_mod, "_SLOW_WRITE_THRESHOLD_MS")
+        assert base_dao_mod._SLOW_WRITE_THRESHOLD_MS == 2000
+
+    def test_slow_read_threshold_exists(self):
+        import data.persistence.daos.base_dao as base_dao_mod
+
+        assert hasattr(base_dao_mod, "_SLOW_READ_THRESHOLD_MS")
+        assert base_dao_mod._SLOW_READ_THRESHOLD_MS == 500
+
+    def test_slow_upsert_threshold_exists(self):
+        import data.persistence.daos.base_dao as base_dao_mod
+
+        assert hasattr(base_dao_mod, "_SLOW_UPSERT_THRESHOLD_MS")
+        assert base_dao_mod._SLOW_UPSERT_THRESHOLD_MS == 2000
+
+    def test_write_db_uses_constant_not_magic_number(self):
+        import data.persistence.daos.base_dao as base_dao_mod
+        import inspect
+
+        source = inspect.getsource(base_dao_mod.BaseDao._write_db)
+        assert "_SLOW_WRITE_THRESHOLD_MS" in source
+        assert "if elapsed > 2000" not in source
+
+    def test_read_db_uses_constant_not_magic_number(self):
+        import data.persistence.daos.base_dao as base_dao_mod
+        import inspect
+
+        source = inspect.getsource(base_dao_mod.BaseDao._read_db)
+        assert "_SLOW_READ_THRESHOLD_MS" in source
+        assert "if elapsed > 500" not in source
+
+
 class TestNullProtectedDefaultsTrue:
     """B-P1-8/DB-P1-1: Verify null_protected defaults to True and COALESCE is applied."""
 

@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import logging
 
 import flet as ft
@@ -115,11 +114,13 @@ class HomeView(ft.Container):
         if self.page and self._pubsub_subscribed:
             try:
                 self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[HomeView] PubSub unsubscribe skipped: {exc}")
             self._pubsub_subscribed = False
-        with contextlib.suppress(Exception):
+        try:
             I18n.unsubscribe(self.refresh_locale)
+        except Exception as exc:
+            logger.debug(f"[HomeView] I18n unsubscribe skipped: {exc}")
         if self._init_task:
             self._init_task.cancel()
 

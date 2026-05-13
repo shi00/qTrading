@@ -22,6 +22,8 @@ from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
 
 logger = logging.getLogger(__name__)
 
+_NOTIFY_THROTTLE_S = 0.2
+
 
 class TaskStatus(Enum):
     QUEUED = "QUEUED"
@@ -118,7 +120,7 @@ class TaskManager:
 
             # Throttle for update_progress notifications (seconds)
             self._last_notify_time: float = 0.0
-            self._NOTIFY_THROTTLE_S: float = 0.2  # Max 5 pushes per second
+            self._NOTIFY_THROTTLE_S: float = _NOTIFY_THROTTLE_S
 
             # History loaded from DB (read-only, separate from active _tasks)
             self._history: list[AppTask] = []
@@ -498,7 +500,7 @@ class TaskManager:
         # Wait for database schema to be ready (handled safely by CacheManager)
 
         # 2. Mark stale RUNNING/QUEUED from last session as INTERRUPTED
-        await cache._write_db(
+        await cache.write_db(
             "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
             (
                 TaskStatus.INTERRUPTED.value,
@@ -506,8 +508,8 @@ class TaskManager:
             ),
         )
 
-        # 3. Load recent history (_read_db returns pd.DataFrame)
-        df = await cache._read_db(
+        # 3. Load recent history (read_db returns pd.DataFrame)
+        df = await cache.read_db(
             "SELECT * FROM task_history ORDER BY created_at DESC LIMIT 200",
         )
         if df is not None and not df.empty:
@@ -535,7 +537,7 @@ class TaskManager:
 
         # 4. Purge old records (>30 days)
         cutoff_date = (get_now() - datetime.timedelta(days=30)).replace(tzinfo=None)
-        await cache._write_db(
+        await cache.write_db(
             "DELETE FROM task_history WHERE completed_at < $1",
             (cutoff_date,),
         )
@@ -639,7 +641,7 @@ class TaskManager:
                 "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
                 "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at"
             )
-            await cache._write_db(sql, params)
+            await cache.write_db(sql, params)
         except Exception as e:
             logger.debug(f"[TaskManager] Persist failed (non-critical): {e}")
 

@@ -318,7 +318,7 @@ class SchedulerService:
                 # DataFrame/Series fallback: treat row count as added amount
                 try:
                     added = 0 if result.empty else len(result)  # type: ignore[union-attr]
-                except Exception:
+                except (ValueError, TypeError, AttributeError):
                     added = 0
             else:
                 added = result

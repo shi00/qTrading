@@ -64,7 +64,7 @@ class TechnicalBreakoutStrategy(PolarsBaseStrategy):
 @register_strategy("northbound_holding")
 class NorthboundHoldingStrategy(PolarsBaseStrategy):
     """
-    P1-11 fix: Renamed from NorthboundStrategy to clarify semantics.
+    Renamed from NorthboundStrategy to clarify semantics.
     This strategy filters stocks by northbound (HK capital) HOLDING RATIO,
     not by net capital flow. For net flow analysis, use NorthboundFlowStrategy.
     """
@@ -122,7 +122,7 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
 @register_strategy("northbound_flow")
 class NorthboundFlowStrategy(PolarsBaseStrategy):
     """
-    P1-11 fix: New strategy for northbound NET CAPITAL FLOW analysis.
+    New strategy for northbound NET CAPITAL FLOW analysis.
     Uses moneyflow_hsgt.north_money to track daily net inflow/outflow.
     Complements NorthboundHoldingStrategy which tracks holding ratio.
     """

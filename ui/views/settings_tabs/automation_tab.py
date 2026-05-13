@@ -275,11 +275,10 @@ class AutomationTab(ft.Container):
         try:
             if self.page:
                 self.update()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[AutomationTab] UI update skipped: {exc}")
 
     def _get_schedule_status_text(self, enabled):
-        """获取调度状态文本"""
         return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
 
     def on_schedule_toggle(self, e):
@@ -466,8 +465,8 @@ class NotificationsTab(ft.Container):
         try:
             if self.page:
                 self.update()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[NewsTab] UI update skipped: {exc}")
 
     def on_news_toggle(self, e):
         """处理新闻推送开关切换"""

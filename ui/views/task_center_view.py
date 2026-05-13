@@ -1,4 +1,3 @@
-import contextlib
 import logging
 
 import flet as ft
@@ -258,8 +257,11 @@ class TaskCenterView(ft.Container):
             cards = [self._build_task_card(t) for t in page_tasks]
             self.scroll_area.controls = cards
 
-        with contextlib.suppress(Exception):
-            self.update()
+        if self.page:
+            try:
+                self.update()
+            except Exception as exc:
+                logger.debug(f"[TaskCenterView] UI update skipped: {exc}")
 
     def _build_task_card(self, t: AppTask) -> ft.Container:
         """Build a single task card with status badge, progress, and actions."""

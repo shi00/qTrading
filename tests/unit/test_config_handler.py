@@ -419,3 +419,178 @@ class TestConfigHandlerNoLockReentry:
                 assert result is True
         finally:
             cfg_mod.ConfigHandler._config_cache = original_cache
+
+
+class TestGetDbConfigUsesDefaultConfig:
+    """Q-P2-8: get_db_config() should use DEFAULT_CONFIG as default value source,
+    not hardcoded literals, so defaults stay in sync."""
+
+    @patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="pw")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_host_defaults_from_default_config(self, mock_load, mock_pw):
+        result = cfg_mod.ConfigHandler.get_db_config()
+        assert result["host"] == cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_host"]
+
+    @patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="pw")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_port_defaults_from_default_config(self, mock_load, mock_pw):
+        result = cfg_mod.ConfigHandler.get_db_config()
+        assert result["port"] == cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_port"]
+
+    @patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="pw")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_user_defaults_from_default_config(self, mock_load, mock_pw):
+        result = cfg_mod.ConfigHandler.get_db_config()
+        assert result["user"] == cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_user"]
+
+    @patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="pw")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_database_defaults_from_default_config(self, mock_load, mock_pw):
+        result = cfg_mod.ConfigHandler.get_db_config()
+        assert result["database"] == cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_name"]
+
+    @patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="pw")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"db_host": "10.0.0.1"})
+    def test_custom_host_overrides_default(self, mock_load, mock_pw):
+        result = cfg_mod.ConfigHandler.get_db_config()
+        assert result["host"] == "10.0.0.1"
+
+    def test_default_config_host_is_127_0_0_1(self):
+        assert cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_host"] == "127.0.0.1"
+
+
+class TestSaveTokenKeyringDeleteLogsDebug:
+    """Q-P1-3: save_token with empty token should log debug when keyring
+    deletion fails, not silently swallow the exception."""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring unavailable"))
+    def test_empty_token_logs_debug_on_keyring_failure(self, mock_del, mock_save):
+        with patch.object(cfg_mod, "logger") as mock_logger:
+            cfg_mod.ConfigHandler.save_token("")
+            mock_logger.debug.assert_called_once()
+            assert "ts_token" in mock_logger.debug.call_args[0][0]
+
+
+class TestSaveDbPasswordKeyringDeleteLogsDebug:
+    """Q-P1-3: save_db_password fallback path should log debug when keyring
+    deletion fails, not silently swallow the exception."""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="encrypted")
+    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
+    def test_fallback_logs_debug_on_keyring_delete_failure(self, mock_set, mock_del, mock_enc, mock_save):
+        with patch.object(cfg_mod, "logger") as mock_logger:
+            cfg_mod.ConfigHandler.save_db_password("my_password")
+            debug_calls = [c for c in mock_logger.debug.call_args_list if "db_password" in c[0][0]]
+            assert len(debug_calls) >= 1
+
+
+class TestSaveLlmConfigKeyringDeleteLogsDebug:
+    """Q-P1-3: save_llm_config with empty api_key should log debug when keyring
+    deletion fails, not silently swallow the exception."""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring unavailable"))
+    def test_empty_key_logs_debug_on_keyring_delete_failure(self, mock_del, mock_save):
+        with patch.object(cfg_mod, "logger") as mock_logger:
+            cfg_mod.ConfigHandler.save_llm_config(
+                provider="deepseek",
+                model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com",
+                api_key="",
+            )
+            debug_calls = [c for c in mock_logger.debug.call_args_list if "ai_api_key" in c[0][0]]
+            assert len(debug_calls) >= 1
+
+
+class TestGetLlmConfigCustomModelsIsolation:
+    """R3-1: get_llm_config() must return a deep copy of custom_models,
+    not a reference to DEFAULT_CONFIG, to prevent mutation of defaults."""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    def test_custom_models_is_deepcopy_not_reference(self, mock_kr, mock_load):
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        cm = result["custom_models"]
+        assert cm == cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_models"]
+        assert cm is not cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_models"]
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    def test_mutating_custom_models_does_not_affect_default(self, mock_kr, mock_load):
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        result["custom_models"]["test_provider"] = ["model_x"]
+        assert "test_provider" not in cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_models"]
+
+
+class TestGetNoProxyDomainsIsolation:
+    """R3-1b: get_no_proxy_domains() must return a copy of the list,
+    not a reference to DEFAULT_CONFIG, to prevent mutation of defaults."""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_returns_copy_not_reference(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_no_proxy_domains()
+        assert result == cfg_mod.ConfigHandler.DEFAULT_CONFIG["no_proxy_domains"]
+        assert result is not cfg_mod.ConfigHandler.DEFAULT_CONFIG["no_proxy_domains"]
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_mutating_result_does_not_affect_default(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_no_proxy_domains()
+        result.append("evil.example.com")
+        assert "evil.example.com" not in cfg_mod.ConfigHandler.DEFAULT_CONFIG["no_proxy_domains"]
+
+
+class TestGetSyncIntegrityConfigUsesDefaultConfig:
+    """R3-2: get_sync_integrity_config() should use DEFAULT_CONFIG as
+    default value source for nested keys, not hardcoded literals."""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_quotes_tolerance_from_default_config(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_sync_integrity_config()
+        assert (
+            result["quotes_tolerance_ratio"]
+            == (cfg_mod.ConfigHandler.DEFAULT_CONFIG["sync_integrity"]["quotes_tolerance_ratio"])
+        )
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_quality_weights_from_default_config(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_sync_integrity_config()
+        assert result["quality_weights"] == cfg_mod.ConfigHandler.DEFAULT_CONFIG["sync_integrity"]["quality_weights"]
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"sync_integrity": {"quotes_tolerance_ratio": 0.5}},
+    )
+    def test_partial_config_overrides_default(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_sync_integrity_config()
+        assert result["quotes_tolerance_ratio"] == 0.5
+        assert (
+            result["indicators_tolerance_ratio"]
+            == (cfg_mod.ConfigHandler.DEFAULT_CONFIG["sync_integrity"]["indicators_tolerance_ratio"])
+        )
+
+
+class TestGetMaxIoWorkersUsesDefaultConfig:
+    """R3-5: get_max_io_workers() should use DEFAULT_CONFIG as default value
+    source for max_io_workers. Note: result is capped by db_capacity."""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_max_io_workers_capped_by_db_capacity(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_max_io_workers()
+        db_capacity = (
+            cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"]
+            + cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_max_overflow"]
+        )
+        assert result == min(cfg_mod.ConfigHandler.DEFAULT_CONFIG["max_io_workers"], db_capacity)
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"max_io_workers": 5, "db_connection_pool_size": 20, "db_max_overflow": 10},
+    )
+    def test_custom_io_workers_within_db_capacity(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_max_io_workers()
+        assert result == 5

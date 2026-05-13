@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import inspect
 import logging
 import time
@@ -407,8 +406,8 @@ class DataSourceTab(ft.Container):
         try:
             if self.page:
                 self.update()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[DataSourceTab] UI update skipped: {exc}")
 
     def update_theme(self):
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
@@ -686,8 +685,8 @@ class DataSourceTab(ft.Container):
                 try:
                     self.btn_check_health.disabled = False
                     self._safe_update()
-                except Exception:
-                    pass  # View may have been unmounted
+                except Exception as exc:
+                    logger.debug(f"[DataSourceTab] Post-health-check update skipped: {exc}")
 
         task_id = TaskManager().submit_task(
             name=I18n.get("task_name_health_check"),
@@ -1139,8 +1138,10 @@ class DataSourceTab(ft.Container):
 
         # Batch update via parent container to ensure consistency
         if self.page:
-            with contextlib.suppress(Exception):
+            try:
                 self.update()
+            except Exception as exc:
+                logger.debug(f"[DataSourceTab] UI update skipped: {exc}")
 
     async def show_health_report_dialog(self, e):
         """Show full health report dialog"""

@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import datetime
 import logging
 import time
@@ -26,6 +25,9 @@ class EngineDisposedError(RuntimeError):
 
 
 _IN_CHUNK_SIZE = 500
+_SLOW_WRITE_THRESHOLD_MS = 2000
+_SLOW_READ_THRESHOLD_MS = 500
+_SLOW_UPSERT_THRESHOLD_MS = 2000
 
 
 class BaseDao:
@@ -117,8 +119,10 @@ class BaseDao:
                             logger.debug(f"[BaseDao] Date conversion skipped for column '{col}': {e}")
                 for col in target_datetime_cols:
                     if col in df.columns:
-                        with contextlib.suppress(Exception):
+                        try:
                             df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce")
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"[BaseDao] Datetime conversion skipped for column '{col}': {e}")
 
         df_clean = df[cols]
 
@@ -218,7 +222,7 @@ class BaseDao:
                     await conn.exec_driver_sql(sql, params)
 
             elapsed = (time.perf_counter() - start_time) * 1000
-            if elapsed > 2000:
+            if elapsed > _SLOW_WRITE_THRESHOLD_MS:
                 logger.warning(
                     f"[{self.__class__.__name__}] Slow Write ({elapsed:.1f}ms): {sql[:200]}...",
                 )
@@ -398,7 +402,7 @@ class BaseDao:
                     await conn.execute(stmt, records)
 
             elapsed = (time.perf_counter() - start_time) * 1000
-            if elapsed > 2000:
+            if elapsed > _SLOW_UPSERT_THRESHOLD_MS:
                 logger.warning(
                     f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}",
                 )
@@ -523,7 +527,7 @@ class BaseDao:
                 )
 
                 elapsed = (time.perf_counter() - start_time) * 1000
-                if elapsed > 500:
+                if elapsed > _SLOW_READ_THRESHOLD_MS:
                     logger.warning(
                         f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
                     )
@@ -605,7 +609,7 @@ class BaseDao:
                 )
 
                 elapsed = (time.perf_counter() - start_time) * 1000
-                if elapsed > 500:
+                if elapsed > _SLOW_READ_THRESHOLD_MS:
                     logger.warning(
                         f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {str(stmt)[:200]}...",
                     )

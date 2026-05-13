@@ -209,7 +209,8 @@ class DatabaseConfigService:
 
             return exists is not None
 
-        except Exception:
+        except (ValueError, RuntimeError, OSError) as exc:
+            logger.debug(f"[DBConfigService] db_exists check failed: {exc}")
             return False
 
     @classmethod
@@ -313,7 +314,8 @@ class DatabaseConfigService:
 
             return None
 
-        except Exception:
+        except (ValueError, RuntimeError, OSError) as exc:
+            logger.debug(f"[DBConfigService] get_db_info failed: {exc}")
             return None
 
     @classmethod
@@ -439,5 +441,6 @@ class DatabaseConfigService:
                 table_count=table_count or 0,
             )
 
-        except Exception:
+        except (ValueError, RuntimeError, OSError) as exc:
+            logger.debug(f"[DBConfigService] get_db_stats failed: {exc}")
             return None

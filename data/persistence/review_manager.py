@@ -125,10 +125,12 @@ class ReviewManager:
                                         index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
                                     else:
                                         index_cache[trade_date_str] = None
-                                except Exception:
+                                except (ValueError, TypeError, KeyError):
                                     index_cache[trade_date_str] = None
-                        except Exception:
-                            logger.warning(f"[Review] Cache index lookup failed for {index_code} on {trade_date_str}")
+                        except (ValueError, RuntimeError, OSError) as exc:
+                            logger.warning(
+                                f"[Review] Cache index lookup failed for {index_code} on {trade_date_str}: {exc}"
+                            )
                             index_cache[trade_date_str] = None
 
                     index_pct = index_cache.get(trade_date_str)

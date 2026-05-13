@@ -1192,8 +1192,8 @@ class OnboardingWizard(ft.Container):
         try:
             if self.page:
                 self.update()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[OnboardingWizard] UI update skipped: {exc}")
 
     def _show_loading_overlay(self, show: bool):
         self._validation_in_progress = show

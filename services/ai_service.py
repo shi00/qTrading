@@ -53,8 +53,8 @@ def validate_ai_analysis_response(response: dict) -> dict:
 
 
 try:
-    import litellm  # pyright: ignore[reportMissingImports]
-    from litellm import acompletion  # pyright: ignore[reportMissingImports]
+    import litellm  # type: ignore[import-untyped]
+    from litellm import acompletion  # type: ignore[import-untyped]
 
     litellm.suppress_debug_info = True
     litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
@@ -71,8 +71,8 @@ def _check_reasoning_support(model: str) -> bool:
         return False
     try:
         return litellm.utils.supports_reasoning(model=model)
-    except Exception:
-        logger.debug(f"[AIService] supports_reasoning check failed for {model}, using fallback list")
+    except (AttributeError, ImportError, TypeError, ValueError) as exc:
+        logger.debug(f"[AIService] supports_reasoning check failed for {model}: {exc}, using fallback list")
         reasoning_models = {
             "deepseek-v4-pro",
             "o3-pro",

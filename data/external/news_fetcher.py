@@ -65,7 +65,8 @@ class NewsFetcher:
             import akshare.stock_feature.stock_disclosure_cninfo as mod
 
             market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
-        except Exception:
+        except (ImportError, AttributeError, IndexError, TypeError) as exc:
+            logger.debug(f"[NewsFetcher] Failed to read akshare default market: {exc}")
             market = "沪深京"  # Fallback to standard standard UTF-8 key
 
         # Run the IO bound akshare calls in the thread pool
@@ -219,8 +220,8 @@ class NewsFetcher:
                             final_time = news_dt.strftime("%Y-%m-%d %H:%M:%S")
                         else:
                             final_time = f"{today_str} {raw_time}"
-                    except Exception:
-                        # Fallback
+                    except (ValueError, IndexError, TypeError) as exc:
+                        logger.debug(f"[NewsFetcher] Time parse fallback for '{raw_time}': {exc}")
                         final_time = f"{today_str} {raw_time}"
 
                 # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
@@ -228,8 +229,8 @@ class NewsFetcher:
                     # Try parsing with pandas for robustness (handles multiple formats)
                     dt_obj = pd.to_datetime(final_time)  # type: ignore[assignment]
                     final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    # Fallback: if pandas fails, try to ensure at least string format
+                except (ValueError, TypeError) as exc:
+                    logger.debug(f"[NewsFetcher] Pandas time standardize fallback for '{final_time}': {exc}")
                     final_time = str(final_time)
 
                 news_list.append(

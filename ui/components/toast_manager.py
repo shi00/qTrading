@@ -130,8 +130,8 @@ class ToastManager:
                 try:
                     self.toasts_stack.update()
                     self.container.update()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[ToastManager] UI update after remove failed: {exc}")
 
     async def stop_all(self) -> None:
         """
@@ -302,8 +302,8 @@ class ToastCard(ft.Container):
                 await self.dismiss()
         except asyncio.CancelledError:
             pass
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[ToastManager] Auto-dismiss failed: {exc}")
 
     def _on_hover(self, e):
         self.is_hovered = e.data == "true"

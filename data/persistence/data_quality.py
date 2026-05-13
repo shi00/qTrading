@@ -109,7 +109,8 @@ class DataQualityService:
             d_latest = pd.to_datetime(latest)
             d_ref = pd.to_datetime(ref_date)
             lag = (d_ref - d_latest).days
-        except Exception:
+        except (ValueError, TypeError) as exc:
+            logger.debug(f"[DataQuality] Date parse failed for lag calc: {exc}")
             lag = cls.LAG_ERROR
 
         return {"lag_days": lag, "latest_data_date": latest}

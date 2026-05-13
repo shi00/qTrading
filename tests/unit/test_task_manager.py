@@ -583,7 +583,7 @@ class TestTaskManagerCancelAllRunningAsync:
         mgr._tasks[t.id] = t
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
-            mock_cm._instance._write_db = AsyncMock()
+            mock_cm._instance.write_db = AsyncMock()
             await mgr.cancel_all_running_async()
             assert t.status == TaskStatus.CANCELLED
 
@@ -616,8 +616,8 @@ class TestTaskManagerInitDb:
     async def test_init_db(self, mock_i18n, mock_tp):
         mgr = TaskManager()
         mock_cache = MagicMock()
-        mock_cache._write_db = AsyncMock()
-        mock_cache._read_db = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.write_db = AsyncMock()
+        mock_cache.read_db = AsyncMock(return_value=pd.DataFrame())
         with (
             patch("services.task_manager.CacheManager", create=True) as mock_cm_cls,
             patch.dict("sys.modules", {"data.cache.cache_manager": MagicMock(CacheManager=mock_cm_cls)}),
@@ -872,11 +872,11 @@ class TestTaskManagerPersistSnapshot:
     async def test_write_succeeds(self, mock_i18n, mock_tp):
         mgr = TaskManager()
         mock_cache = MagicMock()
-        mock_cache._write_db = AsyncMock()
+        mock_cache.write_db = AsyncMock()
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = mock_cache
             await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
-            mock_cache._write_db.assert_called_once()
+            mock_cache.write_db.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("services.task_manager.ThreadPoolManager")
@@ -884,7 +884,7 @@ class TestTaskManagerPersistSnapshot:
     async def test_write_fails_gracefully(self, mock_i18n, mock_tp):
         mgr = TaskManager()
         mock_cache = MagicMock()
-        mock_cache._write_db = AsyncMock(side_effect=Exception("DB error"))
+        mock_cache.write_db = AsyncMock(side_effect=Exception("DB error"))
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = mock_cache
             await mgr._persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
@@ -984,6 +984,24 @@ class TestUpdateProgressReturnStatus:
         mgr._tasks[t.id] = t
         result = mgr.update_progress(t.id, 0.5)
         assert result is False
+
+
+class TestNotifyThrottleConstant:
+    """Q-P2-7: _NOTIFY_THROTTLE_S should be a module-level constant,
+    not a magic number inside the method body."""
+
+    def test_notify_throttle_constant_exists(self):
+        import services.task_manager as tm_mod
+
+        assert hasattr(tm_mod, "_NOTIFY_THROTTLE_S")
+        assert tm_mod._NOTIFY_THROTTLE_S == 0.2
+
+    def test_notify_uses_constant_not_magic_number(self):
+        import services.task_manager as tm_mod
+        import inspect
+
+        source = inspect.getsource(tm_mod.TaskManager.update_progress)
+        assert "_NOTIFY_THROTTLE_S" in source
 
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")

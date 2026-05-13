@@ -269,8 +269,8 @@ class TushareConfigPanel(ft.Container):
         try:
             if self.page:
                 self.update()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[TushareConfig] UI update skipped: {exc}")
 
     async def verify_token(self) -> bool:
         token = self.token_input.value.strip()

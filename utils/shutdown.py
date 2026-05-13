@@ -69,7 +69,7 @@ class ShutdownCoordinator:
         for handler in logging.root.handlers:
             try:
                 handler.flush()
-            except Exception:
+            except (OSError, ValueError):
                 pass
         logger.critical(
             f"[Shutdown] Force-exiting process with code {code}. Call stack and cleanup state have been logged above.",
@@ -194,7 +194,7 @@ class ShutdownCoordinator:
             for handler in logging.root.handlers:
                 try:
                     handler.flush()
-                except Exception:
+                except (OSError, ValueError):
                     pass
 
     async def _run_cleanup_steps(self, step_timeout_s: float) -> list[StepResult]:

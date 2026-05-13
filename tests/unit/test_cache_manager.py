@@ -320,6 +320,37 @@ class TestCacheManagerWriteReadDb:
             mock_dao._read_db.assert_called_once()
 
 
+class TestCacheManagerPublicWriteReadDb:
+    """Q-P2-1: CacheManager.write_db/read_db are public methods
+    (renamed from _write_db/_read_db which were called externally)."""
+
+    @pytest.mark.asyncio
+    async def test_write_db_public_method(self):
+        mgr = _make_mgr()
+        mock_dao = MagicMock()
+        mock_dao._write_db = AsyncMock(return_value=1)
+        with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
+            result = await mgr.write_db("INSERT INTO test VALUES (?)", ("val",))
+            mock_dao._write_db.assert_called_once()
+            assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_read_db_public_method(self):
+        mgr = _make_mgr()
+        mock_dao = MagicMock()
+        mock_dao._read_db = AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+        with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
+            result = await mgr.read_db("SELECT * FROM test")
+            mock_dao._read_db.assert_called_once()
+            assert len(result) == 1
+
+    def test_write_db_backward_compat_alias(self):
+        assert CacheManager._write_db is CacheManager.write_db
+
+    def test_read_db_backward_compat_alias(self):
+        assert CacheManager._read_db is CacheManager.read_db
+
+
 class TestCacheManagerCheckComprehensiveHealth:
     def _make_health_conn(self):
         mock_conn = MagicMock()

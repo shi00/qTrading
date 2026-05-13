@@ -335,7 +335,7 @@ class AIStrategyMixin:
                 async with news_sem:
                     try:
                         return await NewsFetcher.get_stock_news(code, limit=5)
-                    except Exception:
+                    except (ValueError, RuntimeError, OSError, ConnectionError):
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}

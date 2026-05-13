@@ -1,8 +1,10 @@
-import contextlib
+import logging
 
 import flet as ft
 
 from ui.theme import AppColors, AppStyles
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardCard(ft.Container):
@@ -204,8 +206,10 @@ class ActionChip(ft.Container):
             self.opacity = 1.0
 
         if self.page:
-            with contextlib.suppress(Exception):
+            try:
                 self.update()
+            except Exception as exc:
+                logger.debug(f"[SettingsWidget] UI update skipped: {exc}")
 
 
 class StatusBadge(ft.Container):

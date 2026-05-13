@@ -88,9 +88,10 @@ class SyncDao(BaseDao):
             if df is not None and not df.empty:
                 return set(df["ts_code"])
             return set()
-        except Exception:
+        except (ValueError, KeyError, RuntimeError) as exc:
             if raise_on_error:
                 raise
+            logger.debug(f"[SyncDao] Step4 stock query failed: {exc}")
             return set()
 
     async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):
