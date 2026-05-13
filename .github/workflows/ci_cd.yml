@@ -77,8 +77,33 @@ jobs:
       - name: Verify requirements.txt is up to date
         run: |
           pip install pip-tools
-          pip-compile pyproject.toml -o requirements_check.txt
-          diff requirements.txt requirements_check.txt || (echo "::error::requirements.txt is out of date. Run: pip-compile pyproject.toml -o requirements.txt" && exit 1)
+          pip-compile pyproject.toml -o requirements_check.txt --no-header
+          pip-compile --extra dev pyproject.toml -o requirements_dev_check.txt --no-header
+          pip-compile --extra optional pyproject.toml -o requirements_optional_check.txt --no-header
+          python -c "
+          import sys
+          errors = []
+          for expected, actual, label in [
+              ('requirements.txt', 'requirements_check.txt', 'core'),
+              ('requirements-dev.txt', 'requirements_dev_check.txt', 'dev'),
+              ('requirements-optional.txt', 'requirements_optional_check.txt', 'optional'),
+          ]:
+              with open(expected) as f:
+                  exp_pkgs = {line.split('==')[0] for line in f if '==' in line and not line.startswith('#')}
+              with open(actual) as f:
+                  act_pkgs = {line.split('==')[0] for line in f if '==' in line and not line.startswith('#')}
+              missing = exp_pkgs - act_pkgs
+              extra = act_pkgs - exp_pkgs
+              if missing:
+                  errors.append(f'{label}: missing packages: {missing}')
+              if extra:
+                  errors.append(f'{label}: extra packages: {extra}')
+          if errors:
+              for e in errors:
+                  print(f'::error::{e}')
+              sys.exit(1)
+          print('All requirements files contain the expected packages.')
+          "
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
