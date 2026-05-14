@@ -142,7 +142,9 @@ class ShutdownCoordinator:
         Safety rules:
         - Never call singleton factories (e.g. DataProcessor()), only access Class._instance
         - No exit statements (sys.exit / os._exit), caller decides how to exit
-        - Each step is independently wrapped so one failure does not skip remaining steps
+        - Each step is independently wrapped; a critical failure is logged but does NOT
+          skip remaining steps — resource-release steps (thread pools, AI model) always run
+        - Returns False if any critical step failed, even if all steps were executed
         """
         if self._cleanup_done and self._cleanup_task is None:
             logger.info("[Shutdown] Cleanup already completed, skipping.")
@@ -209,8 +211,9 @@ class ShutdownCoordinator:
             )
             results.append(result)
             if critical and not result.ok:
-                logger.error(f"[Shutdown] Critical step '{name}' failed, aborting cleanup sequence.")
-                break
+                logger.error(
+                    f"[Shutdown] Critical step '{name}' failed. Continuing remaining steps to release resources."
+                )
         return results
 
     async def _run_async_step(self, name: str, step, step_timeout_s: float, critical: bool) -> StepResult:

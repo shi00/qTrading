@@ -183,6 +183,8 @@ if not TEST_DB_PASSWORD:
 
 _xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
 TEST_DB_NAME = os.environ.get("TEST_DB_NAME", f"test_astock_{_xdist_worker}" if _xdist_worker else "test_astock")
+if _xdist_worker and _xdist_worker not in TEST_DB_NAME:
+    TEST_DB_NAME = f"{TEST_DB_NAME}_{_xdist_worker}"
 if not TEST_DB_NAME.startswith("test_"):
     raise ValueError(f"TEST_DB_NAME must start with 'test_' for safety, got: {TEST_DB_NAME!r}")
 if not TEST_DB_NAME.replace("_", "").isalnum():

@@ -66,6 +66,7 @@ class TestConftestNoHardcodedPassword:
             "import os; os.environ.pop('TEST_DB_PASSWORD', None); "
             "os.environ.pop('CI_PG_PASSWORD', None); "
             "os.environ['GITHUB_RUN_ID']='12345'; "
+            "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
             "import tests.conftest as m; print(m.TEST_DB_PASSWORD)"
         )
         result = subprocess.run(
@@ -85,6 +86,7 @@ class TestConftestNoHardcodedPassword:
             "import os; os.environ.pop('TEST_DB_PASSWORD', None); "
             "os.environ.pop('CI_PG_PASSWORD', None); "
             "os.environ.pop('GITHUB_RUN_ID', None); "
+            "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
             "import tests.conftest as m; print(m.TEST_DB_PASSWORD)"
         )
         result = subprocess.run(
@@ -123,6 +125,7 @@ class TestConftestXdistIsolation:
         code = (
             "import os; os.environ['PYTEST_XDIST_WORKER']='gw1'; "
             "os.environ.pop('TEST_DB_NAME', None); "
+            "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
             "import tests.conftest as m; print(m.TEST_DB_NAME)"
         )
         result = subprocess.run(
@@ -160,6 +163,7 @@ class TestConftestXdistIsolation:
             code = (
                 f"import os; os.environ['PYTEST_XDIST_WORKER']='{worker}'; "
                 "os.environ.pop('TEST_DB_NAME', None); "
+                "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
                 "import tests.conftest as m; print(m.TEST_DB_NAME)"
             )
             result = subprocess.run(

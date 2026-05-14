@@ -37,18 +37,20 @@ async def main(page: ft.Page):
     # ============================================================
     from utils.shutdown import ShutdownCoordinator
 
-    coordinator = ShutdownCoordinator(page, watchdog_timeout_s=10.0)
+    coordinator = ShutdownCoordinator(page, watchdog_timeout_s=15.0)
     close_confirm_dialog = None
     close_confirm_visible = False
     shutdown_requested = False
     active_dialog = None
+    _scheduled_tasks: set = set()
 
     def _schedule_async(coro):
         if hasattr(page, "run_task"):
-            # Flet page can schedule coroutines bound to UI loop.
             page.run_task(coro)
             return
-        asyncio.create_task(coro())
+        task = asyncio.create_task(coro())
+        _scheduled_tasks.add(task)
+        task.add_done_callback(_scheduled_tasks.discard)
 
     async def _perform_window_shutdown():
         nonlocal shutdown_requested
@@ -217,19 +219,17 @@ async def main(page: ft.Page):
 
     # ── 途径二：兜底路径 — WebSocket 断开（外部 kill / 网络中断等） ──
     async def _on_disconnect(e):
-        was_window_path = coordinator.cleanup_done
+        coordinator.start_watchdog(15)
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=12.0, step_timeout_s=2.0)
 
-        coordinator.start_watchdog(10)
-        cleanup_ok = await coordinator.do_cleanup(timeout_s=8.0, step_timeout_s=3.0)
-
-        if not was_window_path:
+        if not coordinator.cleanup_done:
             if cleanup_ok:
                 coordinator.cancel_watchdog()
                 logger.info("[Main] External disconnect cleanup completed; waiting for runtime to terminate naturally.")
                 return
             logger.error("[Main] External disconnect cleanup incomplete, forcing process exit.")
             await asyncio.sleep(0.2)
-            coordinator._force_exit(0)
+            coordinator._force_exit(1)
 
     page.on_disconnect = _on_disconnect
 

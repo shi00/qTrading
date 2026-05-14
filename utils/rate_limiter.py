@@ -13,6 +13,17 @@ class TokenBucket:
     When the server signals rate-limiting (429), call reduce_rate() to slow down.
     After consecutive successes, the rate gradually recovers toward original_rate.
 
+    Important constraints:
+    - Single-event-loop assumption: a TokenBucket instance must only be used from
+      ONE asyncio event loop throughout its lifetime. Sharing the same instance
+      across different loops (e.g. after loop restart) may cause state
+      inconsistency because ``consume_async`` relies on ``asyncio.sleep`` whose
+      scheduling behavior is loop-local. For per-loop isolation, create a
+      separate TokenBucket per loop via ``get_loop_local(key, factory)``.
+    - ``consume()`` must NOT be called from an async context; use
+      ``consume_async()`` instead. A ``RuntimeError`` is raised if ``consume()``
+      detects an active event loop.
+
     Attributes:
         rate (float): Current rate (tokens/sec). Adjusted adaptively.
         original_rate (float): The initial configured rate (tokens/sec).

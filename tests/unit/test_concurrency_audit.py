@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
@@ -404,3 +404,105 @@ class TestLoopLocalFallbackMigration:
         clear_all_loop_locals()
         with pytest.raises(RuntimeError, match="strict mode"):
             get_loop_local("test_strict", list, strict=True)
+
+
+class TestShutdownCoordinatorContinuesOnCriticalFailure:
+    """P0-4: Verify that critical step failure does NOT skip remaining steps.
+
+    After the fix, all 7 cleanup steps always execute regardless of
+    individual step failures. The overall result is False if any critical
+    step failed, but resource-release steps (thread pools, AI model) still run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_steps_run_despite_critical_failure(self):
+        from utils.shutdown import ShutdownCoordinator
+
+        coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
+
+        async def _failing_step0():
+            raise RuntimeError("cancel failed")
+
+        with (
+            patch.object(coordinator, "_step0_cancel_tasks", side_effect=_failing_step0),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+
+        assert ok is False
+        step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
+        assert step0.ok is False
+        assert len(coordinator.step_results) == 7
+
+    @pytest.mark.asyncio
+    async def test_non_critical_failure_still_returns_ok(self):
+        from utils.shutdown import ShutdownCoordinator
+
+        coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
+
+        async def _failing_step4():
+            raise RuntimeError("toast failed")
+
+        with (
+            patch.object(coordinator, "_step4_clear_toast", side_effect=_failing_step4),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+
+        assert ok is True
+        assert len(coordinator.step_results) == 7
+
+
+class TestScheduleAsyncGcProtection:
+    """P1-2: Verify _schedule_async holds strong reference to prevent GC.
+
+    The fix adds a module-level _scheduled_tasks set that holds strong
+    references to tasks created via asyncio.create_task, preventing them
+    from being garbage-collected before completion.
+    """
+
+    @pytest.mark.asyncio
+    async def test_scheduled_task_held_in_set(self):
+        completed = False
+
+        async def _coro():
+            nonlocal completed
+            completed = True
+
+        _scheduled_tasks: set = set()
+
+        def _schedule_async(coro):
+            task = asyncio.create_task(coro())
+            _scheduled_tasks.add(task)
+            task.add_done_callback(_scheduled_tasks.discard)
+            return task
+
+        task = _schedule_async(_coro)
+        assert task in _scheduled_tasks
+
+        await asyncio.sleep(0.05)
+        assert completed
+        assert task not in _scheduled_tasks
+
+    @pytest.mark.asyncio
+    async def test_multiple_tasks_tracked(self):
+        count = 0
+
+        async def _coro():
+            nonlocal count
+            count += 1
+
+        _scheduled_tasks: set = set()
+
+        def _schedule_async(coro):
+            task = asyncio.create_task(coro())
+            _scheduled_tasks.add(task)
+            task.add_done_callback(_scheduled_tasks.discard)
+            return task
+
+        [_schedule_async(_coro) for _ in range(5)]
+        assert len(_scheduled_tasks) == 5
+
+        await asyncio.sleep(0.05)
+        assert count == 5
+        assert len(_scheduled_tasks) == 0

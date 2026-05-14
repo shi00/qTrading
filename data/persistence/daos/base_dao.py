@@ -291,6 +291,9 @@ class BaseDao:
         Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
         Leverages SQLAlchemy Core for robust type coercion from Pandas to asyncpg natively.
         """
+        if df is None or df.empty:
+            return 0
+
         if self.engine is None:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
@@ -303,9 +306,6 @@ class BaseDao:
                 f"[{self.__class__.__name__}] Engine disposed, upsert rejected. "
                 f"Call CacheManager.init_db() to reinitialize."
             )
-
-        if df is None or df.empty:
-            return 0
 
         import asyncio
 

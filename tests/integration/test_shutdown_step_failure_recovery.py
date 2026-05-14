@@ -44,7 +44,7 @@ class TestShutdownStepFailureRecovery:
         assert "Step 0" in failed_names
 
     @pytest.mark.asyncio
-    async def test_critical_failure_aborts_remaining_steps(self, mock_singletons):
+    async def test_critical_failure_continues_remaining_steps(self, mock_singletons):
         mock_singletons["TaskManager"]._instance.cancel_all_running_async = AsyncMock(
             side_effect=RuntimeError("step0 failed")
         )
@@ -56,10 +56,10 @@ class TestShutdownStepFailureRecovery:
         assert ok is False
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
-        assert len(coordinator.step_results) == 1
+        assert len(coordinator.step_results) == 7
 
     @pytest.mark.asyncio
-    async def test_step_timeout_aborts_remaining_steps(self, mock_singletons):
+    async def test_step_timeout_continues_remaining_steps(self, mock_singletons):
         coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
         async def _blocking_step0():
@@ -71,7 +71,7 @@ class TestShutdownStepFailureRecovery:
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
         assert step0.timed_out is True
-        assert len(coordinator.step_results) == 1
+        assert len(coordinator.step_results) == 7
 
     @pytest.mark.asyncio
     async def test_step_result_error_message_preserved(self, mock_singletons):
