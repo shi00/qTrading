@@ -85,18 +85,19 @@ def migrated_db_url(tmp_path_factory):
     db_url = f"sqlite:///{db_file}"
     import config as cfg_mod
 
-    # env.py prefers config.DB_URL over sqlalchemy.url; force it to the temp DB.
     original_db_url = cfg_mod.DB_URL
     original_env_db_url = os.environ.get("DATABASE_URL")
     cfg_mod.DB_URL = db_url
     os.environ["DATABASE_URL"] = db_url
-    command.upgrade(_make_cfg(db_url), "head")
-    yield db_url
-    cfg_mod.DB_URL = original_db_url
-    if original_env_db_url is None:
-        os.environ.pop("DATABASE_URL", None)
-    else:
-        os.environ["DATABASE_URL"] = original_env_db_url
+    try:
+        command.upgrade(_make_cfg(db_url), "head")
+        yield db_url
+    finally:
+        cfg_mod.DB_URL = original_db_url
+        if original_env_db_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = original_env_db_url
 
 
 def _get_table_columns(db_url: str, table_name: str) -> set[str]:

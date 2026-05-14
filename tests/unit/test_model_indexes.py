@@ -24,16 +24,18 @@ class TestTaskHistoryIndexes:
             if idx.name == "idx_task_history_status_created":
                 col_names = [c.name for c in idx.columns]
                 assert col_names == ["status", "created_at"], f"Expected ['status', 'created_at'], got {col_names}"
-                return
-        pytest.fail("Index idx_task_history_status_created not found")
+                break
+        else:
+            pytest.fail("Index idx_task_history_status_created not found")
 
     def test_completed_at_index_covers_completed_at(self):
         for idx in TaskHistory.__table__.indexes:
             if idx.name == "idx_task_history_completed":
                 col_names = [c.name for c in idx.columns]
                 assert col_names == ["completed_at"], f"Expected ['completed_at'], got {col_names}"
-                return
-        pytest.fail("Index idx_task_history_completed not found")
+                break
+        else:
+            pytest.fail("Index idx_task_history_completed not found")
 
 
 class TestMarketNewsUniqueConstraint:

@@ -11,11 +11,18 @@ import pytest
 class TestTushareClientBoundaryConditions:
     """Tushare API error handling boundary conditions - behavior tests"""
 
+    @pytest.fixture(autouse=True)
+    def _reset_tushare(self):
+        from data.external.tushare_client import TushareClient
+
+        TushareClient._instance = None
+        yield
+        TushareClient._instance = None
+
     @pytest.mark.asyncio
     async def test_handle_api_call_unknown_error_raises_on_last_retry(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
@@ -32,13 +39,10 @@ class TestTushareClientBoundaryConditions:
                 with pytest.raises(Exception, match="unknown error"):
                     await client._handle_api_call(failing_func)
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_handle_api_call_network_error_exhaustion_raises_runtime_error(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
@@ -56,13 +60,10 @@ class TestTushareClientBoundaryConditions:
                 with pytest.raises(RuntimeError, match="retries exhausted"):
                     await client._handle_api_call(failing_func)
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_handle_api_call_permission_error_reraises(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 3
@@ -79,13 +80,10 @@ class TestTushareClientBoundaryConditions:
             with pytest.raises(Exception, match="没有权限"):
                 await client._handle_api_call(failing_func)
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_handle_api_call_rate_limit_reduces_rate(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
@@ -109,13 +107,10 @@ class TestTushareClientBoundaryConditions:
 
         mock_limiter.reduce_rate.assert_called()
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_paginated_first_page_failure_raises(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
@@ -128,14 +123,11 @@ class TestTushareClientBoundaryConditions:
             with pytest.raises(Exception, match="API error"):
                 await client._handle_api_call_paginated(MagicMock())
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_paginated_later_page_failure_returns_partial(self):
         from data.external.tushare_client import TushareClient
         import pandas as pd
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
@@ -161,13 +153,10 @@ class TestTushareClientBoundaryConditions:
         assert result is not None
         assert len(result) == 1
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_paginated_empty_result_returns_none(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
@@ -181,13 +170,10 @@ class TestTushareClientBoundaryConditions:
 
         assert result is None
 
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_network_error_retries_with_backoff(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 2
@@ -211,8 +197,6 @@ class TestTushareClientBoundaryConditions:
                     await client._handle_api_call(failing_func)
 
         assert len(sleep_calls) > 0, "Network errors must trigger backoff sleep"
-
-        TushareClient._instance = None
 
 
 class TestQualityGateBoundaryConditions:
@@ -249,7 +233,8 @@ class TestQualityGateBoundaryConditions:
         original = qg_module._STRICT_QUALITY_GATE
         try:
             qg_module._STRICT_QUALITY_GATE = False
-            _check_tier(None, QualityTier.BRONZE, "test_func")
+            result = _check_tier(None, QualityTier.BRONZE, "test_func")
+            assert result is None
         finally:
             qg_module._STRICT_QUALITY_GATE = original
 
@@ -602,7 +587,7 @@ class TestShutdownBoundaryConditions:
         coord = ShutdownCoordinator()
 
         async def slow_step():
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
 
         result = await coord._run_async_step(
             name="test",

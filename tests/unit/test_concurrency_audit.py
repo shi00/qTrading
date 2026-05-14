@@ -174,7 +174,7 @@ class TestMarketDataServiceStopBehavior:
     async def test_stop_in_loop_preserves_task_for_graceful_await(self, mock_tc, mock_cache, mock_api):
         svc = MarketDataService()
         svc._running = True
-        poll_task = asyncio.create_task(asyncio.sleep(100))
+        poll_task = asyncio.create_task(asyncio.sleep(60))
         svc._task = poll_task
         svc.stop()
         assert svc._task is not None

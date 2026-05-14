@@ -194,9 +194,11 @@ class TestNewsSubscriptionServiceFetchAndNotify:
     @patch("data.external.news_subscription.CacheManager")
     async def test_no_news(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
+        svc._notify_listeners = AsyncMock()
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(return_value=[])
             await svc._fetch_and_notify()
+        svc._notify_listeners.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("data.external.news_subscription.AIService")
@@ -471,7 +473,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
 
         async def slow_alert(msg):
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
 
         svc._alert_listeners.add(slow_alert)
         with (
@@ -611,7 +613,7 @@ class TestNewsSubscriptionServiceNotifyListenerErrors:
         svc = NewsSubscriptionService()
 
         async def slow_cb():
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
 
         svc._listeners.add(slow_cb)
         with patch("data.external.news_subscription.asyncio.wait_for", side_effect=TimeoutError):

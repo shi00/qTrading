@@ -118,6 +118,15 @@ class _LoggerSpy:
         self.messages.append(msg % args if args else msg)
 
 
+@pytest.fixture(autouse=True)
+def _reset_fake_coordinator():
+    _FakeCoordinator.last = None
+    _FakeCoordinator.cleanup_result = True
+    yield
+    _FakeCoordinator.last = None
+    _FakeCoordinator.cleanup_result = True
+
+
 def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     _FakeCoordinator.cleanup_result = cleanup_result
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)

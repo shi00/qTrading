@@ -270,9 +270,9 @@ class TestScreenerViewModelExport:
         assert len(result) == 3
 
     @pytest.mark.asyncio
-    async def test_export_results_no_data(self, vm):
+    async def test_export_results_no_data(self, vm, tmp_path):
         vm._full_results = None
-        path, error = await vm.export_results("/tmp/test.csv")
+        path, error = await vm.export_results(str(tmp_path / "test.csv"))
         assert path is None
         assert error == "No data to export"
 

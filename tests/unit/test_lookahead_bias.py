@@ -158,7 +158,11 @@ class TestLookaheadBias(unittest.IsolatedAsyncioTestCase):
         )
         start_date = call_kwargs.get("start_date")
         if start_date is not None:
-            now_based_start = datetime.date.today() - datetime.timedelta(days=365 * 5 + 30)
+            fixed_today = datetime.date(2026, 5, 15)
+            with patch("datetime.date") as mock_date:
+                mock_date.today.return_value = fixed_today
+                mock_date.side_effect = lambda *args, **kw: datetime.date(*args, **kw)
+                now_based_start = mock_date.today() - datetime.timedelta(days=365 * 5 + 30)
             assert start_date < now_based_start, (
                 f"S-2: start_date must be derived from end_date (2024-03-15), not get_now(); got {start_date}"
             )

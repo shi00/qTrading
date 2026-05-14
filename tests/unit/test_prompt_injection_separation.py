@@ -5,6 +5,7 @@ not concatenated into the strategy system_prompt.
 These tests validate BEHAVIOR, not source code text.
 """
 
+import contextlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -53,15 +54,13 @@ class TestUniversalRulesSeparateSystemMessage:
             with patch("services.ai_service.DataSanitizer"):
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
                     mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
-                    try:
+                    with contextlib.suppress(RuntimeError, ValueError, TypeError):
                         await svc.analyze_stock(
                             stock_info={"ts_code": "000001.SZ", "name": "test"},
                             tech_info={},
                             news_list=[],
                             strategy_key="value",
                         )
-                    except RuntimeError, ValueError, TypeError:
-                        pass
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]
         assert len(system_msgs) >= 2, (
@@ -82,15 +81,13 @@ class TestUniversalRulesSeparateSystemMessage:
             with patch("services.ai_service.DataSanitizer"):
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
                     mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
-                    try:
+                    with contextlib.suppress(RuntimeError, ValueError, TypeError):
                         await svc.analyze_stock(
                             stock_info={"ts_code": "000001.SZ", "name": "test"},
                             tech_info={},
                             news_list=[],
                             strategy_key="value",
                         )
-                    except RuntimeError, ValueError, TypeError:
-                        pass
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]
         assert len(system_msgs) >= 2
@@ -128,7 +125,7 @@ class TestUniversalRulesSeparateSystemMessage:
                     mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
                     with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
                         with patch("utils.prompt_guard.sanitize_prompt", side_effect=lambda x: x):
-                            try:
+                            with contextlib.suppress(RuntimeError, ValueError, TypeError):
                                 await svc.analyze_stock(
                                     stock_info={"ts_code": "000001.SZ", "name": "test"},
                                     tech_info={},
@@ -136,8 +133,6 @@ class TestUniversalRulesSeparateSystemMessage:
                                     strategy_key="value",
                                     ui_prompt_override=custom_prompt,
                                 )
-                            except RuntimeError, ValueError, TypeError:
-                                pass
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]
         assert len(system_msgs) >= 2

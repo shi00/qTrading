@@ -39,6 +39,9 @@ class TestDatabaseManager(TestDatabaseBase):
                 await conn.execute(text(f"INSERT INTO test_daily_quotes VALUES ('000001.SZ', '{date}', {10.0 + i})"))
 
     async def asyncTearDown(self):
+        async with self._ddl_engine.begin() as conn:
+            await conn.execute(text("DROP TABLE IF EXISTS test_stock_basic"))
+            await conn.execute(text("DROP TABLE IF EXISTS test_daily_quotes"))
         if hasattr(self, "db_manager"):
             self.db_manager.close()
         if hasattr(self, "_ddl_engine"):

@@ -385,8 +385,15 @@ class TestTaskManagerPersistenceFlush:
                 with manager._persist_counter_lock:
                     manager._persist_pending_count = 0
 
-            asyncio.create_task(complete_later())
-            await manager.flush_persistence(timeout_s=0.5)
+            task = asyncio.create_task(complete_later())
+            try:
+                await manager.flush_persistence(timeout_s=0.5)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
             with manager._persist_counter_lock:
                 assert manager._persist_pending_count == 0

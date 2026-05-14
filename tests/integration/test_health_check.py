@@ -17,12 +17,19 @@ from data.mixins.health_mixin import _compute_tier
 class TestHealthCacheInvalidation:
     """P1-5: Health cache must be cleared after sync operations"""
 
-    @pytest.mark.asyncio
-    async def test_sync_historical_clears_health_cache(self):
+    @pytest.fixture(autouse=True)
+    def _reset_dp(self):
         from data.data_processor import DataProcessor
 
         DataProcessor._instance = None
         DataProcessor._initialized = False
+        yield
+        DataProcessor._instance = None
+        DataProcessor._initialized = False
+
+    @pytest.mark.asyncio
+    async def test_sync_historical_clears_health_cache(self):
+        from data.data_processor import DataProcessor
 
         with (
             patch("data.data_processor.TushareClient"),
@@ -41,15 +48,9 @@ class TestHealthCacheInvalidation:
 
             assert processor._health_cache == {"time": 0, "data": None}
 
-        DataProcessor._instance = None
-        DataProcessor._initialized = False
-
     @pytest.mark.asyncio
     async def test_sync_financial_clears_health_cache(self):
         from data.data_processor import DataProcessor
-
-        DataProcessor._instance = None
-        DataProcessor._initialized = False
 
         with (
             patch("data.data_processor.TushareClient"),
@@ -68,15 +69,9 @@ class TestHealthCacheInvalidation:
 
             assert processor._health_cache == {"time": 0, "data": None}
 
-        DataProcessor._instance = None
-        DataProcessor._initialized = False
-
     @pytest.mark.asyncio
     async def test_sync_comprehensive_clears_health_cache(self):
         from data.data_processor import DataProcessor
-
-        DataProcessor._instance = None
-        DataProcessor._initialized = False
 
         with (
             patch("data.data_processor.TushareClient"),
@@ -94,9 +89,6 @@ class TestHealthCacheInvalidation:
                 await processor.sync_comprehensive_fundamentals()
 
             assert processor._health_cache == {"time": 0, "data": None}
-
-        DataProcessor._instance = None
-        DataProcessor._initialized = False
 
 
 class TestQualityScanDelisted:

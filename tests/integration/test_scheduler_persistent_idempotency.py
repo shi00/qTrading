@@ -79,7 +79,7 @@ class TestSchedulerPersistentIdempotency:
         assert config[_CFG_LAST_NIGHTLY_PREDICTION] == "20260429"
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 class TestSchedulerFailureProtection:
     """H-6: Failed tasks must NOT mark done."""
 

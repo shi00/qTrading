@@ -247,14 +247,15 @@ class TestReviewManager:
 class TestNewsFetcher:
     """Tests for NewsFetcher"""
 
+    @pytest.mark.skip(reason="Requires real network - run manually")
     @pytest.mark.asyncio
     async def test_get_us_major_moves_returns_string(self):
         """Test: get_us_major_moves returns a non-empty string"""
         result = await NewsFetcher.get_us_major_moves()
 
         assert isinstance(result, str)
-        # May be "Global data error" if market is closed, but should still be string
 
+    @pytest.mark.skip(reason="Requires real network - run manually")
     @pytest.mark.asyncio
     async def test_get_stock_news_returns_list(self):
         """Test: get_stock_news returns a list"""

@@ -484,6 +484,7 @@ class TestShutdownCoordinatorGracefulForceExit:
         )
 
 
+@pytest.mark.slow
 class TestWatchdogStepResultsLogging:
     def test_watchdog_timeout_includes_step_results(self, caplog):
         import logging
@@ -557,7 +558,7 @@ class TestMainPyCleanupTimeouts:
         coord = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=lambda code: None)
 
         async def slow_cancel():
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
 
         with (
             patch("services.task_manager.TaskManager") as mock_tm,

@@ -35,41 +35,42 @@ def mock_singletons():
     orig_scheduler_running = getattr(svc.scheduler, "running", None) if hasattr(svc, "scheduler") else None
     orig_scheduler_stop = getattr(svc, "stop", None)
 
-    TaskManager._instance = AsyncMock()
-    NewsSubscriptionService._instance = AsyncMock()
-    DataProcessor._instance = AsyncMock()
-    CacheManager._instance = AsyncMock()
-    CacheManager._instance.engine = AsyncMock()
-    MarketDataService._instance = AsyncMock()
-    LocalModelManager._instance = MagicMock()
-    LocalModelManager._instance._worker_ready = True
-    ThreadPoolManager._instance = MagicMock()
-    svc.scheduler = MagicMock()
-    svc.scheduler.running = True
-    svc.stop = MagicMock()
+    try:
+        TaskManager._instance = AsyncMock()
+        NewsSubscriptionService._instance = AsyncMock()
+        DataProcessor._instance = AsyncMock()
+        CacheManager._instance = AsyncMock()
+        CacheManager._instance.engine = AsyncMock()
+        MarketDataService._instance = AsyncMock()
+        LocalModelManager._instance = MagicMock()
+        LocalModelManager._instance._worker_ready = True
+        ThreadPoolManager._instance = MagicMock()
+        svc.scheduler = MagicMock()
+        svc.scheduler.running = True
+        svc.stop = MagicMock()
 
-    yield {
-        "TaskManager": TaskManager,
-        "scheduler": svc,
-        "NewsSubscriptionService": NewsSubscriptionService,
-        "DataProcessor": DataProcessor,
-        "CacheManager": CacheManager,
-        "MarketDataService": MarketDataService,
-        "LocalModelManager": LocalModelManager,
-        "ThreadPoolManager": ThreadPoolManager,
-    }
-
-    TaskManager._instance = orig_tm
-    NewsSubscriptionService._instance = orig_news
-    DataProcessor._instance = orig_dp
-    CacheManager._instance = orig_cache
-    MarketDataService._instance = orig_mds
-    LocalModelManager._instance = orig_llm
-    ThreadPoolManager._instance = orig_tp
-    if orig_scheduler_running is not None:
-        svc.scheduler.running = orig_scheduler_running
-    if orig_scheduler_stop is not None:
-        svc.stop = orig_scheduler_stop
+        yield {
+            "TaskManager": TaskManager,
+            "scheduler": svc,
+            "NewsSubscriptionService": NewsSubscriptionService,
+            "DataProcessor": DataProcessor,
+            "CacheManager": CacheManager,
+            "MarketDataService": MarketDataService,
+            "LocalModelManager": LocalModelManager,
+            "ThreadPoolManager": ThreadPoolManager,
+        }
+    finally:
+        TaskManager._instance = orig_tm
+        NewsSubscriptionService._instance = orig_news
+        DataProcessor._instance = orig_dp
+        CacheManager._instance = orig_cache
+        MarketDataService._instance = orig_mds
+        LocalModelManager._instance = orig_llm
+        ThreadPoolManager._instance = orig_tp
+        if orig_scheduler_running is not None:
+            svc.scheduler.running = orig_scheduler_running
+        if orig_scheduler_stop is not None:
+            svc.stop = orig_scheduler_stop
 
 
 @pytest.mark.asyncio

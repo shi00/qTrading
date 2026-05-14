@@ -114,8 +114,8 @@ class TestGetLogger:
 
 
 class TestSetupLoggingNoisyLibs:
-    def test_noisy_libs_suppressed(self):
-        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+    def test_noisy_libs_suppressed(self, tmp_path):
+        with patch("utils.logger.LOG_DIR", str(tmp_path / "test_logs")):
             setup_logging()
         noisy_libs = ["urllib3", "requests", "flet", "apscheduler"]
         for lib in noisy_libs:
@@ -131,26 +131,26 @@ class TestUpdateLogLevel:
     def teardown_method(self):
         self.root_logger.handlers = self.original_handlers
 
-    def test_update_to_debug(self):
-        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+    def test_update_to_debug(self, tmp_path):
+        with patch("utils.logger.LOG_DIR", str(tmp_path / "test_logs")):
             setup_logging()
         update_log_level("DEBUG")
         assert logging.getLogger().level == logging.DEBUG
 
-    def test_update_to_warning(self):
-        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+    def test_update_to_warning(self, tmp_path):
+        with patch("utils.logger.LOG_DIR", str(tmp_path / "test_logs")):
             setup_logging()
         update_log_level("WARNING")
         assert logging.getLogger().level == logging.WARNING
 
-    def test_update_to_error(self):
-        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+    def test_update_to_error(self, tmp_path):
+        with patch("utils.logger.LOG_DIR", str(tmp_path / "test_logs")):
             setup_logging()
         update_log_level("ERROR")
         assert logging.getLogger().level == logging.ERROR
 
-    def test_update_unknown_defaults_to_info(self):
-        with patch("utils.logger.LOG_DIR", "/tmp/test_logs"):
+    def test_update_unknown_defaults_to_info(self, tmp_path):
+        with patch("utils.logger.LOG_DIR", str(tmp_path / "test_logs")):
             setup_logging()
         update_log_level("UNKNOWN_LEVEL")
         assert logging.getLogger().level == logging.INFO
