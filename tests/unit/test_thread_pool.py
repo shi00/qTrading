@@ -4,6 +4,13 @@ from unittest.mock import patch
 from utils.thread_pool import ThreadPoolManager, TaskType, get_thread_pool_manager
 
 
+@pytest.fixture(autouse=True)
+def auto_reset_singleton():
+    ThreadPoolManager._reset_singleton()
+    yield
+    ThreadPoolManager._reset_singleton()
+
+
 class TestThreadPoolManagerInit:
     @patch("utils.thread_pool.ConfigHandler")
     def test_init(self, mock_ch):
@@ -57,12 +64,6 @@ class TestThreadPoolManagerShutdown:
 
 
 class TestGetThreadPoolManager:
-    def setup_method(self):
-        ThreadPoolManager._reset_singleton()
-
-    def teardown_method(self):
-        ThreadPoolManager._reset_singleton()
-
     def test_returns_instance(self):
         mgr = get_thread_pool_manager()
         assert isinstance(mgr, ThreadPoolManager)
@@ -74,12 +75,6 @@ class TestGetThreadPoolManager:
 
 
 class TestThreadPoolManagerPools:
-    def setup_method(self):
-        ThreadPoolManager._reset_singleton()
-
-    def teardown_method(self):
-        ThreadPoolManager._reset_singleton()
-
     def test_io_pool_exists(self):
         mgr = ThreadPoolManager()
         assert mgr._io_pool is not None
@@ -112,12 +107,6 @@ class TestThreadPoolManagerPools:
 
 
 class TestThreadPoolManagerSingleton:
-    def setup_method(self):
-        ThreadPoolManager._reset_singleton()
-
-    def teardown_method(self):
-        ThreadPoolManager._reset_singleton()
-
     def test_singleton_creation(self):
         mgr1 = ThreadPoolManager()
         mgr2 = ThreadPoolManager()
@@ -131,12 +120,6 @@ class TestThreadPoolManagerSingleton:
 
 
 class TestThreadPoolManagerSubmit:
-    def setup_method(self):
-        ThreadPoolManager._reset_singleton()
-
-    def teardown_method(self):
-        ThreadPoolManager._reset_singleton()
-
     def test_submit_sync_task(self):
         mgr = ThreadPoolManager()
         result = mgr.submit(TaskType.IO, lambda: 42)
