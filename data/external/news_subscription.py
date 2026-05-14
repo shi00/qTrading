@@ -194,29 +194,32 @@ class NewsSubscriptionService:
     def stop(self):
         """Stop the service and reset state.
 
-        Always cancels tasks immediately. If called from a running event loop,
-        also schedules stop_async() for graceful queue draining.
+        Cancels the fetch task immediately so no new items enter the queue.
+        If called from a running event loop, schedules stop_async() which
+        will drain the processing queue and then cancel the processing task.
+        The processing task is NOT cancelled here so stop_async() can still
+        drain queued items.
         """
+        if not self._running:
+            return
         self._running = False
 
         if self._current_fetch_task and not self._current_fetch_task.done():
             self._current_fetch_task.cancel()
-            self._current_fetch_task = None
-
-        if self._processing_task and not self._processing_task.done():
-            self._processing_task.cancel()
-            self._processing_task = None
-
-        self._last_news_time = None
-        self._last_news_content = None
 
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                loop.create_task(self.stop_async())
+                task = loop.create_task(self.stop_async())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
                 logger.debug("[NewsService] stop() scheduled stop_async for graceful drain")
         except RuntimeError:
-            pass
+            if self._processing_task and not self._processing_task.done():
+                self._processing_task.cancel()
+            self._processing_task = None
+            self._last_news_time = None
+            self._last_news_content = None
 
         logger.info("[NewsService] Stopped news polling service")
 

@@ -100,8 +100,7 @@ class TestSyncStrategiesUseRateLimiter:
         assert tb.tokens < 10
 
     @pytest.mark.asyncio
-    async def test_rate_limiter_warns_in_async_context(self):
+    async def test_rate_limiter_raises_in_async_context(self):
         tb = TokenBucket(start_tokens=10, capacity=10, rate=100.0)
-        with patch("utils.rate_limiter.logger") as mock_logger:
+        with pytest.raises(RuntimeError, match="TokenBucket.consume\\(\\)"):
             tb.consume(tokens=1)
-            mock_logger.warning.assert_called()

@@ -621,7 +621,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     val_str = (
                         f"{val / 100:.2f}{I18n.get('unit_yi')}"
                         if abs(val) > 100
-                        else f"{val:.0f}{I18n.get('unit_wan')}"
+                        else f"{val * 100:.0f}{I18n.get('unit_wan')}"
                     )
                     sub_str = I18n.get("home_inflow") if val > 0 else I18n.get("home_outflow")
                     return {"name": name, "value": val_str, "sub": sub_str}

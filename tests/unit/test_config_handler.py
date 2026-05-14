@@ -378,12 +378,17 @@ class TestConfigHandlerSyncIntegrityConfig:
 
 
 class TestConfigHandlerEnsureDefaults:
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
-    @patch.object(cfg_mod.ConfigHandler, "_deep_merge_defaults", return_value=({"auto_update_enabled": True}, True))
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    def test_merges_and_saves(self, mock_save, mock_merge, mock_load):
-        cfg_mod.ConfigHandler.ensure_defaults()
-        mock_save.assert_called_once()
+    @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
+    def test_merges_and_saves(self, mock_save):
+        with patch.object(cfg_mod.ConfigHandler, "_config_cache", {}):
+            cfg_mod.ConfigHandler.ensure_defaults()
+            mock_save.assert_called_once()
+
+    @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
+    def test_no_save_when_already_complete(self, mock_save):
+        with patch.object(cfg_mod.ConfigHandler, "_config_cache", cfg_mod.ConfigHandler.DEFAULT_CONFIG.copy()):
+            cfg_mod.ConfigHandler.ensure_defaults()
+            mock_save.assert_not_called()
 
 
 class TestConfigHandlerGetTokenKeyringMigration:

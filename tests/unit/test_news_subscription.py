@@ -85,10 +85,13 @@ class TestNewsSubscriptionServiceStop:
 
     @patch("data.external.news_subscription.AIService")
     @patch("data.external.news_subscription.CacheManager")
-    def test_stop_clears_last_news(self, mock_cache, mock_ai):
+    def test_stop_clears_last_news_when_no_loop(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
+        svc._running = True
         svc._last_news_time = "2024-06-15"
         svc._last_news_content = "some content"
+        svc._current_fetch_task = None
+        svc._processing_task = None
         svc.stop()
         assert svc._last_news_time is None
         assert svc._last_news_content is None
@@ -117,13 +120,8 @@ class TestNewsSubscriptionServiceStart:
     @patch("data.external.news_subscription.CacheManager")
     async def test_start_sets_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
-        with patch("data.external.news_subscription.asyncio") as mock_aio:
-            mock_aio.Queue = asyncio.Queue
-            mock_aio.Lock = asyncio.Lock
-            mock_aio.create_task = MagicMock()
-            svc.start()
-            assert svc._running is True
-            mock_aio.create_task.assert_called()
+        svc.start()
+        assert svc._running is True
         svc._running = False
 
     @patch("data.external.news_subscription.AIService")

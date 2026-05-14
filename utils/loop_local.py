@@ -39,7 +39,12 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = True)
             return _fallback_store[key]
 
     if loop not in store:
-        store[loop] = factory()
+        with _fallback_lock:
+            if key in _fallback_store:
+                store[loop] = _fallback_store.pop(key)
+                logger.debug(f"[loop_local] Migrated fallback instance for '{key}' to loop-local store.")
+            else:
+                store[loop] = factory()
     return store[loop]
 
 

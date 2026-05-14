@@ -64,6 +64,7 @@ class ScreenerViewModel:
         self.on_progress: Callable[[float], None] | None = None
         self.on_log_stream_start: Callable[[str], Callable] | None = None
         self._main_loop = None
+        self._background_tasks: set = set()
 
     def bind(self, on_update, on_log, on_status, on_progress, on_log_stream_start=None):
         self.on_update = on_update
@@ -439,7 +440,11 @@ class ScreenerViewModel:
                 self._flush_pending = True
                 try:
                     loop = asyncio.get_running_loop()
-                    loop.create_task(self._flush_ai_buffer())
+                    if not self._main_loop:
+                        self._main_loop = loop
+                    task = loop.create_task(self._flush_ai_buffer())
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
                 except RuntimeError:
                     if self._main_loop and self._main_loop.is_running():
                         asyncio.run_coroutine_threadsafe(

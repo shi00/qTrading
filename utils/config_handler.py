@@ -193,39 +193,59 @@ class ConfigHandler:
 
     @staticmethod
     def ensure_defaults():
-        """Ensure default settings exist AND remove unused keys from user_settings.json"""
+        """Ensure default settings exist AND remove unused keys from user_settings.json
+
+        Uses write lock for the entire read-modify-write cycle to prevent TOCTOU races.
+        Reads config directly inside the lock (not via load_config) to avoid
+        wlock->rlock deadlock with RWLockFair.
+        """
         try:
-            current_config = ConfigHandler.load_config()
-            dirty = False
+            with ConfigHandler._lock.gen_wlock():
+                if ConfigHandler._config_cache is not None:
+                    current_config = ConfigHandler._config_cache.copy()
+                elif os.path.exists(CONFIG_FILE):
+                    try:
+                        with open(CONFIG_FILE, encoding="utf-8") as f:
+                            current_config = json.load(f)
+                    except (json.JSONDecodeError, OSError):
+                        current_config = {}
+                else:
+                    current_config = {}
 
-            for key, default_val in ConfigHandler.DEFAULT_CONFIG.items():
-                if key not in current_config:
-                    current_config[key] = default_val
-                    dirty = True
-                    logger.info(f"Initialized default config: {key}")
-                elif isinstance(default_val, dict) and isinstance(current_config.get(key), dict):
-                    nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(current_config[key], default_val)
-                    if nested_dirty:
-                        current_config[key] = nested_result
+                dirty = False
+
+                for key, default_val in ConfigHandler.DEFAULT_CONFIG.items():
+                    if key not in current_config:
+                        current_config[key] = default_val
                         dirty = True
-                        logger.info(f"Updated nested config: {key}")
+                        logger.info(f"Initialized default config: {key}")
+                    elif isinstance(default_val, dict) and isinstance(current_config.get(key), dict):
+                        nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(
+                            current_config[key], default_val
+                        )
+                        if nested_dirty:
+                            current_config[key] = nested_result
+                            dirty = True
+                            logger.info(f"Updated nested config: {key}")
 
-            valid_keys = set(ConfigHandler.DEFAULT_CONFIG.keys())
-            existing_keys = list(current_config.keys())
+                valid_keys = set(ConfigHandler.DEFAULT_CONFIG.keys())
+                existing_keys = list(current_config.keys())
 
-            for key in existing_keys:
-                if key.startswith("ai_strategy_prompt_"):
-                    continue
-                if key not in valid_keys:
-                    logger.info(f"Removing deprecated/unused config: {key}")
-                    current_config.pop(key)
-                    dirty = True
+                for key in existing_keys:
+                    if key.startswith("ai_strategy_prompt_"):
+                        continue
+                    if key not in valid_keys:
+                        logger.info(f"Removing deprecated/unused config: {key}")
+                        current_config.pop(key)
+                        dirty = True
 
-            if dirty:
-                ConfigHandler.save_config(current_config, replace=True)
-                logger.info(
-                    f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}",
-                )
+                if dirty:
+                    success = ConfigHandler._save_json_atomically(current_config, CONFIG_FILE)
+                    if success:
+                        ConfigHandler._config_cache = current_config
+                    logger.info(
+                        f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}",
+                    )
 
         except Exception as e:
             logger.error(f"Failed to ensure default config: {e}")

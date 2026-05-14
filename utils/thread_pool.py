@@ -63,7 +63,7 @@ class ThreadPoolManager:
 
         self._io_pool: concurrent.futures.ThreadPoolExecutor | None = None
         self._cpu_pool: concurrent.futures.ThreadPoolExecutor | None = None
-        self._shutdown_done = False  # S3-1 fix: Idempotent guard
+        self._shutdown_event = threading.Event()
 
         self._init_pools()
         atexit.register(self._atexit_shutdown)
@@ -145,7 +145,8 @@ class ThreadPoolManager:
 
     @property
     def io_pool(self) -> concurrent.futures.ThreadPoolExecutor:
-        # Emergency recovery if pool was accidentally shutdown or None
+        if self._shutdown_event.is_set():
+            raise RuntimeError("Cannot access io_pool after shutdown")
         if self._io_pool is None:
             self._init_pools()
         assert self._io_pool is not None
@@ -153,7 +154,8 @@ class ThreadPoolManager:
 
     @property
     def cpu_pool(self) -> concurrent.futures.ThreadPoolExecutor:
-        # Emergency recovery
+        if self._shutdown_event.is_set():
+            raise RuntimeError("Cannot access cpu_pool after shutdown")
         if self._cpu_pool is None:
             self._init_pools()
         assert self._cpu_pool is not None
@@ -212,9 +214,9 @@ class ThreadPoolManager:
         For now, we trust the executor's shutdown mechanism.
         S3-1 fix: Added idempotent guard to prevent double shutdown.
         """
-        if self._shutdown_done:
+        if self._shutdown_event.is_set():
             return
-        self._shutdown_done = True
+        self._shutdown_event.set()
 
         shutdown_performed = False
         if hasattr(self, "_io_pool") and self._io_pool:

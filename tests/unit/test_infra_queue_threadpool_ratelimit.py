@@ -57,10 +57,10 @@ class TestThreadPoolManagerIdempotentShutdown:
         tpm = ThreadPoolManager()
 
         tpm.shutdown(wait=False)
-        assert tpm._shutdown_done is True
+        assert tpm._shutdown_event.is_set()
 
         tpm.shutdown(wait=False)
-        assert tpm._shutdown_done is True
+        assert tpm._shutdown_event.is_set()
 
         ThreadPoolManager._reset_singleton()
 
@@ -80,31 +80,22 @@ class TestThreadPoolManagerIdempotentShutdown:
 
 
 class TestTokenBucketAsyncWarning:
-    """S3-2: TokenBucket should warn when used in async context"""
+    """S3-2 / C-P1-5: TokenBucket must raise RuntimeError when consume()
+    is called from async context (use consume_async instead)."""
 
     @pytest.mark.asyncio
-    async def test_consume_warns_in_async_context(self):
+    async def test_consume_raises_in_async_context(self):
         bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
-
-        with patch("utils.rate_limiter.logger") as mock_logger:
+        with pytest.raises(RuntimeError, match="TokenBucket.consume\\(\\)"):
             bucket.consume(1)
-            mock_logger.warning.assert_called()
-            call_args = mock_logger.warning.call_args[0][0]
-            assert "async context" in call_args.lower() or "consume_async" in call_args
 
     @pytest.mark.asyncio
-    async def test_consume_async_no_warning(self):
-        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+    async def test_consume_async_no_error(self):
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=1)
+        await bucket.consume_async(1)
+        assert int(bucket.tokens) == 9
 
-        with patch("utils.rate_limiter.logger") as mock_logger:
-            await bucket.consume_async(1)
-            warning_calls = [c for c in mock_logger.warning.call_args_list if "async context" in str(c).lower()]
-            assert len(warning_calls) == 0
-
-    def test_consume_no_warning_in_sync_context(self):
-        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
-
-        with patch("utils.rate_limiter.logger") as mock_logger:
-            bucket.consume(1)
-            warning_calls = [c for c in mock_logger.warning.call_args_list if "async context" in str(c).lower()]
-            assert len(warning_calls) == 0
+    def test_consume_no_error_in_sync_context(self):
+        bucket = TokenBucket(start_tokens=10, capacity=20, rate=1)
+        bucket.consume(1)
+        assert int(bucket.tokens) == 9

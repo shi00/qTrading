@@ -73,6 +73,7 @@ class MarketDataService:
         self._task = None
         self._cached_data = None
         self._listeners = set()
+        self._background_tasks = set()
         self._initialized = True
 
     def add_listener(self, callback: typing.Callable | None):
@@ -101,34 +102,40 @@ class MarketDataService:
         logger.info("[MarketDataService] Started market data polling service")
 
     def stop(self):
-        """停止服务并重置状态
+        """Stop the service and reset state.
 
-        Always cancels the task immediately. If called from a running event
-        loop, also schedules stop_async() for graceful await.
+        Cancels the task immediately. If called from a running event loop,
+        also schedules stop_async() for graceful await + cleanup.
+        stop() itself no longer clears _task or _cached_data — that is
+        stop_async()'s responsibility so the graceful-await path works.
         """
+        if not self._running:
+            return
         self._running = False
+
         if self._task and not self._task.done():
             self._task.cancel()
-        self._task = None
-
-        self._cached_data = None
 
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                loop.create_task(self.stop_async())
+                task = loop.create_task(self.stop_async())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
-            pass
+            self._task = None
+            self._cached_data = None
 
         logger.info("[MarketDataService] Stopped market data polling service")
 
     async def stop_async(self, timeout: float = 3.0):
         """停止服务并等待后台任务完成"""
         self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.wait_for(self._task, timeout=timeout)
+        if self._task:
+            if not self._task.done():
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(self._task, timeout=timeout)
             self._task = None
 
         self._cached_data = None
@@ -284,7 +291,7 @@ class MarketDataService:
                 "name": I18n.get("home_northbound"),
                 "value": f"{val / 100:.2f}{I18n.get('unit_yi')}"
                 if abs(val) > 100
-                else f"{val:.0f}{I18n.get('unit_wan')}",
+                else f"{val * 100:.0f}{I18n.get('unit_wan')}",
                 "sub": I18n.get("home_inflow") if val > 0 else I18n.get("home_outflow"),
                 "color": "red" if val > 0 else "green" if val < 0 else "grey",
             }
