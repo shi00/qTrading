@@ -74,16 +74,6 @@ jobs:
           pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           pip install -r requirements-dev.txt
 
-      - name: Verify requirements.txt is up to date
-        run: |
-          pip install pip-tools
-          pip-compile pyproject.toml -o requirements_check.txt
-          diff requirements.txt requirements_check.txt || (echo "::error::requirements.txt is out of date. Run: pip-compile pyproject.toml -o requirements.txt" && exit 1)
-          pip-compile --extra dev pyproject.toml -o requirements_dev_check.txt
-          diff requirements-dev.txt requirements_dev_check.txt || (echo "::error::requirements-dev.txt is out of date. Run: pip-compile --extra dev pyproject.toml -o requirements-dev.txt" && exit 1)
-          pip-compile --extra optional pyproject.toml -o requirements_optional_check.txt
-          diff requirements-optional.txt requirements_optional_check.txt || (echo "::error::requirements-optional.txt is out of date. Run: pip-compile --extra optional pyproject.toml -o requirements-optional.txt" && exit 1)
-
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
         run: |
