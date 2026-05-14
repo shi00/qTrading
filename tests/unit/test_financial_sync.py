@@ -180,7 +180,7 @@ class TestFinancialSyncRunModes:
         strategy = FinancialSyncStrategy(ctx)
         strategy._shutdown_event.set()
         result = await strategy.run(force=True)
-        assert result.status in ("cancelled", "failed", "success")
+        assert result.status in ("cancelled", "success")
 
     @pytest.mark.asyncio
     async def test_run_exception(self):
@@ -214,7 +214,8 @@ class TestFinancialSyncFetchComprehensive:
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
         df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
-        assert df is not None or df is None
+        assert isinstance(df, pd.DataFrame)
+        assert "ts_code" in df.columns
         assert "mainbz" in aux
         assert "audit" in aux
 

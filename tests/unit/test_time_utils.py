@@ -1,7 +1,7 @@
 import datetime
 from datetime import datetime as dt_datetime
 import pytest
-import pytz
+from unittest.mock import patch
 
 from utils.time_utils import (
     get_now,
@@ -11,15 +11,15 @@ from utils.time_utils import (
     to_date,
     to_utc_for_db,
     from_utc_to_cst,
+    CST_TZ,
 )
-
-CST_TZ = pytz.timezone("Asia/Shanghai")
 
 
 class TestGetNow:
     def test_returns_datetime(self):
         result = get_now()
         assert isinstance(result, datetime.datetime)
+        assert result.tzinfo is not None
 
     def test_has_timezone(self):
         result = get_now()
@@ -28,6 +28,10 @@ class TestGetNow:
     def test_is_cst_timezone(self):
         result = get_now()
         assert result.tzinfo.zone == "Asia/Shanghai"
+
+    def test_cst_tz_defined(self):
+        assert CST_TZ is not None
+        assert CST_TZ.zone == "Asia/Shanghai"
 
 
 class TestParseDate:
@@ -68,8 +72,12 @@ class TestGetTodayStr:
         result = get_today_str()
         assert isinstance(result, str)
 
-    def test_format_yyyymmdd(self):
+    @patch("utils.time_utils.get_now")
+    def test_format_yyyymmdd(self, mock_get_now):
+        fixed_dt = CST_TZ.localize(datetime.datetime(2024, 6, 15, 10, 30, 0))
+        mock_get_now.return_value = fixed_dt
         result = get_today_str()
+        assert result == "20240615"
         assert len(result) == 8
         assert result.isdigit()
 
@@ -104,6 +112,13 @@ class TestToYyyymmddStr:
     def test_partial_digit_string(self):
         assert to_yyyymmdd_str("2024061500") == "20240615"
 
+    def test_normalizes_common_inputs(self):
+        assert to_yyyymmdd_str("2024-03-15") == "20240315"
+        assert to_yyyymmdd_str("20240315") == "20240315"
+        assert to_yyyymmdd_str(dt_datetime(2024, 3, 15, 10, 0, 0)) == "20240315"
+        assert to_yyyymmdd_str(None) is None
+        assert to_yyyymmdd_str("") is None
+
 
 class TestToDate:
     def test_datetime_input(self):
@@ -124,6 +139,11 @@ class TestToDate:
         with pytest.raises(ValueError):
             to_date("not_a_date")
 
+    def test_normalizes_common_inputs(self):
+        assert to_date("20240315") == datetime.date(2024, 3, 15)
+        assert to_date("2024-03-15") == datetime.date(2024, 3, 15)
+        assert to_date(datetime.datetime(2024, 3, 15, 10, 0, 0)) == datetime.date(2024, 3, 15)
+
 
 class TestToUtcForDb:
     def test_none_returns_none(self):
@@ -141,6 +161,18 @@ class TestToUtcForDb:
         assert result.tzinfo is None
         assert result.hour == 0
 
+    def test_aware_datetime_cst_to_utc(self):
+        cst_time = dt_datetime(2024, 1, 15, 10, 30, 0)
+        cst_aware = CST_TZ.localize(cst_time)
+        utc_time = to_utc_for_db(cst_aware)
+        assert utc_time.tzinfo is None
+        assert utc_time.hour == 2
+
+    def test_naive_datetime_treated_as_cst(self):
+        naive_time = dt_datetime(2024, 1, 15, 10, 30, 0)
+        utc_time = to_utc_for_db(naive_time)
+        assert utc_time.hour == 2
+
 
 class TestFromUtcToCst:
     def test_none_returns_none(self):
@@ -157,71 +189,15 @@ class TestFromUtcToCst:
         result = from_utc_to_cst(dt)
         assert result.hour == 8
 
-
-class TestTimezoneConversion:
-    """S1-6: 时区转换测试"""
-
-    def test_to_utc_for_db(self):
-        """CST 时间转 UTC 存储"""
-        from utils.time_utils import to_utc_for_db, CST_TZ
-
-        cst_time = dt_datetime(2024, 1, 15, 10, 30, 0)
-        cst_aware = CST_TZ.localize(cst_time)
-
-        utc_time = to_utc_for_db(cst_aware)
-        assert utc_time.tzinfo is None
-        assert utc_time.hour == 2
-
-    def test_from_utc_to_cst(self):
-        """UTC 时间转 CST 显示"""
-        from utils.time_utils import from_utc_to_cst
-
+    def test_utc_naive_to_cst(self):
         utc_naive = dt_datetime(2024, 1, 15, 2, 30, 0)
-
         cst_time = from_utc_to_cst(utc_naive)
         assert cst_time.hour == 10
         assert cst_time.tzinfo.zone == "Asia/Shanghai"
 
     def test_roundtrip_preserves_time(self):
-        """往返转换保持时间一致"""
-        from utils.time_utils import to_utc_for_db, from_utc_to_cst, CST_TZ
-
         original = CST_TZ.localize(dt_datetime(2024, 6, 15, 14, 45, 30))
         utc_stored = to_utc_for_db(original)
         restored = from_utc_to_cst(utc_stored)
-
         assert original.hour == restored.hour
         assert original.minute == restored.minute
-
-    def test_to_utc_with_naive_datetime(self):
-        """无时区信息的时间视为 CST 并转为 UTC"""
-        from utils.time_utils import to_utc_for_db
-
-        naive_time = dt_datetime(2024, 1, 15, 10, 30, 0)
-        utc_time = to_utc_for_db(naive_time)
-
-        assert utc_time.hour == 2
-
-    def test_cst_tz_defined(self):
-        """CST_TZ 常量已定义"""
-        from utils.time_utils import CST_TZ
-
-        assert CST_TZ is not None
-        assert CST_TZ.zone == "Asia/Shanghai"
-
-    def test_to_yyyymmdd_str_normalizes_common_inputs(self):
-        from utils.time_utils import to_yyyymmdd_str
-
-        assert to_yyyymmdd_str("2024-03-15") == "20240315"
-        assert to_yyyymmdd_str("20240315") == "20240315"
-        assert to_yyyymmdd_str(dt_datetime(2024, 3, 15, 10, 0, 0)) == "20240315"
-        assert to_yyyymmdd_str(None) is None
-        assert to_yyyymmdd_str("") is None
-
-    def test_to_date_normalizes_common_inputs(self):
-        from utils.time_utils import to_date
-        import datetime as _dt
-
-        assert to_date("20240315") == _dt.date(2024, 3, 15)
-        assert to_date("2024-03-15") == _dt.date(2024, 3, 15)
-        assert to_date(_dt.datetime(2024, 3, 15, 10, 0, 0)) == _dt.date(2024, 3, 15)

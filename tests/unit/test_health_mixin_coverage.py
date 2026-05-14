@@ -355,7 +355,8 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
+            assert "lag" in result["details"]
 
     @pytest.mark.asyncio
     async def test_start_date_fallback_insufficient_dates(self):
@@ -379,7 +380,8 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
+            assert "lag" in result["details"]
 
     @pytest.mark.asyncio
     async def test_api_trade_cal_cross_check(self):
@@ -408,7 +410,8 @@ class TestCheckDataHealthDeepBranches:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             with patch("data.external.tushare_client.TushareClient", return_value=mock_tc):
                 result = await proc.check_data_health()
-                assert "status" in result
+                assert result["status"] in ("red", "yellow", "green")
+                assert "lag" in result["details"]
 
     @pytest.mark.asyncio
     async def test_api_extends_gold_standard(self):
@@ -437,7 +440,8 @@ class TestCheckDataHealthDeepBranches:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             with patch("data.external.tushare_client.TushareClient", return_value=mock_tc):
                 result = await proc.check_data_health()
-                assert "status" in result
+                assert result["status"] in ("red", "yellow", "green")
+                assert "lag" in result["details"]
 
     @pytest.mark.asyncio
     async def test_concept_count_error(self):
@@ -461,7 +465,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_no_local_dates_lag(self):
@@ -538,7 +542,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_data_status_yellow_fin_coverage_low(self):
@@ -562,7 +566,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_depth_warning(self):
@@ -614,7 +618,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_field_completeness_and_fin_lag(self):
@@ -638,7 +642,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_field_completeness_exception(self):
@@ -662,7 +666,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_sync_status_fin_lag_computation(self):
@@ -685,7 +689,7 @@ class TestCheckDataHealthDeepBranches:
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
-            assert "status" in result
+            assert result["status"] in ("red", "yellow", "green")
 
 
 class TestRunQualityScanDeepBranches:

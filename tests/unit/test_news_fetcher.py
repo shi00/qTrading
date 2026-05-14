@@ -13,6 +13,19 @@ from data.external.news_fetcher import (
 )
 
 
+@pytest.fixture(autouse=True)
+def clean_global_caches():
+    _US_MOVES_CACHE.clear()
+    _SINA_CONSECUTIVE_EMPTY.clear()
+    _SINA_CONSECUTIVE_EMPTY["concept"] = 0
+    _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+    yield
+    _US_MOVES_CACHE.clear()
+    _SINA_CONSECUTIVE_EMPTY.clear()
+    _SINA_CONSECUTIVE_EMPTY["concept"] = 0
+    _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+
+
 class TestRunWithPythonStringStorage:
     def test_returns_fetcher_result(self):
         assert _run_with_python_string_storage(lambda: 42) == 42
@@ -305,17 +318,14 @@ class TestGetLatestGlobalNews:
 class TestGetUsMajorMoves:
     @pytest.mark.asyncio
     async def test_cached_result(self):
-        _US_MOVES_CACHE.clear()
         _US_MOVES_CACHE["result"] = "NVDA: 2.5%, TSLA: -1.2%"
         result = await NewsFetcher.get_us_major_moves()
         assert result == "NVDA: 2.5%, TSLA: -1.2%"
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_success_with_data(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
         mock_get.return_value = mock_resp
@@ -331,12 +341,10 @@ class TestGetUsMajorMoves:
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
         assert "NVDA" in result
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_all_retries_fail(self, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("network error"))
@@ -345,13 +353,11 @@ class TestGetUsMajorMoves:
             result = await NewsFetcher.get_us_major_moves()
             assert isinstance(result, str)
             assert "unavailable" in result or "error" in result.lower()
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_jsonp_parse_failure(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = "invalid response without jsonp"
         mock_get.return_value = mock_resp
@@ -361,13 +367,11 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_high_pct_movers(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = (
             'IO({"data": [{"name": "UNKNOWN", "cname": "未知", "price": "10.0", "diff": "0.5", "chg": "5.0"}]});'
@@ -383,13 +387,11 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert "UNKNOWN" in result
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_no_giants_fallback(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": [{"name": "SMALL1", "cname": "小公司1", "price": "1.0", "diff": "0.01", "chg": "0.5"}, {"name": "SMALL2", "cname": "小公司2", "price": "2.0", "diff": "0.02", "chg": "0.3"}, {"name": "SMALL3", "cname": "小公司3", "price": "3.0", "diff": "0.03", "chg": "0.1"}, {"name": "SMALL4", "cname": "小公司4", "price": "4.0", "diff": "0.04", "chg": "0.2"}, {"name": "SMALL5", "cname": "小公司5", "price": "5.0", "diff": "0.05", "chg": "0.4"}]});'
         mock_get.return_value = mock_resp
@@ -407,13 +409,11 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_invalid_chg_value(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = (
             'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "invalid"}]});'
@@ -429,13 +429,11 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_json_decode_error(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = "IO(not valid json);"
         mock_get.return_value = mock_resp
@@ -445,13 +443,11 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
     async def test_exception_in_processing(self, mock_get, mock_tpm):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
         mock_get.return_value = mock_resp
@@ -461,7 +457,6 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
 
 class TestGetHotConcepts:
@@ -712,7 +707,6 @@ class TestSinaConsecutiveEmptyAlert:
     @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_concept_empty_increments_counter(self, mock_tpm, mock_run):
-        _SINA_CONSECUTIVE_EMPTY["concept"] = 0
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=None)
@@ -964,7 +958,6 @@ class TestGetUsMajorMovesDirectExecution:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_fetch_direct_success(self, mock_get):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
         mock_get.return_value = mock_resp
@@ -977,13 +970,10 @@ class TestGetUsMajorMovesDirectExecution:
             result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
         assert "NVDA" in result
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_empty_data_warning(self, mock_get):
-        _US_MOVES_CACHE.clear()
-        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": []});'
         mock_get.return_value = mock_resp
@@ -996,13 +986,10 @@ class TestGetUsMajorMovesDirectExecution:
             result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
         assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= 1
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_json_decode_error(self, mock_get):
-        _US_MOVES_CACHE.clear()
-        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
         mock_resp = MagicMock()
         mock_resp.text = "IO(not valid json);"
         mock_get.return_value = mock_resp
@@ -1014,13 +1001,10 @@ class TestGetUsMajorMovesDirectExecution:
 
             result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_invalid_jsonp_structure(self, mock_get):
-        _US_MOVES_CACHE.clear()
-        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
         mock_resp = MagicMock()
         mock_resp.text = "no jsonp structure here"
         mock_get.return_value = mock_resp
@@ -1032,12 +1016,10 @@ class TestGetUsMajorMovesDirectExecution:
 
             result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_consecutive_empty_threshold_error(self, mock_get):
-        _US_MOVES_CACHE.clear()
         _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": []});'
@@ -1051,13 +1033,10 @@ class TestGetUsMajorMovesDirectExecution:
             result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
         assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= _SINA_EMPTY_THRESHOLD
-        _US_MOVES_CACHE.clear()
-        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
     async def test_us_moves_processing_exception(self, mock_get):
-        _US_MOVES_CACHE.clear()
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
         mock_get.return_value = mock_resp
@@ -1070,7 +1049,6 @@ class TestGetUsMajorMovesDirectExecution:
             with patch("data.external.news_fetcher.json.loads", side_effect=Exception("parse error")):
                 result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
-        _US_MOVES_CACHE.clear()
 
 
 class TestGetHotConceptsDirectExecution:
@@ -1101,4 +1079,3 @@ class TestGetHotConceptsDirectExecution:
             result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
         assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
-        _SINA_CONSECUTIVE_EMPTY["concept"] = 0

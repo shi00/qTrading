@@ -258,7 +258,7 @@ class TestHistoricalSyncRunExtended:
         strategy = HistoricalSyncStrategy(ctx)
         strategy._shutdown_event.set()
         result = await strategy.run(days=5)
-        assert result.status in ("cancelled", "failed", "success")
+        assert result.status in ("cancelled", "success")
 
     @pytest.mark.asyncio
     async def test_run_with_cached_dates(self):

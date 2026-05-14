@@ -94,20 +94,14 @@ class TestTokenBucketRefill(unittest.TestCase):
     """测试令牌补充"""
 
     def test_refill_tokens(self):
-        """令牌自动补充"""
         bucket = TokenBucket(start_tokens=0, capacity=100, rate=10.0)
-
-        time.sleep(0.5)
-
+        bucket.last_update = time.monotonic() - 1.0
         bucket._consume_reserve(0)
         self.assertGreater(bucket.tokens, 0)
 
     def test_refill_not_exceed_capacity(self):
-        """补充不超过容量"""
         bucket = TokenBucket(start_tokens=10, capacity=20, rate=100.0)
-
-        time.sleep(0.5)
-
+        bucket.last_update = time.monotonic() - 1.0
         bucket._consume_reserve(0)
         self.assertLessEqual(bucket.tokens, 20.0)
 

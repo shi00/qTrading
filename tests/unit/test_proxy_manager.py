@@ -15,46 +15,47 @@ class TestProxyManagerNoEnvironWrite:
     def test_apply_does_not_write_to_os_environ(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["api.tushare.pro", "localhost"]
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NO_PROXY", None)
+                os.environ.pop("no_proxy", None)
 
-            ProxyManager.apply_smart_proxy_policy()
+                ProxyManager.apply_smart_proxy_policy()
 
-            assert os.environ.get("NO_PROXY") is None
-            assert os.environ.get("no_proxy") is None
+                assert os.environ.get("NO_PROXY") is None
+                assert os.environ.get("no_proxy") is None
 
     def test_apply_caches_domains(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["api.tushare.pro", "localhost"]
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NO_PROXY", None)
+                os.environ.pop("no_proxy", None)
 
-            ProxyManager.apply_smart_proxy_policy()
+                ProxyManager.apply_smart_proxy_policy()
 
-            domains = ProxyManager.get_no_proxy_domains()
-            assert "api.tushare.pro" in domains
-            assert "localhost" in domains
+                domains = ProxyManager.get_no_proxy_domains()
+                assert "api.tushare.pro" in domains
+                assert "localhost" in domains
 
     def test_existing_env_not_modified(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["api.tushare.pro"]
-            os.environ["NO_PROXY"] = "original.domain"
-            os.environ["no_proxy"] = "original.domain"
+            with patch.dict(os.environ, {"NO_PROXY": "original.domain", "no_proxy": "original.domain"}, clear=False):
+                ProxyManager.apply_smart_proxy_policy()
 
-            ProxyManager.apply_smart_proxy_policy()
-
-            assert os.environ.get("NO_PROXY") == "original.domain"
+                assert os.environ.get("NO_PROXY") == "original.domain"
 
     def test_clears_nothing_when_no_domains(self):
         ProxyManager._original_no_proxy = set()
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = []
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NO_PROXY", None)
+                os.environ.pop("no_proxy", None)
 
-            ProxyManager.apply_smart_proxy_policy()
+                ProxyManager.apply_smart_proxy_policy()
 
-            assert os.environ.get("NO_PROXY") is None
+                assert os.environ.get("NO_PROXY") is None
 
 
 class TestProxyManagerSnapshotOriginal:
@@ -67,43 +68,38 @@ class TestProxyManagerSnapshotOriginal:
     def test_snapshots_original_env_on_first_call(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["api.tushare.pro"]
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
-            os.environ["NO_PROXY"] = "localhost,127.0.0.1"
+            with patch.dict(os.environ, {"NO_PROXY": "localhost,127.0.0.1"}, clear=False):
+                ProxyManager.apply_smart_proxy_policy()
 
-            ProxyManager.apply_smart_proxy_policy()
-
-            assert ProxyManager._original_no_proxy == {"localhost", "127.0.0.1"}
+                assert ProxyManager._original_no_proxy == {"localhost", "127.0.0.1"}
 
     def test_reapply_uses_original_not_current_env(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["api.tushare.pro"]
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
-            os.environ["NO_PROXY"] = "localhost"
+            with patch.dict(os.environ, {"NO_PROXY": "localhost"}, clear=False):
+                ProxyManager.apply_smart_proxy_policy()
 
-            ProxyManager.apply_smart_proxy_policy()
+                mock_ch.get_no_proxy_domains.return_value = []
+                ProxyManager.reapply_proxy_policy()
 
-            mock_ch.get_no_proxy_domains.return_value = []
-            ProxyManager.reapply_proxy_policy()
-
-            assert "api.tushare.pro" not in ProxyManager.get_no_proxy_string()
+                assert "api.tushare.pro" not in ProxyManager.get_no_proxy_string()
 
     def test_reapply_removes_domain_deleted_from_config(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["tushare.pro", "api.example.com"]
-            os.environ.pop("NO_PROXY", None)
-            os.environ.pop("no_proxy", None)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NO_PROXY", None)
+                os.environ.pop("no_proxy", None)
 
-            ProxyManager.apply_smart_proxy_policy()
-            assert "tushare.pro" in ProxyManager.get_no_proxy_domains()
-            assert "api.example.com" in ProxyManager.get_no_proxy_domains()
+                ProxyManager.apply_smart_proxy_policy()
+                assert "tushare.pro" in ProxyManager.get_no_proxy_domains()
+                assert "api.example.com" in ProxyManager.get_no_proxy_domains()
 
-            mock_ch.get_no_proxy_domains.return_value = ["tushare.pro"]
-            ProxyManager.reapply_proxy_policy()
+                mock_ch.get_no_proxy_domains.return_value = ["tushare.pro"]
+                ProxyManager.reapply_proxy_policy()
 
-            assert "tushare.pro" in ProxyManager.get_no_proxy_domains()
-            assert "api.example.com" not in ProxyManager.get_no_proxy_domains()
+                assert "tushare.pro" in ProxyManager.get_no_proxy_domains()
+                assert "api.example.com" not in ProxyManager.get_no_proxy_domains()
 
 
 class TestProxyManagerGetNoProxyString:
@@ -235,68 +231,72 @@ class TestProxyManagerLitellmEnvContext:
         ProxyManager._env_written = False
 
     def test_sets_env_inside_context(self):
-        os.environ.pop("NO_PROXY", None)
-        os.environ.pop("no_proxy", None)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
 
-        with ProxyManager.litellm_env_context():
-            assert os.environ.get("NO_PROXY") is not None
-            assert "tushare.pro" in os.environ["NO_PROXY"]
-            assert "localhost" in os.environ["NO_PROXY"]
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") is not None
+                assert "tushare.pro" in os.environ["NO_PROXY"]
+                assert "localhost" in os.environ["NO_PROXY"]
 
     def test_restores_env_after_context(self):
-        os.environ.pop("NO_PROXY", None)
-        os.environ.pop("no_proxy", None)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
 
-        with ProxyManager.litellm_env_context():
-            pass
+            with ProxyManager.litellm_env_context():
+                pass
 
-        assert os.environ.get("NO_PROXY") is None
-        assert os.environ.get("no_proxy") is None
+            assert os.environ.get("NO_PROXY") is None
+            assert os.environ.get("no_proxy") is None
 
     def test_preserves_existing_env_on_exit(self):
-        os.environ["NO_PROXY"] = "pre-existing.domain"
-        os.environ["no_proxy"] = "pre-existing.domain"
+        with patch.dict(
+            os.environ, {"NO_PROXY": "pre-existing.domain", "no_proxy": "pre-existing.domain"}, clear=False
+        ):
+            with ProxyManager.litellm_env_context():
+                assert "tushare.pro" in os.environ["NO_PROXY"]
 
-        with ProxyManager.litellm_env_context():
-            assert "tushare.pro" in os.environ["NO_PROXY"]
-
-        assert os.environ["NO_PROXY"] == "pre-existing.domain"
+            assert os.environ["NO_PROXY"] == "pre-existing.domain"
 
     def test_handles_exception_and_restores(self):
-        os.environ.pop("NO_PROXY", None)
-        os.environ.pop("no_proxy", None)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
 
-        try:
-            with ProxyManager.litellm_env_context():
-                raise RuntimeError("test error")
-        except RuntimeError:
-            pass
+            try:
+                with ProxyManager.litellm_env_context():
+                    raise RuntimeError("test error")
+            except RuntimeError:
+                pass
 
-        assert os.environ.get("NO_PROXY") is None
+            assert os.environ.get("NO_PROXY") is None
 
     def test_preserves_http_proxy_on_exit(self):
-        os.environ["HTTPS_PROXY"] = "http://original:8080"
-        os.environ.pop("NO_PROXY", None)
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://original:8080"}, clear=False):
+            os.environ.pop("NO_PROXY", None)
 
-        with ProxyManager.litellm_env_context():
-            assert "tushare.pro" in os.environ.get("NO_PROXY", "")
+            with ProxyManager.litellm_env_context():
+                assert "tushare.pro" in os.environ.get("NO_PROXY", "")
 
-        assert os.environ["HTTPS_PROXY"] == "http://original:8080"
-        assert os.environ.get("NO_PROXY") is None
+            assert os.environ["HTTPS_PROXY"] == "http://original:8080"
+            assert os.environ.get("NO_PROXY") is None
 
     def test_no_proxy_domains_empty_no_env_write(self):
         ProxyManager._no_proxy_domains = set()
 
-        with ProxyManager.litellm_env_context():
-            assert os.environ.get("NO_PROXY") is None
+        with patch.dict(os.environ, {}, clear=False):
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") is None
 
     def test_with_proxy_env_vars(self):
         ProxyManager._no_proxy_domains = {"tushare.pro"}
-        os.environ["HTTP_PROXY"] = "http://proxy:3128"
-        os.environ["HTTPS_PROXY"] = "http://proxy:3128"
+        with patch.dict(
+            os.environ, {"HTTP_PROXY": "http://proxy:3128", "HTTPS_PROXY": "http://proxy:3128"}, clear=False
+        ):
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("HTTP_PROXY") == "http://proxy:3128"
+                assert "tushare.pro" in os.environ.get("NO_PROXY", "")
 
-        with ProxyManager.litellm_env_context():
-            assert os.environ.get("HTTP_PROXY") == "http://proxy:3128"
-            assert "tushare.pro" in os.environ.get("NO_PROXY", "")
-
-        assert os.environ["HTTP_PROXY"] == "http://proxy:3128"
+            assert os.environ["HTTP_PROXY"] == "http://proxy:3128"

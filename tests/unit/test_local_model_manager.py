@@ -92,16 +92,10 @@ class TestLocalModelManagerUnloadModel:
 class TestLocalModelManagerLoadModel:
     @pytest.mark.asyncio
     async def test_no_llama_cpp(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = False
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", False):
             mgr = LocalModelManager()
             result = await mgr.load_model("/path/to/model.gguf")
             assert result is False
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
 
 class TestPersistentWorkerEnsureWorker:
@@ -255,11 +249,7 @@ class TestPersistentWorkerShutdownWorker:
 class TestPersistentWorkerModelReuse:
     @pytest.mark.asyncio
     async def test_second_inference_reuses_worker(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
 
@@ -296,29 +286,17 @@ class TestPersistentWorkerModelReuse:
                 assert result2 == "second result"
 
                 assert ensure_call_count == 2
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_file_not_found(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             result = await mgr.load_model("/nonexistent/model.gguf")
             assert result is False
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_same_model_skip_reload(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._worker_ready = True
             mgr._model_path = "/path/to/model.gguf"
@@ -333,37 +311,23 @@ class TestPersistentWorkerModelReuse:
                     config={"n_threads": 4, "n_batch": 1024, "n_ctx": 4096, "n_gpu_layers": 0, "flash_attn": True},
                 )
                 assert result is True
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
 
 class TestLocalModelManagerRunInference:
     @pytest.mark.asyncio
     async def test_no_llama_cpp(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = False
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", False):
             mgr = LocalModelManager()
             with pytest.raises(ImportError):
                 await mgr.run_inference("test prompt")
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_no_model_configured(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             with patch("utils.config_handler.ConfigHandler.get_local_ai_config", return_value={"local_model_path": ""}):
                 with pytest.raises(RuntimeError, match="not configured"):
                     await mgr.run_inference("test prompt")
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
 
 class TestLocalModelManagerCalculateMd5:
@@ -438,11 +402,7 @@ class TestLocalModelManagerCalculateFileMd5Success:
 class TestLocalModelManagerLoadModelWithLlama:
     @pytest.mark.asyncio
     async def test_load_model_success(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
@@ -456,16 +416,10 @@ class TestLocalModelManagerLoadModelWithLlama:
                 assert result is True
                 assert mgr._model_path == "/path/to/model.gguf"
                 assert mgr._model_md5 == "abc123"
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_load_model_failure(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
@@ -477,16 +431,10 @@ class TestLocalModelManagerLoadModelWithLlama:
                 result = await mgr.load_model("/path/to/model.gguf")
                 assert result is False
                 assert mgr._model_path == ""
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_load_model_no_config(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
@@ -500,16 +448,10 @@ class TestLocalModelManagerLoadModelWithLlama:
                 mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
                 result = await mgr.load_model("/path/to/model.gguf")
                 assert result is True
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_load_model_ensure_worker_fails(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
@@ -521,18 +463,12 @@ class TestLocalModelManagerLoadModelWithLlama:
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is False
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
 
 class TestLocalModelManagerRunInferenceWithModel:
     @pytest.mark.asyncio
     async def test_run_inference_success(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -558,17 +494,12 @@ class TestLocalModelManagerRunInferenceWithModel:
                     ("test prompt", 150, 0.7, "You are a helpful assistant."),
                     timeout=5,
                 )
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_run_inference_timeout(self):
-        import services.local_model_manager as mod
         from services.local_model_manager import LocalInferenceTimeoutError
 
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -593,16 +524,10 @@ class TestLocalModelManagerRunInferenceWithModel:
                     await mgr.run_inference("test prompt")
 
                 mgr._shutdown_worker.assert_called()
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_run_inference_error_response(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -624,16 +549,10 @@ class TestLocalModelManagerRunInferenceWithModel:
 
                 with pytest.raises(RuntimeError, match="Inference execution failed"):
                     await mgr.run_inference("test prompt")
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_run_inference_worker_shutdown(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -656,16 +575,10 @@ class TestLocalModelManagerRunInferenceWithModel:
                 with pytest.raises(RuntimeError, match="Worker shut down unexpectedly"):
                     await mgr.run_inference("test prompt")
                 assert mgr._worker_ready is False
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_run_inference_request_queue_full(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -686,8 +599,6 @@ class TestLocalModelManagerRunInferenceWithModel:
                 with pytest.raises(RuntimeError, match="Failed to send request to worker"):
                     await mgr.run_inference("test prompt")
                 assert mgr._worker_ready is False
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
 
 class TestLocalModelManagerUnloadSetsCancel:
@@ -716,12 +627,9 @@ class TestLocalModelManagerGetLoadLock:
 class TestLocalModelManagerSubprocessCleanup:
     @pytest.mark.asyncio
     async def test_timeout_shuts_down_worker(self):
-        import services.local_model_manager as mod
         from services.local_model_manager import LocalInferenceTimeoutError
 
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -746,16 +654,10 @@ class TestLocalModelManagerSubprocessCleanup:
                     await mgr.run_inference("test prompt")
 
                 mgr._shutdown_worker.assert_called()
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
     @pytest.mark.asyncio
     async def test_worker_exits_without_result(self):
-        import services.local_model_manager as mod
-
-        original = mod._HAS_LLAMA_CPP
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._model_path = "/path/to/model.gguf"
             with (
@@ -778,8 +680,6 @@ class TestLocalModelManagerSubprocessCleanup:
                 with pytest.raises(RuntimeError, match="exited without producing"):
                     await mgr.run_inference("test prompt")
                 assert mgr._worker_ready is False
-        finally:
-            mod._HAS_LLAMA_CPP = original
 
 
 class TestLocalInferenceTimeoutErrorType:
@@ -834,10 +734,7 @@ class TestCancelEventInterruptsInference:
 
     @pytest.mark.asyncio
     async def test_cancel_event_raises_runtime_error(self):
-        import services.local_model_manager as mod
-
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._worker_ready = True
             mgr._model_path = "/fake/model.gguf"
@@ -854,8 +751,6 @@ class TestCancelEventInterruptsInference:
             ):
                 with pytest.raises(RuntimeError, match="Inference cancelled"):
                     await mgr.run_inference("test prompt")
-        finally:
-            mod._HAS_LLAMA_CPP = False
 
 
 class TestLoadModelClearsCancelEvent:
@@ -863,10 +758,7 @@ class TestLoadModelClearsCancelEvent:
 
     @pytest.mark.asyncio
     async def test_cancel_event_cleared_on_load_success(self):
-        import services.local_model_manager as mod
-
-        mod._HAS_LLAMA_CPP = True
-        try:
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
             mgr._cancel_event.set()
 
@@ -881,5 +773,3 @@ class TestLoadModelClearsCancelEvent:
                                 result = await mgr.load_model("/fake/model.gguf")
                                 assert result is True
                                 assert not mgr._cancel_event.is_set()
-        finally:
-            mod._HAS_LLAMA_CPP = False

@@ -134,19 +134,14 @@ class TestSecurityManagerSalt:
     def setup_method(self):
         SecurityManager._key = None
 
-    @patch("utils.security_utils.os.path.exists")
+    @patch("utils.security_utils.os.path.exists", return_value=True)
     def test_load_existing_salt(self, mock_exists):
-        from utils.security_utils import _MACHINE_SALT_FILE
+        from unittest.mock import mock_open
 
         salt_content = b"existing_salt_16bytes"
-        mock_exists.side_effect = lambda p: p == _MACHINE_SALT_FILE
-
-        with patch("builtins.open", MagicMock()):
-            with patch("utils.security_utils.os.path.exists", return_value=True):
-                with patch.object(SecurityManager, "_get_or_create_salt") as mock_salt:
-                    mock_salt.return_value = salt_content
-                    result = SecurityManager._get_or_create_salt()
-                    assert result == salt_content
+        with patch("builtins.open", mock_open(read_data=salt_content)):
+            result = SecurityManager._get_or_create_salt()
+            assert result == salt_content
 
     @patch("utils.security_utils.os.path.exists")
     def test_create_new_salt_when_missing(self, mock_exists):

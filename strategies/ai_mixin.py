@@ -193,6 +193,22 @@ class AIStrategyMixin:
         """Normalize context trade_date for cache APIs that expect YYYYMMDD strings."""
         return to_yyyymmdd_str(value)
 
+    @staticmethod
+    def resolve_end_date(ctx_td, is_backtest):
+        import datetime as _dt
+
+        end_date = get_now().date()
+        if ctx_td:
+            try:
+                end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()
+            except (ValueError, TypeError):
+                if is_backtest:
+                    raise ValueError(
+                        f"Cannot parse trade_date for backtest: {ctx_td!r}. "
+                        f"Refusing to fall back to current date to prevent lookahead bias."
+                    ) from None
+        return end_date
+
     async def run_ai_analysis(
         self,
         candidates_df: pd.DataFrame,
@@ -298,17 +314,7 @@ class AIStrategyMixin:
             end_date = get_now().date()
 
             ctx_td = self._normalize_trade_date_for_cache(context.get("trade_date"))
-            if ctx_td:
-                try:
-                    import datetime as _dt
-
-                    end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()
-                except (ValueError, TypeError):
-                    if context.get("is_backtest"):
-                        raise ValueError(
-                            f"Cannot parse trade_date for backtest: {ctx_td!r}. "
-                            f"Refusing to fall back to current date to prevent lookahead bias."
-                        ) from None
+            end_date = self.resolve_end_date(ctx_td, context.get("is_backtest"))
 
             years = ConfigHandler.get_init_history_years()
             start_date = end_date - timedelta(days=365 * years + 30)
