@@ -9,11 +9,9 @@ from utils.time_utils import get_now
 
 @pytest.fixture(autouse=True)
 def reset_singleton():
-    TaskManager._instance = None
-    TaskManager._initialized = False
+    TaskManager._reset_singleton()
     yield
-    TaskManager._instance = None
-    TaskManager._initialized = False
+    TaskManager._reset_singleton()
 
 
 class TestAppTask:

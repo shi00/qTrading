@@ -1,4 +1,3 @@
-import asyncio
 import datetime
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 
 
-class TestLookaheadBias(unittest.TestCase):
+class TestLookaheadBias(unittest.IsolatedAsyncioTestCase):
     def test_ai_mixin_uses_context_trade_date_first(self):
         from strategies.ai_mixin import AIStrategyMixin
 
@@ -28,7 +27,7 @@ class TestLookaheadBias(unittest.TestCase):
     @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_mixin.NewsFetcher")
     @patch("strategies.ai_mixin.I18n")
-    def test_capital_data_uses_context_trade_date(self, mock_i18n, mock_news, mock_ai):
+    async def test_capital_data_uses_context_trade_date(self, mock_i18n, mock_news, mock_ai):
         from strategies.ai_mixin import AIStrategyMixin
 
         mock_ai_inst = MagicMock()
@@ -59,7 +58,7 @@ class TestLookaheadBias(unittest.TestCase):
         context = {"trade_date": "20240315", "data_processor": dp}
         candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-        asyncio.run(mixin.run_ai_analysis(candidates_df, context))
+        await mixin.run_ai_analysis(candidates_df, context)
 
         cache.get_moneyflow.assert_awaited_once_with(trade_date="20240315")
         cache.get_top_list.assert_awaited_once_with(trade_date="20240315")
@@ -69,7 +68,7 @@ class TestLookaheadBias(unittest.TestCase):
     @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_mixin.NewsFetcher")
     @patch("strategies.ai_mixin.I18n")
-    def test_capital_data_falls_back_to_latest(self, mock_i18n, mock_news, mock_ai):
+    async def test_capital_data_falls_back_to_latest(self, mock_i18n, mock_news, mock_ai):
         from strategies.ai_mixin import AIStrategyMixin
 
         mock_ai_inst = MagicMock()
@@ -100,7 +99,7 @@ class TestLookaheadBias(unittest.TestCase):
         context = {"data_processor": dp}
         candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-        asyncio.run(mixin.run_ai_analysis(candidates_df, context))
+        await mixin.run_ai_analysis(candidates_df, context)
 
         dp.get_latest_trade_date.assert_awaited_once()
         cache.get_moneyflow.assert_awaited_once_with(trade_date="20240430")
@@ -119,7 +118,7 @@ class TestLookaheadBias(unittest.TestCase):
     @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_mixin.NewsFetcher")
     @patch("strategies.ai_mixin.I18n")
-    def test_kline_history_end_date_aligned_with_context_trade_date(self, mock_i18n, mock_news, mock_ai):
+    async def test_kline_history_end_date_aligned_with_context_trade_date(self, mock_i18n, mock_news, mock_ai):
         from strategies.ai_mixin import AIStrategyMixin
 
         mock_ai_inst = MagicMock()
@@ -150,7 +149,7 @@ class TestLookaheadBias(unittest.TestCase):
         context = {"trade_date": "20240315", "data_processor": dp}
         candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-        asyncio.run(mixin.run_ai_analysis(candidates_df, context))
+        await mixin.run_ai_analysis(candidates_df, context)
 
         all_calls = cache.get_daily_quotes.call_args_list
         call_kwargs = all_calls[-1].kwargs if all_calls else {}
@@ -167,7 +166,7 @@ class TestLookaheadBias(unittest.TestCase):
     @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_mixin.NewsFetcher")
     @patch("strategies.ai_mixin.I18n")
-    def test_kline_history_cache_key_includes_trade_date(self, mock_i18n, mock_news, mock_ai):
+    async def test_kline_history_cache_key_includes_trade_date(self, mock_i18n, mock_news, mock_ai):
         from strategies.ai_mixin import AIStrategyMixin
 
         mock_ai_inst = MagicMock()
@@ -198,7 +197,7 @@ class TestLookaheadBias(unittest.TestCase):
         context = {"trade_date": "20240315", "data_processor": dp}
         candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-        asyncio.run(mixin.run_ai_analysis(candidates_df, context))
+        await mixin.run_ai_analysis(candidates_df, context)
 
         assert len(mixin._history_cache) == 1
         cache_key = list(mixin._history_cache.keys())[0]
@@ -207,7 +206,7 @@ class TestLookaheadBias(unittest.TestCase):
     @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_mixin.NewsFetcher")
     @patch("strategies.ai_mixin.I18n")
-    def test_kline_history_cache_key_changes_with_trade_date(self, mock_i18n, mock_news, mock_ai):
+    async def test_kline_history_cache_key_changes_with_trade_date(self, mock_i18n, mock_news, mock_ai):
         """M-1: 不同 trade_date 不应命中同一个历史缓存键。"""
         from strategies.ai_mixin import AIStrategyMixin
 
@@ -237,8 +236,8 @@ class TestLookaheadBias(unittest.TestCase):
         dp.get_latest_trade_date = AsyncMock(return_value="20240430")
 
         candidates_df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
-        asyncio.run(mixin.run_ai_analysis(candidates_df, {"trade_date": "20240315", "data_processor": dp}))
-        asyncio.run(mixin.run_ai_analysis(candidates_df, {"trade_date": "20240316", "data_processor": dp}))
+        await mixin.run_ai_analysis(candidates_df, {"trade_date": "20240315", "data_processor": dp})
+        await mixin.run_ai_analysis(candidates_df, {"trade_date": "20240316", "data_processor": dp})
 
         assert cache.get_daily_quotes.await_count == 2, (
             f"M-1: different trade_date should trigger separate history fetches, got {cache.get_daily_quotes.await_count}"

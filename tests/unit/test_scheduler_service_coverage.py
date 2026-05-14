@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 import datetime
+import pandas as pd
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from utils.scheduler_service import SchedulerService
@@ -370,8 +371,6 @@ class TestNightlyPredictionLogicClosure:
 
     @pytest.mark.asyncio
     async def test_prediction_logic_no_trade_date_raises(self):
-        import pandas as pd
-
         svc = _make_svc()
         mock_dp = MagicMock()
         mock_dp.trade_calendar = MagicMock()

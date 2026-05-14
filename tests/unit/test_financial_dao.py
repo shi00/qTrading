@@ -1,12 +1,13 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.financial_dao import FinancialDao
 
 
 def _make_dao():
-    dao = FinancialDao(MagicMock())
+    dao = FinancialDao(MagicMock(spec=AsyncEngine))
     dao._save_upsert = AsyncMock(return_value=5)
     dao._read_db = AsyncMock(return_value=None)
     dao._write_db = AsyncMock(return_value=0)

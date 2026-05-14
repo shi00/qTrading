@@ -5,13 +5,10 @@ Coverage Goal: >90%
 """
 
 import os
-import sys
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
@@ -41,6 +38,18 @@ def isolated_config(tmp_path):
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset all singletons before and after each test"""
+    try:
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler._config_cache = None
+    except Exception:
+        pass
+    try:
+        import services.ai_service as ai_service_module
+
+        ai_service_module.AIService._instance = None
+    except Exception:
+        pass
     yield
     try:
         from utils.config_handler import ConfigHandler

@@ -9,11 +9,9 @@ from data.external.news_subscription import NewsSubscriptionService, NewsUpdateT
 
 @pytest.fixture(autouse=True)
 def reset_singleton():
-    NewsSubscriptionService._instance = None
-    NewsSubscriptionService._initialized = False
+    NewsSubscriptionService._reset_singleton()
     yield
-    NewsSubscriptionService._instance = None
-    NewsSubscriptionService._initialized = False
+    NewsSubscriptionService._reset_singleton()
 
 
 class TestNewsUpdateType:
@@ -534,7 +532,7 @@ class TestNewsSubscriptionServiceProcessingLoop:
         svc._notify_listeners = AsyncMock()
         svc._generate_tags = AsyncMock(return_value="tag")
         loop_task = asyncio.create_task(svc._processing_loop())
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.05)
         svc._running = False
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -553,7 +551,7 @@ class TestNewsSubscriptionServiceProcessingLoop:
         svc._notify_listeners = AsyncMock()
         svc._generate_tags = AsyncMock(return_value="tag")
         loop_task = asyncio.create_task(svc._processing_loop())
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.05)
         svc._running = False
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -570,7 +568,7 @@ class TestNewsSubscriptionServiceProcessingLoop:
         await svc.processing_queue.put({"content": "test"})
         svc._generate_tags = AsyncMock(side_effect=Exception("tag error"))
         loop_task = asyncio.create_task(svc._processing_loop())
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.05)
         svc._running = False
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

@@ -1,5 +1,6 @@
 import pytest
 import datetime
+import sqlalchemy as sa
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
@@ -389,7 +390,6 @@ class TestQuoteDaoCheckDataExists:
             await dao.check_data_exists("20240615", tables=["daily_quotes"])
             call_args = dao._read_db_select.call_args
             stmt = call_args[0][0]
-            import sqlalchemy as sa
 
             assert isinstance(stmt, sa.Select)
 

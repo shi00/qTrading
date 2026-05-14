@@ -530,8 +530,6 @@ class TestMacroSyncStrategySyncShibor:
     @pytest.mark.asyncio
     @patch("data.sync.macro.MacroDao")
     async def test_shibor_already_uptodate(self, mock_dao):
-        import datetime
-
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -549,8 +547,6 @@ class TestMacroSyncStrategySyncShibor:
     @patch("utils.config_handler.ConfigHandler")
     @patch("data.sync.macro.MacroDao")
     async def test_shibor_no_latest(self, mock_dao, mock_ch):
-        import datetime
-
         mock_ch.get_init_history_years.return_value = 1
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()

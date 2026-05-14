@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 import datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
@@ -367,8 +369,6 @@ class TestFinancialSyncGatherTolerance:
 
         async def fail_task():
             raise RuntimeError("API timeout")
-
-        import asyncio
 
         results = await asyncio.gather(success_task(), fail_task(), return_exceptions=True)
         saved = 0
