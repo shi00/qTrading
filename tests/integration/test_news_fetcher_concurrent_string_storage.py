@@ -7,7 +7,6 @@ import pytest
 from data.external.news_fetcher import _run_with_python_string_storage
 
 
-@pytest.mark.unit
 class TestConcurrentStringStorage:
     def test_run_with_python_string_storage_restores_original(self):
         original = pd.options.mode.string_storage

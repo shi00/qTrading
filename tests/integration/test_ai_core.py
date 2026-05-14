@@ -4,15 +4,10 @@ Targets: ReviewManager, AIStrategy, NewsFetcher
 Coverage Goal: >90%
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-
-# Add project root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.external.news_fetcher import NewsFetcher
 from data.persistence.review_manager import ReviewManager

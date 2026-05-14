@@ -1,8 +1,4 @@
-import os
-import sys
 import unittest
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine

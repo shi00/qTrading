@@ -20,13 +20,13 @@ def test_ai_macro():
     }
 
     for k, v in data.items():
-        if len(v) != size:
-            print(f"Mismatch: {k} length is {len(v)}")
-            return
+        assert len(v) == size, f"Mismatch: {k} length is {len(v)}, expected {size}"
 
     df = pd.DataFrame(data)
 
     result = AIStrategyMixin._build_history_text(df)
+    assert isinstance(result, str)
+    assert len(result) > 0
     print("AI STRATEGY PROMPT TEXT:")
     print("-" * 50)
     print(result)

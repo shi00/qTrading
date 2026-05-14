@@ -84,6 +84,12 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
+_MOCK_KEYRING = None
+_MOCK_LITELLM = None
+_ORIGINAL_KEYRING = None
+_ORIGINAL_LITELLM = None
+
+
 def _create_mock_keyring():
     """Create a mock keyring module for CI environments."""
     _password_store = {}
@@ -97,17 +103,17 @@ def _create_mock_keyring():
     def delete_password(service_name, username):
         _password_store.pop(f"{service_name}:{username}", None)
 
+    def clear():
+        _password_store.clear()
+
     mock_kr = MagicMock()
     mock_kr.get_password = get_password
     mock_kr.set_password = set_password
     mock_kr.delete_password = delete_password
+    mock_kr.clear = clear
     mock_kr.errors = MagicMock()
     mock_kr.errors.NoKeyringError = type("NoKeyringError", (Exception,), {})
     return mock_kr
-
-
-_original_keyring = sys.modules.get("keyring")
-sys.modules["keyring"] = _create_mock_keyring()
 
 
 def _create_mock_litellm():
@@ -135,21 +141,20 @@ def _create_mock_litellm():
     return mock_lt
 
 
-_original_litellm = sys.modules.get("litellm")
-sys.modules["litellm"] = _create_mock_litellm()
-
-
 def pytest_unconfigure(config):
-    """Restore original keyring module after test session."""
-    if _original_keyring is not None:
-        sys.modules["keyring"] = _original_keyring
+    """Restore original keyring/litellm modules and clean up temp config after test session."""
+    if _ORIGINAL_KEYRING is not None:
+        sys.modules["keyring"] = _ORIGINAL_KEYRING
     else:
         sys.modules.pop("keyring", None)
 
-    if _original_litellm is not None:
-        sys.modules["litellm"] = _original_litellm
+    if _ORIGINAL_LITELLM is not None:
+        sys.modules["litellm"] = _ORIGINAL_LITELLM
     else:
         sys.modules.pop("litellm", None)
+
+    if _MOCK_KEYRING is not None and hasattr(_MOCK_KEYRING, "clear"):
+        _MOCK_KEYRING.clear()
 
     import shutil
 
@@ -203,14 +208,24 @@ _temp_config_file = os.path.join(_temp_config_dir, "test_user_settings.json")
 def pytest_configure(config):
     """
     Hook that runs before any test collection or import.
-    Patch CONFIG_FILE and DATABASE_URL before any modules are imported.
+    Patch CONFIG_FILE, DATABASE_URL, and mock keyring/litellm before any modules are imported.
     """
+    global _MOCK_KEYRING, _MOCK_LITELLM, _ORIGINAL_KEYRING, _ORIGINAL_LITELLM
+
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
+
+    _ORIGINAL_KEYRING = sys.modules.get("keyring")
+    _MOCK_KEYRING = _create_mock_keyring()
+    sys.modules["keyring"] = _MOCK_KEYRING
+
+    _ORIGINAL_LITELLM = sys.modules.get("litellm")
+    _MOCK_LITELLM = _create_mock_litellm()
+    sys.modules["litellm"] = _MOCK_LITELLM
 
     os.environ["DATABASE_URL"] = TEST_DB_URL
 
@@ -226,6 +241,14 @@ def isolate_config_file():
     The actual patching is done in pytest_configure for early interception.
     """
     yield _temp_config_file
+
+
+@pytest.fixture(autouse=True)
+def _reset_mock_keyring_store():
+    """Clear mock keyring password store between tests to prevent leakage."""
+    yield
+    if _MOCK_KEYRING is not None and hasattr(_MOCK_KEYRING, "clear"):
+        _MOCK_KEYRING.clear()
 
 
 _test_engine = None
@@ -308,7 +331,7 @@ async def test_engine():
                 await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
             finally:
                 await conn.close()
-        except Exception:
+        except OSError, asyncpg.PostgresError:
             pass
 
 

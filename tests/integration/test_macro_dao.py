@@ -7,14 +7,10 @@
 - L3: Shibor 利率注入
 """
 
-import os
-import sys
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.persistence.daos.macro_dao import MacroDao
 

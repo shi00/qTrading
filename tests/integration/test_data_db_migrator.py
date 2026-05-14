@@ -5,13 +5,9 @@ Tests for DatabaseMigrator module.
 测试完全使用 Mock，不连接任何真实数据库。
 """
 
-import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 
 @pytest.fixture

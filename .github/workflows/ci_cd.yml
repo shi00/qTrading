@@ -13,9 +13,15 @@ on:
       - 'pyproject.toml'
       - 'pyrightconfig.json'
       - 'alembic.ini'
+      - 'alembic/**'
       - 'AStockScreener.spec'
       - 'installer.iss'
       - 'locales/**'
+      - 'assets/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tests/**'
+      - 'scripts/**'
       - '.github/workflows/ci_cd.yml'
   workflow_dispatch:
 
@@ -30,6 +36,7 @@ jobs:
   ci-checks:
     name: Code Quality & Tests (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -58,6 +65,10 @@ jobs:
         with:
           python-version: '3.14'
           cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
 
       - name: Setup Node for Pyright
         uses: actions/setup-node@v4
@@ -69,10 +80,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --prefer-binary -r requirements.txt
           set -o pipefail
-          pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
-          pip install -r requirements-dev.txt
+          pip install --prefer-binary -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          pip install --prefer-binary -r requirements-dev.txt
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
@@ -90,9 +101,8 @@ jobs:
 
       - name: Security Audit (pip-audit)
         run: |
-          pip install pip-audit
-          pip-audit -r requirements.txt --desc || true
-          pip-audit -r requirements-optional.txt --desc || true
+          pip-audit -s osv -r requirements.txt --desc
+          pip-audit -s osv -r requirements-optional.txt --desc
 
       - name: Pyright Type Check
         # User explicitly requested this to fail the build if type errors occur
@@ -183,8 +193,11 @@ jobs:
   ci-checks-windows:
     name: Code Quality & Tests (Windows)
     runs-on: windows-latest
+    timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      requirements_outdated: ${{ steps.set-outdated-flag.outputs.outdated }}
 
     steps:
       - name: Checkout Code
@@ -195,6 +208,10 @@ jobs:
         with:
           python-version: '3.14'
           cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
 
       - name: Setup PostgreSQL
         uses: ikalnytskyi/action-setup-postgres@v7
@@ -215,12 +232,14 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --prefer-binary -r requirements.txt
           set -o pipefail
-          pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
-          pip install -r requirements-dev.txt
+          pip install --prefer-binary -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          pip install --prefer-binary -r requirements-dev.txt
 
       - name: Verify requirements.txt is up to date
+        id: verify-requirements
+        continue-on-error: true
         shell: bash
         run: |
           pip install pip-tools
@@ -230,6 +249,24 @@ jobs:
           diff requirements-dev.txt requirements_dev_check.txt || (echo "::error::requirements-dev.txt is out of date. Run: pip-compile --extra dev pyproject.toml -o requirements-dev.txt" && exit 1)
           pip-compile --extra optional pyproject.toml -o requirements_optional_check.txt
           diff requirements-optional.txt requirements_optional_check.txt || (echo "::error::requirements-optional.txt is out of date. Run: pip-compile --extra optional pyproject.toml -o requirements-optional.txt" && exit 1)
+
+      - name: Set requirements outdated flag
+        id: set-outdated-flag
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.verify-requirements.outcome }}" = "failure" ]; then
+            echo "outdated=true" >> $GITHUB_OUTPUT
+          else
+            echo "outdated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fail job if requirements are outdated
+        if: steps.set-outdated-flag.outputs.outdated == 'true'
+        shell: bash
+        run: |
+          echo "::error::requirements*.txt are out of date. An auto-fix PR will be created."
+          exit 1
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
@@ -269,11 +306,56 @@ jobs:
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
 
+  update-requirements:
+    name: Update requirements*.txt
+    needs: ci-checks-windows
+    if: always() && needs.ci-checks-windows.outputs.requirements_outdated == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Recompile requirements
+        shell: bash
+        run: |
+          pip install pip-tools
+          pip-compile pyproject.toml -o requirements.txt
+          pip-compile --extra dev pyproject.toml -o requirements-dev.txt
+          pip-compile --extra optional pyproject.toml -o requirements-optional.txt
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: bot/update-requirements
+          delete-branch: true
+          title: "chore: update requirements*.txt"
+          body: |
+            `requirements*.txt` are out of date with `pyproject.toml`.
+
+            This PR was auto-generated by the CI pipeline after detecting that `pip-compile` produces different output than the committed files.
+
+            Please review the changes and merge if they look correct.
+          commit-message: "chore: update requirements*.txt via pip-compile"
+          labels: dependencies, automated
+
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
     needs: [ci-checks, ci-checks-windows]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -292,13 +374,17 @@ jobs:
         with:
           python-version: '3.14'
           cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
-          pip install -r requirements.txt
-          pip install -r requirements-optional.txt || echo "Optional deps failed, continuing..."
+          pip install --prefer-binary llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          pip install --prefer-binary -r requirements.txt
+          pip install --prefer-binary -r requirements-optional.txt || echo "Optional deps failed, continuing..."
           pip install pyinstaller
 
       - name: Install UPX

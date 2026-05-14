@@ -20,15 +20,11 @@
 """
 
 import datetime
-import os
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
 import pytest_asyncio
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.sync.base import SyncResult
 from strategies.prompt_validator import (

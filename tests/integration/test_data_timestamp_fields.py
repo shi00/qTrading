@@ -1,14 +1,10 @@
 import asyncio
-import os
-import sys
 import unittest
 from datetime import date, datetime
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.persistence.models import Base
 
@@ -208,8 +204,8 @@ class TestMacroDaoNoCreatedInjection:
         from data.persistence.models import get_model_columns
         from data.persistence.models import MacroEconomy
 
-        set(get_model_columns(MacroEconomy))
-        assert True, "save_macro_economy should NOT inject created_at in Python layer"
+        columns = set(get_model_columns(MacroEconomy))
+        assert "created_at" not in columns, f"created_at found in MacroEconomy columns: {columns}"
 
 
 class TestCreatedAtTimezoneCompatibility:

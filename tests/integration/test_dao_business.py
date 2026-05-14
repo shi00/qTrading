@@ -5,8 +5,6 @@ Tests for DAO business logic.
 """
 
 import datetime
-import os
-import sys
 from datetime import date, timedelta
 
 import pandas as pd
@@ -14,8 +12,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 _TODAY = date.today()
 _RECENT_DATE = _TODAY - timedelta(days=1)

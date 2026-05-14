@@ -218,9 +218,9 @@ class TestDataProcessorShouldSyncFinancials:
     async def test_recent_sync(self):
         dp = _make_dp()
         try:
-            recent = datetime.datetime.now() - datetime.timedelta(days=5)
+            recent = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=5)
             dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
-            with patch("data.data_processor.get_now", return_value=datetime.datetime.now()):
+            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
                 result, reason = await dp.should_sync_financials()
                 assert result is False
         finally:
@@ -230,9 +230,9 @@ class TestDataProcessorShouldSyncFinancials:
     async def test_old_sync(self):
         dp = _make_dp()
         try:
-            old = datetime.datetime.now() - datetime.timedelta(days=35)
+            old = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=35)
             dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": old.strftime("%Y-%m-%d")})
-            with patch("data.data_processor.get_now", return_value=datetime.datetime.now()):
+            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
                 result, reason = await dp.should_sync_financials()
                 assert result is True
         finally:
@@ -295,7 +295,7 @@ class TestDataProcessorSyncStockBasic:
             dp.cache.save_stock_basic = AsyncMock(return_value=2)
             dp.cache.update_sync_status = AsyncMock()
             dp.clear_cancel()
-            with patch("data.data_processor.get_now", return_value=datetime.datetime.now()):
+            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
                 result = await dp.sync_stock_basic()
                 assert result == 2
         finally:
@@ -309,7 +309,7 @@ class TestDataProcessorSyncStockBasic:
             dp.api.get_stock_basic_all = AsyncMock(return_value=df)
             dp.cache.save_stock_basic = AsyncMock(return_value=0)
             dp.clear_cancel()
-            with patch("data.data_processor.get_now", return_value=datetime.datetime.now()):
+            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
                 result = await dp.sync_stock_basic()
                 assert result == 0
         finally:

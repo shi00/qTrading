@@ -260,7 +260,7 @@ regex==2026.5.9
     # via tiktoken
 repath==0.9.0
     # via flet
-requests==2.34.0
+requests==2.34.1
     # via
     #   AStockScreener (pyproject.toml)
     #   akshare

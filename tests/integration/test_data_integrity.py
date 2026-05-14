@@ -1,12 +1,8 @@
 import inspect
-import os
-import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.data_processor import DataProcessor
 from tests.integration.test_infra_base import TestDatabaseBase

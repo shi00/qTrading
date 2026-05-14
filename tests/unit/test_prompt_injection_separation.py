@@ -60,7 +60,7 @@ class TestUniversalRulesSeparateSystemMessage:
                             news_list=[],
                             strategy_key="value",
                         )
-                    except Exception:
+                    except RuntimeError, ValueError, TypeError:
                         pass
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]
@@ -89,7 +89,7 @@ class TestUniversalRulesSeparateSystemMessage:
                             news_list=[],
                             strategy_key="value",
                         )
-                    except Exception:
+                    except RuntimeError, ValueError, TypeError:
                         pass
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]
@@ -136,7 +136,7 @@ class TestUniversalRulesSeparateSystemMessage:
                                     strategy_key="value",
                                     ui_prompt_override=custom_prompt,
                                 )
-                            except Exception:
+                            except RuntimeError, ValueError, TypeError:
                                 pass
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]

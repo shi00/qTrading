@@ -4,13 +4,7 @@ Tests for singleton_registry module.
 S5-2: Unified singleton reset registry.
 """
 
-import os
-import sys
-
 import pytest
-
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 
 class TestSingletonRegistry:

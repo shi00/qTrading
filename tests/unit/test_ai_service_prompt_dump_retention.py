@@ -1,13 +1,10 @@
 import os
-import sys
 import time
 import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import services.ai_service as ai_mod
 import utils.time_utils as time_utils

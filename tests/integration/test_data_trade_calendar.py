@@ -13,14 +13,10 @@ Tests cover:
 
 import asyncio
 import datetime
-import os
-import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from tests.integration.test_infra_base import TestDatabaseBase

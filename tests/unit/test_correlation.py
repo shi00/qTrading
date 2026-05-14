@@ -4,12 +4,7 @@ Tests for correlation module.
 S5-3: Correlation ID support for cross-module log tracing.
 """
 
-import os
-import sys
 import logging
-
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 
 class TestCorrelationId:

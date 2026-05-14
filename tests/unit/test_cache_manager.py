@@ -754,7 +754,8 @@ class TestCacheManagerDelegationsWithWait:
         mgr = _make_mgr()
         mgr.quote_dao.get_cached_trade_dates = AsyncMock(return_value=set())
         with patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock):
-            await mgr.get_cached_trade_dates()
+            result = await mgr.get_cached_trade_dates()
+            assert result == set()
             mgr.quote_dao.get_cached_trade_dates.assert_called_once()
 
     @pytest.mark.asyncio
@@ -762,7 +763,8 @@ class TestCacheManagerDelegationsWithWait:
         mgr = _make_mgr()
         mgr.quote_dao.get_cached_dates_for_table = AsyncMock(return_value=set())
         with patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock):
-            await mgr.get_cached_dates_for_table("daily_quotes")
+            result = await mgr.get_cached_dates_for_table("daily_quotes")
+            assert result == set()
             mgr.quote_dao.get_cached_dates_for_table.assert_called_once()
 
     @pytest.mark.asyncio
@@ -770,7 +772,8 @@ class TestCacheManagerDelegationsWithWait:
         mgr = _make_mgr()
         mgr.quote_dao.get_field_completeness = AsyncMock(return_value={})
         with patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock):
-            await mgr.get_field_completeness("20240614")
+            result = await mgr.get_field_completeness("20240614")
+            assert result == {}
             mgr.quote_dao.get_field_completeness.assert_called_once()
 
 
@@ -781,7 +784,8 @@ class TestCacheManagerBulkQualityScores:
         mgr._initialized = True
         mgr.quote_dao = MagicMock()
         mgr.quote_dao.get_bulk_table_counts = AsyncMock(return_value={})
-        await mgr.get_bulk_table_counts("daily_quotes", "2024-01-01", "2024-06-14")
+        result = await mgr.get_bulk_table_counts("daily_quotes", "2024-01-01", "2024-06-14")
+        assert result == {}
         mgr.quote_dao.get_bulk_table_counts.assert_called_once()
 
     @pytest.mark.asyncio
@@ -790,7 +794,8 @@ class TestCacheManagerBulkQualityScores:
         mgr._initialized = True
         mgr.quote_dao = MagicMock()
         mgr.quote_dao.get_bulk_expected_stock_counts = AsyncMock(return_value={})
-        await mgr.get_bulk_expected_stock_counts("2024-01-01", "2024-06-14")
+        result = await mgr.get_bulk_expected_stock_counts("2024-01-01", "2024-06-14")
+        assert result == {}
         mgr.quote_dao.get_bulk_expected_stock_counts.assert_called_once()
 
     @pytest.mark.asyncio
@@ -799,7 +804,8 @@ class TestCacheManagerBulkQualityScores:
         mgr._initialized = True
         mgr.quote_dao = MagicMock()
         mgr.quote_dao.get_bulk_sync_quality_scores = AsyncMock(return_value={})
-        await mgr.get_bulk_sync_quality_scores("2024-01-01", "2024-06-14")
+        result = await mgr.get_bulk_sync_quality_scores("2024-01-01", "2024-06-14")
+        assert result == {}
         mgr.quote_dao.get_bulk_sync_quality_scores.assert_called_once()
 
     @pytest.mark.asyncio
@@ -817,7 +823,8 @@ class TestCacheManagerBulkQualityScores:
         mgr._initialized = True
         mgr.quote_dao = MagicMock()
         mgr.quote_dao.get_sync_quality_score = AsyncMock(return_value={})
-        await mgr.get_sync_quality_score("2024-06-14")
+        result = await mgr.get_sync_quality_score("2024-06-14")
+        assert result == {}
         mgr.quote_dao.get_sync_quality_score.assert_called_once()
 
     @pytest.mark.asyncio
@@ -830,7 +837,8 @@ class TestCacheManagerBulkQualityScores:
         with patch("utils.loop_local.get_loop_local") as mock_gll:
             mock_gll.return_value = MagicMock()
             mock_gll.return_value.is_set = MagicMock(return_value=True)
-            await mgr.get_field_completeness("2024-06-14")
+            result = await mgr.get_field_completeness("2024-06-14")
+            assert result == {}
             mgr.quote_dao.get_field_completeness.assert_called_once()
 
 
@@ -853,49 +861,56 @@ class TestCacheManagerDelegations:
     async def test_save_stock_basic(self):
         mgr = self._make_mgr()
         mgr.stock_dao.save_stock_basic = AsyncMock(return_value=1)
-        await mgr.save_stock_basic(pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await mgr.save_stock_basic(pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        assert result == 1
         mgr.stock_dao.save_stock_basic.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_stock_basic(self):
         mgr = self._make_mgr()
         mgr.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_stock_basic()
+        result = await mgr.get_stock_basic()
+        assert result is not None
         mgr.stock_dao.get_stock_basic.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_daily_quotes(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_daily_quotes = AsyncMock(return_value=1)
-        await mgr.save_daily_quotes(pd.DataFrame())
+        result = await mgr.save_daily_quotes(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_daily_quotes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_daily_quotes(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_daily_quotes(ts_code="000001.SZ")
+        result = await mgr.get_daily_quotes(ts_code="000001.SZ")
+        assert result is not None
         mgr.quote_dao.get_daily_quotes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_daily_indicators(self):
         mgr = self._make_mgr()
         mgr.market_dao.save_daily_indicators = AsyncMock(return_value=1)
-        await mgr.save_daily_indicators(pd.DataFrame())
+        result = await mgr.save_daily_indicators(pd.DataFrame())
+        assert result == 1
         mgr.market_dao.save_daily_indicators.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_daily_indicators(self):
         mgr = self._make_mgr()
         mgr.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_daily_indicators(ts_code="000001.SZ")
+        result = await mgr.get_daily_indicators(ts_code="000001.SZ")
+        assert result is not None
         mgr.market_dao.get_daily_indicators.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_financial_reports(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_financial_reports = AsyncMock(return_value=1)
-        await mgr.save_financial_reports(pd.DataFrame())
+        result = await mgr.save_financial_reports(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_financial_reports.assert_called_once()
 
     @pytest.mark.asyncio
@@ -909,399 +924,456 @@ class TestCacheManagerDelegations:
     async def test_get_sync_status(self):
         mgr = self._make_mgr()
         mgr.sync_dao.get_sync_status = AsyncMock(return_value=None)
-        await mgr.get_sync_status("test_table")
+        result = await mgr.get_sync_status("test_table")
+        assert result is None
         mgr.sync_dao.get_sync_status.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_market_news(self):
         mgr = self._make_mgr()
-        mgr.market_dao.save_market_news = AsyncMock()
-        await mgr.save_market_news({"content": "test"})
+        mgr.market_dao.save_market_news = AsyncMock(return_value=None)
+        result = await mgr.save_market_news({"content": "test"})
+        assert result is None
         mgr.market_dao.save_market_news.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_market_news(self):
         mgr = self._make_mgr()
         mgr.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_market_news()
+        result = await mgr.get_market_news()
+        assert result is not None
         mgr.market_dao.get_market_news.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_screening_data(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_screening_data()
+        result = await mgr.get_screening_data()
+        assert result is not None
         mgr.screener_dao.get_screening_data.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_concepts(self):
         mgr = self._make_mgr()
         mgr.stock_dao.save_concepts = AsyncMock(return_value=1)
-        await mgr.save_concepts(pd.DataFrame())
+        result = await mgr.save_concepts(pd.DataFrame())
+        assert result == 1
         mgr.stock_dao.save_concepts.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_overwrite_concepts(self):
         mgr = self._make_mgr()
         mgr.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
-        await mgr.overwrite_concepts(pd.DataFrame())
+        result = await mgr.overwrite_concepts(pd.DataFrame())
+        assert result == 1
         mgr.stock_dao.overwrite_concepts.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_concepts(self):
         mgr = self._make_mgr()
         mgr.stock_dao.get_concepts = AsyncMock(return_value={})
-        await mgr.get_concepts()
+        result = await mgr.get_concepts()
+        assert result == {}
         mgr.stock_dao.get_concepts.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_moneyflow(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_moneyflow = AsyncMock(return_value=1)
-        await mgr.save_moneyflow(pd.DataFrame())
+        result = await mgr.save_moneyflow(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_moneyflow.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_northbound(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_northbound = AsyncMock(return_value=1)
-        await mgr.save_northbound(pd.DataFrame())
+        result = await mgr.save_northbound(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_northbound.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_fina_forecast(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_fina_forecast = AsyncMock(return_value=1)
-        await mgr.save_fina_forecast(pd.DataFrame())
+        result = await mgr.save_fina_forecast(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_fina_forecast.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_fina_mainbz(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_fina_mainbz = AsyncMock(return_value=1)
-        await mgr.save_fina_mainbz(pd.DataFrame())
+        result = await mgr.save_fina_mainbz(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_fina_mainbz.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_pledge_stat(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_pledge_stat = AsyncMock(return_value=1)
-        await mgr.save_pledge_stat(pd.DataFrame())
+        result = await mgr.save_pledge_stat(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_pledge_stat.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_repurchase(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_repurchase = AsyncMock(return_value=1)
-        await mgr.save_repurchase(pd.DataFrame())
+        result = await mgr.save_repurchase(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_repurchase.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_dividend(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_dividend = AsyncMock(return_value=1)
-        await mgr.save_dividend(pd.DataFrame())
+        result = await mgr.save_dividend(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_dividend.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_index_daily(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_index_daily = AsyncMock(return_value=1)
-        await mgr.save_index_daily(pd.DataFrame())
+        result = await mgr.save_index_daily(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_index_daily.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_index_dailybasic(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_index_dailybasic = AsyncMock(return_value=1)
-        await mgr.save_index_dailybasic(pd.DataFrame())
+        result = await mgr.save_index_dailybasic(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_index_dailybasic.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_index_daily(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_index_daily()
+        result = await mgr.get_index_daily()
+        assert result is not None
         mgr.quote_dao.get_index_daily.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_limit_list(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_limit_list = AsyncMock(return_value=1)
-        await mgr.save_limit_list(pd.DataFrame())
+        result = await mgr.save_limit_list(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_limit_list.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_margin_daily(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_margin_daily = AsyncMock(return_value=1)
-        await mgr.save_margin_daily(pd.DataFrame())
+        result = await mgr.save_margin_daily(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_margin_daily.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_suspend_d(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_suspend_d = AsyncMock(return_value=1)
-        await mgr.save_suspend_d(pd.DataFrame())
+        result = await mgr.save_suspend_d(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_suspend_d.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_fina_audit(self):
         mgr = self._make_mgr()
         mgr.financial_dao.save_fina_audit = AsyncMock(return_value=1)
-        await mgr.save_fina_audit(pd.DataFrame())
+        result = await mgr.save_fina_audit(pd.DataFrame())
+        assert result == 1
         mgr.financial_dao.save_fina_audit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_top_list(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_top_list = AsyncMock(return_value=1)
-        await mgr.save_top_list(pd.DataFrame())
+        result = await mgr.save_top_list(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_top_list.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_top_list(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_top_list()
+        result = await mgr.get_top_list()
+        assert result is not None
         mgr.quote_dao.get_top_list.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_block_trade(self):
         mgr = self._make_mgr()
         mgr.quote_dao.save_block_trade = AsyncMock(return_value=1)
-        await mgr.save_block_trade(pd.DataFrame())
+        result = await mgr.save_block_trade(pd.DataFrame())
+        assert result == 1
         mgr.quote_dao.save_block_trade.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_block_trade(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_block_trade()
+        result = await mgr.get_block_trade()
+        assert result is not None
         mgr.quote_dao.get_block_trade.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_moneyflow(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_moneyflow()
+        result = await mgr.get_moneyflow()
+        assert result is not None
         mgr.quote_dao.get_moneyflow.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_northbound(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_northbound()
+        result = await mgr.get_northbound()
+        assert result is not None
         mgr.quote_dao.get_northbound.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_screening_history(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_screening_history = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_screening_history()
+        result = await mgr.get_screening_history()
+        assert result is not None
         mgr.screener_dao.get_screening_history.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_history_tree(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_history_tree = AsyncMock(return_value=[])
-        await mgr.get_history_tree()
+        result = await mgr.get_history_tree()
+        assert result == []
         mgr.screener_dao.get_history_tree.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_history_records(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_history_records = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_history_records(trade_date="20240614")
+        result = await mgr.get_history_records(trade_date="20240614")
+        assert result is not None
         mgr.screener_dao.get_history_records.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_pending_reviews(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_pending_reviews = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_pending_reviews()
+        result = await mgr.get_pending_reviews()
+        assert result is not None
         mgr.screener_dao.get_pending_reviews.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_learning_examples(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_learning_examples = AsyncMock(return_value=[])
-        await mgr.get_learning_examples()
+        result = await mgr.get_learning_examples()
+        assert result == []
         mgr.screener_dao.get_learning_examples.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_completed_step4_stocks(self):
         mgr = self._make_mgr()
         mgr.sync_dao.get_completed_step4_stocks = AsyncMock(return_value=set())
-        await mgr.get_completed_step4_stocks()
+        result = await mgr.get_completed_step4_stocks()
+        assert result == set()
         mgr.sync_dao.get_completed_step4_stocks.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_mark_stock_step4_completed(self):
         mgr = self._make_mgr()
-        mgr.sync_dao.mark_stock_step4_completed = AsyncMock()
-        await mgr.mark_stock_step4_completed("000001.SZ")
+        mgr.sync_dao.mark_stock_step4_completed = AsyncMock(return_value=None)
+        result = await mgr.mark_stock_step4_completed("000001.SZ")
+        assert result is None
         mgr.sync_dao.mark_stock_step4_completed.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_clear_step4_sync_status(self):
         mgr = self._make_mgr()
-        mgr.sync_dao.clear_step4_sync_status = AsyncMock()
-        await mgr.clear_step4_sync_status()
+        mgr.sync_dao.clear_step4_sync_status = AsyncMock(return_value=None)
+        result = await mgr.clear_step4_sync_status()
+        assert result is None
         mgr.sync_dao.clear_step4_sync_status.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_trade_cal(self):
         mgr = self._make_mgr()
         mgr.stock_dao.save_trade_cal = AsyncMock(return_value=1)
-        await mgr.save_trade_cal(pd.DataFrame())
+        result = await mgr.save_trade_cal(pd.DataFrame())
+        assert result == 1
         mgr.stock_dao.save_trade_cal.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_trade_cal(self):
         mgr = self._make_mgr()
         mgr.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_trade_cal()
+        result = await mgr.get_trade_cal()
+        assert result is not None
         mgr.stock_dao.get_trade_cal.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_trade_cal_range(self):
         mgr = self._make_mgr()
         mgr.stock_dao.get_trade_cal_range = AsyncMock(return_value=(None, None))
-        await mgr.get_trade_cal_range()
+        result = await mgr.get_trade_cal_range()
+        assert result == (None, None)
         mgr.stock_dao.get_trade_cal_range.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_macro_economy(self):
         mgr = self._make_mgr()
         mgr.macro_dao.save_macro_economy = AsyncMock(return_value=1)
-        await mgr.save_macro_economy(pd.DataFrame())
+        result = await mgr.save_macro_economy(pd.DataFrame())
+        assert result == 1
         mgr.macro_dao.save_macro_economy.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_shibor_daily(self):
         mgr = self._make_mgr()
         mgr.macro_dao.save_shibor_daily = AsyncMock(return_value=1)
-        await mgr.save_shibor_daily(pd.DataFrame())
+        result = await mgr.save_shibor_daily(pd.DataFrame())
+        assert result == 1
         mgr.macro_dao.save_shibor_daily.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_holder_number(self):
         mgr = self._make_mgr()
         mgr.holder_dao.save_holder_number = AsyncMock(return_value=1)
-        await mgr.save_holder_number(pd.DataFrame())
+        result = await mgr.save_holder_number(pd.DataFrame())
+        assert result == 1
         mgr.holder_dao.save_holder_number.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_top10_holders(self):
         mgr = self._make_mgr()
         mgr.holder_dao.save_top10_holders = AsyncMock(return_value=1)
-        await mgr.save_top10_holders(pd.DataFrame())
+        result = await mgr.save_top10_holders(pd.DataFrame())
+        assert result == 1
         mgr.holder_dao.save_top10_holders.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_index_weights(self):
         mgr = self._make_mgr()
         mgr.market_dao.save_index_weights = AsyncMock(return_value=1)
-        await mgr.save_index_weights(pd.DataFrame())
+        result = await mgr.save_index_weights(pd.DataFrame())
+        assert result == 1
         mgr.market_dao.save_index_weights.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_index_weights(self):
         mgr = self._make_mgr()
         mgr.market_dao.get_index_weights = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_index_weights("399300.SZ", "20240614")
+        result = await mgr.get_index_weights("399300.SZ", "20240614")
+        assert result is not None
         mgr.market_dao.get_index_weights.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_latest_index_weight_date(self):
         mgr = self._make_mgr()
         mgr.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        await mgr.get_latest_index_weight_date()
+        result = await mgr.get_latest_index_weight_date()
+        assert result is None
         mgr.market_dao.get_latest_index_weight_date.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_moneyflow_hsgt(self):
         mgr = self._make_mgr()
         mgr.market_dao.save_moneyflow_hsgt = AsyncMock(return_value=1)
-        await mgr.save_moneyflow_hsgt(pd.DataFrame())
+        result = await mgr.save_moneyflow_hsgt(pd.DataFrame())
+        assert result == 1
         mgr.market_dao.save_moneyflow_hsgt.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_moneyflow_hsgt(self):
         mgr = self._make_mgr()
         mgr.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_moneyflow_hsgt()
+        result = await mgr.get_moneyflow_hsgt()
+        assert result is not None
         mgr.market_dao.get_moneyflow_hsgt.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_financial_reports_history(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_financial_reports_history("000001.SZ")
+        result = await mgr.get_financial_reports_history("000001.SZ")
+        assert result is not None
         mgr.financial_dao.get_financial_reports_history.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_fina_audit(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_fina_audit_batch = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_fina_audit("000001.SZ")
+        result = await mgr.get_fina_audit("000001.SZ")
+        assert result is not None
         mgr.financial_dao.get_fina_audit_batch.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_fina_mainbz(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_fina_mainbz("000001.SZ")
+        result = await mgr.get_fina_mainbz("000001.SZ")
+        assert result is not None
         mgr.financial_dao.get_fina_mainbz.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_dividend(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_dividend_batch = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_dividend("000001.SZ")
+        result = await mgr.get_dividend("000001.SZ")
+        assert result is not None
         mgr.financial_dao.get_dividend_batch.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_pledge_stat(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_pledge_stat_batch = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_pledge_stat("000001.SZ")
+        result = await mgr.get_pledge_stat("000001.SZ")
+        assert result is not None
         mgr.financial_dao.get_pledge_stat_batch.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_top10_holders(self):
         mgr = self._make_mgr()
         mgr.holder_dao.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_top10_holders("000001.SZ")
+        result = await mgr.get_top10_holders("000001.SZ")
+        assert result is not None
         mgr.holder_dao.get_top10_holders.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_stk_holdernumber(self):
         mgr = self._make_mgr()
         mgr.holder_dao.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_stk_holdernumber("000001.SZ")
+        result = await mgr.get_stk_holdernumber("000001.SZ")
+        assert result is not None
         mgr.holder_dao.get_stk_holdernumber.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_existing_top10_ts_codes(self):
         mgr = self._make_mgr()
         mgr.holder_dao.get_existing_top10_ts_codes = AsyncMock(return_value=set())
-        await mgr.get_existing_top10_ts_codes("20240331")
+        result = await mgr.get_existing_top10_ts_codes("20240331")
+        assert result == set()
         mgr.holder_dao.get_existing_top10_ts_codes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_macro_economy(self):
         mgr = self._make_mgr()
         mgr.macro_dao.get_macro_economy_latest = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_macro_economy()
+        result = await mgr.get_macro_economy()
+        assert result is not None
         mgr.macro_dao.get_macro_economy_latest.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest(self):
         mgr = self._make_mgr()
         mgr.macro_dao.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_shibor_latest()
+        result = await mgr.get_shibor_latest()
+        assert result is not None
         mgr.macro_dao.get_shibor_latest.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1315,63 +1387,72 @@ class TestCacheManagerDelegations:
     async def test_get_latest_northbound(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_latest_northbound = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_latest_northbound()
+        result = await mgr.get_latest_northbound()
+        assert result is not None
         mgr.quote_dao.get_latest_northbound.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_latest_indicators(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_latest_indicators = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_latest_indicators()
+        result = await mgr.get_latest_indicators()
+        assert result is not None
         mgr.financial_dao.get_latest_indicators.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_cached_indicator_dates(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_cached_indicator_dates = AsyncMock(return_value=set())
-        await mgr.get_cached_indicator_dates()
+        result = await mgr.get_cached_indicator_dates()
+        assert result == set()
         mgr.financial_dao.get_cached_indicator_dates.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_cached_financial_records(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_cached_financial_records = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_cached_financial_records()
+        result = await mgr.get_cached_financial_records()
+        assert result is not None
         mgr.financial_dao.get_cached_financial_records.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_fundamental_screening_data(self):
         mgr = self._make_mgr()
         mgr.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_fundamental_screening_data()
+        result = await mgr.get_fundamental_screening_data()
+        assert result is not None
         mgr.screener_dao.get_fundamental_screening_data.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_incomplete_financial_stocks(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_incomplete_financial_stocks = AsyncMock(return_value=set())
-        await mgr.get_incomplete_financial_stocks()
+        result = await mgr.get_incomplete_financial_stocks()
+        assert result == set()
         mgr.financial_dao.get_incomplete_financial_stocks.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_daily_indicators_bulk(self):
         mgr = self._make_mgr()
         mgr.market_dao.get_daily_indicators_bulk = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_daily_indicators_bulk(["000001.SZ"])
+        result = await mgr.get_daily_indicators_bulk(["000001.SZ"])
+        assert result is not None
         mgr.market_dao.get_daily_indicators_bulk.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_index_daily_range(self):
         mgr = self._make_mgr()
         mgr.quote_dao.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
-        await mgr.get_index_daily_range(["399300.SZ"])
+        result = await mgr.get_index_daily_range(["399300.SZ"])
+        assert result is not None
         mgr.quote_dao.get_index_daily_range.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_start_date_by_trade_days(self):
         mgr = self._make_mgr()
         mgr.stock_dao.get_start_date_by_trade_days = AsyncMock(return_value="20240101")
-        await mgr.get_start_date_by_trade_days("20240614", 250)
+        result = await mgr.get_start_date_by_trade_days("20240614", 250)
+        assert result == "20240101"
         mgr.stock_dao.get_start_date_by_trade_days.assert_called_once()
 
 

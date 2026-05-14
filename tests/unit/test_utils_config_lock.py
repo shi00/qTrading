@@ -4,11 +4,7 @@ Tests for ConfigHandler thread safety.
 验证配置处理器的线程安全性。
 """
 
-import os
-import sys
 import threading
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.config_handler import ConfigHandler
 

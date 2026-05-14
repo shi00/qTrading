@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from utils.scheduler_service import SchedulerService
@@ -329,10 +329,16 @@ class TestRunDailyUpdate:
     @pytest.mark.asyncio
     async def test_already_updated(self):
         svc = _make_svc()
-        today_str = datetime.now().strftime("%Y%m%d")
+        today_str = "20240615"
         svc._last_update_date = today_str
-        with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
             mock_ch.is_auto_update_enabled.return_value = True
+            mock_now_dt = MagicMock()
+            mock_now_dt.date.return_value = date(2024, 6, 15)
+            mock_now.return_value = mock_now_dt
             await svc._run_daily_update()
 
     @pytest.mark.asyncio
@@ -348,7 +354,7 @@ class TestRunDailyUpdate:
             mock_dp_instance.trade_calendar = MagicMock()
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=False)
             mock_dp.return_value = mock_dp_instance
-            mock_now.return_value.date.return_value = datetime.now().date()
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
             await svc._run_daily_update()
 
     @pytest.mark.asyncio
@@ -365,7 +371,7 @@ class TestRunDailyUpdate:
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
             mock_dp.return_value = mock_dp_instance
             mock_now_dt = MagicMock()
-            mock_now_dt.date.return_value = datetime.now().date()
+            mock_now_dt.date.return_value = date(2024, 6, 15)
             mock_now_dt.weekday.return_value = 5
             mock_now.return_value = mock_now_dt
             await svc._run_daily_update()
@@ -385,7 +391,7 @@ class TestRunDailyUpdate:
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
             mock_dp.return_value = mock_dp_instance
             mock_now_dt = MagicMock()
-            mock_now_dt.date.return_value = datetime.now().date()
+            mock_now_dt.date.return_value = date(2024, 6, 15)
             mock_now_dt.weekday.return_value = 2
             mock_now.return_value = mock_now_dt
             mock_tm_instance = MagicMock()
@@ -407,7 +413,7 @@ class TestRunDailyUpdate:
             mock_dp_instance.trade_calendar = MagicMock()
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
             mock_dp.return_value = mock_dp_instance
-            mock_now.return_value.date.return_value = datetime.now().date()
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
             mock_tm_instance = MagicMock()
             mock_tm.return_value = mock_tm_instance
             await svc._run_daily_update()
@@ -430,7 +436,7 @@ class TestRunDoubaoTagger:
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
             mock_ch.is_doubao_schedule_enabled.return_value = True
-            today_str = datetime.now().strftime("%Y%m%d")
+            today_str = "20240615"
             mock_now.return_value.strftime.return_value = today_str
             svc._last_doubao_date = today_str
             await svc._run_doubao_tagger()
@@ -463,14 +469,14 @@ class TestRunNightlyPrediction:
     @pytest.mark.asyncio
     async def test_already_done(self):
         svc = _make_svc()
-        today_str = datetime.now().strftime("%Y%m%d")
+        today_str = "20240615"
         svc._last_pred_date = today_str
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
-            mock_now.return_value.date.return_value = datetime.now().date()
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
             await svc._run_nightly_prediction()
 
     @pytest.mark.asyncio
@@ -486,7 +492,7 @@ class TestRunNightlyPrediction:
             mock_dp_instance.trade_calendar = MagicMock()
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=False)
             mock_dp.return_value = mock_dp_instance
-            mock_now.return_value.date.return_value = datetime.now().date()
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
             await svc._run_nightly_prediction()
 
     @pytest.mark.asyncio
@@ -503,7 +509,7 @@ class TestRunNightlyPrediction:
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
             mock_dp.return_value = mock_dp_instance
             mock_now_dt = MagicMock()
-            mock_now_dt.date.return_value = datetime.now().date()
+            mock_now_dt.date.return_value = date(2024, 6, 15)
             mock_now_dt.weekday.return_value = 6
             mock_now.return_value = mock_now_dt
             await svc._run_nightly_prediction()
@@ -522,7 +528,7 @@ class TestRunNightlyPrediction:
             mock_dp_instance.trade_calendar = MagicMock()
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
             mock_dp.return_value = mock_dp_instance
-            mock_now.return_value.date.return_value = datetime.now().date()
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
             mock_tm_instance = MagicMock()
             mock_tm.return_value = mock_tm_instance
             await svc._run_nightly_prediction()

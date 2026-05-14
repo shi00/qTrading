@@ -6,7 +6,6 @@ import pytest
 from utils.shutdown import ShutdownCoordinator
 
 
-@pytest.mark.unit
 class TestShutdownStepFailureRecovery:
     @pytest.mark.asyncio
     async def test_non_critical_step_failure_does_not_fail_cleanup(self, mock_singletons):

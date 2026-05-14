@@ -1,12 +1,8 @@
 import datetime
-import os
-import sys
 import unittest
 from datetime import date, timedelta
 
 import pandas as pd
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 _TODAY = date.today()
 _RECENT = _TODAY - timedelta(days=1)

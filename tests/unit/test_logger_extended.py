@@ -1,12 +1,8 @@
 import logging
 import os
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-
-# Add project root to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.logger import get_logger, setup_logging, update_log_level
 

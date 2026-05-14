@@ -7,14 +7,10 @@
 - L2: 批量预取避免 N+1 查询
 """
 
-import os
-import sys
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.persistence.daos.financial_dao import FinancialDao
 

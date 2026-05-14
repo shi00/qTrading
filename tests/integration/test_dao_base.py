@@ -6,16 +6,12 @@ Tests for DAO layer methods.
 """
 
 import datetime
-import os
-import sys
 
 import pandas as pd
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from data.persistence.daos.base_dao import BaseDao
 from data.persistence.daos.financial_dao import FinancialDao

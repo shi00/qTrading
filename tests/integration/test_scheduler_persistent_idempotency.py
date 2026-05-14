@@ -5,7 +5,6 @@ _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
 
 
-@pytest.mark.unit
 class TestSchedulerPersistentIdempotency:
     def test_runtime_keys_survive_ensure_defaults_cleanup(self, monkeypatch, tmp_path):
         import utils.config_handler as cfg_mod
@@ -124,7 +123,6 @@ class TestSchedulerFailureProtection:
         assert has_errors is False
 
 
-@pytest.mark.unit
 class TestDoubaoIdempotency:
     """H-7: Doubao weekly task must have idempotency key."""
 

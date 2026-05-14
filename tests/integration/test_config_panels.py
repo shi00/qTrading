@@ -6,14 +6,11 @@ Tests for DatabaseConfigPanel, LocalModelConfigPanel, LLMConfigPanel
 
 import asyncio
 import os
-import sys
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 

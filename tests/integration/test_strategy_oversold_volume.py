@@ -27,7 +27,6 @@ def _build_quotes_df(ts_code, dates, close_start, vol_base, vol_spike_at=None):
     return pl.DataFrame(rows)
 
 
-@pytest.mark.unit
 class TestOversoldVolumeThreshold:
     def test_vol_ratio_filter_reduces_candidates(self):
         dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(30)]

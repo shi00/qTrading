@@ -42,26 +42,26 @@ def reset_singletons():
         from utils.config_handler import ConfigHandler
 
         ConfigHandler._config_cache = None
-    except Exception:
+    except ImportError, AttributeError:
         pass
     try:
         import services.ai_service as ai_service_module
 
         ai_service_module.AIService._instance = None
-    except Exception:
+    except ImportError, AttributeError:
         pass
     yield
     try:
         from utils.config_handler import ConfigHandler
 
         ConfigHandler._config_cache = None
-    except Exception:
+    except ImportError, AttributeError:
         pass
     try:
         import services.ai_service as ai_service_module
 
         ai_service_module.AIService._instance = None
-    except Exception:
+    except ImportError, AttributeError:
         pass
 
 

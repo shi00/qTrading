@@ -350,131 +350,180 @@ class TestSecurityManagerBoundaryConditions:
     def test_encrypt_decrypt_roundtrip(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            plaintext = "test_secret_value_123"
-            encrypted = SecurityManager.encrypt_data(plaintext)
-            assert encrypted != plaintext
-            assert len(encrypted) > 0
+                plaintext = "test_secret_value_123"
+                encrypted = SecurityManager.encrypt_data(plaintext)
+                assert encrypted != plaintext
+                assert len(encrypted) > 0
 
-            decrypted = SecurityManager.decrypt_data(encrypted)
-            assert decrypted == plaintext
+                decrypted = SecurityManager.decrypt_data(encrypted)
+                assert decrypted == plaintext
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
     def test_key_file_atomic_write(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            key = SecurityManager.get_key()
-            SecurityManager._save_key(key)
+                key = SecurityManager.get_key()
+                SecurityManager._save_key(key)
 
-            assert os.path.exists(SecurityManager.KEY_FILE)
-            assert os.path.exists(SecurityManager.KEY_FILE_BAK)
+                assert os.path.exists(SecurityManager.KEY_FILE)
+                assert os.path.exists(SecurityManager.KEY_FILE_BAK)
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
     def test_key_backup_on_load(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            key = SecurityManager.get_key()
-            SecurityManager._save_key(key)
-            SecurityManager._key = None
+                key = SecurityManager.get_key()
+                SecurityManager._save_key(key)
+                SecurityManager._key = None
 
-            SecurityManager.get_key()
-            assert os.path.exists(SecurityManager.KEY_FILE_BAK)
+                SecurityManager.get_key()
+                assert os.path.exists(SecurityManager.KEY_FILE_BAK)
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
     def test_key_recovery_from_backup(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            key = SecurityManager.get_key()
-            SecurityManager._save_key(key)
-            SecurityManager._key = None
+                key = SecurityManager.get_key()
+                SecurityManager._save_key(key)
+                SecurityManager._key = None
 
-            SecurityManager.get_key()
-            SecurityManager._key = None
+                SecurityManager.get_key()
+                SecurityManager._key = None
 
-            os.remove(SecurityManager.KEY_FILE)
-            with open(SecurityManager.KEY_FILE, "w", encoding="utf-8") as f:
-                f.write("corrupt_data")
+                os.remove(SecurityManager.KEY_FILE)
+                with open(SecurityManager.KEY_FILE, "w", encoding="utf-8") as f:
+                    f.write("corrupt_data")
 
-            recovered_key = SecurityManager.get_key()
-            assert recovered_key is not None
-            assert len(recovered_key) == 32
+                recovered_key = SecurityManager.get_key()
+                assert recovered_key is not None
+                assert len(recovered_key) == 32
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
     def test_key_corrupt_both_files_raises(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            with open(SecurityManager.KEY_FILE, "w", encoding="utf-8") as f:
-                f.write("corrupt_primary")
-            with open(SecurityManager.KEY_FILE_BAK, "w", encoding="utf-8") as f:
-                f.write("corrupt_backup")
+                with open(SecurityManager.KEY_FILE, "w", encoding="utf-8") as f:
+                    f.write("corrupt_primary")
+                with open(SecurityManager.KEY_FILE_BAK, "w", encoding="utf-8") as f:
+                    f.write("corrupt_backup")
 
-            with pytest.raises(RuntimeError, match="corrupt"):
-                SecurityManager.get_key()
+                with pytest.raises(RuntimeError, match="corrupt"):
+                    SecurityManager.get_key()
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
     def test_aesgcm_256bit_key(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            key = SecurityManager.get_key()
-            assert len(key) == 32, "AES-256 key must be 32 bytes (256 bits)"
+                key = SecurityManager.get_key()
+                assert len(key) == 32, "AES-256 key must be 32 bytes (256 bits)"
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
     def test_nonce_96bit(self):
         from utils.security_utils import SecurityManager
 
-        SecurityManager._key = None
-        with tempfile.TemporaryDirectory() as tmpdir:
-            SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-            SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+        original_key_file = SecurityManager.KEY_FILE
+        original_key_file_bak = SecurityManager.KEY_FILE_BAK
+        try:
             SecurityManager._key = None
+            with tempfile.TemporaryDirectory() as tmpdir:
+                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
+                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+                SecurityManager._key = None
 
-            plaintext = "test_nonce_check"
-            encrypted = SecurityManager.encrypt_data(plaintext)
-            decoded = base64.b64decode(encrypted)
-            nonce = decoded[:12]
-            assert len(nonce) == 12, "AES-GCM nonce must be 12 bytes (96 bits)"
+                plaintext = "test_nonce_check"
+                encrypted = SecurityManager.encrypt_data(plaintext)
+                decoded = base64.b64decode(encrypted)
+                nonce = decoded[:12]
+                assert len(nonce) == 12, "AES-GCM nonce must be 12 bytes (96 bits)"
 
+                SecurityManager._key = None
+        finally:
+            SecurityManager.KEY_FILE = original_key_file
+            SecurityManager.KEY_FILE_BAK = original_key_file_bak
             SecurityManager._key = None
 
 
