@@ -28,7 +28,7 @@ def setup_logging(name="astock_screener"):
     # 2. Load config with robustness
     try:
         current_level = ConfigHandler.get_log_level()
-    except (ValueError, OSError, RuntimeError):
+    except ValueError, OSError, RuntimeError:
         current_level = "INFO"
 
     level_map = {
@@ -73,7 +73,7 @@ def setup_logging(name="astock_screener"):
     try:
         max_mb = ConfigHandler.get_log_max_mb()
         backup_count = ConfigHandler.get_log_backup_count()
-    except (ValueError, OSError, RuntimeError):
+    except ValueError, OSError, RuntimeError:
         max_mb = 5
         backup_count = 5
     max_bytes = int(max_mb * 1024 * 1024)
@@ -134,7 +134,7 @@ def setup_logging(name="astock_screener"):
                     )
                     temp_err_handler.doRollover()
                     temp_err_handler.close()
-                except (OSError, ValueError):
+                except OSError, ValueError:
                     pass
 
             error_handler = RotatingFileHandler(
@@ -147,7 +147,7 @@ def setup_logging(name="astock_screener"):
             error_handler.setFormatter(formatter)
             error_handler.addFilter(correlation_filter)
             logger.addHandler(error_handler)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             pass
 
     # 6. Suppress noisy third-party logs

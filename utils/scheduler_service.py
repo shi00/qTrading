@@ -227,7 +227,7 @@ class SchedulerService:
         scheduled_time = ConfigHandler.get_auto_update_time() or "16:30"
         try:
             hour, minute = map(int, scheduled_time.split(":"))
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             hour, minute = 16, 30
 
         self.scheduler.add_job(
@@ -252,7 +252,7 @@ class SchedulerService:
         doubao_time = ConfigHandler.get_doubao_schedule_time() or "10:00"
         try:
             dh, dm = map(int, doubao_time.split(":"))
-        except (ValueError, TypeError, AttributeError):
+        except ValueError, TypeError, AttributeError:
             dh, dm = 10, 0
 
         self.scheduler.add_job(
@@ -318,7 +318,7 @@ class SchedulerService:
                 # DataFrame/Series fallback: treat row count as added amount
                 try:
                     added = 0 if result.empty else len(result)  # type: ignore[union-attr]
-                except (ValueError, TypeError, AttributeError):
+                except ValueError, TypeError, AttributeError:
                     added = 0
             else:
                 added = result

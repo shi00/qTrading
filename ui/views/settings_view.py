@@ -138,7 +138,7 @@ class SettingsView(ft.Container):
     def _on_tab_click(self, e):
         try:
             idx = int(e.control.data)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             logger.warning(f"Invalid tab index data: {e.control.data}")
             return
 

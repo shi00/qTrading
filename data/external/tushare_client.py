@@ -413,7 +413,7 @@ class TushareClient:
                         f"[API] UNSAFE_FALLBACK: Assuming {date_str} is trading day (weekday check). May be inaccurate for holidays!",
                     )
                 return is_weekday
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 return True  # Default to allowing if all else fails
 
     # ========== Policy-Driven AI Extensions ==========

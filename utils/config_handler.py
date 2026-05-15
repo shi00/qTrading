@@ -207,7 +207,7 @@ class ConfigHandler:
                     try:
                         with open(CONFIG_FILE, encoding="utf-8") as f:
                             current_config = json.load(f)
-                    except (json.JSONDecodeError, OSError):
+                    except json.JSONDecodeError, OSError:
                         current_config = {}
                 else:
                     current_config = {}
@@ -326,7 +326,7 @@ class ConfigHandler:
                         try:
                             with open(CONFIG_FILE, encoding="utf-8") as f:
                                 current_config = json.load(f)
-                        except (json.JSONDecodeError, OSError):
+                        except json.JSONDecodeError, OSError:
                             pass
                     current_config.update(config_data)
 
@@ -809,7 +809,7 @@ class ConfigHandler:
         try:
             val = ConfigHandler.get_setting("local_model_timeout")
             return int(val) if val is not None else None  # type: ignore[arg-type]
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             # If config is corrupted/invalid, treat as not set (no default provided)
             return None  # type: ignore[return-value]
 
@@ -1019,7 +1019,7 @@ class ConfigHandler:
         val = config.get("max_io_workers", ConfigHandler.DEFAULT_CONFIG["max_io_workers"])
         try:
             io_workers = int(val)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return 0
 
         if io_workers <= 0:
@@ -1029,11 +1029,11 @@ class ConfigHandler:
             db_pool_size = int(
                 config.get("db_connection_pool_size", ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"])
             )
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             db_pool_size = ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"]
         try:
             db_max_overflow = int(config.get("db_max_overflow", ConfigHandler.DEFAULT_CONFIG["db_max_overflow"]))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             db_max_overflow = ConfigHandler.DEFAULT_CONFIG["db_max_overflow"]
         db_capacity = db_pool_size + db_max_overflow
 
@@ -1056,7 +1056,7 @@ class ConfigHandler:
         val = config.get("max_cpu_workers", ConfigHandler.DEFAULT_CONFIG["max_cpu_workers"])
         try:
             return int(val)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return 0
 
     @staticmethod
@@ -1073,7 +1073,7 @@ class ConfigHandler:
         val = config.get("max_concurrent_tasks", ConfigHandler.DEFAULT_CONFIG["max_concurrent_tasks"])
         try:
             val = int(val)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             val = 0
         if val > 0:
             return val

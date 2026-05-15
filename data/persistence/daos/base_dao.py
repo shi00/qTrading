@@ -135,7 +135,7 @@ class BaseDao:
             try:
                 if pd.isna(val):
                     return None
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 # multi-dimensional np arrays or un-hashable types that 'isna' dislikes
                 pass
 
@@ -480,7 +480,7 @@ class BaseDao:
                         return pd.to_datetime(clean_val).date()
                     except (ValueError, TypeError) as e:
                         logger.debug(f"[BaseDao] Pandas date parse skipped for '{clean_val}': {e}")
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 logger.warning(f"[BaseDao] Failed to convert date string: {val}")
                 pass
 

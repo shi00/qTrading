@@ -65,7 +65,16 @@ class TestCacheManagerCreateEngine:
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("sqlite:///test.db")
-        mock_create.assert_called_once_with("sqlite:///test.db", echo=False, pool_size=10, max_overflow=5, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True, future=True)
+        mock_create.assert_called_once_with(
+            "sqlite:///test.db",
+            echo=False,
+            pool_size=10,
+            max_overflow=5,
+            pool_timeout=30,
+            pool_recycle=1800,
+            pool_pre_ping=True,
+            future=True,
+        )
         assert mgr.engine == mock_engine
 
     @patch("data.cache.cache_manager.create_async_engine")
@@ -81,7 +90,16 @@ class TestCacheManagerCreateEngine:
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("sqlite:///test.db")
-        mock_create.assert_called_once_with("sqlite:///test.db", echo=False, pool_size=10, max_overflow=5, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True, future=True)
+        mock_create.assert_called_once_with(
+            "sqlite:///test.db",
+            echo=False,
+            pool_size=10,
+            max_overflow=5,
+            pool_timeout=30,
+            pool_recycle=1800,
+            pool_pre_ping=True,
+            future=True,
+        )
 
     @patch("data.cache.cache_manager.create_async_engine")
     @patch("utils.config_handler.ConfigHandler.get_db_connection_pool_size", return_value=None)
@@ -96,7 +114,16 @@ class TestCacheManagerCreateEngine:
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("sqlite:///test.db")
-        mock_create.assert_called_once_with("sqlite:///test.db", echo=False, pool_size=10, max_overflow=5, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True, future=True)
+        mock_create.assert_called_once_with(
+            "sqlite:///test.db",
+            echo=False,
+            pool_size=10,
+            max_overflow=5,
+            pool_timeout=30,
+            pool_recycle=1800,
+            pool_pre_ping=True,
+            future=True,
+        )
 
 
 class TestCacheManagerInitDb:

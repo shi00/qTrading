@@ -1187,7 +1187,7 @@ class ScreenerView(ft.Container):
                     else:
                         try:
                             params[name] = float(ctrl.value)  # type: ignore[untyped]
-                        except (ValueError, TypeError):
+                        except ValueError, TypeError:
                             params[name] = ctrl.value
                 elif isinstance(ctrl, ft.Dropdown):
                     params[name] = ctrl.value

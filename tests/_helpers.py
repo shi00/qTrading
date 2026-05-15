@@ -56,7 +56,7 @@ def _resolve_model_class_from_method(method) -> type | None:
     """
     try:
         source = inspect.getsource(method)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return None
 
     import re
@@ -82,7 +82,7 @@ def _resolve_exclude_from_method(method) -> set | None:
     """Resolve the exclude= parameter from a DAO save method if present."""
     try:
         source = inspect.getsource(method)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return None
 
     import re
@@ -98,7 +98,7 @@ def _resolve_hardcoded_cols_from_method(method) -> set | None:
     """Fallback: try to resolve hardcoded column lists from method source."""
     try:
         source = inspect.getsource(method)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return None
 
     import re
@@ -123,7 +123,7 @@ def extract_fields_from_api_method(method) -> set:
     """
     try:
         source = inspect.getsource(method)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return set()
 
     import re

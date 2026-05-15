@@ -116,7 +116,7 @@ def _persistent_worker(
 try:
     importlib.import_module("llama_cpp")
     _HAS_LLAMA_CPP = True
-except (ImportError, AttributeError):
+except ImportError, AttributeError:
     _HAS_LLAMA_CPP = False
     logger.warning(
         "llama-cpp-python not installed. Embedded AI features will be disabled.",

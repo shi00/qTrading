@@ -429,7 +429,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         self,
         trade_date: datetime.date | None,
         force: bool = False,
-        sync_result: "SyncResult | None" = None,
+        sync_result: SyncResult | None = None,
     ):
         """
         Sync ALL data types for a single day.

@@ -36,7 +36,7 @@ def validate_ai_analysis_response(response: dict) -> dict:
                 logger.warning(f"[AIService] Output validation: score out of range [0,100]: {score}")
                 score = max(0, min(100, score))
             response["score"] = score
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             logger.warning(f"[AIService] Output validation: invalid score type: {score}")
             response["score"] = 0
 

@@ -50,27 +50,27 @@ class DatabaseManager:
 
         try:
             pool_size = int(ConfigHandler.get_db_connection_pool_size())
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pool_size = 10
 
         try:
             max_overflow = int(ConfigHandler.get_db_max_overflow())
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             max_overflow = 5
 
         try:
             pool_timeout = int(ConfigHandler.get_db_pool_timeout())
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pool_timeout = 30
 
         try:
             pool_recycle = int(ConfigHandler.get_db_pool_recycle())
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pool_recycle = 1800
 
         try:
             pool_pre_ping = ConfigHandler.get_db_pool_pre_ping()
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pool_pre_ping = True
 
         self._engine = sa.create_engine(

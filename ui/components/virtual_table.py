@@ -184,7 +184,7 @@ class PaginatedTable(ft.Column):
                             text_color = AppColors.UP_RED if hasattr(AppColors, "UP_RED") else "#F44336"
                         elif num_val < 0:
                             text_color = AppColors.DOWN_GREEN if hasattr(AppColors, "DOWN_GREEN") else "#4CAF50"
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         pass
 
                 # Dim stock code extensions (.SH, .SZ)

@@ -78,7 +78,7 @@ class DoubaoTagger:
             await self.cm.init_db()
             self.dao = self.cm.stock_dao
 
-    async def _dump_debug_artifacts(self, page: "Page", reason: str):
+    async def _dump_debug_artifacts(self, page: Page, reason: str):
         try:
             html_content = await page.content()
             html_path = os.path.join(APP_ROOT, "doubao_dom_debug.html")
@@ -123,7 +123,7 @@ class DoubaoTagger:
             logger.warning("[DoubaoTagger] Failed to persist auth state to %s: %s", AUTH_FILE, ex)
             return False
 
-    async def _find_chat_input(self, page: "Page", timeout_ms: int = CHAT_INPUT_WAIT_MS):
+    async def _find_chat_input(self, page: Page, timeout_ms: int = CHAT_INPUT_WAIT_MS):
         """Find the chat input with ordered selector fallbacks for DOM changes."""
         candidate_errors: list[str] = []
         deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
@@ -171,7 +171,7 @@ class DoubaoTagger:
             f"Doubao chat input not found after selector fallback. url={current_url}, title={current_title}"
         )
 
-    async def process_batch(self, page: "Page", stocks: list[tuple[str, str]]) -> bool:
+    async def process_batch(self, page: Page, stocks: list[tuple[str, str]]) -> bool:
         """核心交互逻辑：发送数据并等待大模型结果"""
         stock_text = "\n".join([f"{r[0]} ({r[1]})" for r in stocks])
         prompt = PROMPT_TEMPLATE.format(count=len(stocks), stock_list=stock_text)

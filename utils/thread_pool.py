@@ -6,7 +6,7 @@ import logging
 import threading
 from collections.abc import Callable
 from enum import Enum, auto
-from typing import Optional, TypeVar
+from typing import TypeVar
 
 from utils.config_handler import ConfigHandler
 
@@ -35,7 +35,7 @@ class ThreadPoolManager:
       Pure Python CPU-bound tasks will suffer from GIL contention and should use ProcessPoolExecutor instead.
     """
 
-    _instance: Optional["ThreadPoolManager"] = None
+    _instance: ThreadPoolManager | None = None
     _lock = threading.Lock()  # Singleton Lock
 
     def __new__(cls):
@@ -52,7 +52,7 @@ class ThreadPoolManager:
             if cls._instance is not None:
                 try:
                     cls._instance.shutdown(wait=False)
-                except (RuntimeError, ValueError, OSError):
+                except RuntimeError, ValueError, OSError:
                     pass
             cls._instance = None
             cls._initialized = False
@@ -77,10 +77,10 @@ class ThreadPoolManager:
                 handler.flush()
                 if hasattr(handler, "stream") and hasattr(handler.stream, "closed") and handler.stream.closed:
                     logger.removeHandler(handler)
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 try:
                     logger.removeHandler(handler)
-                except (ValueError, RuntimeError):
+                except ValueError, RuntimeError:
                     pass
         try:
             self.shutdown(wait=False)
@@ -222,7 +222,7 @@ class ThreadPoolManager:
         if hasattr(self, "_io_pool") and self._io_pool:
             try:
                 logger.info("Shutting down IO Pool...")
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass
             self._io_pool.shutdown(wait=wait, cancel_futures=True)
             self._io_pool = None
@@ -231,7 +231,7 @@ class ThreadPoolManager:
         if hasattr(self, "_cpu_pool") and self._cpu_pool:
             try:
                 logger.info("Shutting down CPU Pool...")
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass
             self._cpu_pool.shutdown(wait=wait, cancel_futures=True)
             self._cpu_pool = None
@@ -240,7 +240,7 @@ class ThreadPoolManager:
         if shutdown_performed:
             try:
                 logger.info("Thread Pools shut down.")
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass
 
 

@@ -364,7 +364,7 @@ class NewsFetcher:
                 # Safe float conversion
                 try:
                     pct = float(item.get("chg", 0))
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     pct = 0.0
 
                 if matched or abs(pct) > 3.0:
@@ -439,7 +439,7 @@ class NewsFetcher:
                     else:
                         change_val = float(raw_val)  # type: ignore[arg-type]
                     change_str = f"{change_val:.2f}%"
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     change_str = "0.00%"
                     change_val = 0.0
 

@@ -63,7 +63,7 @@ class SyncResult:
     expected_bases: dict[datetime.date, int] = field(default_factory=dict)
     table_stats: dict[str, dict] = field(default_factory=dict)
 
-    def merge(self, other: "SyncResult"):
+    def merge(self, other: SyncResult):
         """Merge another result into this one."""
         self.added += other.added
         self.updated += other.updated

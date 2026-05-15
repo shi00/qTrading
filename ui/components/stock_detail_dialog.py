@@ -74,7 +74,7 @@ class StockDetailDialog(ft.AlertDialog):
         # Guard against NaN from raw DataFrame data
         try:
             pct = float(pct) if pct is not None and pct == pct else 0  # NaN != NaN
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pct = 0
         pct_color = AppColors.UP if pct > 0 else AppColors.DOWN
         pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
@@ -236,7 +236,7 @@ class StockDetailDialog(ft.AlertDialog):
         if ai_reason or ai_score:
             try:
                 score_val = float(ai_score) if ai_score is not None else 0
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 score_val = 0
 
             score_color = (
@@ -359,7 +359,7 @@ class StockDetailDialog(ft.AlertDialog):
             return "-"
         try:
             return f"{float(val):.2f}{suffix}"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "-"
 
     def _format_mv(self, key):
@@ -370,7 +370,7 @@ class StockDetailDialog(ft.AlertDialog):
         try:
             # Tushare returns in 万元, convert to 亿
             return f"{float(val) / 10000:.1f}{I18n.get('unit_yi')}"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "-"
 
     def _format_vol(self, key):
@@ -383,7 +383,7 @@ class StockDetailDialog(ft.AlertDialog):
             if v >= 10000:
                 return f"{v / 10000:.1f}{I18n.get('unit_wanshou')}"
             return f"{v:.0f}{I18n.get('unit_shou')}"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "-"
 
     def _format_amount(self, key):
@@ -394,7 +394,7 @@ class StockDetailDialog(ft.AlertDialog):
         try:
             # Amount is in 千元
             return f"{float(val) / 100000:.2f}{I18n.get('unit_yi')}"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "-"
 
     def _close(self, e):

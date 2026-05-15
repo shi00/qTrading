@@ -209,7 +209,7 @@ class ProxyManager:
 
     @staticmethod
     @contextmanager
-    def litellm_env_context() -> Generator[None, None, None]:
+    def litellm_env_context() -> Generator[None]:
         """
         Context manager that temporarily sets NO_PROXY in os.environ
         for libraries that read proxy config from env (e.g. litellm).
