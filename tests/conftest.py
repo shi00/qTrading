@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import os
 import sys
 import tempfile
@@ -16,16 +15,6 @@ except ImportError:
     pass
 
 import pytest
-
-__all__ = [
-    "TEST_DB_HOST",
-    "TEST_DB_PORT",
-    "TEST_DB_USER",
-    "TEST_DB_PASSWORD",
-    "TEST_DB_NAME",
-    "TEST_DB_URL",
-    "TEST_DB_SYNC_URL",
-]
 
 
 @pytest.fixture(scope="session")
@@ -159,54 +148,17 @@ def pytest_unconfigure(config):
         shutil.rmtree(_temp_config_dir, ignore_errors=True)
 
 
-TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
-TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
-TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
-TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD")
-if not TEST_DB_PASSWORD:
-    _run_id = os.environ.get("GITHUB_RUN_ID", "")
-    if _run_id:
-        TEST_DB_PASSWORD = hashlib.sha256(f"astock_ci_{_run_id}".encode()).hexdigest()[:24]
-    else:
-        import getpass
-
-        try:
-            _local_user = getpass.getuser()
-        except Exception:
-            _local_user = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
-        TEST_DB_PASSWORD = hashlib.sha256(f"astock_local_{_local_user}".encode()).hexdigest()[:24]
-    import warnings
-
-    warnings.warn(
-        "Using derived test DB password. Set TEST_DB_PASSWORD or CI_PG_PASSWORD env var for production CI.",
-        UserWarning,
-        stacklevel=2,
-    )
-
-_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
-TEST_DB_NAME = os.environ.get("TEST_DB_NAME", f"test_astock_{_xdist_worker}" if _xdist_worker else "test_astock")
-if _xdist_worker and _xdist_worker not in TEST_DB_NAME:
-    TEST_DB_NAME = f"{TEST_DB_NAME}_{_xdist_worker}"
-if not TEST_DB_NAME.startswith("test_"):
-    raise ValueError(f"TEST_DB_NAME must start with 'test_' for safety, got: {TEST_DB_NAME!r}")
-if not TEST_DB_NAME.replace("_", "").isalnum():
-    raise ValueError("TEST_DB_NAME must contain only letters, digits, and underscores")
-_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "postgres"}
-if TEST_DB_HOST not in _ALLOWED_HOSTS:
-    raise ValueError(f"TEST_DB_HOST must be one of {_ALLOWED_HOSTS} for safety, got: {TEST_DB_HOST!r}")
-
-TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
-TEST_DB_SYNC_URL = f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
-
 _temp_config_dir = tempfile.mkdtemp(prefix="astock_test_config_")
 _temp_config_file = os.path.join(_temp_config_dir, "test_user_settings.json")
 
 
+def _get_test_db_url():
+    from tests.integration.conftest import TEST_DB_URL
+
+    return TEST_DB_URL
+
+
 def pytest_configure(config):
-    """
-    Hook that runs before any test collection or import.
-    Patch CONFIG_FILE, DATABASE_URL, and mock keyring/litellm before any modules are imported.
-    """
     global _MOCK_KEYRING, _MOCK_LITELLM, _ORIGINAL_KEYRING, _ORIGINAL_LITELLM
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -221,7 +173,7 @@ def pytest_configure(config):
     _MOCK_LITELLM = _create_mock_litellm()
     sys.modules["litellm"] = _MOCK_LITELLM
 
-    os.environ["DATABASE_URL"] = TEST_DB_URL
+    os.environ["DATABASE_URL"] = _get_test_db_url()
 
     import utils.config_handler
 

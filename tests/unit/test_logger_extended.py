@@ -106,7 +106,7 @@ if __name__ == "__main__":
 class TestGetLogger:
     def test_get_root_logger(self):
         logger = get_logger()
-        assert logger is not None
+        assert isinstance(logger, logging.Logger)
 
     def test_get_named_logger(self):
         logger = get_logger("test_module")

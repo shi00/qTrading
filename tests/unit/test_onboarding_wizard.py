@@ -221,7 +221,8 @@ class TestDataProcessorSingleton:
         """Test DataProcessor can be imported"""
         from data.data_processor import DataProcessor
 
-        assert DataProcessor is not None
+        assert isinstance(DataProcessor, type)
+        assert hasattr(DataProcessor, "initialize_system")
 
 
 class TestAPISignatures:

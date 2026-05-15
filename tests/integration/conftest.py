@@ -1,3 +1,4 @@
+import hashlib
 import os
 
 import asyncpg
@@ -5,14 +6,44 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from tests.conftest import (
-    TEST_DB_HOST,
-    TEST_DB_NAME,
-    TEST_DB_PASSWORD,
-    TEST_DB_PORT,
-    TEST_DB_URL,
-    TEST_DB_USER,
-)
+TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
+TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
+TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")
+TEST_DB_PASSWORD = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD")
+if not TEST_DB_PASSWORD:
+    _run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if _run_id:
+        TEST_DB_PASSWORD = hashlib.sha256(f"astock_ci_{_run_id}".encode()).hexdigest()[:24]
+    else:
+        import getpass
+
+        try:
+            _local_user = getpass.getuser()
+        except Exception:
+            _local_user = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
+        TEST_DB_PASSWORD = hashlib.sha256(f"astock_local_{_local_user}".encode()).hexdigest()[:24]
+    import warnings
+
+    warnings.warn(
+        "Using derived test DB password. Set TEST_DB_PASSWORD or CI_PG_PASSWORD env var for production CI.",
+        UserWarning,
+        stacklevel=2,
+    )
+
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+TEST_DB_NAME = os.environ.get("TEST_DB_NAME", f"test_astock_{_xdist_worker}" if _xdist_worker else "test_astock")
+if _xdist_worker and _xdist_worker not in TEST_DB_NAME:
+    TEST_DB_NAME = f"{TEST_DB_NAME}_{_xdist_worker}"
+if not TEST_DB_NAME.startswith("test_"):
+    raise ValueError(f"TEST_DB_NAME must start with 'test_' for safety, got: {TEST_DB_NAME!r}")
+if not TEST_DB_NAME.replace("_", "").isalnum():
+    raise ValueError("TEST_DB_NAME must contain only letters, digits, and underscores")
+_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "postgres"}
+if TEST_DB_HOST not in _ALLOWED_HOSTS:
+    raise ValueError(f"TEST_DB_HOST must be one of {_ALLOWED_HOSTS} for safety, got: {TEST_DB_HOST!r}")
+
+TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
+TEST_DB_SYNC_URL = f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
 
 
 def pytest_collection_modifyitems(items):
@@ -101,7 +132,7 @@ async def test_engine():
                 await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
             finally:
                 await conn.close()
-        except OSError, asyncpg.PostgresError:
+        except (OSError, asyncpg.PostgresError):
             pass
 
 

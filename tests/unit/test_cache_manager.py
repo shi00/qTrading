@@ -3,8 +3,17 @@ import inspect
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 import pandas as pd
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.cache.cache_manager import CacheManager
+from data.persistence.daos.stock_dao import StockDao
+from data.persistence.daos.quote_dao import QuoteDao
+from data.persistence.daos.financial_dao import FinancialDao
+from data.persistence.daos.sync_dao import SyncDao
+from data.persistence.daos.market_dao import MarketDao
+from data.persistence.daos.screener_dao import ScreenerDao
+from data.persistence.daos.macro_dao import MacroDao
+from data.persistence.daos.holder_dao import HolderDao
 from tests.conftest import reset_singleton as _reset_singleton_ctx
 
 
@@ -28,15 +37,15 @@ def _make_mgr():
     mgr._initialized = True
     mgr._schema_initialized = False
     mgr._disposed = False
-    mgr.engine = MagicMock()
-    mgr.stock_dao = MagicMock()
-    mgr.quote_dao = MagicMock()
-    mgr.financial_dao = MagicMock()
-    mgr.sync_dao = MagicMock()
-    mgr.market_dao = MagicMock()
-    mgr.screener_dao = MagicMock()
-    mgr.macro_dao = MagicMock()
-    mgr.holder_dao = MagicMock()
+    mgr.engine = MagicMock(spec=AsyncEngine)
+    mgr.stock_dao = MagicMock(spec=StockDao)
+    mgr.quote_dao = MagicMock(spec=QuoteDao)
+    mgr.financial_dao = MagicMock(spec=FinancialDao)
+    mgr.sync_dao = MagicMock(spec=SyncDao)
+    mgr.market_dao = MagicMock(spec=MarketDao)
+    mgr.screener_dao = MagicMock(spec=ScreenerDao)
+    mgr.macro_dao = MagicMock(spec=MacroDao)
+    mgr.holder_dao = MagicMock(spec=HolderDao)
     mgr._maintenance_event_lazy = None
     mgr._init_lock_lazy = None
     return mgr
@@ -56,7 +65,7 @@ class TestCacheManagerCreateEngine:
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("sqlite:///test.db")
-        mock_create.assert_called_once()
+        mock_create.assert_called_once_with("sqlite:///test.db", echo=False, pool_size=10, max_overflow=5, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True, future=True)
         assert mgr.engine == mock_engine
 
     @patch("data.cache.cache_manager.create_async_engine")
@@ -72,7 +81,7 @@ class TestCacheManagerCreateEngine:
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("sqlite:///test.db")
-        mock_create.assert_called_once()
+        mock_create.assert_called_once_with("sqlite:///test.db", echo=False, pool_size=10, max_overflow=5, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True, future=True)
 
     @patch("data.cache.cache_manager.create_async_engine")
     @patch("utils.config_handler.ConfigHandler.get_db_connection_pool_size", return_value=None)
@@ -87,7 +96,7 @@ class TestCacheManagerCreateEngine:
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("sqlite:///test.db")
-        mock_create.assert_called_once()
+        mock_create.assert_called_once_with("sqlite:///test.db", echo=False, pool_size=10, max_overflow=5, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True, future=True)
 
 
 class TestCacheManagerInitDb:
@@ -181,7 +190,7 @@ class TestCacheManagerClose:
             mock_gll.return_value.set = MagicMock()
             await mgr.close()
             assert mgr._disposed is True
-            mgr.engine.dispose.assert_called_once()
+            mgr.engine.dispose.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_close_no_engine(self):
@@ -297,7 +306,7 @@ class TestCacheManagerWaitForMaintenance:
         mock_event.wait = AsyncMock()
         with patch.object(CacheManager, "_maintenance_event", new_callable=PropertyMock, return_value=mock_event):
             await mgr.wait_for_maintenance()
-            mock_event.wait.assert_called_once()
+            mock_event.wait.assert_called_once_with()
 
 
 class TestCacheManagerWriteReadDb:
@@ -756,7 +765,7 @@ class TestCacheManagerDelegationsWithWait:
         with patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock):
             result = await mgr.get_cached_trade_dates()
             assert result == set()
-            mgr.quote_dao.get_cached_trade_dates.assert_called_once()
+            mgr.quote_dao.get_cached_trade_dates.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_get_cached_dates_for_table(self):
@@ -765,7 +774,7 @@ class TestCacheManagerDelegationsWithWait:
         with patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock):
             result = await mgr.get_cached_dates_for_table("daily_quotes")
             assert result == set()
-            mgr.quote_dao.get_cached_dates_for_table.assert_called_once()
+            mgr.quote_dao.get_cached_dates_for_table.assert_called_once_with("daily_quotes")
 
     @pytest.mark.asyncio
     async def test_get_field_completeness(self):
@@ -786,7 +795,7 @@ class TestCacheManagerBulkQualityScores:
         mgr.quote_dao.get_bulk_table_counts = AsyncMock(return_value={})
         result = await mgr.get_bulk_table_counts("daily_quotes", "2024-01-01", "2024-06-14")
         assert result == {}
-        mgr.quote_dao.get_bulk_table_counts.assert_called_once()
+        mgr.quote_dao.get_bulk_table_counts.assert_called_once_with("daily_quotes", "2024-01-01", "2024-06-14")
 
     @pytest.mark.asyncio
     async def test_get_bulk_expected_stock_counts(self):
@@ -806,7 +815,7 @@ class TestCacheManagerBulkQualityScores:
         mgr.quote_dao.get_bulk_sync_quality_scores = AsyncMock(return_value={})
         result = await mgr.get_bulk_sync_quality_scores("2024-01-01", "2024-06-14")
         assert result == {}
-        mgr.quote_dao.get_bulk_sync_quality_scores.assert_called_once()
+        mgr.quote_dao.get_bulk_sync_quality_scores.assert_called_once_with("2024-01-01", "2024-06-14", None)
 
     @pytest.mark.asyncio
     async def test_get_expected_stock_count(self):
@@ -825,7 +834,7 @@ class TestCacheManagerBulkQualityScores:
         mgr.quote_dao.get_sync_quality_score = AsyncMock(return_value={})
         result = await mgr.get_sync_quality_score("2024-06-14")
         assert result == {}
-        mgr.quote_dao.get_sync_quality_score.assert_called_once()
+        mgr.quote_dao.get_sync_quality_score.assert_called_once_with("2024-06-14")
 
     @pytest.mark.asyncio
     async def test_get_field_completeness(self):
@@ -839,7 +848,7 @@ class TestCacheManagerBulkQualityScores:
             mock_gll.return_value.is_set = MagicMock(return_value=True)
             result = await mgr.get_field_completeness("2024-06-14")
             assert result == {}
-            mgr.quote_dao.get_field_completeness.assert_called_once()
+            mgr.quote_dao.get_field_completeness.assert_called_once_with("2024-06-14")
 
 
 class TestCacheManagerDelegations:
@@ -871,7 +880,7 @@ class TestCacheManagerDelegations:
         mgr.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_stock_basic()
         assert result is not None
-        mgr.stock_dao.get_stock_basic.assert_called_once()
+        mgr.stock_dao.get_stock_basic.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_save_daily_quotes(self):
@@ -918,7 +927,7 @@ class TestCacheManagerDelegations:
         mgr = self._make_mgr()
         mgr.sync_dao.update_sync_status = AsyncMock()
         await mgr.update_sync_status("test_table", "20240614", 100)
-        mgr.sync_dao.update_sync_status.assert_called_once()
+        mgr.sync_dao.update_sync_status.assert_called_once_with("test_table", "20240614", 100, "success", None)
 
     @pytest.mark.asyncio
     async def test_get_sync_status(self):
@@ -934,7 +943,7 @@ class TestCacheManagerDelegations:
         mgr.market_dao.save_market_news = AsyncMock(return_value=None)
         result = await mgr.save_market_news({"content": "test"})
         assert result is None
-        mgr.market_dao.save_market_news.assert_called_once()
+        mgr.market_dao.save_market_news.assert_called_once_with({"content": "test"}, False)
 
     @pytest.mark.asyncio
     async def test_get_market_news(self):
@@ -942,7 +951,7 @@ class TestCacheManagerDelegations:
         mgr.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_market_news()
         assert result is not None
-        mgr.market_dao.get_market_news.assert_called_once()
+        mgr.market_dao.get_market_news.assert_called_once_with(50, 0, None)
 
     @pytest.mark.asyncio
     async def test_get_screening_data(self):
@@ -974,7 +983,7 @@ class TestCacheManagerDelegations:
         mgr.stock_dao.get_concepts = AsyncMock(return_value={})
         result = await mgr.get_concepts()
         assert result == {}
-        mgr.stock_dao.get_concepts.assert_called_once()
+        mgr.stock_dao.get_concepts.assert_called_once_with(None)
 
     @pytest.mark.asyncio
     async def test_save_moneyflow(self):
@@ -1166,7 +1175,7 @@ class TestCacheManagerDelegations:
         mgr.screener_dao.get_pending_reviews = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_pending_reviews()
         assert result is not None
-        mgr.screener_dao.get_pending_reviews.assert_called_once()
+        mgr.screener_dao.get_pending_reviews.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_get_learning_examples(self):
@@ -1190,7 +1199,7 @@ class TestCacheManagerDelegations:
         mgr.sync_dao.mark_stock_step4_completed = AsyncMock(return_value=None)
         result = await mgr.mark_stock_step4_completed("000001.SZ")
         assert result is None
-        mgr.sync_dao.mark_stock_step4_completed.assert_called_once()
+        mgr.sync_dao.mark_stock_step4_completed.assert_called_once_with("000001.SZ", 1, conn=None)
 
     @pytest.mark.asyncio
     async def test_clear_step4_sync_status(self):
@@ -1198,7 +1207,7 @@ class TestCacheManagerDelegations:
         mgr.sync_dao.clear_step4_sync_status = AsyncMock(return_value=None)
         result = await mgr.clear_step4_sync_status()
         assert result is None
-        mgr.sync_dao.clear_step4_sync_status.assert_called_once()
+        mgr.sync_dao.clear_step4_sync_status.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_save_trade_cal(self):
@@ -1222,7 +1231,7 @@ class TestCacheManagerDelegations:
         mgr.stock_dao.get_trade_cal_range = AsyncMock(return_value=(None, None))
         result = await mgr.get_trade_cal_range()
         assert result == (None, None)
-        mgr.stock_dao.get_trade_cal_range.assert_called_once()
+        mgr.stock_dao.get_trade_cal_range.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_save_macro_economy(self):
@@ -1270,7 +1279,7 @@ class TestCacheManagerDelegations:
         mgr.market_dao.get_index_weights = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_index_weights("399300.SZ", "20240614")
         assert result is not None
-        mgr.market_dao.get_index_weights.assert_called_once()
+        mgr.market_dao.get_index_weights.assert_called_once_with("399300.SZ", "20240614")
 
     @pytest.mark.asyncio
     async def test_get_latest_index_weight_date(self):
@@ -1278,7 +1287,7 @@ class TestCacheManagerDelegations:
         mgr.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
         result = await mgr.get_latest_index_weight_date()
         assert result is None
-        mgr.market_dao.get_latest_index_weight_date.assert_called_once()
+        mgr.market_dao.get_latest_index_weight_date.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_save_moneyflow_hsgt(self):
@@ -1302,7 +1311,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_financial_reports_history("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_financial_reports_history.assert_called_once()
+        mgr.financial_dao.get_financial_reports_history.assert_called_once_with("000001.SZ", 8)
 
     @pytest.mark.asyncio
     async def test_get_fina_audit(self):
@@ -1310,7 +1319,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_fina_audit_batch = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_fina_audit("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_fina_audit_batch.assert_called_once()
+        mgr.financial_dao.get_fina_audit_batch.assert_called_once_with(["000001.SZ"])
 
     @pytest.mark.asyncio
     async def test_get_fina_mainbz(self):
@@ -1318,7 +1327,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_fina_mainbz("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_fina_mainbz.assert_called_once()
+        mgr.financial_dao.get_fina_mainbz.assert_called_once_with("000001.SZ")
 
     @pytest.mark.asyncio
     async def test_get_dividend(self):
@@ -1326,7 +1335,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_dividend_batch = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_dividend("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_dividend_batch.assert_called_once()
+        mgr.financial_dao.get_dividend_batch.assert_called_once_with(["000001.SZ"])
 
     @pytest.mark.asyncio
     async def test_get_pledge_stat(self):
@@ -1334,7 +1343,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_pledge_stat_batch = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_pledge_stat("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_pledge_stat_batch.assert_called_once()
+        mgr.financial_dao.get_pledge_stat_batch.assert_called_once_with(["000001.SZ"])
 
     @pytest.mark.asyncio
     async def test_get_top10_holders(self):
@@ -1342,7 +1351,7 @@ class TestCacheManagerDelegations:
         mgr.holder_dao.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_top10_holders("000001.SZ")
         assert result is not None
-        mgr.holder_dao.get_top10_holders.assert_called_once()
+        mgr.holder_dao.get_top10_holders.assert_called_once_with("000001.SZ")
 
     @pytest.mark.asyncio
     async def test_get_stk_holdernumber(self):
@@ -1350,7 +1359,7 @@ class TestCacheManagerDelegations:
         mgr.holder_dao.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_stk_holdernumber("000001.SZ")
         assert result is not None
-        mgr.holder_dao.get_stk_holdernumber.assert_called_once()
+        mgr.holder_dao.get_stk_holdernumber.assert_called_once_with("000001.SZ")
 
     @pytest.mark.asyncio
     async def test_get_existing_top10_ts_codes(self):
@@ -1358,7 +1367,7 @@ class TestCacheManagerDelegations:
         mgr.holder_dao.get_existing_top10_ts_codes = AsyncMock(return_value=set())
         result = await mgr.get_existing_top10_ts_codes("20240331")
         assert result == set()
-        mgr.holder_dao.get_existing_top10_ts_codes.assert_called_once()
+        mgr.holder_dao.get_existing_top10_ts_codes.assert_called_once_with("20240331")
 
     @pytest.mark.asyncio
     async def test_get_macro_economy(self):
@@ -1405,7 +1414,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_cached_indicator_dates = AsyncMock(return_value=set())
         result = await mgr.get_cached_indicator_dates()
         assert result == set()
-        mgr.financial_dao.get_cached_indicator_dates.assert_called_once()
+        mgr.financial_dao.get_cached_indicator_dates.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_get_cached_financial_records(self):
@@ -1429,7 +1438,7 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_incomplete_financial_stocks = AsyncMock(return_value=set())
         result = await mgr.get_incomplete_financial_stocks()
         assert result == set()
-        mgr.financial_dao.get_incomplete_financial_stocks.assert_called_once()
+        mgr.financial_dao.get_incomplete_financial_stocks.assert_called_once_with(4, 1)
 
     @pytest.mark.asyncio
     async def test_get_daily_indicators_bulk(self):
@@ -1437,7 +1446,7 @@ class TestCacheManagerDelegations:
         mgr.market_dao.get_daily_indicators_bulk = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_daily_indicators_bulk(["000001.SZ"])
         assert result is not None
-        mgr.market_dao.get_daily_indicators_bulk.assert_called_once()
+        mgr.market_dao.get_daily_indicators_bulk.assert_called_once_with(["000001.SZ"], None, None)
 
     @pytest.mark.asyncio
     async def test_get_index_daily_range(self):
@@ -1445,7 +1454,7 @@ class TestCacheManagerDelegations:
         mgr.quote_dao.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_index_daily_range(["399300.SZ"])
         assert result is not None
-        mgr.quote_dao.get_index_daily_range.assert_called_once()
+        mgr.quote_dao.get_index_daily_range.assert_called_once_with(["399300.SZ"], None, None)
 
     @pytest.mark.asyncio
     async def test_get_start_date_by_trade_days(self):
@@ -1453,7 +1462,7 @@ class TestCacheManagerDelegations:
         mgr.stock_dao.get_start_date_by_trade_days = AsyncMock(return_value="20240101")
         result = await mgr.get_start_date_by_trade_days("20240614", 250)
         assert result == "20240101"
-        mgr.stock_dao.get_start_date_by_trade_days.assert_called_once()
+        mgr.stock_dao.get_start_date_by_trade_days.assert_called_once_with("20240614", 250)
 
 
 class TestCacheManagerNormalizeNewsItem:
@@ -1517,14 +1526,14 @@ class TestCacheManagerUsesMetadataTables:
 
         assert hasattr(CacheManager, "check_table_has_data")
         sig = inspect.signature(CacheManager.check_table_has_data)
-        assert sig is not None
+        assert "table_name" in sig.parameters
 
     def test_health_check_uses_metadata_not_sa_table(self):
         from data.cache.cache_manager import CacheManager
 
         assert hasattr(CacheManager, "check_comprehensive_health")
         sig = inspect.signature(CacheManager.check_comprehensive_health)
-        assert sig is not None
+        assert len(sig.parameters) >= 1
 
 
 class TestSuppressErrorsDefaultFalse:

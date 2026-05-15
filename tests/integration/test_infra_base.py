@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 logger = logging.getLogger(__name__)
 
-from tests.conftest import TEST_DB_URL
+from tests.integration.conftest import TEST_DB_URL
 from data.cache.cache_manager import CacheManager
 from data.persistence.models import Base
 

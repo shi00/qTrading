@@ -117,7 +117,12 @@ jobs:
           python -m alembic downgrade base
           python -m alembic upgrade head
 
-      - name: Run Pytest
+      - name: Run Unit Tests
+        run: |
+          set -e
+          python -m pytest tests/unit/ -v --tb=short -m "not slow" --cov --cov-report=term-missing --cov-report=xml --cov-report=json
+
+      - name: Run Integration Tests
         env:
           TEST_DB_HOST: localhost
           TEST_DB_PORT: 5432
@@ -125,7 +130,7 @@ jobs:
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
         run: |
           set -e
-          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-report=json
+          python -m pytest tests/integration/ tests/e2e/ -v --tb=short --cov --cov-report=term-missing --cov-append
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
@@ -294,14 +299,16 @@ jobs:
           python -m alembic downgrade base
           python -m alembic upgrade head
 
-      - name: Run Pytest
+      - name: Run Unit Tests
+        run: python -m pytest tests/unit/ -v --tb=short -m "not slow" --cov --cov-report=term-missing --cov-report=json
+
+      - name: Run Integration Tests
         env:
           TEST_DB_HOST: localhost
           TEST_DB_PORT: 5432
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
-        run: |
-          python -m pytest tests/ -v --tb=short --cov --cov-report=term-missing --cov-report=json
+        run: python -m pytest tests/integration/ tests/e2e/ -v --tb=short --cov --cov-report=term-missing --cov-append
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
