@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -142,8 +143,6 @@ def pytest_unconfigure(config):
     if _MOCK_KEYRING is not None and hasattr(_MOCK_KEYRING, "clear"):
         _MOCK_KEYRING.clear()
 
-    import shutil
-
     if os.path.exists(_temp_config_dir):
         shutil.rmtree(_temp_config_dir, ignore_errors=True)
 
@@ -153,17 +152,21 @@ _temp_config_file = os.path.join(_temp_config_dir, "test_user_settings.json")
 
 
 def _get_test_db_url():
-    from tests.integration.conftest import TEST_DB_URL
+    try:
+        from tests.integration.conftest import TEST_DB_URL
 
-    return TEST_DB_URL
+        return TEST_DB_URL
+    except ImportError:
+        _host = os.environ.get("TEST_DB_HOST", "localhost")
+        _port = os.environ.get("TEST_DB_PORT", "5432")
+        _user = os.environ.get("TEST_DB_USER", "postgres")
+        _pwd = os.environ.get("TEST_DB_PASSWORD", os.environ.get("CI_PG_PASSWORD", ""))
+        _name = os.environ.get("TEST_DB_NAME", "test_astock")
+        return f"postgresql+asyncpg://{_user}:{_pwd}@{_host}:{_port}/{_name}"
 
 
 def pytest_configure(config):
     global _MOCK_KEYRING, _MOCK_LITELLM, _ORIGINAL_KEYRING, _ORIGINAL_LITELLM
-
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
 
     _ORIGINAL_KEYRING = sys.modules.get("keyring")
     _MOCK_KEYRING = _create_mock_keyring()

@@ -11,14 +11,16 @@ class TestScreenerDaoGetScreeningHistory:
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_screening_history("test_strategy", limit=10)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_without_strategy(self):
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_screening_history(None, limit=10)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
 
 
 class TestScreenerDaoGetHistoryTree:
@@ -36,7 +38,9 @@ class TestScreenerDaoGetHistoryTree:
             )
         )
         result = await dao.get_history_tree(offset=0, limit=30)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "run_id" in result.columns
+        assert len(result) == 1
 
 
 class TestScreenerDaoGetHistoryRecords:
@@ -45,21 +49,24 @@ class TestScreenerDaoGetHistoryRecords:
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_history_records(trade_date=None, run_id="r1")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_with_trade_date(self):
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_history_records(trade_date="20240615")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_with_strategy_name(self):
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_history_records(trade_date="20240615", strategy_name="test")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
 
 
 class TestScreenerDaoGetPendingReviews:
@@ -76,6 +83,7 @@ class TestScreenerDaoGetPendingReviews:
         )
         result = await dao.get_pending_reviews()
         assert isinstance(result, list)
+        assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_empty(self):
@@ -98,8 +106,8 @@ class TestScreenerDaoGetLearningExamples:
             )
         )
         wins, losses = await dao.get_learning_examples(limit=3)
-        assert wins is not None
-        assert losses is not None
+        assert isinstance(wins, pd.DataFrame)
+        assert isinstance(losses, pd.DataFrame)
 
 
 class TestScreenerDaoGetScreeningData:
@@ -108,7 +116,8 @@ class TestScreenerDaoGetScreeningData:
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_screening_data(trade_date="20240615")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
 
     @pytest.mark.asyncio
     async def test_without_trade_date(self):
@@ -120,7 +129,8 @@ class TestScreenerDaoGetScreeningData:
             ]
         )
         result = await dao.get_screening_data()
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
 
 
 class TestScreenerDaoGetPendingPredictions:
@@ -137,7 +147,8 @@ class TestScreenerDaoGetPendingPredictions:
             )
         )
         result = await dao.get_pending_predictions("20240601")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_none_result(self):
@@ -160,7 +171,8 @@ class TestScreenerDaoGetLearningContext:
             )
         )
         result = await dao.get_learning_context(limit=3, is_win=True)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
 
     @pytest.mark.asyncio
     async def test_loss(self):
@@ -174,14 +186,22 @@ class TestScreenerDaoGetLearningContext:
             )
         )
         result = await dao.get_learning_context(limit=3, is_win=False)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
 
 
 class TestScreenerDaoUpdatePredictionResult:
     @pytest.mark.asyncio
     async def test_basic(self):
-        dao = ScreenerDao(MagicMock())
-        dao._write_db = AsyncMock(return_value=1)
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(return_value=mock_begin)
+        dao = ScreenerDao(mock_engine)
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         await dao.update_prediction_result(
             record_id=1,
             pct=5.0,
@@ -192,25 +212,42 @@ class TestScreenerDaoUpdatePredictionResult:
             index_pct=1.0,
             alpha=4.0,
         )
+        mock_conn.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_with_review_status(self):
-        dao = ScreenerDao(MagicMock())
-        dao._write_db = AsyncMock(return_value=1)
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(return_value=mock_begin)
+        dao = ScreenerDao(mock_engine)
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         await dao.update_prediction_result(
             record_id=1,
             pct=5.0,
             label="WIN",
             review_status="completed",
         )
+        mock_conn.execute.assert_called_once()
 
 
 class TestScreenerDaoSaveScreeningResults:
     @pytest.mark.asyncio
     async def test_empty_records(self):
         dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=0)
         await dao.save_screening_results([])
+        dao._save_upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_none_records(self):
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=0)
         await dao.save_screening_results(None)
+        dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_with_dict_records(self):
@@ -218,6 +255,7 @@ class TestScreenerDaoSaveScreeningResults:
         dao._save_upsert = AsyncMock(return_value=1)
         records = [{"run_id": "r1", "ts_code": "000001.SZ", "name": "Test", "trade_date": "20240615"}]
         await dao.save_screening_results(records)
+        dao._save_upsert.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_with_thinking(self):
@@ -309,7 +347,8 @@ class TestScreenerDaoGetFundamentalScreeningData:
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_fundamental_screening_data(trade_date="20240615")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
 
     @pytest.mark.asyncio
     async def test_without_trade_date_auto_resolve(self):
@@ -321,7 +360,8 @@ class TestScreenerDaoGetFundamentalScreeningData:
             ]
         )
         result = await dao.get_fundamental_screening_data()
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
 
     @pytest.mark.asyncio
     async def test_no_trade_date_and_db_empty(self):
@@ -339,6 +379,7 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
         with patch("data.persistence.daos.screener_dao.Base") as mock_base:
             mock_base.metadata.tables.get.return_value = None
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
+        mock_base.metadata.tables.get.assert_called()
 
     @pytest.mark.asyncio
     async def test_engine_not_initialized(self):
@@ -351,11 +392,19 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
 
     @pytest.mark.asyncio
     async def test_default_status_t1_done_when_no_t5(self):
-        dao = ScreenerDao(MagicMock())
-        dao._write_db = AsyncMock(return_value=1)
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(return_value=mock_begin)
+        dao = ScreenerDao(mock_engine)
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         with patch("data.persistence.daos.screener_dao.sa.update") as mock_update:
             mock_update.return_value.where.return_value.values.return_value = MagicMock()
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
+        mock_conn.execute.assert_called_once()
 
 
 class TestScreenerDaoSaveScreeningResultsTuple:
@@ -386,12 +435,16 @@ class TestScreenerDaoSaveThinking:
     async def test_save_thinking_no_matching_ids(self):
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1], "run_id": ["r2"], "ts_code": ["000002.SZ"]}))
+        dao._save_upsert = AsyncMock(return_value=0)
         thinking_records = [{"run_id": "r1", "ts_code": "000001.SZ", "thinking": "analysis"}]
         await dao._save_thinking(thinking_records)
+        dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_save_thinking_empty_read(self):
         dao = ScreenerDao(MagicMock())
         dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._save_upsert = AsyncMock(return_value=0)
         thinking_records = [{"run_id": "r1", "ts_code": "000001.SZ", "thinking": "analysis"}]
         await dao._save_thinking(thinking_records)
+        dao._save_upsert.assert_not_called()

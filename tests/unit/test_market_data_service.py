@@ -9,7 +9,8 @@ class TestMarketDataServiceInit:
     @patch("data.domain_services.market_data_service.CacheManager")
     def test_init(self, mock_cm):
         svc = MarketDataService()
-        assert svc is not None
+        assert svc.cache is not None
+        assert svc._listeners is not None
 
 
 class TestMarketDataServiceFetchMarketData:
@@ -19,9 +20,10 @@ class TestMarketDataServiceFetchMarketData:
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         svc = MarketDataService()
-        svc._fetch_market_data = AsyncMock(return_value={})
+        expected = {"key": "value"}
+        svc._fetch_market_data = AsyncMock(return_value=expected)
         result = await svc._fetch_market_data()
-        assert isinstance(result, dict)
+        assert result == expected
 
 
 class TestMarketDataServiceConfig:
@@ -69,6 +71,7 @@ class TestMarketDataServiceListeners:
         svc = MarketDataService()
         cb = MagicMock()
         svc.remove_listener(cb)
+        assert cb not in svc._listeners
 
 
 class TestMarketDataServiceStop:

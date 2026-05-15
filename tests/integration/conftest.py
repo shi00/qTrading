@@ -52,8 +52,6 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
-_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
-
 _test_engine = None
 _test_db_initialized = False
 
@@ -104,8 +102,10 @@ async def test_engine():
 
     yield _test_engine
 
-    if _test_engine is not None:
-        await _test_engine.dispose()
+    try:
+        if _test_engine is not None:
+            await _test_engine.dispose()
+    finally:
         _test_engine = None
 
     if _xdist_worker:
@@ -132,19 +132,24 @@ async def test_engine():
                 await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
             finally:
                 await conn.close()
-        except (OSError, asyncpg.PostgresError):
+        except OSError, asyncpg.PostgresError:
             pass
 
 
 @pytest_asyncio.fixture
 async def db_connection(test_engine: AsyncEngine):
     async with test_engine.connect() as conn:
-        await conn.begin()
+        txn = await conn.begin()
+        nested = await conn.begin_nested()
         yield conn
-        await conn.rollback()
+        if nested.is_active:
+            await nested.rollback()
+        await txn.rollback()
 
 
 @pytest_asyncio.fixture
 async def db_transaction(test_engine: AsyncEngine):
-    async with test_engine.begin() as conn:
+    async with test_engine.connect() as conn:
+        txn = await conn.begin()
         yield conn
+        await txn.rollback()

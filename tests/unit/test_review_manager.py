@@ -9,26 +9,29 @@ from data.persistence.review_manager import ReviewManager
 class TestReviewManagerInit:
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")
-    def test_init(self, mock_tc, mock_cm):
+    def test_init_creates_cache_and_api(self, mock_tc, mock_cm):
         rm = ReviewManager()
-        assert rm is not None
+        assert rm.cache is not None
+        assert rm.api is not None
 
 
 class TestReviewManagerRunReview:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_no_pending(self, mock_cm, mock_tc):
+    async def test_no_pending_skips_update(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         rm = ReviewManager()
         rm._get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
+        rm._update_result = AsyncMock()
         await rm.run_review()
+        rm._update_result.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_with_pending_no_quotes(self, mock_cm, mock_tc):
+    async def test_with_pending_no_quotes_skips_update(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         rm = ReviewManager()
@@ -45,12 +48,14 @@ class TestReviewManagerRunReview:
             )
         )
         mock_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        rm._update_result = AsyncMock()
         await rm.run_review()
+        rm._update_result.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_with_pending_and_quotes(self, mock_cm, mock_tc):
+    async def test_with_pending_and_quotes_updates_result(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         rm = ReviewManager()
@@ -85,6 +90,7 @@ class TestReviewManagerRunReview:
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
+        rm._update_result.assert_called_once()
 
 
 class TestReviewManagerGetLearningContext:
@@ -142,7 +148,7 @@ class TestReviewManagerGetLearningContext:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_error(self, mock_cm, mock_tc):
+    async def test_error_returns_fallback_string(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
@@ -151,28 +157,35 @@ class TestReviewManagerGetLearningContext:
         rm.cache = mock_cache
         result = await rm.get_learning_context()
         assert isinstance(result, str)
+        assert len(result) > 0
 
 
 class TestReviewManagerSaveResults:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_save_empty_df(self, mock_cm, mock_tc):
+    async def test_save_empty_df_skips_dao(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
         rm = ReviewManager()
         rm.cache = mock_cache
         await rm.save_results("test_strategy", pd.DataFrame())
+        mock_cache.screener_dao.save_screening_results.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_save_none_df(self, mock_cm, mock_tc):
+    async def test_save_none_df_skips_dao(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
         rm = ReviewManager()
         rm.cache = mock_cache
         await rm.save_results("test_strategy", None)
+        mock_cache.screener_dao.save_screening_results.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -280,6 +293,7 @@ class TestReviewManagerNormalizeTradeDate:
     def test_string_date(self):
         result = ReviewManager._normalize_trade_date("20240615")
         assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 15)
 
     def test_date_object(self):
         d = datetime.date(2024, 6, 15)

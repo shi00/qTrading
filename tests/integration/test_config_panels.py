@@ -57,7 +57,8 @@ class TestDatabaseConfigPanel:
         )
 
         panel = DatabaseConfigPanel(show_save_button=False)
-        assert panel is not None
+        assert hasattr(panel, "db_host_input")
+        assert hasattr(panel, "db_port_input")
 
     def test_get_config(self, mock_page, isolated_config):
         """Test get_config returns correct structure"""
@@ -163,7 +164,7 @@ class TestLocalModelConfigPanel:
         )
 
         panel = LocalModelConfigPanel(show_save_button=False)
-        assert panel is not None
+        assert hasattr(panel, "model_path_input")
 
     def test_get_current_config(self, mock_page, isolated_config):
         """Test get_current_config returns correct structure"""
@@ -271,7 +272,8 @@ class TestLLMConfigPanel:
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
         panel = LLMConfigPanel()
-        assert panel is not None
+        assert hasattr(panel, "provider_dropdown")
+        assert hasattr(panel, "api_key_input")
 
     def test_get_current_config_structure(self, mock_page, isolated_config):
         """Test get_current_config returns correct structure"""
@@ -304,7 +306,7 @@ class TestConfigPanelsIntegration:
         if hasattr(panel, "_on_input_change"):
             panel._on_input_change(None)
 
-        assert len(callback_called) > 0 or True
+        assert len(callback_called) > 0
 
     def test_local_model_panel_on_change_callback(self, mock_page, isolated_config):
         """Test on_change callback is triggered for local model panel"""
@@ -322,7 +324,7 @@ class TestConfigPanelsIntegration:
         if hasattr(panel, "_on_model_path_change"):
             panel._on_model_path_change(None)
 
-        assert len(callback_called) > 0 or True
+        assert len(callback_called) > 0
 
 
 class TestTushareConfigPanel:
