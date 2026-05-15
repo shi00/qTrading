@@ -72,6 +72,7 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.pyright]
+pythonVersion = "3.13"
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
