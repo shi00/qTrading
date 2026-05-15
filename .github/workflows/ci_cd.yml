@@ -280,18 +280,22 @@ jobs:
           cat optional-deps.log
 
       - name: Install Node dependencies
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         run: npm ci
 
       - name: Ruff Check & Format
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         run: |
           python -m ruff check .
           python -m ruff format --check .
 
       - name: Pyright Type Check
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         continue-on-error: false
         run: npx pyright
 
       - name: Verify Alembic Migrations
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
         run: |
@@ -300,9 +304,11 @@ jobs:
           python -m alembic upgrade head
 
       - name: Run Unit Tests
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         run: python -m pytest tests/unit/ -v --tb=short -m "not slow" --cov --cov-report=term-missing --cov-report=json
 
       - name: Run Integration Tests
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         env:
           TEST_DB_HOST: localhost
           TEST_DB_PORT: 5432
@@ -311,12 +317,13 @@ jobs:
         run: python -m pytest tests/integration/ tests/e2e/ -v --tb=short --cov --cov-report=term-missing --cov-append
 
       - name: Check Per-File Coverage >= 80%
+        if: steps.set-outdated-flag.outputs.outdated != 'true'
         run: python scripts/check_per_file_coverage.py
 
   update-requirements:
     name: Update requirements*.txt
     needs: ci-checks-windows
-    if: always() && needs.ci-checks-windows.outputs.requirements_outdated == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: always() && needs.ci-checks-windows.outputs.requirements_outdated == 'true' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:
@@ -344,7 +351,7 @@ jobs:
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.BOT_PAT || secrets.GITHUB_TOKEN }}
           branch: bot/update-requirements
           delete-branch: true
           title: "chore: update requirements*.txt"
