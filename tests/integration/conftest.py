@@ -132,7 +132,7 @@ async def test_engine():
                 await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
             finally:
                 await conn.close()
-        except OSError, asyncpg.PostgresError:
+        except (OSError, asyncpg.PostgresError):
             pass
 
 

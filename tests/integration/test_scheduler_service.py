@@ -43,7 +43,7 @@ class TestSchedulerServiceSingleton:
                         try:
                             if cls._instance.scheduler.running:
                                 cls._instance.scheduler.shutdown(wait=False)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             pass
                     cls._instance = None
                     cls._initialized = False
@@ -67,7 +67,7 @@ class TestSchedulerServiceSingleton:
                         try:
                             if cls._instance.scheduler.running:
                                 cls._instance.scheduler.shutdown(wait=False)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             pass
                     cls._instance = None
                     cls._initialized = False
@@ -102,7 +102,7 @@ class TestSchedulerServiceSingleton:
                         try:
                             if cls._instance.scheduler.running:
                                 cls._instance.scheduler.shutdown(wait=False)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             pass
                     cls._instance = None
                     cls._initialized = False
@@ -137,7 +137,7 @@ class TestSchedulerServiceSingleton:
                         try:
                             if cls._instance.scheduler.running:
                                 cls._instance.scheduler.shutdown(wait=False)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             pass
                     cls._instance = None
                     cls._initialized = False

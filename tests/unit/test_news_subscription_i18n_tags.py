@@ -12,7 +12,7 @@ def _make_i18n_mock(overrides=None):
             if kw:
                 try:
                     return val.format(**kw)
-                except KeyError, IndexError:
+                except (KeyError, IndexError):
                     return val
             return val
         if "news_tag_format" in key:
@@ -20,7 +20,7 @@ def _make_i18n_mock(overrides=None):
             if kw:
                 try:
                     return fmt.format(**kw)
-                except KeyError, IndexError:
+                except (KeyError, IndexError):
                     return fmt
             return fmt
         return key

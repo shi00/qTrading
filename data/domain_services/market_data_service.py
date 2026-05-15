@@ -316,5 +316,5 @@ class MarketDataService:
             if math.isnan(f):
                 return 0.0
             return f
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return 0.0

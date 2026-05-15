@@ -77,7 +77,7 @@ async def _truncate_all_tables(engine: AsyncEngine):
         async with engine.begin() as conn:
             await conn.execute(text(f"TRUNCATE TABLE {tables_str} CASCADE"))
         return
-    except OperationalError, ProgrammingError:
+    except (OperationalError, ProgrammingError):
         pass
     for table in TABLE_NAMES:
         try:

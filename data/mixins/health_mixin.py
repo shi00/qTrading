@@ -207,7 +207,7 @@ class HealthCheckMixin:
                             f"[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: {e}",
                         )
 
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 self._quality_tier = 1
                 logger.warning(
                     f"[DataProcessor] FastCheck | ⚠️ Malformed date '{latest_quote_date}'. Degrading to BRONZE.",
@@ -241,7 +241,7 @@ class HealthCheckMixin:
                             table_lag = (get_now() - parse_date(str(last_date), "%Y%m%d")).days
                             if table_lag > TIER_QUOTE_FRESHNESS_DAYS:
                                 stale_critical.append(table)
-                        except ValueError, TypeError:
+                        except (ValueError, TypeError):
                             stale_critical.append(table)
                     else:
                         stale_critical.append(table)
@@ -262,7 +262,7 @@ class HealthCheckMixin:
                 if fin_date:
                     try:
                         fin_lag_days = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
-                    except ValueError, TypeError:
+                    except (ValueError, TypeError):
                         pass
 
                 self._quality_tier = _compute_tier(
@@ -370,7 +370,7 @@ class HealthCheckMixin:
                         logger.info(
                             f"[DataProcessor] Health | P1-7: API extends official dates from {local_latest_str} to {api_latest_official}"
                         )
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     pass
 
             lag_days = 0

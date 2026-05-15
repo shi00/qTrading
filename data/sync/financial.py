@@ -274,7 +274,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 if col not in df_merged.columns:
                                     df_merged[col] = None
 
-                    except AttributeError, NameError, TypeError, ImportError:
+                    except (AttributeError, NameError, TypeError, ImportError):
                         raise  # Critical errors must propagate
                     except Exception as e:
                         has_error = True

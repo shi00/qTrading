@@ -54,7 +54,7 @@ def to_yyyymmdd_str(value) -> str | None:
 
     try:
         return parse_date(raw).strftime("%Y%m%d")
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         pass
 
     if len(raw) >= 8 and raw[:8].isdigit():

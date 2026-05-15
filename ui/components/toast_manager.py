@@ -111,7 +111,7 @@ class ToastManager:
         task = self.page.run_task(self._run_toast_lifecycle, toast_card)
         self._register_task(task)  # type: ignore[untyped]
 
-    async def _run_toast_lifecycle(self, toast_card: ToastCard) -> None:
+    async def _run_toast_lifecycle(self, toast_card: "ToastCard") -> None:
         """
         Wrapper for toast lifecycle with proper exception handling.
         Ensures CancelledError is handled cleanly during shutdown.
@@ -121,7 +121,7 @@ class ToastManager:
         except asyncio.CancelledError:
             pass  # Normal cancellation during shutdown
 
-    def _remove_toast(self, toast: ToastCard) -> None:
+    def _remove_toast(self, toast: "ToastCard") -> None:
         """Remove a toast from the stack."""
         with self._lock:
             if toast in self.toasts_stack.controls:

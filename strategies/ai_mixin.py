@@ -201,7 +201,7 @@ class AIStrategyMixin:
         if ctx_td:
             try:
                 end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 if is_backtest:
                     raise ValueError(
                         f"Cannot parse trade_date for backtest: {ctx_td!r}. "
@@ -341,7 +341,7 @@ class AIStrategyMixin:
                 async with news_sem:
                     try:
                         return await NewsFetcher.get_stock_news(code, limit=5)
-                    except ValueError, RuntimeError, OSError, ConnectionError:
+                    except (ValueError, RuntimeError, OSError, ConnectionError):
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}

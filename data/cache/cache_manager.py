@@ -108,27 +108,27 @@ class CacheManager:
         """Create async engine and update DAO references."""
         try:
             db_pool_size = int(ConfigHandler.get_db_connection_pool_size())
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             db_pool_size = 10
 
         try:
             db_max_overflow = int(ConfigHandler.get_db_max_overflow())
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             db_max_overflow = 5
 
         try:
             db_pool_timeout = int(ConfigHandler.get_db_pool_timeout())
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             db_pool_timeout = 30
 
         try:
             db_pool_recycle = int(ConfigHandler.get_db_pool_recycle())
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             db_pool_recycle = 1800
 
         try:
             db_pool_pre_ping = ConfigHandler.get_db_pool_pre_ping()
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             db_pool_pre_ping = True
 
         self.engine = create_async_engine(

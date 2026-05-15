@@ -125,7 +125,7 @@ class ReviewManager:
                                         index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
                                     else:
                                         index_cache[trade_date_str] = None
-                                except ValueError, TypeError, KeyError:
+                                except (ValueError, TypeError, KeyError):
                                     index_cache[trade_date_str] = None
                         except Exception as exc:
                             logger.warning(
@@ -368,7 +368,7 @@ class ReviewManager:
                 params_snapshot_value = (
                     json.loads(params_snapshot) if isinstance(params_snapshot, str) else params_snapshot
                 )
-            except json.JSONDecodeError, TypeError:
+            except (json.JSONDecodeError, TypeError):
                 params_snapshot_value = {"raw": str(params_snapshot)}
 
         # Helpers to safely extract fields
@@ -378,7 +378,7 @@ class ReviewManager:
                 return default
             try:
                 return float(v)
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 return default
 
         def _s(row_data: typing.Any, key: typing.Any, default: typing.Any = ""):
@@ -396,7 +396,7 @@ class ReviewManager:
             ai_score = row.get("ai_score", 0)
             try:
                 ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore[union-attr]
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 ai_score = 0
 
             ai_reason = row.get("ai_reason", "")
