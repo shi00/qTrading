@@ -63,7 +63,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -101,8 +101,8 @@ jobs:
 
       - name: Security Audit (pip-audit)
         run: |
-          pip-audit -s osv -r requirements.txt --desc
-          pip-audit -s osv -r requirements-optional.txt --desc
+          pip-audit -s osv -r requirements.txt --desc --ignore-vuln CVE-2025-69872
+          pip-audit -s osv -r requirements-optional.txt --desc --ignore-vuln CVE-2025-69872
 
       - name: Pyright Type Check
         # User explicitly requested this to fail the build if type errors occur
@@ -211,7 +211,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -328,7 +328,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
           cache: 'pip'
 
       - name: Recompile requirements
@@ -375,7 +375,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt

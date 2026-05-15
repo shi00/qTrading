@@ -2,9 +2,9 @@
 name = "AStockScreener"
 version = "1.0.0"
 description = "智能 A 股 AI 量化交易员"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 
-# urllib3>=2.6.3: Fix Brotli decode error for requests; must be >= 2.6.2
+# urllib3>=2.7.0: Fix Brotli decode error for requests; must be >= 2.6.2
 # brotlicffi: Fast Brotli compression support for urllib3 (optional dep, must be explicit)
 # playwright: Browser automation for E2E tests and scraping helpers
 dependencies = [
@@ -12,11 +12,11 @@ dependencies = [
     "flet-desktop==0.28.3",
     "tushare==1.4.29",
     "akshare>=1.18.60",
-    "requests>=2.32.5",
-    "httpx>=0.27.0",
-    "urllib3>=2.6.3",
+    "requests>=2.34.0",
+    "httpx>=0.28.0",
+    "urllib3>=2.7.0",
     "numpy>=2.4.4",
-    "pandas>=3.0.2",
+    "pandas>=3.0.3",
     "polars>=1.40.1",
     "pyarrow>=24.0.0",
     "pandas_market_calendars>=5.3.2",
@@ -25,39 +25,39 @@ dependencies = [
     "sqlalchemy>=2.0.49",
     "alembic>=1.18.4",
     "sqlparse>=0.5.5",
-    "litellm>=1.82.6",
-    "llama-cpp-python==0.3.22",
+    "litellm>=1.84.0",
+    "llama-cpp-python>=0.3.23",
     "mplfinance>=0.12.10b0",
-    "matplotlib>=3.10.8",
+    "matplotlib>=3.10.9",
     "apscheduler>=3.11.2",
-    "tzdata>=2025.3",
-    "pytz>=2024.1",
-    "python-dotenv==1.0.1",
+    "tzdata>=2026.2",
+    "pytz>=2026.2",
+    "python-dotenv>=1.2.2",
     "keyring>=25.7.0",
-    "cryptography>=47.0.0",
+    "cryptography>=48.0.0",
     "readerwriterlock>=1.0.9",
-    "cachetools>=7.0.5",
+    "cachetools>=7.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.5",
-    "pytest-cov>=7.0.0",
-    "ruff>=0.1.0",
-    "pandas-stubs>=2.2.0",
-    "pip-tools>=7.0",
-    "pip-audit>=0.3.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.0",
+    "pandas-stubs>=3.0.0.250204",
+    "pip-tools>=7.5.0",
+    "pip-audit>=2.10.0",
 ]
 optional = [
-    "brotlicffi>=1.1.0.0",
+    "brotlicffi>=1.2.0.0",
     "playwright>=1.59.0",
 ]
 
 [tool.ruff]
 line-length = 120
 indent-width = 4
-target-version = "py314"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "UP", "B", "SIM", "BLE"]

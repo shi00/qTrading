@@ -24,21 +24,21 @@ repos:
 
       - id: pip-compile-core
         name: pip-compile requirements.txt
-        entry: python -m piptools compile pyproject.toml -o requirements.txt
+        entry: python -m piptools compile --no-emit-index-url pyproject.toml -o requirements.txt
         language: system
         files: ^(pyproject\.toml|requirements\.in)$
         pass_filenames: false
 
       - id: pip-compile-dev
         name: pip-compile requirements-dev.txt
-        entry: python -m piptools compile --extra dev pyproject.toml -o requirements-dev.txt
+        entry: python -m piptools compile --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
         language: system
         files: ^(pyproject\.toml|requirements-dev\.in)$
         pass_filenames: false
 
       - id: pip-compile-optional
         name: pip-compile requirements-optional.txt
-        entry: python -m piptools compile --extra optional pyproject.toml -o requirements-optional.txt
+        entry: python -m piptools compile --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
         language: system
         files: ^(pyproject\.toml|requirements-optional\.in)$
         pass_filenames: false
