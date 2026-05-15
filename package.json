@@ -2,6 +2,6 @@
   "name": "astock-screener-ci-tools",
   "private": true,
   "devDependencies": {
-    "pyright": "1.1.380"
+    "pyright": "1.1.409"
   }
 }
