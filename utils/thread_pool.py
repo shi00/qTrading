@@ -35,7 +35,7 @@ class ThreadPoolManager:
       Pure Python CPU-bound tasks will suffer from GIL contention and should use ProcessPoolExecutor instead.
     """
 
-    _instance: "ThreadPoolManager" | None = None
+    _instance: "ThreadPoolManager | None" = None
     _lock = threading.Lock()  # Singleton Lock
 
     def __new__(cls):

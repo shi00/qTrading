@@ -1183,9 +1183,9 @@ class TestCacheManagerDelegations:
     @pytest.mark.asyncio
     async def test_get_history_tree(self):
         mgr = self._make_mgr()
-        mgr.screener_dao.get_history_tree = AsyncMock(return_value=[])
+        mgr.screener_dao.get_history_tree = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_history_tree()
-        assert result == []
+        assert result.empty
         mgr.screener_dao.get_history_tree.assert_called_once()
 
     @pytest.mark.asyncio
