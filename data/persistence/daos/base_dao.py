@@ -493,8 +493,18 @@ class BaseDao:
 
         return val
 
-    async def _read_db(self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = False):
-        """Generic Read returning DataFrame (Offloaded CSV conversion)"""
+    async def _read_db(
+        self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = False, max_rows: int | None = None
+    ):
+        """Generic Read returning DataFrame (Offloaded CSV conversion)
+
+        Args:
+            sql: SQL query string
+            params: Query parameters
+            suppress_errors: If True, return empty DataFrame on error
+            max_rows: Safety valve - if set, raises ValueError when result
+                      exceeds this row count to prevent accidental full-table loads
+        """
         if self.engine is None:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
@@ -524,6 +534,15 @@ class BaseDao:
                 # Fetch all rows
                 rows = result.fetchall()
                 cols = list(result.keys())
+
+                if max_rows is not None and len(rows) > max_rows:
+                    raise ValueError(
+                        "[%s] Query returned %d rows, exceeding max_rows limit of %d. "
+                        "Add WHERE filters or increase max_rows.",
+                        self.__class__.__name__,
+                        len(rows),
+                        max_rows,
+                    )
 
                 # Offload DF creation
                 df = await ThreadPoolManager().run_async(

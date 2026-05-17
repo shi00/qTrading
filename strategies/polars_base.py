@@ -61,7 +61,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             context["_dependency_status"] = dep_result
             return pd.DataFrame()
         elif dep_result["status"] == "degraded":
-            logger.info(f"[Strategy] {self.name}: running in degraded mode, empty_keys={dep_result['empty_keys']}")
+            logger.info("[Strategy] %s: running in degraded mode, empty_keys=%s", self.name, dep_result["empty_keys"])
             context["_dependency_status"] = dep_result
 
         if self.requires_fundamental_coverage:
@@ -87,7 +87,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         except QualityGateError:
             raise
         except Exception as e:
-            logger.error(f"[Strategy] {self.name} failed: {e}", exc_info=True)
+            logger.error("[Strategy] %s failed: %s", self.name, e, exc_info=True)
             raise RuntimeError(f"Strategy {self.name} execution failed: {e}") from e
 
         if candidates_df is None or candidates_df.empty:

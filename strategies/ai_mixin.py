@@ -113,7 +113,7 @@ class AIStrategyMixin:
             builder: Function(row: dict, prefetched: PreFetchedContext) -> str
         """
         self._context_builders[name] = builder
-        logger.debug(f"[AIStrategyMixin] Registered context builder: {name}")
+        logger.debug("[AIStrategyMixin] Registered context builder: %s", name)
 
     def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -144,7 +144,7 @@ class AIStrategyMixin:
                 f"[{self.__class__.__name__}] Sorted {len(df)} candidates by {col} (descending) for AI analysis"
             )
         else:
-            logger.debug(f"[{self.__class__.__name__}] Using default order for AI analysis ({len(df)} candidates)")
+            logger.debug("[%s] Using default order for AI analysis (%d candidates)", self.__class__.__name__, len(df))
 
         return df.reset_index(drop=True)
 
@@ -240,7 +240,7 @@ class AIStrategyMixin:
 
             is_valid, warning = validate_prompt(ui_prompt_override)
             if not is_valid:
-                logger.warning(f"[AIStrategyMixin] User prompt override rejected: {warning}")
+                logger.warning("[AIStrategyMixin] User prompt override rejected: %s", warning)
                 ui_prompt_override = None
             else:
                 ui_prompt_override = sanitize_prompt(ui_prompt_override)
@@ -296,7 +296,7 @@ class AIStrategyMixin:
             try:
                 global_context = await NewsFetcher.get_us_major_moves()
             except Exception as e:
-                logger.warning(f"[AIStrategyMixin] Failed to fetch global context: {e}")
+                logger.warning("[AIStrategyMixin] Failed to fetch global context: %s", e)
 
         # --- Pre-fetch Concepts for all candidates (N+1 optimization) ---
         concepts_map = {}
@@ -304,7 +304,7 @@ class AIStrategyMixin:
         try:
             concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
         except Exception as e:
-            logger.warning(f"[AIStrategyMixin] Failed to pre-fetch concepts: {e}")
+            logger.warning("[AIStrategyMixin] Failed to pre-fetch concepts: %s", e)
 
         # --- Ultimate Pipeline: Bulk History DB Query & Async News Task Pipelining (Fixing N+1) ---
         prefetched_history = {}
@@ -346,7 +346,7 @@ class AIStrategyMixin:
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
         except Exception as e:
-            logger.warning(f"[AIStrategyMixin] Ultimate Pipeline init failed: {e}")
+            logger.warning("[AIStrategyMixin] Ultimate Pipeline init failed: %s", e)
 
         # --- Batch Pre-Fetch: Capital Flow Data (Moneyflow, TopList, Northbound) ---
         # Fetch once for the trade date, filter per-stock in the loop (0ms per stock)
@@ -355,7 +355,7 @@ class AIStrategyMixin:
             if trade_date is None:
                 trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore[union-attr]
         except Exception as e:
-            logger.warning(f"[AIStrategyMixin] Failed to get latest trade date: {e}")
+            logger.warning("[AIStrategyMixin] Failed to get latest trade date: %s", e)
 
         moneyflow_df = pd.DataFrame()
         top_list_df = pd.DataFrame()
@@ -365,17 +365,17 @@ class AIStrategyMixin:
             try:
                 moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
             except Exception as e:
-                logger.warning(f"[AIStrategyMixin] Failed to pre-fetch moneyflow: {e}")
+                logger.warning("[AIStrategyMixin] Failed to pre-fetch moneyflow: %s", e)
 
             try:
                 top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
             except Exception as e:
-                logger.warning(f"[AIStrategyMixin] Failed to pre-fetch top_list: {e}")
+                logger.warning("[AIStrategyMixin] Failed to pre-fetch top_list: %s", e)
 
             try:
                 northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
             except Exception as e:
-                logger.warning(f"[AIStrategyMixin] Failed to pre-fetch northbound: {e}")
+                logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", e)
 
         logger.info(
             f"[AIStrategyMixin] Pre-fetched capital data: moneyflow={len(moneyflow_df)}, top_list={len(top_list_df)}, northbound={len(northbound_df)}",
@@ -385,9 +385,9 @@ class AIStrategyMixin:
         auxiliary_data = {}
         try:
             auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes)
-            logger.info(f"[AIStrategyMixin] Pre-fetched auxiliary data for {len(auxiliary_data)} stocks")
+            logger.info("[AIStrategyMixin] Pre-fetched auxiliary data for %d stocks", len(auxiliary_data))
         except Exception as e:
-            logger.warning(f"[AIStrategyMixin] Failed to pre-fetch auxiliary data: {e}")
+            logger.warning("[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s", e)
 
         # --- Bundle all pre-fetched data into PreFetchedContext ---
         prefetched = PreFetchedContext(
@@ -652,7 +652,7 @@ class AIStrategyMixin:
                     if block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
                 except Exception as e:
-                    logger.warning(f"[AIStrategyMixin] Context builder '{name}' failed: {e}")
+                    logger.warning("[AIStrategyMixin] Context builder '%s' failed: %s", name, e)
 
             if custom_context_blocks:
                 strategy_ctx = strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
@@ -1020,7 +1020,7 @@ class AIStrategyMixin:
             return "\n".join(lines)
 
         except Exception as e:
-            logger.warning(f"[AIStrategyMixin] Failed to build history text: {e}")
+            logger.warning("[AIStrategyMixin] Failed to build history text: %s", e)
             return I18n.get("ai_history_extract_error")
 
     @staticmethod
@@ -1171,7 +1171,7 @@ class AIStrategyMixin:
             return "\n".join(parts) if parts else I18n.get("ai_financial_insufficient")
 
         except Exception as e:
-            logger.warning(f"[AIMixin] Failed to build multi-period financials for {ts_code}: {e}")
+            logger.warning("[AIMixin] Failed to build multi-period financials for %s: %s", ts_code, e)
             return I18n.get("ai_financial_fetch_failed")
 
     async def _build_auxiliary_data_text(
@@ -1298,7 +1298,7 @@ class AIStrategyMixin:
                     has_data = True
 
         except Exception as e:
-            logger.warning(f"[AIMixin] Failed to build auxiliary data for {ts_code}: {e}")
+            logger.warning("[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, e)
 
         if has_data:
             return "\n".join(lines) + "\n"
@@ -1361,7 +1361,7 @@ class AIStrategyMixin:
                     has_data = True
 
         except Exception as e:
-            logger.warning(f"[AIMixin] Failed to build macro context: {e}")
+            logger.warning("[AIMixin] Failed to build macro context: %s", e)
 
         if has_data:
             return "\n".join(lines) + "\n"
