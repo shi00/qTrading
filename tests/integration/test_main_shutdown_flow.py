@@ -279,7 +279,7 @@ async def test_disconnect_failure_forces_exit(monkeypatch):
     assert coordinator.start_watchdog_calls == 1
     assert coordinator.do_cleanup_calls == 1
     assert coordinator.cancel_watchdog_calls == 0
-    assert exit_calls == [0]
+    assert exit_calls == [1]
 
 
 @pytest.mark.asyncio

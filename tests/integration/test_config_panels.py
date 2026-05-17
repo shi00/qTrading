@@ -321,8 +321,8 @@ class TestConfigPanelsIntegration:
 
         panel = LocalModelConfigPanel(on_change=on_change, show_save_button=False)
 
-        if hasattr(panel, "_on_model_path_change"):
-            panel._on_model_path_change(None)
+        if hasattr(panel, "_on_input_change"):
+            panel._on_input_change(None)
 
         assert len(callback_called) > 0
 

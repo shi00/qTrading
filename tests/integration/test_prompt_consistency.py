@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from strategies.prompt_validator import (
@@ -6,8 +8,14 @@ from strategies.prompt_validator import (
     validate_prompt_declarations,
 )
 
+_SKIP_NO_DATA = pytest.mark.skipif(
+    os.environ.get("SKIP_DATA_CONSISTENCY") == "1",
+    reason="SKIP_DATA_CONSISTENCY=1: CI has no pre-filled data",
+)
+
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_prompt_data_consistency():
     results = await validate_prompt_declarations(get_declarations())
     missing = [name for name, valid in results.items() if not valid]
@@ -24,6 +32,7 @@ async def test_prompt_declaration_report():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_multi_period_roe_available():
     from strategies.prompt_validator import check_multi_period_data
 
@@ -32,6 +41,7 @@ async def test_multi_period_roe_available():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_cashflow_field_exists():
     from strategies.prompt_validator import check_field_exists
 
@@ -40,6 +50,7 @@ async def test_cashflow_field_exists():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_audit_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -48,6 +59,7 @@ async def test_audit_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_dividend_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -56,6 +68,7 @@ async def test_dividend_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_pledge_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -64,6 +77,7 @@ async def test_pledge_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_macro_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -72,6 +86,7 @@ async def test_macro_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_shibor_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -80,6 +95,7 @@ async def test_shibor_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_holders_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -88,6 +104,7 @@ async def test_holders_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_holder_number_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
@@ -96,6 +113,7 @@ async def test_holder_number_table_has_data():
 
 
 @pytest.mark.asyncio
+@_SKIP_NO_DATA
 async def test_mainbz_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
