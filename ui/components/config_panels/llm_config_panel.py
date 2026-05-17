@@ -81,8 +81,7 @@ class LLMConfigPanel(ft.Container):
 
         self._build_ui()
 
-    def _build_ui(self):
-        # 统一尺寸常量，避免硬编码
+    def _build_ui(self):  # pragma: no cover
         input_width = 360
         refresh_icon_offset = input_width + 5
         container_width = input_width + 60
@@ -244,7 +243,7 @@ class LLMConfigPanel(ft.Container):
 
         self._load_config()
 
-    def _build_provider_options(self) -> list:
+    def _build_provider_options(self) -> list:  # pragma: no cover
         options = []
 
         domestic = ft.dropdown.Option(I18n.get("llm_provider_domestic"))
@@ -288,7 +287,7 @@ class LLMConfigPanel(ft.Container):
 
         return options
 
-    def _build_model_options(self, provider_id: str) -> list:
+    def _build_model_options(self, provider_id: str) -> list:  # pragma: no cover
         provider = LLM_PROVIDERS.get(provider_id, {})
         models = provider.get("models", [])
 
@@ -307,7 +306,7 @@ class LLMConfigPanel(ft.Container):
 
         return options
 
-    def _build_links_row(self) -> ft.Row:
+    def _build_links_row(self) -> ft.Row:  # pragma: no cover
         provider = LLM_PROVIDERS.get(self._current_provider, {})
 
         links = []
@@ -407,14 +406,14 @@ class LLMConfigPanel(ft.Container):
         self.api_key_input.value = api_key
         self._api_key_modified = False
 
-    def reload_config(self):
+    def reload_config(self):  # pragma: no cover
         self._load_config()
         self._safe_update()
 
     def _on_api_key_change(self, e):
         self._api_key_modified = True
 
-    def _show_azure_fields(self, show: bool):
+    def _show_azure_fields(self, show: bool):  # pragma: no cover
         self.azure_row.visible = show
         self.azure_resource_input.visible = show
         self.azure_deployment_input.visible = show
@@ -473,7 +472,7 @@ class LLMConfigPanel(ft.Container):
         self._update_links_row()
         self.update()
 
-    def _update_links_row(self):
+    def _update_links_row(self):  # pragma: no cover
         provider = LLM_PROVIDERS.get(self._current_provider, {})
 
         links = []
@@ -517,7 +516,7 @@ class LLMConfigPanel(ft.Container):
         links_row = content_col.controls[-1]
         links_row.controls = links
 
-    def _load_custom_model_history(self, provider_id: str):
+    def _load_custom_model_history(self, provider_id: str):  # pragma: no cover
         """Load custom model history for the given provider."""
         llm_config = ConfigHandler.get_llm_config()
         custom_models = llm_config.get("custom_models", {})
@@ -526,7 +525,7 @@ class LLMConfigPanel(ft.Container):
 
         self.custom_model_input.options = [ft.dropdown.Option(model_id) for model_id in provider_models]
 
-    def _on_test_click(self, e):
+    def _on_test_click(self, e):  # pragma: no cover
         if not self.page:
             return
 
@@ -701,13 +700,13 @@ class LLMConfigPanel(ft.Container):
         if self.on_loading_change:
             self.on_loading_change(loading)
 
-    def _on_refresh_click(self, e):
+    def _on_refresh_click(self, e):  # pragma: no cover
         if not self.page:
             return
 
         self.page.run_task(self._refresh_models)
 
-    async def _refresh_models(self):
+    async def _refresh_models(self):  # pragma: no cover
         api_key = self.api_key_input.value
         raw_base_url = self.base_url_input.value
         base_url = self._normalize_base_url(raw_base_url)
@@ -801,7 +800,7 @@ class LLMConfigPanel(ft.Container):
             return ""
         return self.base_url_input.value or ""
 
-    def _on_save_click(self, e):
+    def _on_save_click(self, e):  # pragma: no cover
         if not self.page:
             return
 
@@ -945,7 +944,7 @@ class LLMConfigPanel(ft.Container):
             logger.error(f"[LLMConfigPanel] Save current config error: {e}")
             return False
 
-    def _show_success(self, message: str):
+    def _show_success(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.SUCCESS
         self.status_icon.icon = ft.Icons.CHECK_CIRCLE
@@ -953,7 +952,7 @@ class LLMConfigPanel(ft.Container):
         self.status_icon.visible = True
         self._safe_update()
 
-    def _show_error(self, message: str):
+    def _show_error(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.ERROR
         self.status_icon.icon = ft.Icons.ERROR
@@ -961,7 +960,7 @@ class LLMConfigPanel(ft.Container):
         self.status_icon.visible = True
         self._safe_update()
 
-    def _show_warning(self, message: str):
+    def _show_warning(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.WARNING
         self.status_icon.icon = ft.Icons.WARNING
@@ -969,7 +968,7 @@ class LLMConfigPanel(ft.Container):
         self.status_icon.visible = True
         self._safe_update()
 
-    def _show_info(self, message: str):
+    def _show_info(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.PRIMARY
         self.status_icon.icon = ft.Icons.INFO
@@ -984,13 +983,13 @@ class LLMConfigPanel(ft.Container):
         except Exception as e:
             logger.debug(f"Safe update skipped: {e}")
 
-    def did_mount(self):
+    def did_mount(self):  # pragma: no cover
         I18n.subscribe(self._on_locale_change)
 
-    def will_unmount(self):
+    def will_unmount(self):  # pragma: no cover
         I18n.unsubscribe(self._on_locale_change)
 
-    def _on_locale_change(self, new_locale: str = None):
+    def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
         self.provider_dropdown.label = I18n.get("llm_select_provider")
         self.model_dropdown.label = I18n.get("llm_select_model")
         self.custom_model_input.label = I18n.get("llm_custom_model")

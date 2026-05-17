@@ -387,3 +387,384 @@ class TestFinancialSyncGatherTolerance:
 
         results = await asyncio.gather(fail_task(), fail_task(), return_exceptions=True)
         assert all(isinstance(r, Exception) for r in results)
+
+
+class TestFinancialSyncCancelActiveTasks:
+    @pytest.mark.asyncio
+    async def test_cancel_cancels_active_tasks(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        strategy._active_tasks = {mock_task}
+        strategy.cancel()
+        mock_task.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_skips_done_tasks(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        mock_task = MagicMock()
+        mock_task.done.return_value = True
+        strategy._active_tasks = {mock_task}
+        strategy.cancel()
+        mock_task.cancel.assert_not_called()
+
+
+class TestFinancialSyncCancelledError:
+    @pytest.mark.asyncio
+    async def test_cancelled_error_sets_status(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=asyncio.CancelledError())
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == "cancelled"
+
+
+class TestFinancialSyncIncompleteStocks:
+    @pytest.mark.asyncio
+    async def test_incomplete_stocks_removed_from_synced(self):
+        ctx = make_ctx()
+        ctx.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ"})
+        ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value={"000001.SZ"})
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+
+
+class TestFinancialSyncAllStocksSynced:
+    @pytest.mark.asyncio
+    async def test_all_synced_with_progress_callback(self):
+        ctx = make_ctx()
+        ctx.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
+        ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
+        progress_cb = MagicMock()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True, progress_callback=progress_cb)
+        assert result is not None
+        progress_cb.assert_called()
+
+
+class TestFinancialSyncFullSyncErrorPaths:
+    @pytest.mark.asyncio
+    async def test_fetch_runtime_error_marks_incomplete(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("API failed"))
+        ctx.api.get_balancesheet = AsyncMock(side_effect=RuntimeError("API failed"))
+        ctx.api.get_fina_indicator = AsyncMock(side_effect=RuntimeError("API failed"))
+        ctx.api.get_cashflow = AsyncMock(side_effect=RuntimeError("API failed"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_fetch_attribute_error_caught_by_outer(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=AttributeError("bad attr"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_empty_data_marks_complete_no_save(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(return_value=None)
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
+        ctx.api.get_fina_audit = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+        ctx.cache.mark_stock_step4_completed.assert_awaited()
+
+
+class TestFinancialSyncFullSyncProgress:
+    @pytest.mark.asyncio
+    async def test_progress_callback_with_enough_stocks(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": [f"00000{i}.SZ" for i in range(10)],
+                    "list_status": ["L"] * 10,
+                }
+            )
+        )
+        progress_cb = MagicMock()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True, progress_callback=progress_cb)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_aux_table_status_updated(self):
+        ctx = make_ctx()
+        ctx.api.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        ctx.api.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        ctx.cache.save_fina_mainbz = AsyncMock(return_value=5)
+        ctx.cache.save_fina_audit = AsyncMock(return_value=3)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+
+
+class TestFinancialSyncIncrementalPaths:
+    @pytest.mark.asyncio
+    async def test_incremental_shutdown_event_set(self):
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+
+        async def set_shutdown_and_return(*args, **kwargs):
+            strategy._shutdown_event.set()
+            return {"last_sync_date": datetime.datetime(2024, 6, 1)}
+
+        ctx.cache.get_sync_status = AsyncMock(side_effect=set_shutdown_and_return)
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_incremental_date_parse_string(self):
+        ctx = make_ctx()
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": "2024-06-01 00:00:00"})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_incremental_date_parse_fallback(self):
+        ctx = make_ctx()
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": "invalid-date"})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_incremental_no_dates_to_sync(self):
+        ctx = make_ctx()
+        now = datetime.datetime.now()
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_incremental_with_progress_callback(self):
+        ctx = make_ctx()
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 6, 1)})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        progress_cb = MagicMock()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(progress_callback=progress_cb)
+        assert result is not None
+
+
+class TestFinancialSyncIncrementalWithDisclosure:
+    @pytest.mark.asyncio
+    async def test_incremental_with_aux_updates(self):
+        ctx = make_ctx()
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240331"],
+                    "actual_date": ["20240430"],
+                }
+            )
+        )
+        ctx.api.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        ctx.api.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        ctx.cache.save_fina_mainbz = AsyncMock(return_value=5)
+        ctx.cache.save_fina_audit = AsyncMock(return_value=3)
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            mock_cfg.get_max_batch_rows.return_value = 100
+            mock_cfg.get_sync_max_concurrent_heavy.return_value = 5
+            result = await strategy.run()
+            assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_incremental_fetch_error_continues(self):
+        ctx = make_ctx()
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240331"],
+                    "actual_date": ["20240430"],
+                }
+            )
+        )
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("API error"))
+        ctx.api.get_balancesheet = AsyncMock(side_effect=RuntimeError("API error"))
+        ctx.api.get_fina_indicator = AsyncMock(side_effect=RuntimeError("API error"))
+        ctx.api.get_cashflow = AsyncMock(side_effect=RuntimeError("API error"))
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            mock_cfg.get_max_batch_rows.return_value = 100
+            mock_cfg.get_sync_max_concurrent_heavy.return_value = 5
+            result = await strategy.run()
+            assert result is not None
+
+
+class TestFinancialSyncCorporateActionsErrorPaths:
+    @pytest.mark.asyncio
+    async def test_permission_denied_handling(self):
+        ctx = make_ctx()
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
+            setattr(ctx.api, cfg["api"], AsyncMock(side_effect=Exception("permission denied")))
+        strategy = FinancialSyncStrategy(ctx)
+        await strategy._sync_corporate_actions_by_date(["20240614"])
+
+    @pytest.mark.asyncio
+    async def test_jifen_denied_handling(self):
+        ctx = make_ctx()
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
+            setattr(ctx.api, cfg["api"], AsyncMock(side_effect=Exception("积分不足")))
+        strategy = FinancialSyncStrategy(ctx)
+        await strategy._sync_corporate_actions_by_date(["20240614"])
+
+    @pytest.mark.asyncio
+    async def test_general_error_handling(self):
+        ctx = make_ctx()
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
+            setattr(ctx.api, cfg["api"], AsyncMock(side_effect=Exception("network error")))
+        strategy = FinancialSyncStrategy(ctx)
+        await strategy._sync_corporate_actions_by_date(["20240614"])
+
+    @pytest.mark.asyncio
+    async def test_shutdown_during_corporate_actions(self):
+        ctx = make_ctx()
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
+            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+        strategy = FinancialSyncStrategy(ctx)
+        strategy._shutdown_event.set()
+        await strategy._sync_corporate_actions_by_date(["20240614"])
+
+    @pytest.mark.asyncio
+    async def test_progress_callback_every_10_days(self):
+        ctx = make_ctx()
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
+            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+        progress_cb = MagicMock()
+        strategy = FinancialSyncStrategy(ctx)
+        dates = [f"202406{d:02d}" for d in range(1, 12)]
+        await strategy._sync_corporate_actions_by_date(dates, progress_callback=progress_cb)
+        assert progress_cb.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_no_save_func_for_unknown_table(self):
+        ctx = make_ctx()
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
+            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+        ctx.cache.save_fina_forecast = AsyncMock(return_value=None)
+        ctx.cache.save_dividend = AsyncMock(return_value=None)
+        ctx.cache.save_repurchase = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        await strategy._sync_corporate_actions_by_date(["20240614"])
+
+
+class TestFinancialSyncFetchAuxPaths:
+    @pytest.mark.asyncio
+    async def test_fetch_aux_save_returns_none_uses_len(self):
+        ctx = make_ctx()
+        ctx.cache.save_fina_mainbz = AsyncMock(return_value=None)
+        ctx.cache.save_fina_audit = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        ctx.api.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        strategy = FinancialSyncStrategy(ctx)
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        assert aux["mainbz"] > 0
+        assert aux["audit"] > 0
+
+    @pytest.mark.asyncio
+    async def test_fetch_aux_permission_error(self):
+        ctx = make_ctx()
+        ctx.api.get_fina_mainbz = AsyncMock(side_effect=Exception("permission denied"))
+        ctx.api.get_fina_audit = AsyncMock(side_effect=Exception("积分不足"))
+        strategy = FinancialSyncStrategy(ctx)
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        assert aux["mainbz"] == 0
+        assert aux["audit"] == 0
+
+    @pytest.mark.asyncio
+    async def test_aux_exception_returns_zero(self):
+        ctx = make_ctx()
+        ctx.api.get_fina_mainbz = AsyncMock(side_effect=RuntimeError("mainbz failed"))
+        ctx.api.get_fina_audit = AsyncMock(side_effect=RuntimeError("audit failed"))
+        strategy = FinancialSyncStrategy(ctx)
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        assert aux["mainbz"] == 0
+        assert aux["audit"] == 0
+
+    @pytest.mark.asyncio
+    async def test_fetch_outer_exception_returns_zero_aux(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("outer fail"))
+        ctx.api.get_balancesheet = AsyncMock(side_effect=RuntimeError("outer fail"))
+        ctx.api.get_fina_indicator = AsyncMock(side_effect=RuntimeError("outer fail"))
+        ctx.api.get_cashflow = AsyncMock(side_effect=RuntimeError("outer fail"))
+        ctx.api.get_fina_mainbz = AsyncMock(side_effect=RuntimeError("outer fail"))
+        ctx.api.get_fina_audit = AsyncMock(side_effect=RuntimeError("outer fail"))
+        strategy = FinancialSyncStrategy(ctx)
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        assert df is None
+        assert aux["mainbz"] == 0
+        assert aux["audit"] == 0
+
+
+class TestFinancialSyncRepairPaths:
+    @pytest.mark.asyncio
+    async def test_repair_with_progress_callback(self):
+        ctx = make_ctx()
+        progress_cb = MagicMock()
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            result = await strategy.repair_financial_data(["000001.SZ"], progress_callback=progress_cb)
+            assert isinstance(result, int)
+
+    @pytest.mark.asyncio
+    async def test_repair_exception_continues(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("API error"))
+        ctx.api.get_balancesheet = AsyncMock(side_effect=RuntimeError("API error"))
+        ctx.api.get_fina_indicator = AsyncMock(side_effect=RuntimeError("API error"))
+        ctx.api.get_cashflow = AsyncMock(side_effect=RuntimeError("API error"))
+        strategy = FinancialSyncStrategy(ctx)
+        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
+            mock_cfg.get_sync_request_delay.return_value = 0
+            result = await strategy.repair_financial_data(["000001.SZ"])
+            assert isinstance(result, int)

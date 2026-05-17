@@ -154,3 +154,107 @@ class TestUpdateLogLevel:
             setup_logging()
         update_log_level("UNKNOWN_LEVEL")
         assert logging.getLogger().level == logging.INFO
+
+
+class TestSetupLoggingDegradation:
+    def setup_method(self):
+        self.root_logger = logging.getLogger()
+        self.original_handlers = self.root_logger.handlers[:]
+        self.root_logger.handlers = []
+
+    def teardown_method(self):
+        self.root_logger.handlers = self.original_handlers
+
+    def test_makedirs_failure_continues(self, tmp_path):
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("os.path.exists", return_value=False),
+            patch("os.makedirs", side_effect=PermissionError("no access")),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+        ):
+            logger = setup_logging("degradation_test")
+        assert logger is not None
+        console_handlers = [h for h in logger.handlers if type(h) is logging.StreamHandler]
+        assert len(console_handlers) >= 1
+
+    def test_config_log_level_exception_defaults_info(self, tmp_path):
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", side_effect=ValueError("bad config")),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+        ):
+            logger = setup_logging("level_fallback_test")
+        assert logger.level == logging.INFO
+
+    def test_config_rotation_exception_defaults(self, tmp_path):
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", side_effect=OSError("unreadable")),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", side_effect=OSError("unreadable")),
+        ):
+            logger = setup_logging("rotation_fallback_test")
+        file_handlers = [
+            h
+            for h in logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler) and "app.log" in h.baseFilename
+        ]
+        assert len(file_handlers) == 1
+        assert file_handlers[0].maxBytes == 5 * 1024 * 1024
+
+    def test_app_log_rollover_on_startup(self, tmp_path):
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+        app_log = log_dir / "app.log"
+        app_log.write_text("old log content", encoding="utf-8")
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+        ):
+            setup_logging("rollover_test")
+        assert (log_dir / "app.log.1").exists()
+
+    def test_app_log_rollover_failure_continues(self, tmp_path):
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+        app_log = log_dir / "app.log"
+        app_log.write_text("old content", encoding="utf-8")
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch("logging.handlers.RotatingFileHandler.doRollover", side_effect=OSError("locked")),
+        ):
+            logger = setup_logging("rollover_fail_test")
+        assert logger is not None
+
+    def test_error_log_rollover_silent_failure(self, tmp_path):
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+        error_log = log_dir / "error.log"
+        error_log.write_text("old error", encoding="utf-8")
+        original_rfh = logging.handlers.RotatingFileHandler
+
+        def selective_rollover(self):
+            if "error.log" in self.baseFilename:
+                raise ValueError("cannot rotate")
+            return original_rfh.doRollover(self)
+
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch("logging.handlers.RotatingFileHandler.doRollover", selective_rollover),
+        ):
+            logger = setup_logging("error_rollover_fail_test")
+        assert logger is not None

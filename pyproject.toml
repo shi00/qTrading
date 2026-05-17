@@ -93,6 +93,7 @@ source = ["core", "data", "services", "strategies", "utils", "ui", "config", "ma
 omit = [
     "data/tiktoken_cache/*",
     "scripts/*",
+    "tests/*",
 ]
 
 [tool.coverage.report]

@@ -1,5 +1,7 @@
+import logging
+
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from utils.thread_pool import ThreadPoolManager, TaskType, get_thread_pool_manager
 
@@ -145,3 +147,109 @@ class TestThreadPoolManagerSubmit:
 
         result = await mgr.run_async(TaskType.IO, greet, "World", greeting="Hi")
         assert result == "Hi, World"
+
+
+class TestThreadPoolManagerResetSingletonErrorHandling:
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reset_singleton_handles_shutdown_runtime_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=RuntimeError("already shut down"))
+        ThreadPoolManager._reset_singleton()
+        assert ThreadPoolManager._instance is None
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reset_singleton_handles_shutdown_value_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=ValueError("bad value"))
+        ThreadPoolManager._reset_singleton()
+        assert ThreadPoolManager._instance is None
+
+
+class TestThreadPoolManagerAtexitShutdown:
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_shutdown_cleans_closed_handler(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        mock_handler = MagicMock()
+        mock_handler.flush = MagicMock()
+        mock_handler.stream = MagicMock()
+        mock_handler.stream.closed = True
+        test_logger = logging.getLogger("utils.thread_pool")
+        original_handlers = test_logger.handlers[:]
+        test_logger.handlers.append(mock_handler)
+        tpm._atexit_shutdown()
+        assert mock_handler not in test_logger.handlers
+        test_logger.handlers = original_handlers
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_shutdown_handles_handler_flush_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        mock_handler = MagicMock()
+        mock_handler.flush = MagicMock(side_effect=ValueError("closed"))
+        test_logger = logging.getLogger("utils.thread_pool")
+        original_handlers = test_logger.handlers[:]
+        test_logger.handlers.append(mock_handler)
+        tpm._atexit_shutdown()
+        test_logger.handlers = original_handlers
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_shutdown_calls_shutdown(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock()
+        tpm._atexit_shutdown()
+        tpm.shutdown.assert_called_once_with(wait=False)
+
+
+class TestThreadPoolManagerShutdownPoolAccess:
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_io_pool_raises_after_shutdown(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown(wait=False)
+        with pytest.raises(RuntimeError, match="Cannot access io_pool"):
+            _ = tpm.io_pool
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_cpu_pool_raises_after_shutdown(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown(wait=False)
+        with pytest.raises(RuntimeError, match="Cannot access cpu_pool"):
+            _ = tpm.cpu_pool
+
+
+class TestThreadPoolManagerShutdownLoggingErrors:
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_shutdown_handles_logger_info_value_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        with patch("utils.thread_pool.logger") as mock_logger:
+            mock_logger.info = MagicMock(side_effect=ValueError("handler closed"))
+            mock_logger.handlers = []
+            tpm.shutdown(wait=False)
+        assert tpm._io_pool is None
+        assert tpm._cpu_pool is None
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_shutdown_handles_logger_info_os_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        with patch("utils.thread_pool.logger") as mock_logger:
+            mock_logger.info = MagicMock(side_effect=OSError("broken pipe"))
+            mock_logger.handlers = []
+            tpm.shutdown(wait=False)
+        assert tpm._io_pool is None
+        assert tpm._cpu_pool is None

@@ -561,3 +561,287 @@ class TestHolderSyncSyncTop10Holders:
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
         result = await strategy._sync_top10_holders("20240331")
         assert result >= 0
+
+
+class TestHolderSyncGetEffectiveTradeDateNone:
+    @pytest.mark.asyncio
+    async def test_none_return_falls_back(self):
+        ctx = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        strategy = HolderSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+
+class TestHolderSyncRunErrorPaths:
+    @pytest.mark.asyncio
+    async def test_stk_holdernumber_error_accumulates(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_top10_holders_error_accumulates(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=-1)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_pledge_stat_error_accumulates(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(-1, None))
+        result = await strategy.run()
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_max_errors_sets_partial(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=-1)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(-1, None))
+        result = await strategy.run()
+        assert result.status == "partial"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_run(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
+        check_count = 0
+
+        def fake_check(result):
+            nonlocal check_count
+            check_count += 1
+            if check_count >= 2:
+                strategy._cancelled = True
+                return True
+            return False
+
+        strategy._check_cancelled = fake_check
+        result = await strategy.run()
+        assert result.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_top_level_exception(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(side_effect=RuntimeError("unexpected"))
+        result = await strategy.run()
+        assert result.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_pledge_stat_zero_count_no_update(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(0, None))
+        result = await strategy.run()
+        assert result is not None
+
+
+class TestHolderSyncTop10ErrorPaths:
+    @pytest.mark.asyncio
+    async def test_consecutive_errors_abort(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(10)]})
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(side_effect=Exception("API error"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        assert result == -1
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_error_counted(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ", "000006.SZ"]}
+            )
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(side_effect=Exception("每分钟最多访问"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        assert result == -1
+
+    @pytest.mark.asyncio
+    async def test_outer_exception_returns_minus_one(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=RuntimeError("DB error"))
+        strategy = HolderSyncStrategy(ctx)
+        result = await strategy._sync_top10_holders("20240331")
+        assert result == -1
+
+
+class TestHolderSyncTop10ProgressAndCheckpoint:
+    @pytest.mark.asyncio
+    async def test_progress_logging_at_interval(self):
+        codes = [f"{i:06d}.SZ" for i in range(1, 250)]
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
+        )
+        ctx.api._slow_api_limiters = {}
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        assert result >= 0
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_save_triggered(self):
+        codes = [f"{i:06d}.SZ" for i in range(1, 10)]
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        big_df = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(1000)], "holder_name": ["Test"] * 1000})
+        ctx.api.get_top10_holders = AsyncMock(return_value=big_df)
+        ctx.api._slow_api_limiters = {}
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        assert result >= 0
+
+    @pytest.mark.asyncio
+    async def test_progress_with_rate_limiter(self):
+        codes = [f"{i:06d}.SZ" for i in range(1, 250)]
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
+        )
+        mock_limiter = MagicMock()
+        mock_limiter.current_rate_per_min = 120.0
+        ctx.api._slow_api_limiters = {"top10_holders": mock_limiter}
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        assert result >= 0
+
+
+class TestHolderSyncOneTablePermission:
+    @pytest.mark.asyncio
+    async def test_permission_error(self):
+        ctx = MagicMock()
+        save_func = AsyncMock()
+        api_func = AsyncMock(side_effect=Exception("permission denied"))
+        strategy = HolderSyncStrategy(ctx)
+        result = await strategy._sync_one_table(api_func, save_func, "test_table", "20240331")
+        assert result == -1
+
+    @pytest.mark.asyncio
+    async def test_jifen_error(self):
+        ctx = MagicMock()
+        save_func = AsyncMock()
+        api_func = AsyncMock(side_effect=Exception("积分不足"))
+        strategy = HolderSyncStrategy(ctx)
+        result = await strategy._sync_one_table(api_func, save_func, "test_table", "20240331")
+        assert result == -1
+
+
+class TestHolderSyncPledgeStatErrorPaths:
+    @pytest.mark.asyncio
+    async def test_permission_error(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_pledge_stat = AsyncMock(side_effect=Exception("permission denied"))
+        ctx.cache = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_pledge_stat()
+        assert count == -1
+
+    @pytest.mark.asyncio
+    async def test_outer_exception(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.cache = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(side_effect=RuntimeError("unexpected"))
+        count, date = await strategy._sync_pledge_stat()
+        assert count == -1
+
+    @pytest.mark.asyncio
+    async def test_api_error_continues_retry(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        call_count = 0
+
+        async def mock_pledge(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise Exception("temporary error")
+            return pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        ctx.api.get_pledge_stat = AsyncMock(side_effect=mock_pledge)
+        ctx.cache = MagicMock()
+        ctx.cache.save_pledge_stat = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_pledge_stat()
+        assert count >= 0
+
+
+class TestHolderSyncGetRecentQuarterEndsEdge:
+    def test_count_one(self):
+        result = HolderSyncStrategy._get_recent_quarter_ends(count=1)
+        assert len(result) <= 1
+
+    def test_count_large(self):
+        result = HolderSyncStrategy._get_recent_quarter_ends(count=10)
+        assert len(result) <= 10

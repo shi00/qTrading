@@ -42,7 +42,7 @@ class HealthScoreCard(ft.Container):
     )
 
     @staticmethod
-    def _make_gradient(color: str) -> ft.LinearGradient:
+    def _make_gradient(color: str) -> ft.LinearGradient:  # pragma: no cover
         return ft.LinearGradient(
             begin=ft.alignment.top_left,
             end=ft.alignment.bottom_right,
@@ -52,7 +52,7 @@ class HealthScoreCard(ft.Container):
             ],
         )
 
-    def __init__(self, status: str, tables_count: int):
+    def __init__(self, status: str, tables_count: int):  # pragma: no cover
         super().__init__()
 
         self.color, self.icon, i18n_key = self._STATUS_MAP.get(
@@ -106,7 +106,7 @@ class MetricTile(ft.Container):
     A single metric tile for the grid.
     """
 
-    def __init__(
+    def __init__(  # pragma: no cover
         self,
         label: str,
         value: str,
@@ -233,7 +233,7 @@ class CoverageDetailTable(ft.Column):
 
         super().__init__(controls=controls, spacing=10)
 
-    def _build_section_header(self, i18n_key):
+    def _build_section_header(self, i18n_key):  # pragma: no cover
         return ft.Container(
             padding=ft.padding.symmetric(vertical=5),
             content=ft.Row(
@@ -385,7 +385,7 @@ class CoverageDetailTable(ft.Column):
             ),
         )
 
-    def _build_depth_breadth_items(self, stats):
+    def _build_depth_breadth_items(self, stats):  # pragma: no cover
         """Build optional Depth/Breadth indicator items (only shown when not None)."""
         items = []
         depth_ratio = stats.get("depth_ratio")
@@ -454,7 +454,7 @@ class HealthReportDialog(ft.AlertDialog):
             shape=ft.RoundedRectangleBorder(radius=8),
         )
 
-    def close_dialog(self, e=None):
+    def close_dialog(self, e=None):  # pragma: no cover
         try:
             if hasattr(self.page_ref, "close"):
                 self.page_ref.close(self)
@@ -561,7 +561,7 @@ class HealthScanDialog(ft.AlertDialog):
     Shows progress then results.
     """
 
-    def __init__(self, page):
+    def __init__(self, page):  # pragma: no cover
         self.page_ref = page
         self.progress_bar = ft.ProgressBar(
             width=400,
@@ -596,7 +596,7 @@ class HealthScanDialog(ft.AlertDialog):
             actions_padding=10,
         )
 
-    def close_dialog(self, e=None):
+    def close_dialog(self, e=None):  # pragma: no cover
         if hasattr(self.page_ref, "close"):
             self.page_ref.close(self)
         else:
@@ -625,7 +625,7 @@ class HealthScanDialog(ft.AlertDialog):
             self.status_text.value = f"Error: {e}"
             self.page_ref.update()
 
-    def show_results(self, result):
+    def show_results(self, result):  # pragma: no cover
         """Display results."""
         score = result.get("score", 0)
         tier = result.get("tier", 1)

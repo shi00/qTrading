@@ -426,3 +426,266 @@ class TestScreenerViewModelRunStrategy:
         await submitted_coro[0]
         status_calls = vm.on_status.call_args_list
         assert any(("策略降级运行" in (args[0] if args else "") and args[1] == "orange") for args, _ in status_calls)
+
+
+class TestSortHelper:
+    def test_sorts_ascending(self):
+        df = pd.DataFrame({"A": [3, 1, 2]})
+        result = ScreenerViewModel._sort_helper(df, "A", True)
+        assert list(result["A"]) == [1, 2, 3]
+
+    def test_sorts_descending(self):
+        df = pd.DataFrame({"A": [3, 1, 2]})
+        result = ScreenerViewModel._sort_helper(df, "A", False)
+        assert list(result["A"]) == [3, 2, 1]
+
+    def test_returns_original_on_key_error(self):
+        df = pd.DataFrame({"A": [3, 1, 2]})
+        result = ScreenerViewModel._sort_helper(df, "Z", True)
+        assert result.equals(df)
+
+
+class TestUpdatePagination:
+    def test_calculates_total_items(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(75)})
+        vm._update_pagination()
+        assert vm.total_items == 75
+
+    def test_calculates_total_pages(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(75)})
+        vm._update_pagination()
+        assert vm.total_pages == 2
+
+    def test_exact_page_boundary(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        assert vm.total_pages == 2
+
+    def test_none_results(self, vm):
+        vm._full_results = None
+        vm._update_pagination()
+        assert vm.total_items == 0
+        assert vm.total_pages == 0
+
+
+class TestGetCurrentPageData:
+    def test_returns_sliced_dataframe(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm.page_no = 1
+        vm.page_size = 50
+        vm._update_pagination()
+        page = vm.get_current_page_data()
+        assert len(page) == 50
+        assert page.iloc[0]["A"] == 0
+
+    def test_second_page(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm.page_no = 2
+        vm.page_size = 50
+        vm._update_pagination()
+        page = vm.get_current_page_data()
+        assert len(page) == 50
+        assert page.iloc[0]["A"] == 50
+
+    def test_none_returns_empty(self, vm):
+        vm._full_results = None
+        result = vm.get_current_page_data()
+        assert result.empty
+
+    def test_empty_df_returns_empty(self, vm):
+        vm._full_results = pd.DataFrame()
+        result = vm.get_current_page_data()
+        assert result.empty
+
+
+class TestChangePage:
+    def test_increment_within_bounds(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.page_no = 1
+        vm.change_page(1)
+        assert vm.page_no == 2
+
+    def test_decrement_within_bounds(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.page_no = 2
+        vm.change_page(-1)
+        assert vm.page_no == 1
+
+    def test_does_not_go_below_one(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.page_no = 1
+        vm.change_page(-1)
+        assert vm.page_no == 1
+
+    def test_does_not_exceed_total_pages(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.page_no = 2
+        vm.change_page(1)
+        assert vm.page_no == 2
+
+    def test_calls_on_update(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.on_update = MagicMock()
+        vm.page_no = 1
+        vm.change_page(1)
+        vm.on_update.assert_called_once()
+
+
+class TestChangePageSize:
+    def test_updates_page_size(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.change_page_size(25)
+        assert vm.page_size == 25
+
+    def test_resets_to_page_one(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.page_no = 2
+        vm.change_page_size(25)
+        assert vm.page_no == 1
+
+    def test_ignores_non_positive(self, vm):
+        vm.page_size = 50
+        vm.change_page_size(0)
+        assert vm.page_size == 50
+
+    def test_ignores_negative(self, vm):
+        vm.page_size = 50
+        vm.change_page_size(-10)
+        assert vm.page_size == 50
+
+    def test_ignores_same_size(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.page_no = 2
+        vm.change_page_size(50)
+        assert vm.page_no == 2
+
+    def test_calls_on_update(self, vm):
+        vm._full_results = pd.DataFrame({"A": range(100)})
+        vm._update_pagination()
+        vm.on_update = MagicMock()
+        vm.change_page_size(25)
+        vm.on_update.assert_called_once()
+
+
+class TestSwitchToHistory:
+    def test_snapshots_state(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        vm.page_no = 3
+        vm.sort_column = "A"
+        vm.sort_ascending = False
+        vm._ai_buffer = [{"x": 1}]
+        vm.switch_to_history()
+        assert vm._realtime_snapshot["page_no"] == 3
+        assert vm._realtime_snapshot["sort_column"] == "A"
+        assert vm._realtime_snapshot["sort_ascending"] is False
+        assert vm._realtime_snapshot["ai_buffer"] == [{"x": 1}]
+
+    def test_clears_results(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1]})
+        vm.switch_to_history()
+        assert vm._full_results is None
+
+    def test_resets_page_and_sort(self, vm):
+        vm.page_no = 5
+        vm.sort_column = "B"
+        vm.sort_ascending = False
+        vm.switch_to_history()
+        assert vm.page_no == 1
+        assert vm.sort_column is None
+        assert vm.sort_ascending is True
+
+    def test_changes_mode(self, vm):
+        vm.switch_to_history()
+        assert vm.mode == "HISTORY"
+
+    def test_noop_if_already_history(self, vm):
+        vm.mode = "HISTORY"
+        vm._full_results = pd.DataFrame({"A": [1]})
+        vm.switch_to_history()
+        assert vm._full_results is not None
+
+
+class TestSwitchToRealtime:
+    def test_restores_snapshot(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        vm.page_no = 3
+        vm.sort_column = "A"
+        vm.sort_ascending = False
+        vm._ai_buffer = [{"x": 1}]
+        vm.switch_to_history()
+        vm.switch_to_realtime()
+        assert vm.page_no == 3
+        assert vm.sort_column == "A"
+        assert vm.sort_ascending is False
+
+    def test_clears_snapshot(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1]})
+        vm.switch_to_history()
+        vm.switch_to_realtime()
+        assert vm._realtime_snapshot is None
+
+    def test_changes_mode(self, vm):
+        vm.switch_to_history()
+        vm.switch_to_realtime()
+        assert vm.mode == "REALTIME"
+
+    def test_merges_discarded_buffer(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1]})
+        vm._ai_buffer = []
+        vm.switch_to_history()
+        vm._discarded_buffer = [{"y": 2}]
+        vm.switch_to_realtime()
+        assert {"y": 2} in vm._ai_buffer
+
+    def test_noop_if_already_realtime(self, vm):
+        vm.mode = "REALTIME"
+        vm.on_update = MagicMock()
+        vm.switch_to_realtime()
+        vm.on_update.assert_not_called()
+
+    def test_calls_on_update(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1]})
+        vm.switch_to_history()
+        vm.on_update = MagicMock()
+        vm.switch_to_realtime()
+        vm.on_update.assert_called_once()
+
+
+class TestGetExportData:
+    def test_returns_none_for_none_results(self, vm):
+        vm._full_results = None
+        assert vm.get_export_data() is None
+
+    def test_returns_none_for_empty_df(self, vm):
+        vm._full_results = pd.DataFrame()
+        assert vm.get_export_data() is None
+
+    def test_returns_dataframe(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        result = vm.get_export_data()
+        assert result is not None
+        assert len(result) == 2
+
+
+class TestExportResultsEmpty:
+    @pytest.mark.asyncio
+    async def test_returns_none_and_message_for_none(self, vm):
+        vm._full_results = None
+        path, msg = await vm.export_results("/tmp/test.csv")
+        assert path is None
+        assert msg == "No data to export"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_and_message_for_empty(self, vm):
+        vm._full_results = pd.DataFrame()
+        path, msg = await vm.export_results("/tmp/test.csv")
+        assert path is None
+        assert msg == "No data to export"
