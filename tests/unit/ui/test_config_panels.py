@@ -9,7 +9,7 @@ from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 
 
 @pytest.fixture
-def mock_config_handler():
+def mock_ch_for_panels():
     with patch("ui.components.config_panels.tushare_config_panel.ConfigHandler") as m:
         m.get_token.return_value = ""
         m.save_token.return_value = True
@@ -133,7 +133,7 @@ def mock_llm_providers():
                 yield
 
 
-def _make_tushare_panel(mock_config_handler, mock_i18n, mock_page, **kwargs):
+def _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, **kwargs):
     panel = TushareConfigPanel(**kwargs)
     panel.page = mock_page
     return panel
@@ -158,51 +158,51 @@ def _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, **kwargs):
 
 
 class TestTushareConfigPanel:
-    def test_load_config_populates_token_from_saved(self, mock_config_handler, mock_i18n, mock_page):
-        mock_config_handler.get_token.return_value = "saved_token_123"
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
+    def test_load_config_populates_token_from_saved(self, mock_ch_for_panels, mock_i18n, mock_page):
+        mock_ch_for_panels.get_token.return_value = "saved_token_123"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         assert panel.token_input.value == "saved_token_123"
 
-    def test_load_config_defaults_empty_token(self, mock_config_handler, mock_i18n, mock_page):
-        mock_config_handler.get_token.return_value = None
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
+    def test_load_config_defaults_empty_token(self, mock_ch_for_panels, mock_i18n, mock_page):
+        mock_ch_for_panels.get_token.return_value = None
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         assert panel.token_input.value == ""
 
-    def test_save_click_calls_on_save_with_config(self, mock_config_handler, mock_i18n, mock_page):
+    def test_save_click_calls_on_save_with_config(self, mock_ch_for_panels, mock_i18n, mock_page):
         on_save = MagicMock()
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page, on_save=on_save)
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_save=on_save)
         panel.token_input.value = "my_token"
         panel._on_save_click(MagicMock())
         on_save.assert_called_once_with({"token": "my_token"})
 
-    def test_get_current_config_returns_token(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
+    def test_get_current_config_returns_token(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.token_input.value = "  abc  "
         config = panel.get_current_config()
         assert config == {"token": "abc"}
 
-    def test_set_config_updates_token_input(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
+    def test_set_config_updates_token_input(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.set_config({"token": "new_token"})
         assert panel.token_input.value == "new_token"
 
-    def test_reload_config_refreshes_from_config_handler(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
-        mock_config_handler.get_token.return_value = "refreshed_token"
+    def test_reload_config_refreshes_from_config_handler(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        mock_ch_for_panels.get_token.return_value = "refreshed_token"
         panel.reload_config()
         assert panel.token_input.value == "refreshed_token"
 
     @pytest.mark.asyncio
-    async def test_verify_token_empty_shows_error(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
+    async def test_verify_token_empty_shows_error(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.token_input.value = ""
         result = await panel.verify_token()
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_verify_token_success_saves_and_notifies(self, mock_config_handler, mock_i18n, mock_page):
+    async def test_verify_token_success_saves_and_notifies(self, mock_ch_for_panels, mock_i18n, mock_page):
         on_verify = MagicMock()
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page, on_verify_success=on_verify)
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
         panel.token_input.value = "valid_token"
 
         with (
@@ -220,32 +220,32 @@ class TestTushareConfigPanel:
             result = await panel.verify_token()
 
         assert result is True
-        mock_config_handler.save_token.assert_called_once_with("valid_token")
+        mock_ch_for_panels.save_token.assert_called_once_with("valid_token")
         on_verify.assert_called_once_with("valid_token")
 
     @pytest.mark.asyncio
-    async def test_verify_token_failure_returns_false(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page)
+    async def test_verify_token_failure_returns_false(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.token_input.value = "bad_token"
 
         with patch("tushare.set_token"), patch("tushare.pro_api", side_effect=Exception("invalid token")):
             result = await panel.verify_token()
 
         assert result is False
-        mock_config_handler.save_token.assert_not_called()
+        mock_ch_for_panels.save_token.assert_not_called()
 
-    def test_on_input_change_calls_on_change(self, mock_config_handler, mock_i18n, mock_page):
+    def test_on_input_change_calls_on_change(self, mock_ch_for_panels, mock_i18n, mock_page):
         on_change = MagicMock()
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page, on_change=on_change)
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_change=on_change)
         panel._on_input_change(MagicMock())
         on_change.assert_called_once()
 
-    def test_save_button_visibility(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page, show_save_button=True)
+    def test_save_button_visibility(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=True)
         assert panel.save_button.visible is True
 
-    def test_save_button_hidden_when_disabled(self, mock_config_handler, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_config_handler, mock_i18n, mock_page, show_save_button=False)
+    def test_save_button_hidden_when_disabled(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=False)
         assert panel.save_button.visible is False
 
 

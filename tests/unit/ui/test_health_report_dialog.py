@@ -1,3 +1,5 @@
+import contextlib
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -44,12 +46,10 @@ class TestHealthReportDialog:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.patches = _apply_patches(mock_i18n, mock_app_colors)
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in _apply_patches(mock_i18n, mock_app_colors):
+                stack.enter_context(p)
+            yield
 
     def _make_report(self, status="green"):
         return {
@@ -113,16 +113,16 @@ class TestHealthReportDialog:
 
 
 class TestHealthScoreCard:
+    # HealthScoreCard.__init__ is marked pragma: no cover, so we test
+    # the mapping logic via class attributes instead of instantiation.
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.patches = _apply_patches(mock_i18n, mock_app_colors)
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in _apply_patches(mock_i18n, mock_app_colors):
+                stack.enter_context(p)
+            yield
 
     def test_status_map_green_has_excellent_key(self):
         from ui.components.health_report_dialog import HealthScoreCard
@@ -154,12 +154,10 @@ class TestKeyMetricsGrid:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.patches = _apply_patches(mock_i18n, mock_app_colors)
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in _apply_patches(mock_i18n, mock_app_colors):
+                stack.enter_context(p)
+            yield
 
     def _make_grid(self, lag_days=0, gap_count=0, sanity_errors=0, latest_local="N/A"):
         from ui.components.health_report_dialog import KeyMetricsGrid
@@ -190,12 +188,10 @@ class TestCoverageDetailTable:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.patches = _apply_patches(mock_i18n, mock_app_colors)
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in _apply_patches(mock_i18n, mock_app_colors):
+                stack.enter_context(p)
+            yield
 
     def test_creates_with_stock_tables(self):
         from ui.components.health_report_dialog import CoverageDetailTable

@@ -491,9 +491,9 @@ class TestScreenerViewModelOnAiResultStream:
         screener_vm.on_log = MagicMock()
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = False
-        with patch("ui.viewmodels.screener_view_model.asyncio") as mock_aio:
-            mock_loop = MagicMock()
-            mock_aio.get_running_loop.return_value = mock_loop
+        screener_vm._flush_ai_buffer = MagicMock()
+        mock_loop = MagicMock()
+        with patch.object(asyncio, "get_running_loop", return_value=mock_loop):
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
         assert len(screener_vm._ai_buffer) == 1
@@ -540,6 +540,8 @@ class TestScreenerViewModelRunStrategyExecution:
             strategy.filter = MagicMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]}))
         return strategy
 
+    # Capture the coroutine_factory that run_strategy submits to TaskManager,
+    # then execute it manually to test the inner _execute_screening logic.
     async def _capture_and_execute(self, strategy_key, save_results=True, params=None, strategy=None):
         if strategy is None:
             strategy = self._make_strategy()
@@ -1071,14 +1073,14 @@ class TestScreenerViewModelOnAiResultStreamFlush:
         screener_vm._flush_pending = False
         screener_vm._main_loop = MagicMock()
         screener_vm._main_loop.is_running.return_value = True
+        screener_vm._flush_ai_buffer = MagicMock()
 
-        with patch("ui.viewmodels.screener_view_model.asyncio") as mock_aio:
-            mock_aio.get_running_loop.side_effect = RuntimeError("no loop")
-            mock_aio.run_coroutine_threadsafe = MagicMock()
+        with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError("no loop")), \
+             patch.object(asyncio, "run_coroutine_threadsafe") as mock_rcts:
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
 
-        mock_aio.run_coroutine_threadsafe.assert_called_once()
+        mock_rcts.assert_called_once()
         assert len(screener_vm._ai_buffer) == 1
 
     def test_flush_no_loop_available(self, screener_vm):
@@ -1087,8 +1089,7 @@ class TestScreenerViewModelOnAiResultStreamFlush:
         screener_vm._flush_pending = False
         screener_vm._main_loop = None
 
-        with patch("ui.viewmodels.screener_view_model.asyncio") as mock_aio:
-            mock_aio.get_running_loop.side_effect = RuntimeError("no loop")
+        with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError("no loop")):
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
 
@@ -1100,9 +1101,9 @@ class TestScreenerViewModelOnAiResultStreamFlush:
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = True
 
-        with patch("ui.viewmodels.screener_view_model.asyncio") as mock_aio:
+        with patch.object(asyncio, "get_running_loop") as mock_get_loop:
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
 
-        mock_aio.get_running_loop.assert_not_called()
+        mock_get_loop.assert_not_called()
         assert len(screener_vm._ai_buffer) == 1

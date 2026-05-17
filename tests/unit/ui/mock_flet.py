@@ -145,7 +145,9 @@ class MockFletPage:
         try:
             result = func(*args, **kwargs)
             if asyncio.iscoroutine(result):
-                mock_task._coro = result
+                # Intentionally not awaiting: MockFletPage has no real event loop.
+                # The _coro attribute is stored for test inspection only.
+                mock_task._coro = result  # noqa: RUF006
         except Exception:
             pass
         self._tasks.append(mock_task)

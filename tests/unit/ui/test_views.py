@@ -721,6 +721,15 @@ class TestAppLayout:
         mock_task.cancel.assert_called_once()
         assert layout._pending_tab_index == 2
 
+    def test_change_tab_cancels_previous_debounce_rapid(self, mock_page):
+        layout = self._make_layout(mock_page)
+        layout._current_tab_index = 0
+        first_task = MagicMock()
+        layout._debounce_task = first_task
+        with patch("ui.app_layout.asyncio.sleep", new_callable=AsyncMock):
+            layout.change_tab(1)
+        first_task.cancel.assert_called_once()
+
     def test_subscribe_events_subscribes_i18n(self, mock_page):
         layout = self._make_layout(mock_page)
         self.mock_i18n.subscribe.assert_called_with(layout._on_locale_change)
