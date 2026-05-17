@@ -706,10 +706,10 @@ class CacheManager:
         check_coros = [_check_single_table(t, m) for t, m in monitored_tables.items()]
         gather_results = await asyncio.gather(*check_coros, return_exceptions=True)
         for item in gather_results:
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
                 logger.warning("[CacheManager] Health | Table check failed: %s", item)
                 continue
-            table_name, table_result = item
+            table_name, table_result = item  # type: ignore[misc]
             results[table_name] = table_result
 
         return {"total_stocks": total_stocks, "tables": results, "global_trade_days": global_trade_days}
