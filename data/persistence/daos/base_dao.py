@@ -486,7 +486,7 @@ class BaseDao:
 
                         return pd.to_datetime(clean_val).date()
                     except (ValueError, TypeError) as e:
-                        logger.debug(f"[BaseDao] Pandas date parse skipped for '{clean_val}': {e}")
+                        logger.debug("[BaseDao] Pandas date parse skipped for '%s': %s", clean_val, e)
             except (ValueError, TypeError):
                 logger.warning("[BaseDao] Failed to convert date string: %s", val)
                 pass

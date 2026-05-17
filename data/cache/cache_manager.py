@@ -88,7 +88,7 @@ class CacheManager:
             return
 
         self._create_engine(connection_string)
-        logger.debug(f"[CacheManager] Initialized with AsyncEngine: {self._sanitize_url(connection_string)}")
+        logger.debug("[CacheManager] Initialized with AsyncEngine: %s", self._sanitize_url(connection_string))
 
     def _get_connection_string(self) -> str | None:
         """Get database connection string from config."""
@@ -151,7 +151,7 @@ class CacheManager:
         self.macro_dao.engine = self.engine
         self.holder_dao.engine = self.engine
 
-        logger.debug(f"[CacheManager] Engine created: {self._sanitize_url(connection_string)}")
+        logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
     @property
     def _maintenance_event(self):
@@ -184,7 +184,7 @@ class CacheManager:
 
             BaseDao._get_maintenance_event().set()
         except Exception as e:
-            logger.debug(f"[CacheManager] Maintenance event set failed during dispose: {e}")
+            logger.debug("[CacheManager] Maintenance event set failed during dispose: %s", e)
         self._maintenance_event.set()
 
         # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
@@ -212,7 +212,7 @@ class CacheManager:
             try:
                 publish_time = pd.to_datetime(publish_time).to_pydatetime()
             except (ValueError, TypeError) as e:
-                logger.debug(f"[CacheManager] Failed to parse publish_time '{publish_time}': {e}")
+                logger.debug("[CacheManager] Failed to parse publish_time '%s': %s", publish_time, e)
                 publish_time = get_now().replace(tzinfo=None)
 
         return {
@@ -298,7 +298,7 @@ class CacheManager:
 
                 BaseDao._get_maintenance_event().set()
             except Exception as e:
-                logger.debug(f"[CacheManager] Failed to set BaseDao maintenance event: {e}")
+                logger.debug("[CacheManager] Failed to set BaseDao maintenance event: %s", e)
             self._maintenance_event.set()
 
     # --- DELAGATIONS START HERE ---
@@ -995,7 +995,7 @@ class CacheManager:
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):
             if isinstance(raw, Exception):
-                logger.warning(f"[CacheManager] prefetch_auxiliary_data: {key} query failed: {raw}")
+                logger.warning("[CacheManager] prefetch_auxiliary_data: %s query failed: %s", key, raw)
                 batch_results[key] = None
             else:
                 batch_results[key] = raw
@@ -1048,7 +1048,7 @@ class CacheManager:
         from data.persistence.daos.quote_dao import _SAFE_TABLE_NAMES
 
         if table_name not in _SAFE_TABLE_NAMES:
-            logger.warning(f"[CacheManager] Invalid table name rejected: {table_name}")
+            logger.warning("[CacheManager] Invalid table name rejected: %s", table_name)
             return False
 
         try:
@@ -1056,7 +1056,7 @@ class CacheManager:
 
             tbl = ModelsBase.metadata.tables.get(table_name)
             if tbl is None:
-                logger.warning(f"[CacheManager] Unknown table in check_table_has_data: {table_name}")
+                logger.warning("[CacheManager] Unknown table in check_table_has_data: %s", table_name)
                 return False
             if self.engine is None:
                 raise RuntimeError("Database engine not initialized")
@@ -1064,5 +1064,5 @@ class CacheManager:
                 result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
                 return result.first() is not None
         except Exception as e:
-            logger.warning(f"[CacheManager] check_table_has_data failed for {table_name}: {e}")
+            logger.warning("[CacheManager] check_table_has_data failed for %s: %s", table_name, e)
             return False
