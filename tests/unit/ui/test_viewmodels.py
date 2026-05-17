@@ -1075,8 +1075,10 @@ class TestScreenerViewModelOnAiResultStreamFlush:
         screener_vm._main_loop.is_running.return_value = True
         screener_vm._flush_ai_buffer = MagicMock()
 
-        with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError("no loop")), \
-             patch.object(asyncio, "run_coroutine_threadsafe") as mock_rcts:
+        with (
+            patch.object(asyncio, "get_running_loop", side_effect=RuntimeError("no loop")),
+            patch.object(asyncio, "run_coroutine_threadsafe") as mock_rcts,
+        ):
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
 
