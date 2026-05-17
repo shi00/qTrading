@@ -298,10 +298,14 @@ class LocalModelConfigPanel(ft.Container):
             self.content = form_content
 
     def _on_input_change(self, e):
-        if e is not None and isinstance(e.control, ft.Slider):
-            val = e.control.value
-            e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
-            e.control.update()
+        if e is not None:
+            try:
+                if isinstance(e.control, ft.Slider):
+                    val = e.control.value
+                    e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
+                    e.control.update()
+            except AttributeError:
+                pass
 
         if self.on_change:
             self.on_change()
