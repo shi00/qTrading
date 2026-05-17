@@ -1,3 +1,4 @@
+import contextlib
 import math
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +8,8 @@ from tests.unit.ui.conftest import set_page
 
 
 class TestStockDetailDialogFormatVal:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -15,11 +18,10 @@ class TestStockDetailDialogFormatVal:
             patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_dialog(self, data=None):
         from ui.components.stock_detail_dialog import StockDetailDialog
@@ -53,6 +55,8 @@ class TestStockDetailDialogFormatVal:
 
 
 class TestStockDetailDialogFormatMv:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -61,11 +65,10 @@ class TestStockDetailDialogFormatMv:
             patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_dialog(self, data=None):
         from ui.components.stock_detail_dialog import StockDetailDialog
@@ -94,6 +97,8 @@ class TestStockDetailDialogFormatMv:
 
 
 class TestStockDetailDialogFormatVol:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -102,11 +107,10 @@ class TestStockDetailDialogFormatVol:
             patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_dialog(self, data=None):
         from ui.components.stock_detail_dialog import StockDetailDialog
@@ -135,6 +139,8 @@ class TestStockDetailDialogFormatVol:
 
 
 class TestStockDetailDialogFormatAmount:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -143,11 +149,10 @@ class TestStockDetailDialogFormatAmount:
             patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_dialog(self, data=None):
         from ui.components.stock_detail_dialog import StockDetailDialog
@@ -171,6 +176,8 @@ class TestStockDetailDialogFormatAmount:
 
 
 class TestStockDetailDialog:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -179,11 +186,10 @@ class TestStockDetailDialog:
             patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_dialog(self, data=None, data_processor=None):
         from ui.components.stock_detail_dialog import StockDetailDialog
@@ -251,7 +257,8 @@ def _async_empty_df():
     import asyncio
     import pandas as pd
 
-    fut = asyncio.Future()
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
     fut.set_result(pd.DataFrame())
     return fut
 
@@ -259,6 +266,7 @@ def _async_empty_df():
 def _async_b64():
     import asyncio
 
-    fut = asyncio.Future()
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
     fut.set_result("base64data")
     return fut

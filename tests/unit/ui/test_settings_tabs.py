@@ -1,3 +1,4 @@
+import contextlib
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,8 @@ from tests.unit.ui.conftest import set_page, wrap_mock_page
 
 
 class TestAutomationTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles, mock_config_handler):
         self.mock_i18n = mock_i18n
@@ -22,11 +25,10 @@ class TestAutomationTab:
             patch("ui.views.settings_tabs.automation_tab.DashboardCard", MagicMock()),
             patch("ui.views.settings_tabs.automation_tab.SettingRow", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.settings_tabs.automation_tab import AutomationTab
@@ -164,7 +166,7 @@ class TestAutomationTab:
         set_page(tab, mock_page)
         tab._on_locale_change("zh_CN")
         expected_keys = [opt.key for opt in tab._build_time_options()]
-        actual_keys = [opt.key for opt in tab.schedule_time.options]
+        actual_keys = [opt.key for opt in (tab.schedule_time.options or [])]
         assert actual_keys == expected_keys
 
     def test_update_theme_sets_input_colors(self, mock_page):
@@ -441,6 +443,8 @@ class TestAutomationTab:
 
 
 class TestAIBrainTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles, mock_config_handler):
         self.mock_i18n = mock_i18n
@@ -462,11 +466,10 @@ class TestAIBrainTab:
             patch("ui.views.settings_tabs.ai_brain_tab.DEFAULT_AI_PROMPT", "default_prompt"),
             patch("ui.views.settings_tabs.ai_brain_tab.DEFAULT_NEWS_PROMPT", "default_news"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
@@ -591,6 +594,8 @@ class TestAIBrainTab:
 
 
 class TestSystemTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles, mock_config_handler):
         self.mock_i18n = mock_i18n
@@ -608,11 +613,10 @@ class TestSystemTab:
             patch("ui.views.settings_tabs.system_tab.SettingRow", MagicMock()),
             patch("ui.views.settings_tabs.system_tab.UILogger"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.settings_tabs.system_tab import SystemTab
@@ -790,6 +794,8 @@ class TestSystemTab:
 
 
 class TestDataSourceTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles, mock_config_handler):
         self.mock_i18n = mock_i18n
@@ -814,11 +820,10 @@ class TestDataSourceTab:
             patch("ui.views.settings_tabs.data_source_tab.MetricCard", MetricCard),
             patch("ui.views.settings_tabs.data_source_tab.UILogger"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
@@ -890,6 +895,8 @@ class TestDataSourceTab:
 
 
 class TestDatabaseTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -899,11 +906,10 @@ class TestDatabaseTab:
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.settings_tabs.database_tab import DatabaseTab
@@ -934,6 +940,8 @@ class TestDatabaseTab:
 
 
 class TestNotificationsTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles, mock_config_handler):
         self.mock_i18n = mock_i18n
@@ -949,11 +957,10 @@ class TestNotificationsTab:
             patch("ui.views.settings_tabs.automation_tab.DashboardCard", MagicMock()),
             patch("ui.views.settings_tabs.automation_tab.SettingRow", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.settings_tabs.automation_tab import NotificationsTab

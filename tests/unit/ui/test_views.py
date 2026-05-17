@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,8 @@ def _build_mock_task_manager():
 
 
 class TestSettingsView:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -41,11 +44,10 @@ class TestSettingsView:
             patch("ui.views.settings_view.NotificationsTab", MagicMock()),
             patch("ui.views.settings_view.SystemTab", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_view(self):
         from ui.views.settings_view import SettingsView
@@ -156,6 +158,8 @@ class TestSettingsView:
 
 
 class TestTaskCenterView:
+    patches: list
+
     def test_format_time_with_none(self):
         assert _format_time(None) == "--:--"
 
@@ -189,11 +193,10 @@ class TestTaskCenterView:
             patch("ui.views.task_center_view.TaskManager", return_value=self.mock_tm),
             patch("ui.views.task_center_view.UILogger"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_view(self, mock_page):
         return TaskCenterView(mock_page)
@@ -401,6 +404,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.RUNNING, progress=0.5, cancellable=True)
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_build_task_card_completed(self, mock_page):
         view = self._make_view(mock_page)
@@ -408,6 +413,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.COMPLETED, progress=1.0)
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_build_task_card_failed(self, mock_page):
         view = self._make_view(mock_page)
@@ -415,6 +422,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.FAILED, error="some error")
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_build_task_card_cancelled(self, mock_page):
         view = self._make_view(mock_page)
@@ -422,6 +431,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.CANCELLED, progress=0.3)
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_build_task_card_interrupted(self, mock_page):
         view = self._make_view(mock_page)
@@ -429,6 +440,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.INTERRUPTED, progress=0.4)
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_build_task_card_queued(self, mock_page):
         view = self._make_view(mock_page)
@@ -436,6 +449,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.QUEUED, cancellable=True)
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_build_task_card_not_cancellable_running(self, mock_page):
         view = self._make_view(mock_page)
@@ -443,6 +458,8 @@ class TestTaskCenterView:
         task = self._make_task(status=TaskStatus.RUNNING, cancellable=False)
         card = view._build_task_card(task)
         assert card is not None
+        assert isinstance(card, ft.Container)
+        assert card.content is not None
 
     def test_on_tasks_updated_mounted(self, mock_page):
         view = self._make_view(mock_page)
@@ -497,6 +514,8 @@ class TestTaskCenterView:
 
 
 class TestHomeView:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -514,11 +533,10 @@ class TestHomeView:
             patch("ui.views.home_view.CacheManager"),
             patch("ui.views.home_view.UILogger"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_view(self):
         from ui.views.home_view import HomeView
@@ -601,6 +619,8 @@ class TestHomeView:
 
 
 class TestAppLayout:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -614,11 +634,10 @@ class TestAppLayout:
             patch("ui.app_layout.TaskCenterView", MagicMock()),
             patch("ui.app_layout.SettingsView", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_layout(self, mock_page):
         from ui.app_layout import AppLayout
@@ -811,16 +830,18 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         layout.body.update = MagicMock()
         layout.nav_rail.update = MagicMock()
-        from ui import app_layout
-
-        original_sv = app_layout.ScreenerView
-        app_layout.ScreenerView = type("_FakeSV", (), {"__init__": lambda self, *a, **kw: None})
-        layout._view_cache[1] = MagicMock()
-        try:
+        FakeSV = type(
+            "FakeScreenerView",
+            (),
+            {
+                "__init__": lambda self, *a, **kw: None,
+                "select_and_run_strategy": AsyncMock(),
+            },
+        )
+        with patch("ui.app_layout.ScreenerView", FakeSV):
+            layout._view_cache[1] = FakeSV()
             await layout.run_strategy_from_home("test_strategy")
             assert layout._current_tab_index == 1
-        finally:
-            app_layout.ScreenerView = original_sv
 
     @pytest.mark.asyncio
     async def test_run_strategy_from_home_calls_select_and_run(self, mock_page):
@@ -828,22 +849,13 @@ class TestAppLayout:
         layout.body.update = MagicMock()
         layout.nav_rail.update = MagicMock()
 
-        class _FakeSV:
-            async def select_and_run_strategy(self, key):
-                pass
-
-        from ui import app_layout
-
-        original_sv = app_layout.ScreenerView
-        app_layout.ScreenerView = _FakeSV
-        mock_screener = MagicMock(spec=_FakeSV)
-        mock_screener.select_and_run_strategy = AsyncMock()
-        layout._view_cache[1] = mock_screener
-        try:
+        FakeSV = type("FakeScreenerView", (), {"__init__": lambda self, *a, **kw: None})
+        with patch("ui.app_layout.ScreenerView", FakeSV):
+            mock_screener = MagicMock(spec=FakeSV)
+            mock_screener.select_and_run_strategy = AsyncMock()
+            layout._view_cache[1] = mock_screener
             await layout.run_strategy_from_home("my_strategy")
             mock_screener.select_and_run_strategy.assert_called_once_with("my_strategy")
-        finally:
-            app_layout.ScreenerView = original_sv
 
     @pytest.mark.asyncio
     async def test_run_strategy_from_home_cancels_existing_debounce(self, mock_page):
@@ -852,13 +864,15 @@ class TestAppLayout:
         layout.nav_rail.update = MagicMock()
         mock_task = MagicMock()
         layout._debounce_task = mock_task
-        from ui import app_layout
-
-        original_sv = app_layout.ScreenerView
-        app_layout.ScreenerView = type("_FakeSV", (), {"__init__": lambda self, *a, **kw: None})
-        layout._view_cache[1] = MagicMock()
-        try:
+        FakeSV = type(
+            "FakeScreenerView",
+            (),
+            {
+                "__init__": lambda self, *a, **kw: None,
+                "select_and_run_strategy": AsyncMock(),
+            },
+        )
+        with patch("ui.app_layout.ScreenerView", FakeSV):
+            layout._view_cache[1] = FakeSV()
             await layout.run_strategy_from_home("test_strategy")
             mock_task.cancel.assert_called_once()
-        finally:
-            app_layout.ScreenerView = original_sv

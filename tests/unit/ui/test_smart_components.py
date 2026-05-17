@@ -154,14 +154,9 @@ class TestToastManager:
 
     def test_register_task_adds_to_active_tasks(self, mock_page):
         manager = ToastManager(mock_page)
-        loop = asyncio.new_event_loop()
-        task = loop.create_task(asyncio.sleep(0))
-
-        manager._register_task(task)
-
-        assert task in manager._active_tasks
-        task.cancel()
-        loop.close()
+        mock_task = MagicMock(spec=asyncio.Task)
+        manager._register_task(mock_task)
+        assert mock_task in manager._active_tasks
 
     def test_register_task_ignores_non_task(self, mock_page):
         manager = ToastManager(mock_page)
@@ -171,16 +166,13 @@ class TestToastManager:
 
         assert len(manager._active_tasks) == 0
 
-    def test_register_task_auto_cleans_on_done(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_register_task_auto_cleans_on_done(self, mock_page):
         manager = ToastManager(mock_page)
-        loop = asyncio.new_event_loop()
-        try:
-            task = loop.create_task(asyncio.sleep(0))
-            manager._register_task(task)
-            loop.run_until_complete(task)
-            assert task not in manager._active_tasks
-        finally:
-            loop.close()
+        task = asyncio.create_task(asyncio.sleep(0))
+        manager._register_task(task)
+        await task
+        assert task not in manager._active_tasks
 
 
 class TestToastCard:

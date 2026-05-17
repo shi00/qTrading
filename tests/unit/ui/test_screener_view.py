@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime
 from unittest.mock import MagicMock, patch
 
@@ -109,6 +110,8 @@ class TestBuildTableData:
 
 
 class TestScreenerView:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
         self.mock_i18n = mock_i18n
@@ -139,11 +142,10 @@ class TestScreenerView:
                 "flet.core.control.Control.update"
             ),  # no-op: Flet update() requires page binding; UI state tested via mock attributes
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_view(self, mock_page):
         view = ScreenerView(mock_page)

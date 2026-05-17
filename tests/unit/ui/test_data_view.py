@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -7,6 +8,8 @@ from tests.unit.ui.conftest import set_page, wrap_mock_page
 
 
 class TestDataExplorerView:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
         self.mock_i18n = mock_i18n
@@ -20,11 +23,10 @@ class TestDataExplorerView:
             patch("ui.views.data_view.ThreadPoolManager", MagicMock()),
             patch("ui.views.data_view.MetaDataManager", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_view(self):
         from ui.views.data_view import DataExplorerView
@@ -132,6 +134,8 @@ class TestDataExplorerView:
 
 
 class TestTableViewerTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
         self.mock_i18n = mock_i18n
@@ -144,11 +148,10 @@ class TestTableViewerTab:
             patch("ui.views.data_view.AppStyles", self.mock_as),
             patch("ui.views.data_view.MetaDataManager"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.data_view import TableViewerTab
@@ -262,6 +265,8 @@ class TestTableViewerTab:
 
 
 class TestSQLConsoleTab:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
         self.mock_i18n = mock_i18n
@@ -274,11 +279,10 @@ class TestSQLConsoleTab:
             patch("ui.views.data_view.AppStyles", self.mock_as),
             patch("ui.views.data_view.MetaDataManager"),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_tab(self):
         from ui.views.data_view import SQLConsoleTab

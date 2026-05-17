@@ -1111,14 +1111,16 @@ class TestLLMConfigPanelExtended:
             "azure_deployment_name": "deploy",
             "api_version": "2024-02-01",
         }
-        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
+        on_test = AsyncMock()
+        panel = _make_llm_panel(
+            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+        )
         panel.api_key_input.value = "azure-key"
         panel.azure_resource_input.value = ""
         panel.azure_deployment_input.value = "deploy"
         with patch.object(panel, "_safe_update"):
             await panel._on_llm_test_connection()
-        on_test = panel.on_test_connection
-        assert on_test is None or not hasattr(panel, "_test_called")
+        on_test.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_on_llm_test_connection_azure_missing_deployment(

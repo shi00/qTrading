@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,6 +43,8 @@ class TestStepConfig:
 
 
 class TestOnboardingWizard:
+    patches: list
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
         self.mock_i18n = mock_i18n
@@ -58,11 +61,10 @@ class TestOnboardingWizard:
             patch("ui.views.onboarding_wizard.LLMConfigPanel", MagicMock()),
             patch("ui.views.onboarding_wizard.LocalModelConfigPanel", MagicMock()),
         ]
-        for p in self.patches:
-            p.start()
-        yield
-        for p in self.patches:
-            p.stop()
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
     def _make_wizard(self, mock_page, on_complete=None):
         from ui.views.onboarding_wizard import OnboardingWizard
