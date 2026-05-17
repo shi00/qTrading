@@ -86,6 +86,8 @@ decorator==5.2.1
     # via akshare
 defusedxml==0.7.1
     # via py-serializable
+diskcache==5.6.3
+    # via llama-cpp-python
 distro==1.9.0
     # via openai
 et-xmlfile==2.0.0
