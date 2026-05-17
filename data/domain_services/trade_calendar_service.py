@@ -187,7 +187,7 @@ class TradeCalendarService:
                         return True
 
             # 2. 调 API 批量拉取完整日历（不带 is_open 过滤）
-            df = await self._api.get_trade_cal(start_date=start_obj, end_date=end_obj)
+            df = await self._api.get_trade_cal(start_date=start_obj, end_date=end_obj)  # type: ignore[arg-type]
             if df is not None and not df.empty:
                 await self._ensure_data_persisted(df)
                 logger.info(f"[TradeCalendarService] Bulk synced {len(df)} calendar records ({start_obj} to {end_obj})")
@@ -302,7 +302,7 @@ class TradeCalendarService:
                     dates = pd.to_datetime(trade_df["cal_date"]).dt.date.tolist()  # type: ignore[union-attr]
                     return sorted(dates)
 
-            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)
+            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
             if offline_dates:
                 return [parse_date(d).date() for d in offline_dates]
 
@@ -313,7 +313,7 @@ class TradeCalendarService:
                 f"[TradeCalendarService] get_trade_dates failed: {e}",
                 exc_info=True,
             )
-            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)
+            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
             if offline_dates:
                 return [parse_date(d).date() for d in offline_dates]
             return []
@@ -413,7 +413,7 @@ class TradeCalendarService:
         if dates_before:
             return dates_before[-1]
 
-        offline_dates = self._offline.get_trade_dates(lookback_start, date_obj)
+        offline_dates = self._offline.get_trade_dates(lookback_start, date_obj)  # type: ignore[arg-type]
         if offline_dates:
             offline_before = [parse_date(d).date() for d in offline_dates if parse_date(d).date() < date_obj]
             if offline_before:
@@ -451,7 +451,7 @@ class TradeCalendarService:
         if dates_after:
             return dates_after[0]
 
-        offline_dates = self._offline.get_trade_dates(date_obj, lookforward_end)
+        offline_dates = self._offline.get_trade_dates(date_obj, lookforward_end)  # type: ignore[arg-type]
         if offline_dates:
             offline_after = [parse_date(d).date() for d in offline_dates if parse_date(d).date() > date_obj]
             if offline_after:

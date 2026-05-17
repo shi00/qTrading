@@ -529,10 +529,10 @@ class DataSourceTab(ft.Container):
                         AppColors.SUCCESS,
                     )
 
-                market_info = result.get("market", {})
-                details = result.get("details", {})
+                market_info = result.get("market", {})  # type: ignore[union-attr]
+                details = result.get("details", {})  # type: ignore[union-attr]
 
-                latest = market_info.get("latest_local")
+                latest = market_info.get("latest_local")  # type: ignore[union-attr]
                 if not latest or str(latest) == "None":
                     display_date = I18n.get("ds_never_sync")
                 else:
@@ -543,7 +543,7 @@ class DataSourceTab(ft.Container):
                     AppColors.PRIMARY,
                 )
 
-                cov_val = details.get("financial_coverage", 0)
+                cov_val = details.get("financial_coverage", 0)  # type: ignore[union-attr]
                 if isinstance(cov_val, (int, float)):
                     cov_str = f"{cov_val:.1f}%"
                 else:
@@ -560,10 +560,10 @@ class DataSourceTab(ft.Container):
                     AppColors.SUCCESS,
                 )
 
-                miss_critical = details.get("missing_critical", 0)
-                miss_depth = details.get("missing_depth", 0)
-                miss_breadth = details.get("missing_breadth", 0)
-                lag = market_info.get("lag_days", 0)
+                miss_critical = details.get("missing_critical", 0)  # type: ignore[union-attr]
+                miss_depth = details.get("missing_depth", 0)  # type: ignore[union-attr]
+                miss_breadth = details.get("missing_breadth", 0)  # type: ignore[union-attr]
+                lag = market_info.get("lag_days", 0)  # type: ignore[union-attr]
 
                 sys_text = I18n.get("ds_health_summary_sys").format(
                     cov=cov_str,

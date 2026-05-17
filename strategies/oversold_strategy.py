@@ -185,7 +185,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
         # --- Phase 2: AI Analysis (via Mixin) ---
         candidates = self._sort_for_ai(candidates)
-        return await self.run_ai_analysis(candidates, context)
+        return await self.run_ai_analysis(candidates, context)  # type: ignore[arg-type]
 
     async def _math_filter(
         self,

@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright  # type: ignore[import-unresolved]
 
 # 动态获取项目根目录 (假设 script 位于项目下的 scripts/ 目录)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

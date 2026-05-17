@@ -282,7 +282,7 @@ class NewsFetcher:
             from utils.proxy_manager import ProxyManager
 
             proxy_config = ProxyManager.get_requests_proxy_config()
-            resp = requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {}))
+            resp = requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {}))  # type: ignore[arg-type]
             content = resp.text
 
             start = content.find("(")

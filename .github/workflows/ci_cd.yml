@@ -101,8 +101,8 @@ jobs:
 
       - name: Security Audit (pip-audit)
         run: |
-          pip-audit -s osv -r requirements.txt --desc --ignore-vuln CVE-2025-69872
-          pip-audit -s osv -r requirements-optional.txt --desc --ignore-vuln CVE-2025-69872
+          pip-audit -s osv -r requirements.txt --desc 
+          pip-audit -s osv -r requirements-optional.txt --desc 
 
       - name: Pyright Type Check
         # User explicitly requested this to fail the build if type errors occur

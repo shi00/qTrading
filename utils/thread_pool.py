@@ -75,7 +75,7 @@ class ThreadPoolManager:
         for handler in logger.handlers[:]:
             try:
                 handler.flush()
-                if hasattr(handler, "stream") and hasattr(handler.stream, "closed") and handler.stream.closed:
+                if hasattr(handler, "stream") and hasattr(handler.stream, "closed") and handler.stream.closed:  # type: ignore[attr-defined]
                     logger.removeHandler(handler)
             except (ValueError, OSError):
                 try:

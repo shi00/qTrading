@@ -9,7 +9,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page
+    from playwright.async_api import Page  # type: ignore[import-unresolved]
 
 # Dynamically add the project root to sys.path so it can run from anywhere
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,7 +136,7 @@ class DoubaoTagger:
             per_try_timeout_ms = max(1, remaining_budget_ms // remaining_selectors)
             try:
                 if kind == "role":
-                    locator = page.get_by_role(selector).first
+                    locator = page.get_by_role(selector).first  # type: ignore[arg-type]
                 else:
                     locator = page.locator(selector).first
                 await locator.wait_for(state="visible", timeout=per_try_timeout_ms)
@@ -280,7 +280,7 @@ class DoubaoTagger:
 
     async def run(self, limit: int = 0):
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import async_playwright  # type: ignore[import-unresolved]
         except ImportError as e:
             raise RuntimeError(
                 "Playwright 未安装，无法运行豆包自动打标。请执行 `pip install playwright && playwright install`。"

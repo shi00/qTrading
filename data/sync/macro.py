@@ -56,7 +56,7 @@ class MacroSyncStrategy(ISyncStrategy):
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync windows."""
         try:
-            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()
+            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
             if trade_date is None:
                 logger.warning("[MacroSync] get_latest_trade_date returned None, falling back to today.")
             elif isinstance(trade_date, datetime.datetime):
@@ -206,7 +206,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
                 years = ConfigHandler.get_init_history_years()
                 rough_start_date = today - datetime.timedelta(days=int(250 * years * 2.0))
-                all_dates = await self.context.processor.trade_calendar.get_trade_dates(
+                all_dates = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore[union-attr]
                     start_date=rough_start_date,
                     end_date=today,
                 )
@@ -263,7 +263,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
                 years = ConfigHandler.get_init_history_years()
                 rough_start_date = today_date - datetime.timedelta(days=int(250 * years * 2.0))
-                all_dates = await self.context.processor.trade_calendar.get_trade_dates(
+                all_dates = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore[union-attr]
                     start_date=rough_start_date,
                     end_date=today_date,
                 )

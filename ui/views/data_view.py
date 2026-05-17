@@ -235,7 +235,7 @@ class TableViewerTab(ft.Container):
                         ft.PopupMenuItem(  # pragma: no cover
                             text=I18n.get("data_export_current"),  # pragma: no cover
                             icon=ft.Icons.DOWNLOAD,  # pragma: no cover
-                            on_click=lambda e: self.page.run_task(  # pragma: no cover
+                            on_click=lambda e: self.page.run_task(  # type: ignore[union-attr]  # pragma: no cover
                                 self._export_csv,  # pragma: no cover
                                 current_page=True,  # pragma: no cover
                             ),  # pragma: no cover
@@ -542,7 +542,7 @@ class TableViewerTab(ft.Container):
                 TaskType.CPU,
                 functools.partial(
                     self.db_manager.query_table,
-                    self.current_table,
+                    self.current_table,  # type: ignore[arg-type]
                     page=self.current_page,
                     page_size=self.page_size,
                     filters=filters,
@@ -712,7 +712,7 @@ class TableViewerTab(ft.Container):
 
             query_func = functools.partial(
                 self.db_manager.query_table,
-                self.current_table,
+                self.current_table,  # type: ignore[arg-type]
                 page=self.current_page if current_page else 1,
                 page_size=self.page_size if current_page else 50000,
                 filters=filters,
@@ -808,7 +808,7 @@ class TableViewerTab(ft.Container):
             ):
                 col.label.content.color = AppColors.TABLE_HEADER_TEXT
 
-        for i, row in enumerate(self.data_table.rows):
+        for i, row in enumerate(self.data_table.rows):  # type: ignore[arg-type]
             row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
             for cell in row.cells:
                 content = cell.content

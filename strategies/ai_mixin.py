@@ -462,7 +462,7 @@ class AIStrategyMixin:
                     on_chunk=on_chunk_callback,
                     history_df=hist_df,
                     news=news_list,
-                    ui_prompt_override=ui_prompt_override,
+                    ui_prompt_override=ui_prompt_override,  # type: ignore[arg-type]
                     vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
                 )
 
@@ -694,7 +694,7 @@ class AIStrategyMixin:
 
             # 7d. History Feature Summary (Level-3: Factor Extraction + Summarization)
             history_text = self._build_history_text(
-                history_df,
+                history_df,  # type: ignore[arg-type]
                 ts_code=ts_code,
                 stock_name=row.get("name", ""),
                 vol_ratio_threshold=vol_ratio_threshold,
@@ -756,7 +756,7 @@ class AIStrategyMixin:
         try:
             # D11: Apply Forward Adjusted Prices (QFQ) to avoid split/dividend gaps fooling the AI
             df_qfq = TechnicalAnalysis._get_qfq_df(history_df)
-            df = df_qfq.sort_values("trade_date", ascending=True).copy()
+            df = df_qfq.sort_values("trade_date", ascending=True).copy()  # type: ignore[union-attr]
             close = df["close"]
 
             # MA Alignment
@@ -874,7 +874,7 @@ class AIStrategyMixin:
             # D11: Apply Forward Adjusted Prices (QFQ) to avoid split/dividend gaps fooling the AI
             df_qfq = TechnicalAnalysis._get_qfq_df(history_df)
             # Ensure chronological order
-            df = df_qfq.sort_values("trade_date", ascending=True).reset_index(drop=True)
+            df = df_qfq.sort_values("trade_date", ascending=True).reset_index(drop=True)  # type: ignore[union-attr]
 
             # Compute Macro Horizon
             macro_cagr = "N/A"
@@ -1073,7 +1073,7 @@ class AIStrategyMixin:
                 net_amt = sf(row.get("net_amount"))
                 net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
                 parts.append(
-                    f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"
+                    f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"  # type: ignore[arg-type]
                 )
             else:
                 parts.append(I18n.get("ai_top_list_no"))

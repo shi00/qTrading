@@ -360,9 +360,9 @@ class BaseDao:
                 for k, v in record.items():
                     if v is pd.NaT or (isinstance(v, type(pd.NaT)) and pd.isna(v)):
                         record[k] = None
-                    elif isinstance(v, (np.int64, np.int32, np.int16, np.int8)):
+                    elif isinstance(v, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore[arg-type]
                         record[k] = int(v)
-                    elif isinstance(v, (np.float64, np.float32)):
+                    elif isinstance(v, (np.float64, np.float32)):  # type: ignore[arg-type]
                         record[k] = float(v)
                     elif isinstance(v, np.bool_):
                         record[k] = bool(v)

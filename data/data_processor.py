@@ -408,7 +408,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 total_count = count
                 await self.cache.update_sync_status(
                     "stock_basic",
-                    get_now().date(),
+                    get_now().date(),  # type: ignore[arg-type]
                     total_count,
                 )
                 self._quality_tier = None
@@ -613,7 +613,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 df = await self.cache.get_moneyflow_hsgt(trade_date=date)
 
                 if df is None or df.empty:
-                    df = await self.api.get_moneyflow_hsgt(trade_date=date)
+                    df = await self.api.get_moneyflow_hsgt(trade_date=date)  # type: ignore[arg-type]
 
                 name = I18n.get("home_northbound")
                 if df is not None and not df.empty:

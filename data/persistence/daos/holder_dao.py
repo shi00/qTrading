@@ -78,7 +78,7 @@ class HolderDao(BaseDao):
             null_count = df["holder_name"].isna().sum()
             if null_count > 0:
                 logger.warning(f"[HolderDao] Filtering {null_count} rows with NULL holder_name from top10_holders")
-                df = df[df["holder_name"].notna()].copy()
+                df = df[df["holder_name"].notna()].copy()  # type: ignore[assignment]
             if df.empty:
                 return 0
         cols = get_model_columns(Top10Holders)

@@ -56,7 +56,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
     async def _get_effective_trade_date(self) -> datetime.date:  # pragma: no cover
         """Prefer the latest closed trade date for default sync windows."""
         try:
-            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()
+            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
             if trade_date is None:
                 logger.warning("[FinancialSync] get_latest_trade_date returned None, falling back to today.")
             elif isinstance(trade_date, datetime.datetime):
@@ -226,7 +226,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
         end_date = await self._get_effective_trade_date()
         years = ConfigHandler.get_init_history_years()
         rough_start_date = end_date - datetime.timedelta(days=int(250 * years * 2.0))
-        all_dates = await self.context.processor.trade_calendar.get_trade_dates(
+        all_dates = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore[union-attr]
             start_date=rough_start_date,
             end_date=end_date,
         )
@@ -287,7 +287,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                         async with self.context.cache.engine.begin() as tx_conn:
                             if has_actual_data:
                                 await self.context.cache.save_financial_reports(
-                                    df_merged[FINANCIAL_REPORT_SCHEMA_COLS],
+                                    df_merged[FINANCIAL_REPORT_SCHEMA_COLS],  # type: ignore[optional-subscript]
                                     conn=tx_conn,
                                 )
                             await self.context.cache.mark_stock_step4_completed(

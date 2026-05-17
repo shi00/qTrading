@@ -268,7 +268,7 @@ class TaskManager:
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
-    def update_progress(self, task_id: str, progress: float, description: str = None) -> bool:
+    def update_progress(self, task_id: str, progress: float, description: str = None) -> bool:  # type: ignore[assignment]
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
         Throttled to avoid flooding subscribers with high-frequency updates.
 
@@ -672,7 +672,7 @@ class TaskManager:
 
             cm = CacheManager()
             stmt = TaskHistory.__table__.delete().where(TaskHistory.__table__.c.id.in_(task_ids))
-            async with cm.engine.begin() as conn:
+            async with cm.engine.begin() as conn:  # type: ignore[union-attr]
                 await conn.execute(stmt)
         except Exception as e:
             logger.debug(f"[TaskManager] DB clear failed (non-critical): {e}")

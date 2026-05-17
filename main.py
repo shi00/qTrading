@@ -94,7 +94,7 @@ async def main(page: ft.Page):  # pragma: no cover
             active_dialog = dialog  # pragma: no cover
             return  # pragma: no cover
         # Fallback for older/test page implementations.  # pragma: no cover
-        page.dialog = dialog  # pragma: no cover
+        page.dialog = dialog  # type: ignore[attr-defined]  # pragma: no cover
         dialog.open = True  # pragma: no cover
         active_dialog = dialog  # pragma: no cover
         page.update()  # pragma: no cover
@@ -283,18 +283,18 @@ async def main(page: ft.Page):  # pragma: no cover
                 ft.Container(  # pragma: no cover
                     content=ft.Column(  # pragma: no cover
                         [  # pragma: no cover
-                            ft.Icon(ft.icons.ERROR_OUTLINE, color=ft.colors.RED, size=48),  # pragma: no cover
+                            ft.Icon(ft.icons.ERROR_OUTLINE, color=ft.colors.RED, size=48),  # type: ignore[attr-defined]  # pragma: no cover
                             ft.Text(  # pragma: no cover
                                 I18n.get("error_db_init_failed", default="数据库初始化失败"),  # pragma: no cover
                                 size=20,  # pragma: no cover
                                 weight=ft.FontWeight.BOLD,  # pragma: no cover
                             ),  # pragma: no cover
-                            ft.Text(str(e)[:200], color=ft.colors.RED_400, size=14),  # pragma: no cover
+                            ft.Text(str(e)[:200], color=ft.colors.RED_400, size=14),  # type: ignore[attr-defined]  # pragma: no cover
                             ft.Row(  # pragma: no cover
                                 [  # pragma: no cover
                                     ft.ElevatedButton(  # pragma: no cover
                                         I18n.get("retry", default="重试"),  # pragma: no cover
-                                        icon=ft.icons.REFRESH,  # pragma: no cover
+                                        icon=ft.icons.REFRESH,  # type: ignore[attr-defined]  # pragma: no cover
                                         on_click=lambda e: page.run_task(on_retry_click, e),  # pragma: no cover
                                     ),  # pragma: no cover
                                     ft.TextButton(  # pragma: no cover

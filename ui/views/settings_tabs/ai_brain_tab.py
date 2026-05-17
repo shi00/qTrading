@@ -355,7 +355,7 @@ class AIBrainTab(ft.Container):
         except Exception as e:  # pragma: no cover
             logger.debug(f"Safe update skipped: {e}")  # pragma: no cover
 
-    def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
         """语言变更回调 - 重建整个 UI"""  # pragma: no cover
         try:  # pragma: no cover
             saved_values = {  # pragma: no cover

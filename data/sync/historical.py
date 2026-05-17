@@ -381,7 +381,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
                     async with sem:
                         try:
-                            await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
+                            await self.sync_daily_market_snapshot(date, force=True, sync_result=result)  # type: ignore[arg-type]
                             logger.debug(
                                 f"[HistoricalSync] Retry | ✅ Recovered {date}",
                             )
@@ -628,7 +628,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 filtered_count = original_count - len(df_north)
                 if filtered_count > 0:
                     if len(df_north) == 0:
-                        sample_codes = data_map.get("north")["ts_code"].head(5).tolist()
+                        sample_codes = data_map.get("north")["ts_code"].head(5).tolist()  # type: ignore[optional-subscript]
                         logger.debug(
                             f"[HistoricalSync] DaySync | {filtered_count} records filtered (southbound HK stocks, not northbound A-shares). "
                             f"Sample ts_codes: {sample_codes}"
@@ -660,7 +660,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
             north_result = {"saved": None, "fetched": 0, "success": False}
 
-        async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | None):
+        async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | datetime.date | None):
             saved = result.get("saved") if isinstance(result, dict) else result
             result_status = result.get("result_status") if isinstance(result, dict) else None
             if saved is not None:

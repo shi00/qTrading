@@ -28,7 +28,7 @@ def reset_all_singletons() -> None:
         for cls in list(_registry):
             if hasattr(cls, "_reset_singleton"):
                 try:
-                    cls._reset_singleton()
+                    cls._reset_singleton()  # type: ignore[attr-defined]
                 except Exception as e:
                     logger.warning(f"[SingletonRegistry] Failed to reset {cls.__name__}: {e}")
             elif hasattr(cls, "_instance"):
@@ -37,13 +37,13 @@ def reset_all_singletons() -> None:
                     f"falling back to _instance = None (resources may leak). "
                     f"Implement _reset_singleton for proper cleanup."
                 )
-                instance = cls._instance
+                instance = cls._instance  # type: ignore[attr-defined]
                 if instance is not None and hasattr(instance, "close"):
                     try:
                         instance.close()
                     except Exception as e:
                         logger.warning(f"[SingletonRegistry] {cls.__name__}.close() failed: {e}")
-                cls._instance = None
+                cls._instance = None  # type: ignore[attr-defined]
 
 
 def get_registered_singletons() -> list[str]:

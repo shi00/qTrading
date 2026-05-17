@@ -106,7 +106,7 @@ def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
         vt_columns.append({"id": col, "label": label, "width": width})
 
     records = df[visible_cols].to_dict("records")  # type: ignore[call-overload]
-    formatted_rows = [{col: _format_cell_value(col, val) for col, val in row.items()} for row in records]
+    formatted_rows = [{col: _format_cell_value(col, val) for col, val in row.items()} for row in records]  # type: ignore[arg-type]
     return vt_columns, formatted_rows
 
 
@@ -764,7 +764,7 @@ class ScreenerView(ft.Container):
                 else I18n.get("screener_all_strategies", "全部策略")
             )
         self._update_status(f"{display} / {label}", "blue")
-        await self.vm.load_history_data(trade_date, strategy_name, run_id)
+        await self.vm.load_history_data(trade_date, strategy_name, run_id)  # type: ignore[arg-type]
         self._toggle_progress(False)
 
     def _on_load_more_history(self, e):
@@ -1083,7 +1083,7 @@ class ScreenerView(ft.Container):
                                     msg = I18n.get(warning, warning)
                                     if warning == "prompt_err_length":
                                         msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                                    self.page.show_toast(
+                                    self.page.show_toast(  # type: ignore[attr-defined]
                                         f"⚠ {msg}",
                                         "warning",
                                     )
@@ -1207,7 +1207,7 @@ class ScreenerView(ft.Container):
         self.page.run_task(_do_toggle)
 
     def _on_virtual_sort(self, col_id, ascending):
-        self.page.run_task(self.vm.sort_data, col_id, ascending)
+        self.page.run_task(self.vm.sort_data, col_id, ascending)  # type: ignore[union-attr]
 
     async def _on_export_click(self, e):
         """Export current results"""
@@ -1343,7 +1343,7 @@ class ScreenerView(ft.Container):
 
         vt_columns, formatted_rows = _build_table_data(df)
 
-        self.result_table.on_row_click = self._on_row_click
+        self.result_table.on_row_click = self._on_row_click  # type: ignore[assignment]
         self.result_table.set_columns(vt_columns)
         self.result_table.set_rows(
             formatted_rows,
@@ -1388,14 +1388,14 @@ class ScreenerView(ft.Container):
             "",  # pragma: no cover
             selectable=True,  # pragma: no cover
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,  # pragma: no cover
-            code_theme="atom-one-dark",  # pragma: no cover
+            code_theme="atom-one-dark",  # type: ignore[arg-type]  # pragma: no cover
         )  # pragma: no cover
 
         content_md = ft.Markdown(  # pragma: no cover
             "",  # pragma: no cover
             selectable=True,  # pragma: no cover
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,  # pragma: no cover
-            code_theme="atom-one-dark",  # pragma: no cover
+            code_theme="atom-one-dark",  # type: ignore[arg-type]  # pragma: no cover
         )  # pragma: no cover
 
         reasoning_tile = ft.ExpansionTile(  # pragma: no cover

@@ -99,7 +99,7 @@ class DatabaseManager:
         """
         self._ensure_engine()
         try:
-            insp = sa.inspect(self._engine)
+            insp = sa.inspect(self._engine)  # type: ignore[arg-type]
             return sorted(insp.get_table_names())
         except Exception as e:
             logger.error(f"Error fetching tables: {e}")
@@ -114,7 +114,7 @@ class DatabaseManager:
         self._ensure_engine()
         try:
             self._validate_table_name(table_name)
-            insp = sa.inspect(self._engine)
+            insp = sa.inspect(self._engine)  # type: ignore[arg-type]
             columns = []
             for col_info in insp.get_columns(table_name):
                 columns.append(
@@ -144,7 +144,7 @@ class DatabaseManager:
                 schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
                 stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
 
-            with self._engine.connect() as conn:
+            with self._engine.connect() as conn:  # type: ignore[union-attr]
                 result = conn.execute(stmt)
                 return result.scalar() or 0
         except Exception as e:
@@ -228,7 +228,7 @@ class DatabaseManager:
             # 3. Apply Pagination
             stmt = stmt.limit(page_size).offset(offset)
 
-            with self._engine.connect() as conn:
+            with self._engine.connect() as conn:  # type: ignore[union-attr]
                 result = conn.execute(stmt)
                 rows = result.fetchall()
                 if not rows:
@@ -308,7 +308,7 @@ class DatabaseManager:
         # 2. Execute with strictly Read-Only connection and Memory Protection
         conn = None
         try:
-            with self._engine.connect() as conn:
+            with self._engine.connect() as conn:  # type: ignore[union-attr]
                 conn = conn.execution_options(isolation_level="AUTOCOMMIT")
                 result = conn.execute(sa.text(sql_query))
 

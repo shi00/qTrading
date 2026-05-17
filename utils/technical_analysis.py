@@ -65,8 +65,8 @@ class TechnicalAnalysis:
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
         # Standard MACD
-        exp1 = df_calc["close"].ewm(span=fast, adjust=False).mean()
-        exp2 = df_calc["close"].ewm(span=slow, adjust=False).mean()
+        exp1 = df_calc["close"].ewm(span=fast, adjust=False).mean()  # type: ignore[optional-subscript]
+        exp2 = df_calc["close"].ewm(span=slow, adjust=False).mean()  # type: ignore[optional-subscript]
         macd = exp1 - exp2
         signal = macd.ewm(span=sign, adjust=False).mean()
         hist = macd - signal
@@ -98,12 +98,12 @@ class TechnicalAnalysis:
         # Use Adjusted Prices
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
-        low_list = df_calc["low"].rolling(window=n, min_periods=n).min()
-        low_list = low_list.fillna(value=df_calc["low"].expanding().min())
-        high_list = df_calc["high"].rolling(window=n, min_periods=n).max()
-        high_list = high_list.fillna(value=df_calc["high"].expanding().max())
+        low_list = df_calc["low"].rolling(window=n, min_periods=n).min()  # type: ignore[optional-subscript]
+        low_list = low_list.fillna(value=df_calc["low"].expanding().min())  # type: ignore[optional-subscript]
+        high_list = df_calc["high"].rolling(window=n, min_periods=n).max()  # type: ignore[optional-subscript]
+        high_list = high_list.fillna(value=df_calc["high"].expanding().max())  # type: ignore[optional-subscript]
 
-        rsv = (df_calc["close"] - low_list) / (high_list - low_list) * 100
+        rsv = (df_calc["close"] - low_list) / (high_list - low_list) * 100  # type: ignore[optional-subscript]
 
         k = rsv.ewm(com=m1 - 1, adjust=False).mean()
         d = k.ewm(com=m2 - 1, adjust=False).mean()
@@ -132,8 +132,8 @@ class TechnicalAnalysis:
         # Use Adjusted Prices
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
-        ma5 = df_calc["close"].rolling(window=5).mean().iloc[-1]
-        ma20 = df_calc["close"].rolling(window=20).mean().iloc[-1]
+        ma5 = df_calc["close"].rolling(window=5).mean().iloc[-1]  # type: ignore[optional-subscript]
+        ma20 = df_calc["close"].rolling(window=20).mean().iloc[-1]  # type: ignore[optional-subscript]
 
         if ma5 > ma20:
             return "UP"
@@ -154,7 +154,7 @@ class TechnicalAnalysis:
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
         # Calculate price changes
-        delta = df_calc["close"].diff()
+        delta = df_calc["close"].diff()  # type: ignore[optional-subscript]
 
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)

@@ -98,7 +98,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
 
         candidates_df = self._sort_for_ai(candidates_df)
 
-        return await self.run_ai_analysis(candidates_df, context)
+        return await self.run_ai_analysis(candidates_df, context)  # type: ignore[arg-type]
 
     @abstractmethod
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:

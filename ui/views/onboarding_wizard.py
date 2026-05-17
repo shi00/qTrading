@@ -478,7 +478,7 @@ class OnboardingWizard(ft.Container):
     def _update_navigation_buttons(self):  # pragma: no cover
         nav_row = self.navigation_bar.content
         new_buttons = self._build_navigation_buttons()
-        nav_row.controls = new_buttons.controls
+        nav_row.controls = new_buttons.controls  # type: ignore[union-attr]
         self._safe_update()
 
     def _build_welcome_step(self):  # pragma: no cover
@@ -1171,7 +1171,7 @@ class OnboardingWizard(ft.Container):
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
 
-    def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
         self.sync_status.value = I18n.get("wizard_status_ready")
         self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
         self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)

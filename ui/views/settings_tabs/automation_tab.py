@@ -240,7 +240,7 @@ class AutomationTab(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[AutomationTab] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str = None):
+    def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]
         """语言变更回调
 
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
@@ -446,7 +446,7 @@ class NotificationsTab(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[NotificationsTab] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str = None):
+    def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]
         """语言变更回调
 
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全

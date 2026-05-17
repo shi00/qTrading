@@ -188,8 +188,8 @@ class AIService:
 
         litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
         litellm.drop_params = True
-        litellm.set_timeout = 30.0
-        litellm.max_retries = 2
+        litellm.set_timeout = 30.0  # type: ignore[attr-defined]
+        litellm.max_retries = 2  # type: ignore[attr-defined]
         litellm.success_callback = []
         litellm.failure_callback = []
         litellm.modify_params = True
@@ -467,14 +467,14 @@ class AIService:
                 return result
             else:
                 response = await acompletion(**request_params)
-                content = response.choices[0].message.content
+                content = response.choices[0].message.content  # type: ignore[union-attr]
                 result = {"content": content}
 
-                if hasattr(response, "usage") and response.usage:
+                if hasattr(response, "usage") and response.usage:  # type: ignore[union-attr]
                     result["usage"] = {
-                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-                        "total_tokens": getattr(response.usage, "total_tokens", 0),
+                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),  # type: ignore[union-attr]
+                        "completion_tokens": getattr(response.usage, "completion_tokens", 0),  # type: ignore[union-attr]
+                        "total_tokens": getattr(response.usage, "total_tokens", 0),  # type: ignore[union-attr]
                     }
 
                 return result
@@ -995,11 +995,11 @@ class AIService:
 
             result = {"success": True, "message": "Connection successful"}
 
-            if hasattr(response, "usage") and response.usage:
+            if hasattr(response, "usage") and response.usage:  # type: ignore[union-attr]
                 result["usage"] = {
-                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-                    "total_tokens": getattr(response.usage, "total_tokens", 0),
+                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),  # type: ignore[union-attr]
+                    "completion_tokens": getattr(response.usage, "completion_tokens", 0),  # type: ignore[union-attr]
+                    "total_tokens": getattr(response.usage, "total_tokens", 0),  # type: ignore[union-attr]
                 }
 
             if supports_reasoning:

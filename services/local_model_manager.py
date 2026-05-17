@@ -420,7 +420,7 @@ class LocalModelManager:
         start_time = asyncio.get_running_loop().time()
 
         try:
-            self._request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5)
+            self._request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5)  # type: ignore[union-attr]
         except Exception as e:
             logger.error(f"[LocalModel] Failed to send request to worker: {e}")
             self._worker_ready = False
@@ -439,13 +439,13 @@ class LocalModelManager:
                 if remaining <= 0:
                     break
                 try:
-                    result = self._result_queue.get_nowait()
+                    result = self._result_queue.get_nowait()  # type: ignore[union-attr]
                     break
                 except queue.Empty:
                     pass
                 if self._worker_proc is not None and not self._worker_proc.is_alive():
                     try:
-                        result = self._result_queue.get_nowait()
+                        result = self._result_queue.get_nowait()  # type: ignore[union-attr]
                     except queue.Empty:
                         pass
                     worker_died = True

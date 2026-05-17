@@ -63,7 +63,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         candidates = df[mask].copy()
 
         # Sort by turnover_rate desc (Most active), cap at limit
-        candidates = candidates.sort_values(by="turnover_rate", ascending=False).head(
+        candidates = candidates.sort_values(by="turnover_rate", ascending=False).head(  # type: ignore[call-arg]
             self.limit,
         )
 
@@ -71,7 +71,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
             return pd.DataFrame()
 
         # --- Step 2: AI Analysis via Mixin (with full data enrichment) ---
-        return await self.run_ai_analysis(candidates, context)
+        return await self.run_ai_analysis(candidates, context)  # type: ignore[arg-type]
 
     def get_ai_context(self, row: dict) -> str:
         # NOTE: AI prompts are intentionally in Chinese (A-share analysis context).

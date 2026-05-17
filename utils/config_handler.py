@@ -648,7 +648,7 @@ class ConfigHandler:
         provider: str,
         model: str,
         base_url: str,
-        api_key: str = None,
+        api_key: str = None,  # type: ignore[assignment]
         **kwargs,
     ) -> bool:
         """
@@ -694,9 +694,9 @@ class ConfigHandler:
             provider_extras["custom_models"] = kwargs["custom_models"]
 
         if provider_extras:
-            config_update["llm_provider_extras"] = provider_extras
+            config_update["llm_provider_extras"] = provider_extras  # type: ignore[assignment]
         else:
-            config_update["llm_provider_extras"] = {}
+            config_update["llm_provider_extras"] = {}  # type: ignore[assignment]
 
         ConfigHandler.save_config(config_update)
 

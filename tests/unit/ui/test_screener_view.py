@@ -885,8 +885,8 @@ class TestScreenerView:
         chunk_fn = view._on_log_stream_start("stock_a")
         add_fn = mock_page.run_task.call_args[0][0]
         await add_fn()
-        chunk_fn("reasoning text", is_reasoning=True)
-        chunk_fn("content text", is_reasoning=False)
+        chunk_fn("reasoning text", is_reasoning=True)  # type: ignore[optional-call]
+        chunk_fn("content text", is_reasoning=False)  # type: ignore[optional-call]
         chunk_fn.final_flush()
         flush_fn = mock_page.run_task.call_args[0][0]
         await flush_fn()
@@ -897,8 +897,8 @@ class TestScreenerView:
         chunk_fn = view._on_log_stream_start("stock_a")
         add_fn = mock_page.run_task.call_args[0][0]
         await add_fn()
-        chunk_fn("reasoning", is_reasoning=True)
-        chunk_fn("more reasoning", is_reasoning=True)
+        chunk_fn("reasoning", is_reasoning=True)  # type: ignore[optional-call]
+        chunk_fn("more reasoning", is_reasoning=True)  # type: ignore[optional-call]
 
     @pytest.mark.asyncio
     async def test_on_log_stream_start_chunk_without_page(self, mock_page):
@@ -907,7 +907,7 @@ class TestScreenerView:
         add_fn = mock_page.run_task.call_args[0][0]
         await add_fn()
         view._Control__page = None
-        chunk_fn("text", is_reasoning=False)
+        chunk_fn("text", is_reasoning=False)  # type: ignore[optional-call]
 
     @pytest.mark.asyncio
     async def test_load_history_tree_with_data(self, mock_page):

@@ -24,7 +24,7 @@ import pytest
 def browser_context():
     """Create browser context for E2E tests"""
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright  # type: ignore[import-unresolved]
 
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=False)
