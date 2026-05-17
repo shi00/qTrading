@@ -242,7 +242,12 @@ class ScreeningHistory(Base):
             "review_status",
             postgresql_where=text("review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL"),
         ),
-        Index("idx_sh_params_gin", "params_snapshot", postgresql_using="gin"),
+        Index(
+            "idx_sh_params_gin",
+            "params_snapshot",
+            postgresql_using="gin",
+            postgresql_ops={"params_snapshot": "jsonb_path_ops"},
+        ),
     )
 
 
@@ -284,7 +289,6 @@ class MarketNews(Base):
 
     __table_args__ = (
         UniqueConstraint("content_hash", name="uq_market_news_hash"),
-        Index("ix_market_news_publish_time", "publish_time"),
         Index("ix_market_news_source", "source"),
         Index("idx_market_news_pub_source", "publish_time", "source"),
     )

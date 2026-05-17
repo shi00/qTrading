@@ -622,7 +622,7 @@ class ScreenerView(ft.Container):
         self.realtime_controls.visible = True
         self.log_card.visible = True
         self.run_btn.visible = True
-        self._render_table()
+        self._render_table_sync()
         if self.page:
             self.page.update()
 
@@ -1304,7 +1304,7 @@ class ScreenerView(ft.Container):
 
         async def _do_update():
             # 1. Update Table
-            self._render_table()
+            await self._render_table_async()
 
             # 2. Update Pagination
             self.page_info_text.value = I18n.get("screener_page_info").format(
@@ -1325,8 +1325,10 @@ class ScreenerView(ft.Container):
 
         self.page.run_task(_do_update)
 
-    def _render_table(self):
-        """Re-render table based on VM current page data"""
+    async def _render_table_async(self):
+        """Re-render table based on VM current page data (CPU work offloaded)"""
+        from utils.thread_pool import ThreadPoolManager, TaskType
+
         df = self.vm.get_current_page_data()
 
         if df is None or df.empty:
@@ -1341,8 +1343,36 @@ class ScreenerView(ft.Container):
 
         self._raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
 
-        vt_columns, formatted_rows = _build_table_data(df)
+        vt_columns, formatted_rows = await ThreadPoolManager().run_async(
+            TaskType.CPU,
+            _build_table_data,
+            df,
+        )
 
+        self.result_table.on_row_click = self._on_row_click  # type: ignore[assignment]
+        self.result_table.set_columns(vt_columns)
+        self.result_table.set_rows(
+            formatted_rows,
+            sort_col=self.vm.sort_column,
+            sort_asc=self.vm.sort_ascending,
+        )
+
+    def _render_table_sync(self):
+        """Synchronous fallback for non-async callers (e.g. update_theme)"""
+        df = self.vm.get_current_page_data()
+
+        if df is None or df.empty:
+            self.result_table.set_columns([])
+            self.result_table.set_rows(
+                [],
+                sort_col=self.vm.sort_column,
+                sort_asc=self.vm.sort_ascending,
+            )
+            self._raw_row_lookup = {}
+            return
+
+        self._raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
+        vt_columns, formatted_rows = _build_table_data(df)
         self.result_table.on_row_click = self._on_row_click  # type: ignore[assignment]
         self.result_table.set_columns(vt_columns)
         self.result_table.set_rows(
@@ -1541,7 +1571,7 @@ class ScreenerView(ft.Container):
         if self.page:
             # Re-render table data to update cell colors
             try:
-                self._render_table()
+                self._render_table_sync()
             except Exception as e:
                 logger.error(
                     f"[ScreenerView] Theme | ❌ Re-render failed: {e}",

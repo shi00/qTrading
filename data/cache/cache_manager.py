@@ -514,29 +514,30 @@ class CacheManager:
 
         from data.persistence.models import Base as ModelsBase
 
-        # === Step 2: Use single connection for table checks (no DAO calls inside) ===
+        # === Step 2: Parallel table health checks (each with own connection) ===
         if self.engine is None:
             raise RuntimeError("Database engine not initialized")
-        async with self.engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
 
-            for table, meta in monitored_tables.items():
-                try:
-                    table_type = meta.get("type", "stock")
-                    is_stock_table = table_type != "global"
+        async def _check_single_table(table: str, meta: dict) -> tuple[str, dict]:
+            table_type = meta.get("type", "stock")
+            is_stock_table = table_type != "global"
+            is_sparse = meta.get("quality_config", {}).get("sparse", False)
 
-                    tbl = ModelsBase.metadata.tables.get(table)
-                    if tbl is None:
-                        logger.warning(f"[CacheManager] Health | Unknown table: {table}")
-                        results[table] = {
-                            "covered": 0,
-                            "ratio": 0,
-                            "fresh_ratio": 0,
-                            "depth_ratio": None,
-                            "breadth_ratio": None,
-                            "type": table_type,
-                        }
-                        continue
+            tbl = ModelsBase.metadata.tables.get(table)
+            if tbl is None:
+                logger.warning("[CacheManager] Health | Unknown table: %s", table)
+                return table, {
+                    "covered": 0,
+                    "ratio": 0,
+                    "fresh_ratio": 0,
+                    "depth_ratio": None,
+                    "breadth_ratio": None,
+                    "type": table_type,
+                }
+
+            try:
+                async with self.engine.connect() as conn:
+                    await conn.execution_options(isolation_level="AUTOCOMMIT")
 
                     if not is_stock_table:
                         r = await conn.execute(
@@ -580,7 +581,9 @@ class CacheManager:
                                         max_date = val
                                         break
                                 except Exception as exc:
-                                    logger.debug(f"[CacheManager] Health | Date probe failed for {table}.{dc}: {exc}")
+                                    logger.debug(
+                                        "[CacheManager] Health | Date probe failed for %s.%s: %s", table, dc, exc
+                                    )
                                     continue
                             if max_date:
                                 from utils.time_utils import parse_date
@@ -596,7 +599,9 @@ class CacheManager:
                                 fresh_ratio = 0.0
                         except (ValueError, TypeError, RuntimeError) as exc:
                             logger.debug(
-                                f"[CacheManager] Health | Freshness check skipped for {table}: {exc}",
+                                "[CacheManager] Health | Freshness check skipped for %s: %s",
+                                table,
+                                exc,
                             )
 
                     depth_ratio = None
@@ -617,11 +622,12 @@ class CacheManager:
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
                         except Exception as exc:
                             logger.debug(
-                                f"[CacheManager] Health | Breadth calc failed for {table}: {exc}",
+                                "[CacheManager] Health | Breadth calc failed for %s: %s",
+                                table,
+                                exc,
                             )
 
-                    is_sparse = meta.get("quality_config", {}).get("sparse", False)
-                    results[table] = {
+                    result = {
                         "covered": cnt,
                         "ratio": ratio,
                         "fresh_ratio": fresh_ratio,
@@ -634,44 +640,77 @@ class CacheManager:
                     if ratio < 0.1:
                         if is_sparse:
                             logger.debug(
-                                f"[CacheManager] Health | Table {table} (sparse): {cnt}/{total_stocks} ({ratio:.1%})",
+                                "[CacheManager] Health | Table %s (sparse): %d/%d (%.1f%%)",
+                                table,
+                                cnt,
+                                total_stocks,
+                                ratio * 100,
                             )
                         elif is_stock_table:
                             logger.warning(
-                                f"[CacheManager] Health | ⚠️ Table {table} coverage CRITICAL: {cnt}/{total_stocks} ({ratio:.1%})",
+                                "[CacheManager] Health | ⚠️ Table %s coverage CRITICAL: %d/%d (%.1f%%)",
+                                table,
+                                cnt,
+                                total_stocks,
+                                ratio * 100,
                             )
                         else:
                             logger.warning(
-                                f"[CacheManager] Health | ⚠️ Table {table} (global) CRITICAL: {cnt} records",
+                                "[CacheManager] Health | ⚠️ Table %s (global) CRITICAL: %d records",
+                                table,
+                                cnt,
                             )
                     elif is_stock_table:
                         d_str = f", depth={depth_ratio:.1%}" if depth_ratio is not None else ""
                         b_str = f", breadth={breadth_ratio:.1%}" if breadth_ratio is not None else ""
                         logger.debug(
-                            f"[CacheManager] Health | Table {table}: {cnt}/{total_stocks} ({ratio:.1%}), fresh={fresh_ratio:.0%}{d_str}{b_str}",
+                            "[CacheManager] Health | Table %s: %d/%d (%.1f%%), fresh=%.0f%%%s%s",
+                            table,
+                            cnt,
+                            total_stocks,
+                            ratio * 100,
+                            fresh_ratio * 100,
+                            d_str,
+                            b_str,
                         )
                     else:
                         logger.debug(
-                            f"[CacheManager] Health | Table {table} (global): {cnt} records",
+                            "[CacheManager] Health | Table %s (global): %d records",
+                            table,
+                            cnt,
                         )
-                except Exception as e:
-                    if "no such table" in str(e):
-                        logger.warning(
-                            f"[CacheManager] Health | ⚠️ Table {table} missing/not created yet.",
-                        )
-                    else:
-                        logger.error(
-                            f"[CacheManager] Health | ❌ Failed to check table {table}: {e}",
-                            exc_info=True,
-                        )
-                    results[table] = {
-                        "covered": 0,
-                        "ratio": 0,
-                        "fresh_ratio": 0,
-                        "depth_ratio": None,
-                        "breadth_ratio": None,
-                        "type": table_type,
-                    }
+
+                    return table, result
+            except Exception as e:
+                if "no such table" in str(e):
+                    logger.warning(
+                        "[CacheManager] Health | ⚠️ Table %s missing/not created yet.",
+                        table,
+                    )
+                else:
+                    logger.error(
+                        "[CacheManager] Health | ❌ Failed to check table %s: %s",
+                        table,
+                        e,
+                        exc_info=True,
+                    )
+                return table, {
+                    "covered": 0,
+                    "ratio": 0,
+                    "fresh_ratio": 0,
+                    "depth_ratio": None,
+                    "breadth_ratio": None,
+                    "type": table_type,
+                }
+
+        check_coros = [_check_single_table(t, m) for t, m in monitored_tables.items()]
+        gather_results = await asyncio.gather(*check_coros, return_exceptions=True)
+        for item in gather_results:
+            if isinstance(item, Exception):
+                logger.warning("[CacheManager] Health | Table check failed: %s", item)
+                continue
+            table_name, table_result = item
+            results[table_name] = table_result
 
         return {"total_stocks": total_stocks, "tables": results, "global_trade_days": global_trade_days}
 

@@ -116,13 +116,13 @@ class BaseDao:
                         try:
                             df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce").dt.date
                         except (ValueError, TypeError) as e:
-                            logger.debug(f"[BaseDao] Date conversion skipped for column '{col}': {e}")
+                            logger.debug("[BaseDao] Date conversion skipped for column '%s': %s", col, e)
                 for col in target_datetime_cols:
                     if col in df.columns:
                         try:
                             df[col] = pd.to_datetime(df[col], format="mixed", errors="coerce")
                         except (ValueError, TypeError) as e:
-                            logger.debug(f"[BaseDao] Datetime conversion skipped for column '{col}': {e}")
+                            logger.debug("[BaseDao] Datetime conversion skipped for column '%s': %s", col, e)
 
         df_clean = df[cols]
 
@@ -211,7 +211,7 @@ class BaseDao:
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug(f"[BaseDao] Engine sync_engine check skipped: {e}")
+            logger.debug("[BaseDao] Engine sync_engine check skipped: %s", e)
 
         start_time = time.perf_counter()
         try:
@@ -234,7 +234,8 @@ class BaseDao:
             return len(params) if is_many and params else 1
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] Write cancelled during shutdown.",
+                "[%s] Write cancelled during shutdown.",
+                self.__class__.__name__,
             )
             raise
         except Exception as e:
@@ -352,6 +353,20 @@ class BaseDao:
                 elif col in target_datetime_cols:
                     df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
 
+            for col in df_clean.columns:
+                if (
+                    df_clean[col].dtype == "bool"
+                    or np.issubdtype(df_clean[col].dtype, np.integer)
+                    or np.issubdtype(df_clean[col].dtype, np.floating)
+                ):
+                    df_clean[col] = df_clean[col].astype(object).where(df_clean[col].notna(), None)
+                elif df_clean[col].dtype == "datetime64[ns]":
+                    df_clean[col] = (
+                        df_clean[col]
+                        .dt.to_pydatetime()
+                        .map(lambda v: v.replace(tzinfo=None) if v is not None else None)
+                    )
+
             df_clean = df_clean.where(df_clean.notna(), None)
 
             records = df_clean.to_dict(orient="records")
@@ -360,14 +375,6 @@ class BaseDao:
                 for k, v in record.items():
                     if v is pd.NaT or (isinstance(v, type(pd.NaT)) and pd.isna(v)):
                         record[k] = None
-                    elif isinstance(v, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore[arg-type]
-                        record[k] = int(v)
-                    elif isinstance(v, (np.float64, np.float32)):  # type: ignore[arg-type]
-                        record[k] = float(v)
-                    elif isinstance(v, np.bool_):
-                        record[k] = bool(v)
-                    elif isinstance(v, pd.Timestamp):
-                        record[k] = v.to_pydatetime().replace(tzinfo=None)
             return records
 
         records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
@@ -481,7 +488,7 @@ class BaseDao:
                     except (ValueError, TypeError) as e:
                         logger.debug(f"[BaseDao] Pandas date parse skipped for '{clean_val}': {e}")
             except (ValueError, TypeError):
-                logger.warning(f"[BaseDao] Failed to convert date string: {val}")
+                logger.warning("[BaseDao] Failed to convert date string: %s", val)
                 pass
 
         return val
