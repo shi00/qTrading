@@ -154,6 +154,15 @@ async def db_transaction(test_engine: AsyncEngine):
         await txn.rollback()
 
 
+@pytest.fixture(autouse=True)
+def _reset_thread_pool():
+    from utils.thread_pool import ThreadPoolManager
+
+    ThreadPoolManager._reset_singleton()
+    yield
+    ThreadPoolManager._reset_singleton()
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def db_schema_ready(test_engine):
     from data.persistence.models import Base

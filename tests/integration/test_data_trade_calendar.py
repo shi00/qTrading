@@ -448,8 +448,7 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
 class TestTradeCalendarServiceOffline(TestDatabaseBase):
     """Test TradeCalendarService offline fallback behavior."""
 
-    def setUp(self):
-        """Set up test fixtures without database."""
+    async def asyncSetUp(self):
         self.mock_cache = MagicMock()
         self.mock_cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
         self.mock_cache.save_trade_cal = AsyncMock()
@@ -459,6 +458,9 @@ class TestTradeCalendarServiceOffline(TestDatabaseBase):
         self.mock_api.get_trade_cal = AsyncMock(return_value=None)
 
         self.service = TradeCalendarService(self.mock_cache, self.mock_api)
+
+    async def asyncTearDown(self):
+        pass
 
     async def test_is_trading_day_offline_fallback(self):
         """Test is_trading_day falls back to offline calendar."""
