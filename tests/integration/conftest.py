@@ -152,3 +152,17 @@ async def db_transaction(test_engine: AsyncEngine):
         txn = await conn.begin()
         yield conn
         await txn.rollback()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def db_schema_ready(test_engine):
+    from data.persistence.models import Base
+    from sqlalchemy import inspect
+
+    async with test_engine.connect() as conn:
+        existing = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+        expected = set(Base.metadata.tables.keys())
+        missing = expected - existing
+        if missing:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.commit()

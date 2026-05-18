@@ -1,5 +1,4 @@
 import inspect
-import unittest
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -43,7 +42,3 @@ class TestDataIntegrity(TestDatabaseBase):
 
         self.assertEqual(dp.api.get_fina_indicator.call_count, 12)
         self.assertGreaterEqual(count, 0)
-
-
-if __name__ == "__main__":
-    unittest.main()

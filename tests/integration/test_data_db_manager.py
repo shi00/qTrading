@@ -1,5 +1,3 @@
-import unittest
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -92,7 +90,3 @@ class TestDatabaseManager(TestDatabaseBase):
         df = result["data"]
         self.assertEqual(len(df), 2000)
         self.assertIn("truncated", result["error"])
-
-
-if __name__ == "__main__":
-    unittest.main()

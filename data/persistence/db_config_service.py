@@ -349,19 +349,17 @@ class DatabaseConfigService:
 
         url = cls.build_url(host, port, user, password, database, async_driver=True)
 
+        engine = create_async_engine(url, echo=False)
         try:
-            engine = create_async_engine(url, echo=False)
-
             await DatabaseMigrator.init_db(engine)
-
-            await engine.dispose()
 
             logger.info(f"Database migrations completed successfully for '{database}'")
             return True, I18n.get("db_migrations_success")
-
         except Exception as e:
             logger.error(f"Failed to run migrations: {e}", exc_info=True)
             return False, f"Failed to create tables: {str(e)}"
+        finally:
+            await engine.dispose()
 
     @classmethod
     async def ensure_tables_exist(

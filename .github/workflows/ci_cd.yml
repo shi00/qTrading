@@ -128,6 +128,7 @@ jobs:
           TEST_DB_PORT: 5432
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           SKIP_DATA_CONSISTENCY: 1
         run: |
           set -e
@@ -308,6 +309,7 @@ jobs:
           TEST_DB_PORT: 5432
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           SKIP_DATA_CONSISTENCY: 1
         run: python -m pytest tests/integration/ tests/e2e/ -v --tb=short --cov --cov-report=term-missing --cov-append
 

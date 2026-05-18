@@ -1,5 +1,4 @@
 import datetime
-import unittest
 from datetime import date, timedelta
 
 import pandas as pd
@@ -448,7 +447,3 @@ class TestCacheManager(TestDatabaseBase):
         res = await self.cache.get_block_trade(_RECENT)
         self.assertEqual(len(res), 1)
         self.assertEqual(res.iloc[0]["amount"], 500)
-
-
-if __name__ == "__main__":
-    unittest.main()

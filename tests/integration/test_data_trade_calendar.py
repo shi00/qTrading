@@ -13,7 +13,6 @@ Tests cover:
 
 import asyncio
 import datetime
-import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -1360,7 +1359,3 @@ class TestEnsureCalendarRange(TestDatabaseBase):
         mock_dp.trade_calendar.ensure_calendar_range.assert_called_once_with(
             datetime.date(2024, 1, 1), datetime.date(2024, 12, 31)
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

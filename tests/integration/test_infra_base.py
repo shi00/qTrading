@@ -1,21 +1,15 @@
+import logging
 import os
 
-import asyncio
-import logging
-import unittest
-
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
 from tests.integration.conftest import TEST_DB_URL
 from data.cache.cache_manager import CacheManager
-from data.persistence.models import Base
-
-_SESSION_ENGINE: AsyncEngine | None = None
-_TABLES_INITIALIZED = False
 
 TABLE_NAMES = [
     "block_trade",
@@ -54,22 +48,6 @@ TABLE_NAMES = [
 ]
 
 
-async def _ensure_session_engine():
-    """Ensure session-level engine is initialized (only once per test session)."""
-    global _SESSION_ENGINE, _TABLES_INITIALIZED
-
-    if _SESSION_ENGINE is None:
-        _SESSION_ENGINE = create_async_engine(TEST_DB_URL, echo=False)
-
-        if not _TABLES_INITIALIZED:
-            async with _SESSION_ENGINE.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-                await conn.run_sync(Base.metadata.create_all)
-            _TABLES_INITIALIZED = True
-
-    return _SESSION_ENGINE
-
-
 async def _truncate_all_tables(engine: AsyncEngine):
     """Truncate all tables for test isolation (fast, no DDL)."""
     tables_str = ", ".join(TABLE_NAMES)
@@ -87,33 +65,82 @@ async def _truncate_all_tables(engine: AsyncEngine):
             logger.warning(f"[TestDB] TRUNCATE {table} failed: {e}")
 
 
-class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):
+class _AssertionMixin:
+    def assertEqual(self, a, b, msg=None):
+        assert a == b, msg or f"{a!r} != {b!r}"
+
+    def assertNotEqual(self, a, b, msg=None):
+        assert a != b, msg or f"{a!r} == {b!r}"
+
+    def assertTrue(self, x, msg=None):
+        assert x, msg or f"{x!r} is not truthy"
+
+    def assertFalse(self, x, msg=None):
+        assert not x, msg or f"{x!r} is not falsy"
+
+    def assertIn(self, a, b, msg=None):
+        assert a in b, msg or f"{a!r} not in {b!r}"
+
+    def assertNotIn(self, a, b, msg=None):
+        assert a not in b, msg or f"{a!r} in {b!r}"
+
+    def assertIsNone(self, x, msg=None):
+        assert x is None, msg or f"{x!r} is not None"
+
+    def assertIsNotNone(self, x, msg=None):
+        assert x is not None, msg or f"{x!r} is None"
+
+    def assertGreater(self, a, b, msg=None):
+        assert a > b, msg or f"{a!r} <= {b!r}"
+
+    def assertGreaterEqual(self, a, b, msg=None):
+        assert a >= b, msg or f"{a!r} < {b!r}"
+
+    def assertLess(self, a, b, msg=None):
+        assert a < b, msg or f"{a!r} >= {b!r}"
+
+    def assertLessEqual(self, a, b, msg=None):
+        assert a <= b, msg or f"{a!r} > {b!r}"
+
+    def assertAlmostEqual(self, a, b, places=7, msg=None):
+        assert round(abs(a - b), places) == 0, msg or f"{a!r} != {b!r} within {places} places"
+
+    def assertCountEqual(self, a, b, msg=None):
+        assert sorted(a) == sorted(b), msg or "counts not equal"
+
+    def assertIsInstance(self, obj, cls, msg=None):
+        assert isinstance(obj, cls), msg or f"{obj!r} is not instance of {cls!r}"
+
+    def assertNotIsInstance(self, obj, cls, msg=None):
+        assert not isinstance(obj, cls), msg or f"{obj!r} is instance of {cls!r}"
+
+    def assertRaises(self, expected_exception):
+        import pytest
+
+        return pytest.raises(expected_exception)
+
+
+class TestDatabaseBase(_AssertionMixin):
     """Base class for all tests that need database access.
 
-    Performance optimization:
-    - Session-level engine (created once per test session)
-    - Session-level table creation (DDL executed once)
-    - Per-test TRUNCATE for data isolation (fast, no DDL)
+    Uses pytest-asyncio fixtures with session-scoped test_engine,
+    eliminating the cross-event-loop deadlock that occurred with
+    unittest.IsolatedAsyncioTestCase + manual loop management.
+
+    Subclasses can still use self.assertEqual / self.assertIn etc.
+    via _AssertionMixin, and override asyncSetUp / asyncTearDown
+    while calling await super().asyncSetUp().
     """
 
-    _session_engine: AsyncEngine = None  # type: ignore[assignment]
+    engine: AsyncEngine
+    cache: CacheManager
 
-    @classmethod
-    def setUpClass(cls):
-        cls._original_db_url = os.environ.get("DATABASE_URL")
-        os.environ["DATABASE_URL"] = TEST_DB_URL
-
-        if cls._session_engine is None:
-            loop = asyncio.new_event_loop()
-            cls._session_engine = loop.run_until_complete(_ensure_session_engine())
-            loop.close()
-
-    @classmethod
-    def tearDownClass(cls):
-        if cls._original_db_url:
-            os.environ["DATABASE_URL"] = cls._original_db_url
-        elif "DATABASE_URL" in os.environ:
-            del os.environ["DATABASE_URL"]
+    @pytest_asyncio.fixture(autouse=True)
+    async def _setup_base(self, test_engine):
+        self._test_engine_ref = test_engine
+        await self.asyncSetUp()
+        yield
+        await self.asyncTearDown()
 
     async def asyncSetUp(self):
         import config
@@ -121,10 +148,13 @@ class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):
         self._original_config_db_url = config.DB_URL
         config.DB_URL = TEST_DB_URL
 
+        self._original_db_url = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = TEST_DB_URL
+
         CacheManager._instance = None
         CacheManager._initialized = False
 
-        self.engine = self._session_engine
+        self.engine = self._test_engine_ref
 
         self.cache = CacheManager()
         await self.cache.init_db()
@@ -138,6 +168,11 @@ class TestDatabaseBase(unittest.IsolatedAsyncioTestCase):
         import config
 
         config.DB_URL = self._original_config_db_url
+
+        if self._original_db_url is not None:
+            os.environ["DATABASE_URL"] = self._original_db_url
+        elif "DATABASE_URL" in os.environ:
+            del os.environ["DATABASE_URL"]
 
         CacheManager._instance = None
         CacheManager._initialized = False

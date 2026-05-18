@@ -1,12 +1,10 @@
-import unittest
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import config
 from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 from data.persistence.database_manager import DatabaseManager
-from tests.integration.test_infra_base import TEST_DB_URL, TestDatabaseBase
+from tests.integration.test_infra_base import TEST_DB_URL, _AssertionMixin, TestDatabaseBase
 
 
 class TestDatabaseManagerSecurity(TestDatabaseBase):
@@ -76,7 +74,7 @@ class TestDatabaseManagerSecurity(TestDatabaseBase):
         self.assertIn("Only SELECT statements are allowed", result.get("error", ""))
 
 
-class TestSafeIdentifier(unittest.TestCase):
+class TestSafeIdentifier(_AssertionMixin):
     """Test _is_safe_identifier validation for SQL injection prevention."""
 
     def test_valid_identifiers(self):
@@ -109,7 +107,3 @@ class TestSafeIdentifier(unittest.TestCase):
         ]
         for name in malicious_names:
             self.assertFalse(_is_safe_identifier(name), f"Should reject: {name}")
-
-
-if __name__ == "__main__":
-    unittest.main()

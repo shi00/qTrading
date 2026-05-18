@@ -590,6 +590,23 @@ class TestDatabaseConfigServiceMigrations:
     """Tests for DatabaseConfigService migration methods"""
 
     @pytest_asyncio.fixture(autouse=True)
+    async def _patch_db_url(self):
+        import config
+
+        from tests.integration.conftest import TEST_DB_URL
+
+        old_config_url = config.DB_URL
+        old_env_url = os.environ.get("DATABASE_URL")
+        config.DB_URL = TEST_DB_URL
+        os.environ["DATABASE_URL"] = TEST_DB_URL
+        yield
+        config.DB_URL = old_config_url
+        if old_env_url is not None:
+            os.environ["DATABASE_URL"] = old_env_url
+        elif "DATABASE_URL" in os.environ:
+            del os.environ["DATABASE_URL"]
+
+    @pytest_asyncio.fixture(autouse=True)
     async def _restore_tables(self, test_engine):
         """确保每个 DDL 测试后无条件恢复表结构（即使测试断言失败）"""
         yield
@@ -699,6 +716,23 @@ class TestDatabaseConfigServiceMigrations:
 
 class TestDatabaseConfigPanelSaveConfig:
     """Tests for DatabaseConfigPanel.save_config with table creation"""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _patch_db_url(self):
+        import config
+
+        from tests.integration.conftest import TEST_DB_URL
+
+        old_config_url = config.DB_URL
+        old_env_url = os.environ.get("DATABASE_URL")
+        config.DB_URL = TEST_DB_URL
+        os.environ["DATABASE_URL"] = TEST_DB_URL
+        yield
+        config.DB_URL = old_config_url
+        if old_env_url is not None:
+            os.environ["DATABASE_URL"] = old_env_url
+        elif "DATABASE_URL" in os.environ:
+            del os.environ["DATABASE_URL"]
 
     @pytest_asyncio.fixture(autouse=True)
     async def _restore_tables(self, test_engine):
@@ -817,6 +851,23 @@ class TestDatabaseConfigPanelSaveConfig:
 
 class TestOnboardingWizardDatabaseValidation:
     """Tests for OnboardingWizard._validate_and_save_database"""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _patch_db_url(self):
+        import config
+
+        from tests.integration.conftest import TEST_DB_URL
+
+        old_config_url = config.DB_URL
+        old_env_url = os.environ.get("DATABASE_URL")
+        config.DB_URL = TEST_DB_URL
+        os.environ["DATABASE_URL"] = TEST_DB_URL
+        yield
+        config.DB_URL = old_config_url
+        if old_env_url is not None:
+            os.environ["DATABASE_URL"] = old_env_url
+        elif "DATABASE_URL" in os.environ:
+            del os.environ["DATABASE_URL"]
 
     @pytest_asyncio.fixture(autouse=True)
     async def _restore_tables(self, test_engine):
