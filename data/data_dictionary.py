@@ -560,6 +560,15 @@ TABLE_DEFINITIONS = {
             "completed_at": "col_completed_at",
         },
     },
+    "app_state": {
+        "alias": "tab_app_state",
+        "desc": "应用全局状态键值存储",
+        "columns": {
+            "key": "col_key",
+            "value": "col_value",
+            "updated_at": "col_updated_at",
+        },
+    },
 }
 
 

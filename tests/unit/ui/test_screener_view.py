@@ -420,13 +420,13 @@ class TestScreenerView:
     def test_render_table_with_none(self, mock_page):
         view = self._make_view(mock_page)
         view.vm.get_current_page_data.return_value = None
-        view._render_table()
+        view._render_table_sync()
         assert view._raw_row_lookup == {}
 
     def test_render_table_with_empty_df(self, mock_page):
         view = self._make_view(mock_page)
         view.vm.get_current_page_data.return_value = pd.DataFrame()
-        view._render_table()
+        view._render_table_sync()
         assert view._raw_row_lookup == {}
 
     def test_render_table_with_data(self, mock_page):
@@ -435,7 +435,7 @@ class TestScreenerView:
         view.vm.get_current_page_data.return_value = df
         with patch("ui.views.screener_view._build_table_data") as mock_build:
             mock_build.return_value = ([{"id": "ts_code", "label": "Code", "width": 100}], [{"ts_code": "000001.SZ"}])
-            view._render_table()
+            view._render_table_sync()
         assert "000001.SZ" in view._raw_row_lookup
 
     def test_render_strategy_params_no_strategy(self, mock_page):
