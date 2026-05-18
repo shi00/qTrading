@@ -19,22 +19,13 @@ Note: Smoke tests (TestOnboardingWizardSmoke) run automatically when
 import pytest
 
 
-def _is_server_reachable(url="http://localhost:8550", timeout_ms=2000):
+def _is_server_reachable(url="http://localhost:8550", timeout=2):
     try:
-        from playwright.sync_api import sync_playwright
+        import urllib.request
 
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
-        try:
-            page.goto(url, timeout=timeout_ms, wait_until="commit")
-            return True
-        except Exception:
-            return False
-        finally:
-            page.close()
-            browser.close()
-            pw.stop()
+        req = urllib.request.Request(url, method="HEAD")
+        urllib.request.urlopen(req, timeout=timeout)
+        return True
     except Exception:
         return False
 
