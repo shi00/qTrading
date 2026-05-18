@@ -20,7 +20,7 @@ class TestAlembicIdempotentUpgrade:
         assert "financial_reports" in _ALL_EXPECTED_TABLES
         assert "screening_history" in _ALL_EXPECTED_TABLES
         assert "trade_cal" in _ALL_EXPECTED_TABLES
-        assert len(_ALL_EXPECTED_TABLES) >= 30
+        assert len(_ALL_EXPECTED_TABLES) >= 31
 
     def test_missing_tables_detection_logic(self):
         existing = {"daily_quotes", "stock_basic", "financial_reports"}
