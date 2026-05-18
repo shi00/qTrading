@@ -65,6 +65,7 @@ class ScreenerViewModel:
         self.on_log_stream_start: Callable[[str], Callable] | None = None
         self._main_loop = None
         self._background_tasks: set = set()
+        self._threadsafe_futures: set = set()
 
     def bind(self, on_update, on_log, on_status, on_progress, on_log_stream_start=None):
         self.on_update = on_update
@@ -89,6 +90,10 @@ class ScreenerViewModel:
         self.on_progress = None
         self.on_log_stream_start = None
         self._main_loop = None
+
+        for f in self._threadsafe_futures:
+            f.cancel()
+        self._threadsafe_futures.clear()
 
         self._full_results = None
         self._ai_buffer = []
@@ -447,10 +452,12 @@ class ScreenerViewModel:
                     task.add_done_callback(self._background_tasks.discard)
                 except RuntimeError:
                     if self._main_loop and self._main_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
+                        future = asyncio.run_coroutine_threadsafe(
                             self._flush_ai_buffer(),
                             self._main_loop,
                         )
+                        self._threadsafe_futures.add(future)
+                        future.add_done_callback(lambda f: self._threadsafe_futures.discard(f))
                     else:
                         self._flush_pending = False
                         logger.error("Cannot schedule flush: No event loop available")

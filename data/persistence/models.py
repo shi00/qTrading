@@ -608,6 +608,14 @@ class TaskHistory(Base):
     )
 
 
+class AppState(Base):
+    __tablename__ = "app_state"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+    updated_at = Column(DateTime(timezone=False), server_default=func.now(), onupdate=func.now())
+
+
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
     exclude = exclude or {"updated_at", "created_at"}
     return [c.name for c in model_class.__table__.columns if c.name not in exclude]

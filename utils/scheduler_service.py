@@ -1,6 +1,10 @@
 """
 Scheduler service for automatic data updates.
 Runs as a background task within the Flet application using APScheduler.
+
+C-P1-6 fix: Idempotency keys (last run dates) are stored in the database
+(app_state table) as the primary source of truth. ConfigHandler (user_settings.json)
+is used only as a startup cache for fast access before the DB is available.
 """
 
 import asyncio
@@ -22,6 +26,10 @@ logger = logging.getLogger(__name__)
 _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
 _CFG_LAST_DOUBAO_REFRESH = "scheduler_last_doubao_refresh"
+
+_DB_KEY_DAILY_UPDATE = "sched_last_daily_update"
+_DB_KEY_NIGHTLY_PREDICTION = "sched_last_nightly_prediction"
+_DB_KEY_DOUBAO_REFRESH = "sched_last_doubao_refresh"
 
 
 from utils.singleton_registry import register_singleton
@@ -76,6 +84,7 @@ class SchedulerService:
         self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
         self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
         self._last_doubao_date = ConfigHandler.get_setting(_CFG_LAST_DOUBAO_REFRESH)
+        self._db_state_loaded = False
         self._initialized = True
         logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
 
@@ -83,23 +92,38 @@ class SchedulerService:
     def _persist_run_date(config_key: str, value: str | None):
         ConfigHandler.save_config({config_key: value or ""})
 
+    async def _persist_run_date_db(self, db_key: str, config_key: str, value: str | None):
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.app_state_service import set_app_state
+
+        engine = CacheManager._instance.engine if CacheManager._instance else None
+        if engine is not None:
+            await set_app_state(engine, db_key, value or "")
+        self._persist_run_date(config_key, value)
+
     def _mark_daily_update_done(self, today_str: str):
         self._last_update_date = today_str
         self._persist_run_date(_CFG_LAST_DAILY_UPDATE, today_str)
 
+    async def _mark_daily_update_done_db(self, today_str: str):
+        self._last_update_date = today_str
+        await self._persist_run_date_db(_DB_KEY_DAILY_UPDATE, _CFG_LAST_DAILY_UPDATE, today_str)
+
     def _mark_nightly_prediction_done(self, today_str: str):
         self._last_pred_date = today_str
         self._persist_run_date(_CFG_LAST_NIGHTLY_PREDICTION, today_str)
+
+    async def _mark_nightly_prediction_done_db(self, today_str: str):
+        self._last_pred_date = today_str
+        await self._persist_run_date_db(_DB_KEY_NIGHTLY_PREDICTION, _CFG_LAST_NIGHTLY_PREDICTION, today_str)
 
     def start(self):
         """Start the scheduler"""
         if self.scheduler.running:
             return
 
-        # Schedule jobs based on config
         self._schedule_jobs()
 
-        # Add listener for missed jobs
         from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
         self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
@@ -109,8 +133,6 @@ class SchedulerService:
             self.scheduler.start()
             logger.info("[Scheduler] Started")
 
-            # Start Config Watchdog (Every 30s)
-            # This ensures we pick up changes from Settings UI without restart
             self.scheduler.add_job(
                 self._watch_config_changes,
                 "interval",
@@ -118,8 +140,53 @@ class SchedulerService:
                 id="config_watchdog",
                 replace_existing=True,
             )
+
+            self.scheduler.add_job(
+                self._load_db_state,
+                "date",
+                id="load_db_state",
+                replace_existing=True,
+            )
         except Exception as e:
             logger.error(f"[Scheduler] Failed to start: {e}")
+
+    async def _load_db_state(self):
+        """Load idempotency state from database (primary source of truth).
+
+        Called once after scheduler starts. Overrides ConfigHandler cache
+        values with database values, ensuring consistency even if
+        user_settings.json was externally modified.
+        """
+        if self._db_state_loaded:
+            return
+
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.app_state_service import get_app_state
+
+        engine = CacheManager._instance.engine if CacheManager._instance else None
+        if engine is None:
+            logger.debug("[Scheduler] DB not available, using ConfigHandler cache for idempotency state")
+            return
+
+        try:
+            db_daily = await get_app_state(engine, _DB_KEY_DAILY_UPDATE)
+            db_pred = await get_app_state(engine, _DB_KEY_NIGHTLY_PREDICTION)
+            db_doubao = await get_app_state(engine, _DB_KEY_DOUBAO_REFRESH)
+
+            if db_daily is not None:
+                self._last_update_date = db_daily
+            if db_pred is not None:
+                self._last_pred_date = db_pred
+            if db_doubao is not None:
+                self._last_doubao_date = db_doubao
+
+            self._db_state_loaded = True
+            logger.info(
+                f"[Scheduler] DB state loaded: daily={self._last_update_date}, "
+                f"pred={self._last_pred_date}, doubao={self._last_doubao_date}",
+            )
+        except Exception as e:
+            logger.warning(f"[Scheduler] Failed to load DB state, using ConfigHandler cache: {e}")
 
     def _on_job_missed(self, event):
         """Handle missed job events with clear logging"""
@@ -307,7 +374,7 @@ class SchedulerService:
             if has_errors:
                 logger.warning("[Scheduler] Daily update completed with errors, NOT marking done")
             else:
-                self._mark_daily_update_done(today_str)
+                await self._mark_daily_update_done_db(today_str)
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
             if result is None:
@@ -354,7 +421,7 @@ class SchedulerService:
                 cancel_event=cancel_event,
             )
             self._last_doubao_date = today_str
-            self._persist_run_date(_CFG_LAST_DOUBAO_REFRESH, today_str)
+            await self._persist_run_date_db(_DB_KEY_DOUBAO_REFRESH, _CFG_LAST_DOUBAO_REFRESH, today_str)
             return I18n.get("sched_doubao_done")
 
         TaskManager().submit_task(
@@ -434,7 +501,7 @@ class SchedulerService:
                 await rm.save_results(
                     "AI_Auto_Nightly", result_df, trade_date=analysis_trade_date, run_id=run_id, params_snapshot={}
                 )
-                self._mark_nightly_prediction_done(today_str)
+                await self._mark_nightly_prediction_done_db(today_str)
                 return I18n.get("sched_pred_done_found", count=len(result_df))
 
             logger.info("[Scheduler] Nightly prediction found no candidates, NOT marking done to allow retry")

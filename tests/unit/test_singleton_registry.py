@@ -160,7 +160,7 @@ class TestSingletonRegistry:
 
     def test_reset_handles_close_exception(self):
         """A-P1-5: reset_all_singletons should handle close() exceptions gracefully"""
-        from utils.singleton_registry import register_singleton, reset_all_singletons, _registry, _lock
+        from utils.singleton_registry import register_singleton, _registry, _lock
 
         @register_singleton
         class DummyCrashyClose:
@@ -173,12 +173,114 @@ class TestSingletonRegistry:
 
         with _lock:
             _registry.remove(DummyCrashyClose)
+
+
+class TestAtexitCleanupAll:
+    """Tests for _atexit_cleanup_all centralized atexit handler"""
+
+    def _cleanup(self, *classes):
+        import utils.singleton_registry as mod
+
+        mod._atexit_fired = False
+        with mod._lock:
+            for cls in classes:
+                if cls in mod._registry:
+                    mod._registry.remove(cls)
+
+    def test_calls_atexit_cleanup_on_registered_singletons(self):
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        cleanup_called = []
+
+        class DummyWithCleanup:
+            @classmethod
+            def _atexit_cleanup(cls):
+                cleanup_called.append(cls.__name__)
+
         with _lock:
-            _registry.append(DummyCrashyClose)
+            _registry.append(DummyWithCleanup)
 
-        reset_all_singletons()
+        _atexit_cleanup_all()
 
-        assert DummyCrashyClose._instance is None
+        assert "DummyWithCleanup" in cleanup_called
+
+        self._cleanup(DummyWithCleanup)
+
+    def test_skips_singletons_without_atexit_cleanup(self):
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        class DummyNoCleanup:
+            pass
 
         with _lock:
-            _registry.remove(DummyCrashyClose)
+            _registry.append(DummyNoCleanup)
+
+        _atexit_cleanup_all()
+
+        self._cleanup(DummyNoCleanup)
+
+    def test_handles_exceptions_from_atexit_cleanup_gracefully(self):
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        class DummyCrashyCleanup:
+            @classmethod
+            def _atexit_cleanup(cls):
+                raise RuntimeError("cleanup boom")
+
+        with _lock:
+            _registry.append(DummyCrashyCleanup)
+
+        _atexit_cleanup_all()
+
+        self._cleanup(DummyCrashyCleanup)
+
+    def test_only_runs_once(self):
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        cleanup_count = []
+
+        class DummyOnce:
+            @classmethod
+            def _atexit_cleanup(cls):
+                cleanup_count.append(1)
+
+        with _lock:
+            _registry.append(DummyOnce)
+
+        _atexit_cleanup_all()
+        _atexit_cleanup_all()
+
+        assert len(cleanup_count) == 1
+
+        self._cleanup(DummyOnce)
+
+    def test_iterates_in_reverse_registration_order(self):
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        call_order = []
+
+        class DummyFirst:
+            @classmethod
+            def _atexit_cleanup(cls):
+                call_order.append("first")
+
+        class DummySecond:
+            @classmethod
+            def _atexit_cleanup(cls):
+                call_order.append("second")
+
+        class DummyThird:
+            @classmethod
+            def _atexit_cleanup(cls):
+                call_order.append("third")
+
+        with _lock:
+            _registry.append(DummyFirst)
+            _registry.append(DummySecond)
+            _registry.append(DummyThird)
+
+        _atexit_cleanup_all()
+
+        assert call_order == ["third", "second", "first"]
+
+        self._cleanup(DummyFirst, DummySecond, DummyThird)

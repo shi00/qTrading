@@ -1,5 +1,4 @@
 import asyncio
-import atexit
 import concurrent.futures
 import functools
 import logging
@@ -66,26 +65,16 @@ class ThreadPoolManager:
         self._shutdown_event = threading.Event()
 
         self._init_pools()
-        atexit.register(self._atexit_shutdown)
         self._initialized = True
 
-    def _atexit_shutdown(self):
-        """S3-1 fix: atexit handler with wait=False to avoid blocking on exit."""
-
-        for handler in logger.handlers[:]:
+    @classmethod
+    def _atexit_cleanup(cls):
+        """C-P2-3: Centralized atexit cleanup via singleton_registry."""
+        if cls._instance is not None:
             try:
-                handler.flush()
-                if hasattr(handler, "stream") and hasattr(handler.stream, "closed") and handler.stream.closed:  # type: ignore[attr-defined]
-                    logger.removeHandler(handler)
-            except (ValueError, OSError):
-                try:
-                    logger.removeHandler(handler)
-                except (ValueError, RuntimeError):
-                    pass
-        try:
-            self.shutdown(wait=False)
-        except ValueError:
-            pass
+                cls._instance.shutdown(wait=False)
+            except (ValueError, RuntimeError, OSError):
+                pass
 
     def _init_pools(self):
         # 1. IO Pool Configuration

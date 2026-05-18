@@ -1,4 +1,4 @@
-import logging
+import inspect
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -171,42 +171,93 @@ class TestThreadPoolManagerResetSingletonErrorHandling:
 
 class TestThreadPoolManagerAtexitShutdown:
     @patch("utils.thread_pool.ConfigHandler")
-    def test_atexit_shutdown_cleans_closed_handler(self, mock_ch):
-        mock_ch.get_max_io_workers.return_value = 4
-        mock_ch.get_max_cpu_workers.return_value = 2
-        tpm = ThreadPoolManager()
-        mock_handler = MagicMock()
-        mock_handler.flush = MagicMock()
-        mock_handler.stream = MagicMock()
-        mock_handler.stream.closed = True
-        test_logger = logging.getLogger("utils.thread_pool")
-        original_handlers = test_logger.handlers[:]
-        test_logger.handlers.append(mock_handler)
-        tpm._atexit_shutdown()
-        assert mock_handler not in test_logger.handlers
-        test_logger.handlers = original_handlers
+    def test_atexit_cleanup_does_nothing_when_instance_is_none(self, mock_ch):
+        ThreadPoolManager._reset_singleton()
+        ThreadPoolManager._atexit_cleanup()
 
     @patch("utils.thread_pool.ConfigHandler")
-    def test_atexit_shutdown_handles_handler_flush_error(self, mock_ch):
-        mock_ch.get_max_io_workers.return_value = 4
-        mock_ch.get_max_cpu_workers.return_value = 2
-        tpm = ThreadPoolManager()
-        mock_handler = MagicMock()
-        mock_handler.flush = MagicMock(side_effect=ValueError("closed"))
-        test_logger = logging.getLogger("utils.thread_pool")
-        original_handlers = test_logger.handlers[:]
-        test_logger.handlers.append(mock_handler)
-        tpm._atexit_shutdown()
-        test_logger.handlers = original_handlers
-
-    @patch("utils.thread_pool.ConfigHandler")
-    def test_atexit_shutdown_calls_shutdown(self, mock_ch):
+    def test_atexit_cleanup_calls_shutdown_when_instance_exists(self, mock_ch):
         mock_ch.get_max_io_workers.return_value = 4
         mock_ch.get_max_cpu_workers.return_value = 2
         tpm = ThreadPoolManager()
         tpm.shutdown = MagicMock()
-        tpm._atexit_shutdown()
+        ThreadPoolManager._atexit_cleanup()
         tpm.shutdown.assert_called_once_with(wait=False)
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_handles_value_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=ValueError("closed"))
+        ThreadPoolManager._atexit_cleanup()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_handles_runtime_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=RuntimeError("already shut down"))
+        ThreadPoolManager._atexit_cleanup()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_handles_os_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=OSError("broken pipe"))
+        ThreadPoolManager._atexit_cleanup()
+
+
+class TestThreadPoolManagerAtexitCleanup:
+    def test_atexit_cleanup_is_classmethod(self):
+        assert isinstance(inspect.getattr_static(ThreadPoolManager, "_atexit_cleanup"), classmethod)
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_noop_when_no_instance(self, mock_ch):
+        ThreadPoolManager._reset_singleton()
+        assert ThreadPoolManager._instance is None
+        ThreadPoolManager._atexit_cleanup()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_calls_shutdown_on_instance(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock()
+        ThreadPoolManager._atexit_cleanup()
+        tpm.shutdown.assert_called_once_with(wait=False)
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_handles_value_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=ValueError("bad value"))
+        ThreadPoolManager._atexit_cleanup()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_handles_runtime_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=RuntimeError("already shut down"))
+        ThreadPoolManager._atexit_cleanup()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_handles_os_error(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown = MagicMock(side_effect=OSError("broken pipe"))
+        ThreadPoolManager._atexit_cleanup()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_atexit_cleanup_does_not_call_shutdown_when_no_instance(self, mock_ch):
+        ThreadPoolManager._reset_singleton()
+        with patch.object(ThreadPoolManager, "shutdown") as mock_shutdown:
+            ThreadPoolManager._atexit_cleanup()
+            mock_shutdown.assert_not_called()
 
 
 class TestThreadPoolManagerShutdownPoolAccess:
