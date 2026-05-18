@@ -648,6 +648,37 @@ class TestNewsFetcherGetUsMajorMoves:
         assert isinstance(result, (list, str))
 
 
+class TestUsMajorMovesLookAheadGuard:
+    @pytest.mark.asyncio
+    async def test_historical_date_returns_empty(self):
+        import datetime
+
+        past_date = datetime.date(2024, 1, 1)
+        result = await NewsFetcher.get_us_major_moves(as_of=past_date)
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_none_as_of_fetches_normally(self):
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=None)
+            result = await NewsFetcher.get_us_major_moves(as_of=None)
+            assert isinstance(result, (list, str))
+
+    @pytest.mark.asyncio
+    async def test_today_as_of_fetches_normally(self):
+        import datetime
+
+        today = datetime.date.today()
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=None)
+            result = await NewsFetcher.get_us_major_moves(as_of=today)
+            assert isinstance(result, (list, str))
+
+
 class TestGetHotConceptsTimeout:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher._run_with_python_string_storage")

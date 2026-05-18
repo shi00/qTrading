@@ -294,7 +294,16 @@ class AIStrategyMixin:
         global_context = ""
         if self.should_include_global_context():
             try:
-                global_context = await NewsFetcher.get_us_major_moves()
+                trade_date_raw = context.get("trade_date")
+                as_of = None
+                if trade_date_raw is not None:
+                    from utils.time_utils import parse_date
+
+                    try:
+                        as_of = parse_date(str(trade_date_raw))
+                    except Exception:
+                        pass
+                global_context = await NewsFetcher.get_us_major_moves(as_of=as_of)
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to fetch global context: %s", e)
 

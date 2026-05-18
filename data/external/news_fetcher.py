@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import threading
-from datetime import timedelta
+from datetime import date, timedelta
 
 import akshare as ak
 import pandas as pd
@@ -250,13 +250,24 @@ class NewsFetcher:
             return []
 
     @staticmethod
-    async def get_us_major_moves():
+    async def get_us_major_moves(as_of: date | None = None):
         """
         Fetch major US Tech giants performance (NVDA, TSLA, AAPL, MSFT, GOOGL, AMZN, META).
         Uses Sina Finance Custom Sort API (Verified Working).
         Cached for 5 minutes to avoid repeated external API calls.
         S2-4 fix: Added retry logic with exponential backoff.
+
+        P0-4 fix: as_of parameter prevents look-ahead bias. When as_of is not
+        today's date (i.e. historical replay), returns empty string instead of
+        injecting real-time data into a past context.
         """
+        if as_of is not None and as_of != get_now().date():
+            logger.debug(
+                "[News] Skipping US major moves for historical date %s (look-ahead guard)",
+                as_of,
+            )
+            return ""
+
         cached = _US_MOVES_CACHE.get("result")
         if cached is not None:
             return cached
