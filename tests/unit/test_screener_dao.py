@@ -189,6 +189,28 @@ class TestScreenerDaoGetLearningContext:
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
 
+    @pytest.mark.asyncio
+    async def test_as_of_adds_date_filter(self):
+        import datetime
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        as_of_date = datetime.date(2024, 6, 1)
+        await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date <= $2" in sql
+        assert call_args[0][1] == ("WIN", as_of_date, 3)
+
+    @pytest.mark.asyncio
+    async def test_no_as_of_no_date_filter(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date" not in sql
+
 
 class TestScreenerDaoUpdatePredictionResult:
     @pytest.mark.asyncio

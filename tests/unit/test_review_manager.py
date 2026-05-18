@@ -159,6 +159,31 @@ class TestReviewManagerGetLearningContext:
         assert isinstance(result, str)
         assert len(result) > 0
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_as_of_passed_to_dao(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=None)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        import datetime
+
+        as_of_date = datetime.date(2024, 6, 1)
+        await rm.get_learning_context(as_of=as_of_date)
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3,
+            is_win=True,
+            as_of=as_of_date,
+        )
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3,
+            is_win=False,
+            as_of=as_of_date,
+        )
+
 
 class TestReviewManagerSaveResults:
     @pytest.mark.asyncio

@@ -202,10 +202,14 @@ class ReviewManager:
             logger.error(f"[Review] Error fetching pending predictions: {e}")
             return pd.DataFrame()
 
-    async def get_learning_context(self, limit: int | None = 3):
+    async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | None = None):
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
         Returns formatted XML string for few-shot learning.
+
+        P0-5 fix: as_of parameter prevents look-ahead bias. When provided,
+        only predictions with trade_date <= as_of are included, preventing
+        future data from leaking into historical replay contexts.
 
         Corner cases:
         - No history: Returns minimal XML
@@ -219,6 +223,7 @@ class ReviewManager:
             df_wins = await self.cache.screener_dao.get_learning_context(
                 limit=limit or 3,
                 is_win=True,
+                as_of=as_of,
             )
             if df_wins is not None and not df_wins.empty:
                 for _, row in df_wins.iterrows():
@@ -238,6 +243,7 @@ class ReviewManager:
             df_losses = await self.cache.screener_dao.get_learning_context(
                 limit=limit or 3,
                 is_win=False,
+                as_of=as_of,
             )
             if df_losses is not None and not df_losses.empty:
                 for _, row in df_losses.iterrows():

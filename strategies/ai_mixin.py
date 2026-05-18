@@ -285,7 +285,16 @@ class AIStrategyMixin:
                 from data.persistence.review_manager import ReviewManager
 
                 rm = ReviewManager()
-                history_context = await rm.get_learning_context()
+                trade_date_raw = context.get("trade_date")
+                as_of = None
+                if trade_date_raw is not None:
+                    from utils.time_utils import parse_date
+
+                    try:
+                        as_of = parse_date(str(trade_date_raw))
+                    except Exception:
+                        pass
+                history_context = await rm.get_learning_context(as_of=as_of)
             except Exception as e:
                 logger.warning(
                     f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}",

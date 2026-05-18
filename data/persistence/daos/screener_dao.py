@@ -1,3 +1,4 @@
+import datetime
 import functools
 import logging
 
@@ -205,18 +206,33 @@ class ScreenerDao(BaseDao):
         df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
         return df if df is not None else pd.DataFrame()
 
-    async def get_learning_context(self, limit: int = 3, is_win: bool = True):
+    async def get_learning_context(
+        self,
+        limit: int = 3,
+        is_win: bool = True,
+        as_of: datetime.date | None = None,
+    ):
         label = "WIN" if is_win else "LOSS"
         order = "DESC" if is_win else "ASC"
 
-        sql = f"""
-            SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
-            FROM screening_history
-            WHERE prediction_result = $1 AND alpha IS NOT NULL
-            ORDER BY alpha {order}, t1_pct {order}
-            LIMIT $2
-        """
-        df = await self._read_db(sql, (label, limit))
+        if as_of is not None:
+            sql = f"""
+                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
+                FROM screening_history
+                WHERE prediction_result = $1 AND alpha IS NOT NULL AND trade_date <= $2
+                ORDER BY alpha {order}, t1_pct {order}
+                LIMIT $3
+            """
+            df = await self._read_db(sql, (label, as_of, limit))
+        else:
+            sql = f"""
+                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
+                FROM screening_history
+                WHERE prediction_result = $1 AND alpha IS NOT NULL
+                ORDER BY alpha {order}, t1_pct {order}
+                LIMIT $2
+            """
+            df = await self._read_db(sql, (label, limit))
         return df if df is not None else pd.DataFrame()
 
     async def update_prediction_result(
