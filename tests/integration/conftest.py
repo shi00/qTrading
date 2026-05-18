@@ -43,7 +43,6 @@ if TEST_DB_HOST not in _ALLOWED_HOSTS:
     raise ValueError(f"TEST_DB_HOST must be one of {_ALLOWED_HOSTS} for safety, got: {TEST_DB_HOST!r}")
 
 TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
-TEST_DB_SYNC_URL = f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
 
 
 def pytest_collection_modifyitems(items):
@@ -52,7 +51,7 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
-_test_engine = None
+_test_engine: AsyncEngine | None = None
 _test_db_initialized = False
 
 
@@ -85,7 +84,7 @@ async def _ensure_test_db():
         await conn.close()
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def test_engine():
     global _test_engine
 
