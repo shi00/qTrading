@@ -482,6 +482,56 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         out = strat._filter_logic(base_lf, {"params": {}}).collect()
         assert len(out) == 0
 
+    def test_sorts_by_trade_date_desc_before_taking_first(self):
+        flow_df = pd.DataFrame(
+            [
+                {"trade_date": "20240101", "north_money": 10.0},
+                {"trade_date": "20240103", "north_money": 120.0},
+                {"trade_date": "20240102", "north_money": 30.0},
+            ]
+        )
+        base_lf = pl.DataFrame(
+            [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 5.0, "total_mv": 500.0}]
+        ).lazy()
+        strat = NorthboundFlowStrategy()
+        ctx = {
+            "northbound_flow_data": flow_df,
+            "params": {"nb_flow_min": 50},
+        }
+        out = strat._filter_logic(base_lf, ctx).collect()
+        assert len(out) == 1
+
+    def test_negative_pe_ttm_excluded(self):
+        flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 120.0}])
+        base_lf = pl.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "亏损股", "industry": "科技", "pe_ttm": -5.0, "total_mv": 4000.0},
+                {"ts_code": "000002.SZ", "name": "盈利股", "industry": "科技", "pe_ttm": 10.0, "total_mv": 3000.0},
+            ]
+        ).lazy()
+        strat = NorthboundFlowStrategy()
+        ctx = {
+            "northbound_flow_data": flow_df,
+            "params": {"nb_flow_min": 50, "total_mv_min": 100},
+        }
+        out = strat._filter_logic(base_lf, ctx).collect()
+        ts_codes = out["ts_code"].to_list()
+        assert "000001.SZ" not in ts_codes
+        assert "000002.SZ" in ts_codes
+
+    def test_flow_equal_to_threshold_returns_empty(self):
+        flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 50.0}])
+        base_lf = pl.DataFrame(
+            [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 5.0, "total_mv": 500.0}]
+        ).lazy()
+        strat = NorthboundFlowStrategy()
+        ctx = {
+            "northbound_flow_data": flow_df,
+            "params": {"nb_flow_min": 50},
+        }
+        out = strat._filter_logic(base_lf, ctx).collect()
+        assert len(out) == 0
+
 
 class TestContextKeyTableMap(unittest.TestCase):
     def test_northbound_flow_data_mapped_to_moneyflow_hsgt(self):

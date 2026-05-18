@@ -172,14 +172,20 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
         try:
             flow_lf = pl.from_pandas(flow_df).lazy()
 
-            north_money_val = flow_lf.select(pl.col("north_money").first()).collect().item()
+            north_money_val = (
+                flow_lf.sort("trade_date", descending=True).select(pl.col("north_money").first()).collect().item()
+            )
 
             if north_money_val is None or north_money_val <= target_flow:
+                logger.debug(
+                    f"[{self.name}] Gating: north_money={north_money_val}, "
+                    f"threshold={target_flow}. Returning empty (market sentiment insufficient)."
+                )
                 return lf.head(0)
 
             return (
                 lf.drop_nulls(subset=["total_mv", "pe_ttm"])
-                .filter(pl.col("total_mv") >= mv_min)
+                .filter((pl.col("total_mv") >= mv_min) & (pl.col("pe_ttm") > 0))
                 .sort("total_mv", descending=True)
             )
         except Exception as e:
