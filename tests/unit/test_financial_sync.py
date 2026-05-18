@@ -674,6 +674,7 @@ class TestFinancialSyncCorporateActionsErrorPaths:
             setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
         progress_cb = MagicMock()
         strategy = FinancialSyncStrategy(ctx)
+        strategy._shutdown_event.clear()
         dates = [f"202406{d:02d}" for d in range(1, 12)]
         await strategy._sync_corporate_actions_by_date(dates, progress_callback=progress_cb)
         assert progress_cb.call_count >= 2
