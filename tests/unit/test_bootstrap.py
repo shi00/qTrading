@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
+from data.persistence.db_migrator import DatabaseMigrationNeeded
 
 
 class TestMaskSensitive:
@@ -156,3 +157,15 @@ class TestInitializeServices:
         assert result["success"] is False
         assert result["error"] == "task_manager_init_failed"
         assert "tm error" in result["detail"]
+
+    @pytest.mark.asyncio
+    async def test_db_upgrade_needed(self):
+        mock_cm = MagicMock()
+        mock_cm.init_db = AsyncMock(side_effect=DatabaseMigrationNeeded(current_rev="abc123", head_rev="def456"))
+
+        result = await initialize_services(mock_cm)
+
+        assert result["success"] is False
+        assert result["error"] == "db_upgrade_needed"
+        assert result["current_rev"] == "abc123"
+        assert result["head_rev"] == "def456"

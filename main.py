@@ -4,6 +4,7 @@ import logging
 import flet as ft
 
 from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
+from data.persistence.db_migrator import DatabaseMigrator
 from data.cache.cache_manager import CacheManager
 from data.external.news_subscription import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
@@ -252,7 +253,102 @@ async def main(page: ft.Page):
         result = await initialize_services(cache_manager, show_toast_fn=show_toast)
 
         if not result["success"]:
-            if result.get("error") == "db_init_failed":
+            if result.get("error") == "db_upgrade_needed":
+                # 显示数据库升级对话框
+                current_rev = result.get("current_rev", "unknown")
+                head_rev = result.get("head_rev", "unknown")
+
+                async def on_upgrade_click(e):
+                    # 显示升级中对话框
+                    in_progress_dialog = ft.AlertDialog(
+                        modal=True,
+                        title=ft.Text(I18n.get("db_upgrade_in_progress_title", default="正在升级数据库...")),
+                        content=ft.Text(
+                            I18n.get("db_upgrade_in_progress_content", default="数据库升级正在进行中，请不要关闭程序。")
+                        ),
+                        actions=[],
+                        actions_alignment=ft.MainAxisAlignment.END,
+                    )
+                    _show_dialog(in_progress_dialog)
+
+                    try:
+                        # 执行升级
+                        await DatabaseMigrator.init_db(cache_manager.engine, auto_migrate=True)
+
+                        # 升级成功
+                        _hide_dialog(in_progress_dialog)
+
+                        success_dialog = ft.AlertDialog(
+                            modal=True,
+                            title=ft.Text(I18n.get("db_upgrade_success_title", default="升级成功")),
+                            content=ft.Text(
+                                I18n.get("db_upgrade_success_content", default="数据库已成功升级到最新版本。")
+                            ),
+                            actions=[
+                                ft.TextButton(
+                                    I18n.get("common_ok", default="确定"),
+                                    on_click=lambda e: [
+                                        _hide_dialog(success_dialog),
+                                        page.run_task(_init_services_and_start_app),
+                                    ],
+                                ),
+                            ],
+                            actions_alignment=ft.MainAxisAlignment.END,
+                        )
+                        _show_dialog(success_dialog)
+                    except Exception as upgrade_error:
+                        # 升级失败
+                        _hide_dialog(in_progress_dialog)
+
+                        error_dialog = ft.AlertDialog(
+                            modal=True,
+                            title=ft.Text(I18n.get("db_upgrade_error_title", default="升级失败")),
+                            content=ft.Text(
+                                I18n.get(
+                                    "db_upgrade_error_content",
+                                    default="数据库升级过程中发生错误: {error}\n\n请查看日志文件获取更多详细信息。",
+                                ).format(error=str(upgrade_error))
+                            ),
+                            actions=[
+                                ft.TextButton(
+                                    I18n.get("common_ok", default="确定"), on_click=lambda e: _hide_dialog(error_dialog)
+                                ),
+                            ],
+                            actions_alignment=ft.MainAxisAlignment.END,
+                        )
+                        _show_dialog(error_dialog)
+
+                def on_skip_click(e):
+                    # 用户选择稍后升级
+                    _hide_dialog(upgrade_dialog)
+                    show_toast(I18n.get("warning_skip_db", default="跳过数据库初始化，部分功能不可用"), "warning")
+                    from ui.app_layout import AppLayout
+
+                    app_layout = AppLayout(page)
+                    app_layout.show()
+
+                # 显示升级提示对话框
+                upgrade_dialog = ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text(I18n.get("db_upgrade_needed_title", default="数据库需要升级")),
+                    content=ft.Text(
+                        I18n.get(
+                            "db_upgrade_needed_content",
+                            default="检测到数据库架构版本较旧。\n\n当前版本: {current_rev}\n最新版本: {head_rev}\n\n建议立即升级以使用最新功能并避免数据不兼容问题。",
+                        ).format(current_rev=current_rev, head_rev=head_rev)
+                    ),
+                    actions=[
+                        ft.TextButton(I18n.get("db_upgrade_skip", default="稍后升级"), on_click=on_skip_click),
+                        ft.ElevatedButton(
+                            I18n.get("db_upgrade_btn", default="立即升级"),
+                            on_click=lambda e: page.run_task(on_upgrade_click, e),
+                        ),
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                )
+                _show_dialog(upgrade_dialog)
+
+            elif result.get("error") == "db_init_failed":
 
                 async def on_retry_click(e):
                     page.clean()

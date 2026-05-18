@@ -2,6 +2,7 @@ import logging
 
 from data.domain_services.market_data_service import MarketDataService
 from data.external.news_subscription import NewsSubscriptionService
+from data.persistence.db_migrator import DatabaseMigrationNeeded
 from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager
 from utils.scheduler_service import SchedulerService
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 async def initialize_services(cache_manager, show_toast_fn=None):
     try:
         await cache_manager.init_db()
+    except DatabaseMigrationNeeded as e:
+        logger.warning(f"[Bootstrap] Database needs migration: {e}")
+        return {
+            "success": False,
+            "error": "db_upgrade_needed",
+            "detail": str(e),
+            "current_rev": e.current_rev,
+            "head_rev": e.head_rev,
+        }
     except Exception as e:
         logger.error(f"[Bootstrap] Database initialization failed: {e}", exc_info=True)
         if show_toast_fn:
