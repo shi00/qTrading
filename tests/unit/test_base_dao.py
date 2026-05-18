@@ -1202,6 +1202,30 @@ class TestBaseDaoPrepareDataParamsExtended:
         result = BaseDao._prepare_data_params(df, ["col1"])
         assert result[0][0] == "hello"
 
+    def test_string_dtype_no_error(self):
+        df = pd.DataFrame({"code": ["000001", "000002"], "value": [1, 2]})
+        df["code"] = df["code"].astype(pd.StringDtype())
+        result = BaseDao._prepare_data_params(df, ["code", "value"])
+        assert result is not None
+        assert len(result) == 2
+        assert result[0][0] == "000001"
+        assert result[0][1] == 1
+
+    def test_mixed_string_and_numeric_dtypes(self):
+        df = pd.DataFrame(
+            {
+                "code": pd.array(["000001", "000002"], dtype=pd.StringDtype()),
+                "price": np.float64(10.5),
+                "volume": np.int64(1000),
+            }
+        )
+        result = BaseDao._prepare_data_params(df, ["code", "price", "volume"])
+        assert result is not None
+        assert len(result) == 2
+        assert result[0][0] == "000001"
+        assert isinstance(result[0][1], float)
+        assert isinstance(result[0][2], int)
+
 
 class TestEngineDisposedErrorDBP01:
     @pytest.mark.asyncio

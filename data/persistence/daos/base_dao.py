@@ -354,13 +354,13 @@ class BaseDao:
                     df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
 
             for col in df_clean.columns:
-                if (
-                    df_clean[col].dtype == "bool"
-                    or np.issubdtype(df_clean[col].dtype, np.integer)
-                    or np.issubdtype(df_clean[col].dtype, np.floating)
-                ):
+                col_dtype = df_clean[col].dtype
+                is_numeric = isinstance(col_dtype, np.dtype) and (
+                    col_dtype == "bool" or np.issubdtype(col_dtype, np.integer) or np.issubdtype(col_dtype, np.floating)
+                )
+                if is_numeric:
                     df_clean[col] = df_clean[col].astype(object).where(df_clean[col].notna(), None)
-                elif df_clean[col].dtype == "datetime64[ns]":
+                elif col_dtype == "datetime64[ns]":
                     df_clean[col] = (
                         df_clean[col]
                         .dt.to_pydatetime()
