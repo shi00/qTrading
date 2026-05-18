@@ -6,28 +6,66 @@ Prerequisites:
 
 Run:
     1. Start the application server first:
-       python -m core.main
-    2. Run E2E tests (remove skip marker or use --override-ini):
+       python main.py
+    2. Run E2E tests:
        pytest tests/e2e/test_onboarding_wizard_e2e.py -m e2e --headed
-       pytest tests/e2e/ -m e2e --override-ini="markers=e2e" -k "not skip"
 
-Note: These tests are skipped by default because they require:
-    - A running application server on localhost:8550
-    - Playwright browser binaries installed
-    - A test database configured
+Note: Smoke tests (TestOnboardingWizardSmoke) run automatically when
+    Playwright is installed and the app server is reachable. They skip
+    gracefully otherwise. Full E2E tests (TestOnboardingWizardE2E,
+    TestOnboardingWizardE2EShortcuts) still require explicit server setup.
 """
 
 import pytest
 
 
+def _is_server_reachable(url="http://localhost:8550", timeout_ms=2000):
+    try:
+        from playwright.sync_api import sync_playwright
+
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(url, timeout=timeout_ms, wait_until="commit")
+            return True
+        except Exception:
+            return False
+        finally:
+            page.close()
+            browser.close()
+            pw.stop()
+    except Exception:
+        return False
+
+
+def _playwright_available():
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("playwright") is not None
+    except ImportError:
+        return False
+
+
+skip_if_no_playwright = pytest.mark.skipif(
+    not _playwright_available(),
+    reason="playwright not installed",
+)
+
+skip_if_no_server = pytest.mark.skipif(
+    not _is_server_reachable(),
+    reason="application server not reachable on localhost:8550",
+)
+
+
 @pytest.fixture(scope="module")
 def browser_context():
-    """Create browser context for E2E tests"""
     try:
-        from playwright.sync_api import sync_playwright  # type: ignore[import-unresolved]
+        from playwright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=False)
+        browser = playwright.chromium.launch(headless=True)
         context = browser.new_context()
         yield context
         context.close()
@@ -39,18 +77,40 @@ def browser_context():
 
 @pytest.fixture
 def page(browser_context):
-    """Create a new page for each test"""
     page = browser_context.new_page()
     yield page
     page.close()
 
 
-class TestOnboardingWizardE2E:
-    """E2E tests for complete wizard flow"""
+class TestOnboardingWizardSmoke:
+    """Smoke tests: run automatically when Playwright + server available"""
 
-    @pytest.mark.skip(reason="Requires running application server")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    def test_app_loads_and_shows_welcome(self, page):
+        page.goto("http://localhost:8550", timeout=10000)
+        welcome_visible = page.locator("text=欢迎使用").or_(page.locator("text=Welcome"))
+        welcome_visible.wait_for(timeout=10000)
+        assert welcome_visible.is_visible()
+
+    @skip_if_no_playwright
+    @skip_if_no_server
+    def test_wizard_first_step_renders(self, page):
+        page.goto("http://localhost:8550", timeout=10000)
+        start_button = page.locator("button:has-text('开始使用')").or_(page.locator("button:has-text('Get Started')"))
+        start_button.wait_for(timeout=10000)
+        assert start_button.is_visible()
+        start_button.click()
+        db_config = page.locator("text=数据库配置").or_(page.locator("text=Database Configuration"))
+        db_config.wait_for(timeout=5000)
+        assert db_config.is_visible()
+
+
+class TestOnboardingWizardE2E:
+    """Full E2E tests: require explicit server setup"""
+
+    @pytest.mark.skip(reason="Requires running application server with test DB")
     def test_wizard_navigation_flow(self, page):
-        """Test complete wizard navigation flow"""
         page.goto("http://localhost:8550")
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
@@ -75,9 +135,8 @@ class TestOnboardingWizardE2E:
         host_value = page.input_value("input[placeholder*='主机']")
         assert host_value == "localhost"
 
-    @pytest.mark.skip(reason="Requires running application server")
+    @pytest.mark.skip(reason="Requires running application server with test DB")
     def test_required_step_validation(self, page):
-        """Test required step validation prevents empty input"""
         page.goto("http://localhost:8550")
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
@@ -90,9 +149,8 @@ class TestOnboardingWizardE2E:
 
         page.wait_for_selector("text=请填写", timeout=3000)
 
-    @pytest.mark.skip(reason="Requires running application server")
+    @pytest.mark.skip(reason="Requires running application server with test DB")
     def test_skip_optional_step(self, page):
-        """Test skipping optional local model step"""
         page.goto("http://localhost:8550")
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
@@ -120,9 +178,8 @@ class TestOnboardingWizardE2E:
 
         page.wait_for_selector("text=数据同步", timeout=5000)
 
-    @pytest.mark.skip(reason="Requires running application server")
+    @pytest.mark.skip(reason="Requires running application server with test DB")
     def test_complete_wizard_flow(self, page):
-        """Test completing the entire wizard"""
         page.goto("http://localhost:8550")
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
@@ -162,9 +219,8 @@ class TestOnboardingWizardE2E:
 class TestOnboardingWizardE2EShortcuts:
     """E2E tests for wizard shortcuts and edge cases"""
 
-    @pytest.mark.skip(reason="Requires running application server")
+    @pytest.mark.skip(reason="Requires running application server with test DB")
     def test_back_navigation_preserves_input(self, page):
-        """Test that going back preserves user input"""
         page.goto("http://localhost:8550")
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
@@ -187,9 +243,8 @@ class TestOnboardingWizardE2EShortcuts:
         assert host_value == "myhost"
         assert port_value == "9999"
 
-    @pytest.mark.skip(reason="Requires running application server")
+    @pytest.mark.skip(reason="Requires running application server with test DB")
     def test_language_switch_preserves_state(self, page):
-        """Test that language switching preserves form state"""
         page.goto("http://localhost:8550")
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
