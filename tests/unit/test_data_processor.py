@@ -86,7 +86,7 @@ class TestDataProcessorCancel:
         dp = _make_dp()
         try:
             for s in dp.strategies.values():
-                s.cancel = AsyncMock()
+                s.cancel = MagicMock()
             await dp.request_cancel()
             assert dp.is_cancelled()
         finally:
@@ -97,9 +97,27 @@ class TestDataProcessorCancel:
         dp = _make_dp()
         try:
             for s in dp.strategies.values():
-                s.cancel = AsyncMock()
+                s.cancel = MagicMock()
             await dp.stop()
             assert dp.is_cancelled()
+        finally:
+            _cleanup(dp)
+
+    @pytest.mark.asyncio
+    async def test_stop_calls_strategy_cancel(self):
+        dp = _make_dp()
+        try:
+            # Track cancel calls
+            cancel_calls = {}
+            for name, s in dp.strategies.items():
+                s.cancel = MagicMock()
+                cancel_calls[name] = s.cancel
+
+            await dp.stop()
+
+            # Verify all strategies were cancelled
+            for _name, mock_cancel in cancel_calls.items():
+                mock_cancel.assert_called_once()
         finally:
             _cleanup(dp)
 
@@ -112,7 +130,7 @@ class TestDataProcessorClose:
             dp.cache = MagicMock()
             dp.cache.close = AsyncMock()
             for s in dp.strategies.values():
-                s.cancel = AsyncMock()
+                s.cancel = MagicMock()
             await dp.close()
             dp.cache.close.assert_called_once()
         finally:
@@ -986,7 +1004,7 @@ class TestDataProcessorRequestCancel:
         mock_ch.get_token.return_value = "test-token"
         dp = DataProcessor()
         for _name, strategy in dp.strategies.items():
-            strategy.cancel = AsyncMock()
+            strategy.cancel = MagicMock()
         await dp.request_cancel()
         assert dp.is_cancelled() is True
 
@@ -1030,6 +1048,27 @@ class TestDataProcessorStop:
         mock_ch.get_token.return_value = "test-token"
         dp = DataProcessor()
         for _name, strategy in dp.strategies.items():
-            strategy.cancel = AsyncMock()
+            strategy.cancel = MagicMock()
         await dp.stop()
+        assert dp.is_cancelled() is True
+
+    @pytest.mark.asyncio
+    @patch("data.data_processor.TushareClient")
+    @patch("data.data_processor.CacheManager")
+    @patch("data.data_processor.TradeCalendarService")
+    @patch("data.data_processor.ConfigHandler")
+    async def test_stop_handles_exception_in_strategy_cancel(self, mock_ch, mock_tc, mock_cache, mock_api):
+        mock_ch.get_token.return_value = "test-token"
+        dp = DataProcessor()
+        # One strategy raises exception, others don't
+        for name, strategy in dp.strategies.items():
+            if name == "financial":
+                strategy.cancel = MagicMock(side_effect=Exception("cancel failed"))
+            else:
+                strategy.cancel = MagicMock()
+
+        # Should not raise exception overall
+        await dp.stop()
+
+        # Verify cancel event is still set
         assert dp.is_cancelled() is True

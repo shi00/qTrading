@@ -151,13 +151,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         # Delegate cancellation to strategies
         try:
-            tasks = []
-            for _name, strategy in self.strategies.items():
-                tasks.append(strategy.cancel())
-
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                logger.debug("[DataProcessor] Stop | All strategies cancelled.")
+            for name, strategy in self.strategies.items():
+                try:
+                    strategy.cancel()
+                    logger.debug(f"[DataProcessor] Stop | Cancelled strategy: {name}")
+                except Exception as e:
+                    logger.error(
+                        f"[DataProcessor] Stop | ❌ Failed to cancel {name}: {e}",
+                        exc_info=True,
+                    )
 
         except Exception as e:
             logger.error(
