@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 import threading
@@ -261,12 +262,15 @@ class NewsFetcher:
         today's date (i.e. historical replay), returns empty string instead of
         injecting real-time data into a past context.
         """
-        if as_of is not None and as_of != get_now().date():
-            logger.debug(
-                "[News] Skipping US major moves for historical date %s (look-ahead guard)",
-                as_of,
-            )
-            return ""
+        if as_of is not None:
+            if isinstance(as_of, datetime.datetime):
+                as_of = as_of.date()
+            if as_of != get_now().date():
+                logger.debug(
+                    "[News] Skipping US major moves for historical date %s (look-ahead guard)",
+                    as_of,
+                )
+                return ""
 
         cached = _US_MOVES_CACHE.get("result")
         if cached is not None:

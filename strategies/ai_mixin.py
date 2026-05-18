@@ -21,7 +21,7 @@ import logging
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import httpx
 from cachetools import TTLCache
@@ -292,6 +292,8 @@ class AIStrategyMixin:
 
                     try:
                         as_of = parse_date(str(trade_date_raw))
+                        if isinstance(as_of, datetime.datetime):
+                            as_of = as_of.date()
                     except Exception:
                         pass
                 history_context = await rm.get_learning_context(as_of=as_of)
@@ -310,6 +312,8 @@ class AIStrategyMixin:
 
                     try:
                         as_of = parse_date(str(trade_date_raw))
+                        if isinstance(as_of, datetime.datetime):
+                            as_of = as_of.date()
                     except Exception:
                         pass
                 global_context = await NewsFetcher.get_us_major_moves(as_of=as_of)

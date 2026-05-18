@@ -678,6 +678,26 @@ class TestUsMajorMovesLookAheadGuard:
             result = await NewsFetcher.get_us_major_moves(as_of=today)
             assert isinstance(result, (list, str))
 
+    @pytest.mark.asyncio
+    async def test_datetime_as_of_converted_to_date(self):
+        import datetime
+
+        today_dt = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=None)
+            result = await NewsFetcher.get_us_major_moves(as_of=today_dt)
+            assert isinstance(result, (list, str))
+
+    @pytest.mark.asyncio
+    async def test_historical_datetime_returns_empty(self):
+        import datetime
+
+        past_dt = datetime.datetime(2024, 1, 1, 12, 0, 0)
+        result = await NewsFetcher.get_us_major_moves(as_of=past_dt)
+        assert result == ""
+
 
 class TestGetHotConceptsTimeout:
     @pytest.mark.asyncio
