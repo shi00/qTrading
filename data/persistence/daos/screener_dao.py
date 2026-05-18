@@ -216,6 +216,8 @@ class ScreenerDao(BaseDao):
         order = "DESC" if is_win else "ASC"
 
         if as_of is not None:
+            if isinstance(as_of, datetime.datetime):
+                as_of = as_of.date()
             sql = f"""
                 SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
                 FROM screening_history

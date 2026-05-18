@@ -203,6 +203,8 @@ class ReviewManager:
             return pd.DataFrame()
 
     async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | None = None):
+        if as_of is not None and isinstance(as_of, datetime.datetime):
+            as_of = as_of.date()
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
         Returns formatted XML string for few-shot learning.
