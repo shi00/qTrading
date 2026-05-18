@@ -297,8 +297,12 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                                 )
                             result_accumulator.added += 1
                         else:
+                            await self.context.cache.mark_stock_step4_completed(
+                                ts_code,
+                                sync_version=1,
+                            )
                             logger.debug(
-                                f"[FinancialSync] StockSync | {ts_code} returned empty data, NOT marked complete (will retry).",
+                                f"[FinancialSync] StockSync | {ts_code} returned empty data, marked complete (no data available).",
                             )
                     else:
                         logger.debug(
