@@ -25,6 +25,7 @@ class EngineDisposedError(RuntimeError):
 
 
 _IN_CHUNK_SIZE = 500
+_UPSERT_CHUNK_SIZE = 500
 _SLOW_WRITE_THRESHOLD_MS = 2000
 _SLOW_READ_THRESHOLD_MS = 500
 _SLOW_UPSERT_THRESHOLD_MS = 2000
@@ -402,23 +403,31 @@ class BaseDao:
 
         start_time = time.perf_counter()
         try:
+            total_written = 0
+
             if conn is not None:
-                await conn.execute(stmt, records)
+                for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
+                    chunk = records[i : i + _UPSERT_CHUNK_SIZE]
+                    await conn.execute(stmt, chunk)
+                    total_written += len(chunk)
             else:
                 async with self.engine.begin() as conn:
-                    await conn.execute(stmt, records)
+                    for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
+                        chunk = records[i : i + _UPSERT_CHUNK_SIZE]
+                        await conn.execute(stmt, chunk)
+                        total_written += len(chunk)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > _SLOW_UPSERT_THRESHOLD_MS:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}",
+                    f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {total_written} rows): {table_name}",
                 )
             else:
                 logger.debug(
-                    f"[{self.__class__.__name__}] UPSERT ({elapsed:.1f}ms, {len(records)} rows): {table_name}",
+                    f"[{self.__class__.__name__}] UPSERT ({elapsed:.1f}ms, {total_written} rows): {table_name}",
                 )
 
-            return len(records)
+            return total_written
         except asyncio.CancelledError:
             logger.warning(
                 f"[{self.__class__.__name__}] UPSERT cancelled during shutdown: {table_name}",

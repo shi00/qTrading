@@ -1108,6 +1108,76 @@ class TestBaseDaoSaveUpsertExtended:
             result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"])
             assert result == 1
 
+    @pytest.mark.asyncio
+    async def test_upsert_chunks_large_batch(self):
+        mock_conn = AsyncMock()
+        mock_engine = _setup_mock_engine_begin(mock_conn)
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        n_rows = 1200
+
+        def mock_prepare_records(task_type, fn, df_slice):
+            return [{"a": i} for i in range(len(df_slice))]
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=mock_prepare_records)
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
+            large_df = pd.DataFrame({"a": list(range(n_rows))})
+            result = await dao._save_upsert(large_df, "test_table", ["a"], ["a"])
+            assert result == n_rows
+            execute_calls = mock_conn.execute.call_args_list
+            assert len(execute_calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_upsert_chunks_with_conn(self):
+        mock_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        n_rows = 700
+
+        def mock_prepare_records(task_type, fn, df_slice):
+            return [{"a": i} for i in range(len(df_slice))]
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=mock_prepare_records)
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
+            large_df = pd.DataFrame({"a": list(range(n_rows))})
+            result = await dao._save_upsert(large_df, "test_table", ["a"], ["a"], conn=mock_conn)
+            assert result == n_rows
+            execute_calls = mock_conn.execute.call_args_list
+            assert len(execute_calls) == 2
+
 
 class TestBaseDaoReadDbExtended:
     @pytest.mark.asyncio
