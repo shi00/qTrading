@@ -257,13 +257,12 @@ class CacheManager:
                 self._schema_initialized = True
                 logger.debug("[CacheManager] Schema | Init completed without errors.")
             except DatabaseMigrationNeeded:
-                # Schema needs migration but auto-migrate is disabled
-                # This is expected in production
                 self._schema_initialized = True
                 logger.info(
                     "[CacheManager] Schema | Database needs migration but AUTO_MIGRATE is disabled. "
-                    "User will be prompted if necessary."
+                    "Propagating to caller for UI handling."
                 )
+                raise
             except Exception as e:
                 logger.error(
                     f"[CacheManager] Schema | Init failed critically: {e}",

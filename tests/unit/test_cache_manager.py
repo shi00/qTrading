@@ -198,6 +198,23 @@ class TestCacheManagerInitDb:
             with pytest.raises(Exception, match="migration failed"):
                 await mgr.init_db(force=True)
 
+    @pytest.mark.asyncio
+    async def test_init_db_propagates_migration_needed(self):
+        from data.persistence.db_migrator import DatabaseMigrationNeeded
+
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+        mock_lock = AsyncMock()
+        mock_lock.__aenter__ = AsyncMock(return_value=None)
+        mock_lock.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=DatabaseMigrationNeeded(current_rev="abc", head_rev="def"))
+            with pytest.raises(DatabaseMigrationNeeded):
+                await mgr.init_db(force=True)
+
 
 class TestCacheManagerClose:
     @pytest.mark.asyncio
