@@ -122,9 +122,13 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
 @register_strategy("northbound_flow")
 class NorthboundFlowStrategy(PolarsBaseStrategy):
     """
-    New strategy for northbound NET CAPITAL FLOW analysis.
-    Uses moneyflow_hsgt.north_money to track daily net inflow/outflow.
-    Complements NorthboundHoldingStrategy which tracks holding ratio.
+    Northbound NET CAPITAL FLOW as market sentiment gating signal.
+
+    moneyflow_hsgt is market-level data (no ts_code), so it cannot be
+    joined with individual stocks. Instead, north_money is used as a
+    gating condition: when net northbound inflow exceeds the threshold,
+    the strategy selects stocks from the base universe using fundamental
+    criteria (market cap, PE, etc.).
     """
 
     enable_ai_analysis = False
@@ -145,25 +149,38 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
                 "default": 50,
                 "step": 10,
             },
+            {
+                "name": "total_mv_min",
+                "label_key": "param_total_mv_min",
+                "type": "slider",
+                "min": 0,
+                "max": 10000,
+                "default": 100,
+                "step": 100,
+            },
         ]
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         flow_df = context.get("northbound_flow_data")
         p = context.get("params", {})
         target_flow = p.get("nb_flow_min", 50)
+        mv_min = p.get("total_mv_min", 100)
 
         if flow_df is None or flow_df.empty:
             return lf.head(0)
 
         try:
             flow_lf = pl.from_pandas(flow_df).lazy()
-            base_lf = lf.select(["ts_code", "name", "industry", "pe_ttm", "total_mv"])
+
+            north_money_val = flow_lf.select(pl.col("north_money").first()).collect().item()
+
+            if north_money_val is None or north_money_val <= target_flow:
+                return lf.head(0)
 
             return (
-                flow_lf.drop_nulls(subset=["north_money"])
-                .filter(pl.col("north_money") > target_flow)
-                .join(base_lf, on="ts_code", how="inner")
-                .sort("north_money", descending=True)
+                lf.drop_nulls(subset=["total_mv", "pe_ttm"])
+                .filter(pl.col("total_mv") >= mv_min)
+                .sort("total_mv", descending=True)
             )
         except Exception as e:
             logger.warning(

@@ -408,17 +408,41 @@ if __name__ == "__main__":
 
 
 class TestNorthboundFlowStrategy(unittest.TestCase):
-    def test_filter_returns_non_empty_when_context_has_flow_data(self):
+    def test_gating_returns_stocks_when_flow_exceeds_threshold(self):
         flow_df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "north_money": 120.0},
-                {"ts_code": "600000.SH", "north_money": 30.0},
+                {"trade_date": "20240101", "north_money": 120.0},
             ]
         )
         base_lf = pl.DataFrame(
             [
                 {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
                 {"ts_code": "600000.SH", "name": "浦发银行", "industry": "银行", "pe_ttm": 4.5, "total_mv": 3000.0},
+                {"ts_code": "000002.SZ", "name": "小盘股", "industry": "科技", "pe_ttm": 20.0, "total_mv": 50.0},
+            ]
+        ).lazy()
+
+        strat = NorthboundFlowStrategy()
+        ctx = {
+            "northbound_flow_data": flow_df,
+            "params": {"nb_flow_min": 50, "total_mv_min": 100},
+        }
+        out = strat._filter_logic(base_lf, ctx).collect()
+        assert len(out) == 2
+        ts_codes = out["ts_code"].to_list()
+        assert "000001.SZ" in ts_codes
+        assert "600000.SH" in ts_codes
+        assert "000002.SZ" not in ts_codes
+
+    def test_gating_returns_empty_when_flow_below_threshold(self):
+        flow_df = pd.DataFrame(
+            [
+                {"trade_date": "20240101", "north_money": 30.0},
+            ]
+        )
+        base_lf = pl.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
             ]
         ).lazy()
 
@@ -426,11 +450,29 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         ctx = {
             "northbound_flow_data": flow_df,
             "params": {"nb_flow_min": 50},
-            "screening_data": base_lf,
         }
         out = strat._filter_logic(base_lf, ctx).collect()
-        assert len(out) == 1
-        assert out["ts_code"][0] == "000001.SZ"
+        assert len(out) == 0
+
+    def test_gating_returns_empty_when_flow_null(self):
+        flow_df = pd.DataFrame(
+            [
+                {"trade_date": "20240101", "north_money": None},
+            ]
+        )
+        base_lf = pl.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
+            ]
+        ).lazy()
+
+        strat = NorthboundFlowStrategy()
+        ctx = {
+            "northbound_flow_data": flow_df,
+            "params": {"nb_flow_min": 50},
+        }
+        out = strat._filter_logic(base_lf, ctx).collect()
+        assert len(out) == 0
 
     def test_filter_returns_empty_when_context_missing(self):
         base_lf = pl.DataFrame(
