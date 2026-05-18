@@ -284,22 +284,21 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
                     if not has_error:
                         has_actual_data = df_merged is not None and not df_merged.empty
-                        async with self.context.cache.engine.begin() as tx_conn:
-                            if has_actual_data:
+                        if has_actual_data:
+                            async with self.context.cache.engine.begin() as tx_conn:
                                 await self.context.cache.save_financial_reports(
                                     df_merged[FINANCIAL_REPORT_SCHEMA_COLS],  # type: ignore[optional-subscript]
                                     conn=tx_conn,
                                 )
-                            await self.context.cache.mark_stock_step4_completed(
-                                ts_code,
-                                sync_version=1,
-                                conn=tx_conn,
-                            )
-                        if has_actual_data:
+                                await self.context.cache.mark_stock_step4_completed(
+                                    ts_code,
+                                    sync_version=1,
+                                    conn=tx_conn,
+                                )
                             result_accumulator.added += 1
                         else:
                             logger.debug(
-                                f"[FinancialSync] StockSync | {ts_code} returned empty data, marked complete but no rows saved.",
+                                f"[FinancialSync] StockSync | {ts_code} returned empty data, NOT marked complete (will retry).",
                             )
                     else:
                         logger.debug(

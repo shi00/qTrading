@@ -263,7 +263,7 @@ class TestRunMigrations:
             mock_migrator.init_db = AsyncMock()
             ok, msg = await DatabaseConfigService.run_migrations("localhost", 5432, "user", "pass", "mydb")
         assert ok is True
-        mock_migrator.init_db.assert_awaited_once_with(mock_engine)
+        mock_migrator.init_db.assert_awaited_once_with(mock_engine, auto_migrate=True)
         mock_engine.dispose.assert_awaited_once()
 
     @pytest.mark.asyncio

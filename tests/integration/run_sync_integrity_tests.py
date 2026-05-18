@@ -59,7 +59,9 @@ def test_core_resume_tables():
     assert hasattr(strategy, "CORE_RESUME_TABLES"), "CORE_RESUME_TABLES not defined"
     assert "daily_quotes" in strategy.CORE_RESUME_TABLES, "daily_quotes not in CORE_RESUME_TABLES"
     assert "daily_indicators" in strategy.CORE_RESUME_TABLES, "daily_indicators not in CORE_RESUME_TABLES"
-    assert "block_trade" not in strategy.CORE_RESUME_TABLES, "block_trade should not be in CORE_RESUME_TABLES"
+    assert "block_trade" in strategy.CORE_RESUME_TABLES, (
+        "block_trade should be in CORE_RESUME_TABLES (unified with SYNCED_TABLES)"
+    )
     print("test_core_resume_tables: PASSED")
 
 

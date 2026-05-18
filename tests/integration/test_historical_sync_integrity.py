@@ -577,14 +577,15 @@ class TestLowFrequencyTableScoring:
 
 
 class TestBreakpointResumeCoreTables:
-    """H3 修复验证：断点续传 CORE_RESUME_TABLES"""
+    """H3 修复验证：断点续传 CORE_RESUME_TABLES 与 SYNCED_TABLES 统一"""
 
     @pytest.mark.asyncio
-    async def test_resume_uses_core_tables_only(self, mock_context):
+    async def test_resume_uses_all_synced_tables(self, mock_context):
         """
-        测试断点续传仅使用核心表
+        测试断点续传使用全部 SYNCED_TABLES
 
-        场景：非核心表无数据时，断点续传仍应正常工作
+        场景：CORE_RESUME_TABLES 应与 SYNCED_TABLES 一致，
+        确保断点续跑语义与 check_data_exists 语义统一
         """
         from data.sync.historical import HistoricalSyncStrategy
 
@@ -604,18 +605,19 @@ class TestBreakpointResumeCoreTables:
         assert "daily_indicators" in strategy.CORE_RESUME_TABLES
 
     @pytest.mark.asyncio
-    async def test_resume_ignores_auxiliary_tables(self, mock_context):
+    async def test_resume_includes_auxiliary_tables(self, mock_context):
         """
-        测试断点续传忽略辅助表
+        测试断点续传包含辅助表
 
-        场景：辅助表（如 block_trade）无数据不影响断点续传
+        场景：辅助表（如 block_trade、moneyflow_daily）应在 CORE_RESUME_TABLES 中，
+        确保断点续跑不会跳过缺少辅助表数据的日期
         """
         from data.sync.historical import HistoricalSyncStrategy
 
         strategy = HistoricalSyncStrategy(mock_context)
 
-        assert "block_trade" not in strategy.CORE_RESUME_TABLES
-        assert "moneyflow_daily" not in strategy.CORE_RESUME_TABLES
+        assert "block_trade" in strategy.CORE_RESUME_TABLES
+        assert "moneyflow_daily" in strategy.CORE_RESUME_TABLES
 
     @pytest.mark.asyncio
     async def test_resume_marks_missing_quality_as_resync(self, mock_context):

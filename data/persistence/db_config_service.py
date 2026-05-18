@@ -352,7 +352,8 @@ class DatabaseConfigService:
         try:
             engine = create_async_engine(url, echo=False)
             try:
-                await DatabaseMigrator.init_db(engine)
+                # Onboarding should automatically create/migrate tables
+                await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
                 logger.info(f"Database migrations completed successfully for '{database}'")
                 return True, I18n.get("db_migrations_success")

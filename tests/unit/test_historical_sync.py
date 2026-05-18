@@ -382,3 +382,4 @@ class TestHistoricalSyncConstants:
     def test_core_resume_tables(self):
         assert "daily_quotes" in HistoricalSyncStrategy.CORE_RESUME_TABLES
         assert "daily_indicators" in HistoricalSyncStrategy.CORE_RESUME_TABLES
+        assert set(HistoricalSyncStrategy.CORE_RESUME_TABLES) == set(HistoricalSyncStrategy.SYNCED_TABLES)

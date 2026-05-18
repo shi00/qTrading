@@ -98,6 +98,9 @@ class TestSyncTypeConsistency:
         core_tables = HistoricalSyncStrategy.CORE_RESUME_TABLES
         assert "daily_quotes" in core_tables, "CORE_RESUME_TABLES should include daily_quotes"
         assert "daily_indicators" in core_tables, "CORE_RESUME_TABLES should include daily_indicators"
+        assert set(core_tables) == set(HistoricalSyncStrategy.SYNCED_TABLES), (
+            "CORE_RESUME_TABLES should equal SYNCED_TABLES for semantic consistency"
+        )
 
     def test_get_cached_dates_returns_datetime_date(self):
         sig = inspect.signature(QuoteDao.get_cached_dates_for_table)

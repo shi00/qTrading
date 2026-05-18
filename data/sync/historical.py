@@ -54,6 +54,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
     CORE_RESUME_TABLES = [
         "daily_quotes",
         "daily_indicators",
+        "moneyflow_daily",
+        "limit_list",
+        "suspend_d",
+        "margin_daily",
+        "northbound_holding",
+        "moneyflow_hsgt",
+        "top_list",
+        "block_trade",
+        "index_daily",
+        "index_dailybasic",
     ]
 
     def __init__(self, context: typing.Any):
