@@ -1,4 +1,5 @@
 import os
+import string
 
 import pytest
 
@@ -7,11 +8,54 @@ from strategies.prompt_validator import (
     get_declarations,
     validate_prompt_declarations,
 )
+from strategies.strategy_prompts import STRATEGY_PROMPTS
 
 _SKIP_NO_DATA = pytest.mark.skipif(
     os.environ.get("SKIP_DATA_CONSISTENCY") == "1",
     reason="SKIP_DATA_CONSISTENCY=1: CI has no pre-filled data",
 )
+
+
+def test_template_placeholders_are_valid():
+    """
+    P1-15 fix: 验证策略提示词模板中的占位符格式正确。
+    检查所有 {placeholder} 格式的占位符是否有效。
+    """
+    formatter = string.Formatter()
+    for strategy_key, template in STRATEGY_PROMPTS.items():
+        try:
+            list(formatter.parse(template))
+        except ValueError as e:
+            pytest.fail(f"Strategy {strategy_key} has invalid placeholder format: {e}")
+
+
+def test_template_no_undefined_placeholders():
+    """
+    P1-15 fix: 验证策略提示词模板中没有未定义的占位符。
+    模板中使用的 {field} 应该在模板上下文中有对应的注入逻辑。
+    """
+    known_context_fields = {
+        "stock_data",
+        "history_text",
+        "support_levels",
+        "turnover_context",
+        "sector_context",
+        "market_context",
+        "global_context",
+        "learning_context",
+        "news_context",
+        "rsi_percentile",
+        "rsi_feature",
+    }
+
+    formatter = string.Formatter()
+    for strategy_key, template in STRATEGY_PROMPTS.items():
+        placeholders = {field for _, field, _, _ in formatter.parse(template) if field}
+        unknown = placeholders - known_context_fields
+        if unknown:
+            pytest.fail(
+                f"Strategy {strategy_key} uses unknown placeholders: {unknown}. Known fields: {known_context_fields}"
+            )
 
 
 @pytest.mark.asyncio
