@@ -463,6 +463,54 @@ class TestBuildSupportContext(unittest.TestCase):
         self.assertIn("VWAC", result)
         self.assertIn("5.", result)
 
+    def test_build_support_levels_qfq_calculation_correctness(self):
+        """P1-18: 验证复权计算的正确性 - VWAC应使用复权价格而非原始价格"""
+        from strategies.ai_mixin import PreFetchedContext
+
+        history_df = pd.DataFrame(
+            [
+                {
+                    "trade_date": f"202401{str(i).zfill(2)}",
+                    "close": 20.0,
+                    "vol": 1000,
+                    "adj_factor": 2.0,
+                }
+                for i in range(1, 32)
+            ]
+            + [
+                {
+                    "trade_date": f"202402{str(i).zfill(2)}",
+                    "close": 10.0,
+                    "vol": 1000,
+                    "adj_factor": 1.0,
+                }
+                for i in range(1, 29)
+            ]
+        )
+
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": 10.0}
+        result = self.strategy._build_support_context(row, prefetched)
+
+        self.assertIn("VWAC", result)
+        import re
+
+        vwac_match = re.search(r"VWAC:\s*(\d+\.\d+)", result)
+        if vwac_match:
+            vwac_value = float(vwac_match.group(1))
+            expected_qfq_close_1 = 20.0 * 2.0
+            expected_qfq_close_2 = 10.0 * 1.0
+            expected_qfq_vol_1 = 1000 / 2.0
+            expected_qfq_vol_2 = 1000 / 1.0
+            total_qfq_vol = expected_qfq_vol_1 * 31 + expected_qfq_vol_2 * 28
+            total_qfq_amount = (
+                expected_qfq_close_1 * expected_qfq_vol_1 * 31 + expected_qfq_close_2 * expected_qfq_vol_2 * 28
+            )
+            expected_vwac = total_qfq_amount / total_qfq_vol
+            self.assertAlmostEqual(vwac_value, expected_vwac, places=1)
+
     def test_build_support_levels_adj_factor_zero_handling(self):
         """P1-18: 测试 adj_factor 为 0 时的处理"""
         from strategies.ai_mixin import PreFetchedContext
