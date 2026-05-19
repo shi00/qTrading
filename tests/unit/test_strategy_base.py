@@ -18,7 +18,7 @@ from strategies.market import (
     BlockTradeStrategy,
     InstitutionalStrategy,
     NorthboundHoldingStrategy,
-    TechnicalBreakoutStrategy,
+    VolumeBreakoutStrategy,
 )
 from strategies.oversold_strategy import OversoldStrategy
 from strategies.utils import fmt_val, safe_float
@@ -72,8 +72,8 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         self.assertIn("000003.SZ", res["ts_code"].values)
         self.assertNotIn("000001.SZ", res["ts_code"].values)
 
-    async def test_technical_breakout(self):
-        s = TechnicalBreakoutStrategy()
+    async def test_volume_breakout(self):
+        s = VolumeBreakoutStrategy()
         res = await s.filter(self.context)
         self.assertIn("000001.SZ", res["ts_code"].values)
         self.assertNotIn("000002.SZ", res["ts_code"].values)
@@ -185,14 +185,14 @@ class TestAIIntegration(unittest.TestCase):
         DividendStrategy,
         CashFlowStrategy,
         LargePEStrategy,
-        TechnicalBreakoutStrategy,
+        VolumeBreakoutStrategy,
         NorthboundHoldingStrategy,
         InstitutionalStrategy,
         BlockTradeStrategy,
     ]
 
     MARKET_STRATEGY_CLASSES = [
-        TechnicalBreakoutStrategy,
+        VolumeBreakoutStrategy,
         NorthboundHoldingStrategy,
         InstitutionalStrategy,
         BlockTradeStrategy,
@@ -252,7 +252,7 @@ class TestAIIntegration(unittest.TestCase):
                 tier = instance.required_quality_tier
                 self.assertIsInstance(tier, QualityTier)
                 if cls in (
-                    TechnicalBreakoutStrategy,
+                    VolumeBreakoutStrategy,
                     ValueStrategy,
                     GrowthStrategy,
                     DividendStrategy,
@@ -346,7 +346,7 @@ class TestPhase2Trigger(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("ai_score", result.columns)
 
     async def test_market_strategy_skips_ai_analysis(self):
-        s = TechnicalBreakoutStrategy()
+        s = VolumeBreakoutStrategy()
         data = pd.DataFrame(
             {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
         )
@@ -356,7 +356,7 @@ class TestPhase2Trigger(unittest.IsolatedAsyncioTestCase):
             mock_ai.assert_not_called()
 
     async def test_market_strategy_no_progress_callback(self):
-        s = TechnicalBreakoutStrategy()
+        s = VolumeBreakoutStrategy()
         data = pd.DataFrame(
             {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
         )
@@ -469,7 +469,7 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertIn("daily_indicators", s.required_tables)
 
     def test_polars_base_default_deps(self):
-        s = TechnicalBreakoutStrategy()
+        s = VolumeBreakoutStrategy()
         self.assertIn("screening_data", s.required_context_keys)
         self.assertIn("daily_quotes", s.required_tables)
 

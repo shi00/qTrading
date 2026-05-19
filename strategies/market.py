@@ -9,13 +9,20 @@ from strategies.polars_base import PolarsBaseStrategy
 logger = logging.getLogger(__name__)
 
 
-@register_strategy("tech_breakout")
-class TechnicalBreakoutStrategy(PolarsBaseStrategy):
+@register_strategy("volume_breakout")
+class VolumeBreakoutStrategy(PolarsBaseStrategy):
+    """
+    P1-19 fix: Renamed from TechnicalBreakoutStrategy to VolumeBreakoutStrategy.
+    The strategy filters stocks by price change percentage and turnover rate,
+    which is more accurately described as "volume breakout" rather than
+    "technical breakout" (which would imply pattern-based analysis).
+    """
+
     required_quality_tier = QualityTier.SILVER
     enable_ai_analysis = False
 
     def __init__(self):
-        super().__init__("strategy_tech_breakout_name", "strategy_tech_breakout_desc")
+        super().__init__("strategy_volume_breakout_name", "strategy_volume_breakout_desc")
 
     def get_parameters(self):
         return [

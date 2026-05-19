@@ -1,7 +1,9 @@
 """
-Tests for market strategies (TechnicalBreakout, Northbound, Institutional, BlockTrade).
+Tests for market strategies (VolumeBreakout, Northbound, Institutional, BlockTrade).
 
 验证市场策略筛选逻辑的正确性。
+
+P1-19 fix: Renamed TechnicalBreakoutStrategy to VolumeBreakoutStrategy.
 """
 
 import unittest
@@ -14,15 +16,15 @@ from strategies.market import (
     InstitutionalStrategy,
     NorthboundFlowStrategy,
     NorthboundHoldingStrategy,
-    TechnicalBreakoutStrategy,
+    VolumeBreakoutStrategy,
 )
 
 
-class TestTechnicalBreakoutStrategy(unittest.TestCase):
-    """测试技术突破策略"""
+class TestVolumeBreakoutStrategy(unittest.TestCase):
+    """测试放量突破策略"""
 
     def setUp(self):
-        self.strategy = TechnicalBreakoutStrategy()
+        self.strategy = VolumeBreakoutStrategy()
         self.sample_df = pd.DataFrame(
             [
                 {
