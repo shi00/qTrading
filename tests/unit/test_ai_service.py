@@ -853,8 +853,9 @@ class TestUniversalRulesSeparateSystemMessage:
         messages = svc._chat_completion.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         assert len(system_msgs) == 2
-        assert system_msgs[0]["content"] == _UNIVERSAL_RULES
-        assert system_msgs[1]["content"] == "Strategy prompt"
+        assert _UNIVERSAL_RULES in system_msgs[0]["content"]
+        assert "<strategy_rules>" in system_msgs[1]["content"]
+        assert "Strategy prompt" in system_msgs[1]["content"]
 
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -886,9 +887,11 @@ class TestUniversalRulesSeparateSystemMessage:
         messages = svc._chat_completion.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         assert len(system_msgs) == 2
-        assert system_msgs[0]["content"] == _UNIVERSAL_RULES
-        assert _UNIVERSAL_RULES not in system_msgs[1]["content"]
-        assert system_msgs[1]["content"] == "safe custom prompt"
+        assert _UNIVERSAL_RULES in system_msgs[0]["content"]
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert "<user_custom_instructions>" in user_msgs[0]["content"]
+        assert "safe custom prompt" in user_msgs[0]["content"]
 
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -922,9 +925,12 @@ class TestUniversalRulesSeparateSystemMessage:
         messages = svc._chat_completion.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         assert len(system_msgs) == 2
-        assert system_msgs[0]["content"] == _UNIVERSAL_RULES
-        assert _UNIVERSAL_RULES not in system_msgs[1]["content"]
-        assert system_msgs[1]["content"] == "Fallback prompt"
+        assert _UNIVERSAL_RULES in system_msgs[0]["content"]
+        assert "<strategy_rules>" in system_msgs[1]["content"]
+        assert "Fallback prompt" in system_msgs[1]["content"]
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert "<user_custom_instructions>" not in user_msgs[0]["content"]
 
 
 class TestAIServiceAnalyzeStockCloudNotAvailable:
