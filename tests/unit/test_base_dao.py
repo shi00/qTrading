@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
 import sqlalchemy as sa
-from sqlalchemy import Float, Date
+from sqlalchemy import Date
 
 from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 
@@ -678,11 +678,12 @@ class TestShiborDailyReservedWordMapping:
         col = ShiborDaily.__table__.c["on"]
         assert col.name == "on"
 
-    def test_on_column_is_float_type(self):
+    def test_on_column_is_numeric_type(self):
+        from sqlalchemy import Numeric
         from data.persistence.models import ShiborDaily
 
         col = ShiborDaily.__table__.c["on"]
-        assert isinstance(col.type, Float)
+        assert isinstance(col.type, Numeric), f"on should be Numeric, got {type(col.type).__name__}"
 
     def test_date_column_is_date_type(self):
         from data.persistence.models import ShiborDaily
@@ -758,12 +759,12 @@ class TestNullProtectedFromMetadata:
 
 
 class TestAiScoreColumnType:
-    def test_ai_score_is_float(self):
+    def test_ai_score_is_numeric(self):
         import sqlalchemy as sa
         from data.persistence.models import ScreeningHistory
 
         col = ScreeningHistory.__table__.c["ai_score"]
-        assert isinstance(col.type, sa.Float), f"ai_score should be Float, got {type(col.type).__name__}"
+        assert isinstance(col.type, sa.Numeric), f"ai_score should be Numeric, got {type(col.type).__name__}"
 
 
 class TestScreeningThinkingModelConstraints:
