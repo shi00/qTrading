@@ -565,6 +565,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         """
         构建多维量化支撑位分析上下文。
         包含：布林带下轨(动态支撑)、VWAC(筹码支撑)、最大放量柱支撑、价值区下沿(结构支撑)。
+
+        P1-18 fix: 使用复权后的价格和成交量进行计算，确保与 _math_filter 中的 RSI 计算口径一致。
+        跨除权除息日时，原始 close 会有跳变，导致 VWAC 失真。
         """
         ts_code = row.get("ts_code", "")
         history_dict = prefetched.history
@@ -585,44 +588,60 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         if "trade_date" in history_df.columns:
             history_df = history_df.sort_values("trade_date", ascending=True)
 
+        qfq_close_col = "close"
+        qfq_vol_col = "vol"
+
+        if "adj_factor" in history_df.columns:
+            adj_factors = history_df["adj_factor"].ffill().fillna(1.0)
+            latest_factor = adj_factors.iloc[-1] if len(adj_factors) > 0 else 1.0
+            if latest_factor == 0:
+                latest_factor = 1.0
+            qfq_ratio = adj_factors / latest_factor
+            qfq_ratio = qfq_ratio.fillna(1.0)
+            qfq_close_col = "qfq_close"
+            qfq_vol_col = "qfq_vol"
+            history_df = history_df.copy()
+            history_df["qfq_close"] = history_df["close"] * qfq_ratio
+            history_df["qfq_vol"] = history_df["vol"] / qfq_ratio.replace(0, 1.0)
+
         recent_60 = history_df.tail(60) if len(history_df) >= 60 else history_df
 
-        # 1. 布林带下轨 (动态支撑) - 随波动率自适应
+        current_qfq_close = current_close
+        if qfq_close_col == "qfq_close" and qfq_close_col in history_df.columns:
+            current_qfq_close = history_df[qfq_close_col].iloc[-1] if len(history_df) > 0 else current_close
+
         if len(history_df) >= 20:
-            close_20 = history_df["close"].tail(20)
+            close_20 = history_df[qfq_close_col].tail(20)
             ma20 = close_20.mean()
             std20 = close_20.std()
             if pd.notna(ma20) and pd.notna(std20) and std20 > 0:
                 boll_lower = ma20 - 2 * std20
                 if pd.notna(boll_lower) and boll_lower > 0:
-                    dist_boll = (current_close - boll_lower) / boll_lower * 100
+                    dist_boll = (current_qfq_close - boll_lower) / boll_lower * 100
                     parts.append(f"布林下轨(动态支撑): {boll_lower:.2f} (距离 {dist_boll:+.2f}%)")
 
-        # 2. 60日量价均价 (VWAC) - 筹码成本区
-        if len(recent_60) >= 20 and "vol" in recent_60.columns and "close" in recent_60.columns:
-            vol_sum = recent_60["vol"].sum()
+        if len(recent_60) >= 20 and qfq_vol_col in recent_60.columns and qfq_close_col in recent_60.columns:
+            vol_sum = recent_60[qfq_vol_col].sum()
             if vol_sum > 0:
-                vwac_60 = (recent_60["close"] * recent_60["vol"]).sum() / vol_sum
+                vwac_60 = (recent_60[qfq_close_col] * recent_60[qfq_vol_col]).sum() / vol_sum
                 if pd.notna(vwac_60) and vwac_60 > 0:
-                    dist_vwac = (current_close - vwac_60) / vwac_60 * 100
+                    dist_vwac = (current_qfq_close - vwac_60) / vwac_60 * 100
                     parts.append(f"60日量价均价(VWAC): {vwac_60:.2f} (距离 {dist_vwac:+.2f}%)")
 
-        # 3. 近60日最大放量柱支撑 - 主力成本区
-        if len(recent_60) >= 5 and "vol" in recent_60.columns and "close" in recent_60.columns:
-            vol_values = recent_60["vol"].values
+        if len(recent_60) >= 5 and qfq_vol_col in recent_60.columns and qfq_close_col in recent_60.columns:
+            vol_values = recent_60[qfq_vol_col].values
             if len(vol_values) > 0 and vol_values.max() > 0:
                 max_vol_pos = vol_values.argmax()
-                max_vol_support = recent_60["close"].iloc[max_vol_pos]
+                max_vol_support = recent_60[qfq_close_col].iloc[max_vol_pos]
                 if pd.notna(max_vol_support) and max_vol_support > 0:
-                    dist_vol_peak = (current_close - max_vol_support) / max_vol_support * 100
+                    dist_vol_peak = (current_qfq_close - max_vol_support) / max_vol_support * 100
                     parts.append(f"近60日最大放量柱支撑: {max_vol_support:.2f} (距离 {dist_vol_peak:+.2f}%)")
 
-        # 4. 120日价值区下沿 (前低集群) - 结构支撑
         if len(history_df) >= 120:
-            close_120 = history_df["close"].tail(120)
+            close_120 = history_df[qfq_close_col].tail(120)
             val_120 = close_120.quantile(0.1)
             if pd.notna(val_120) and val_120 > 0:
-                dist_val = (current_close - val_120) / val_120 * 100
+                dist_val = (current_qfq_close - val_120) / val_120 * 100
                 parts.append(f"120日价值区下沿(前低集群): {val_120:.2f} (距离 {dist_val:+.2f}%)")
 
         return "\n".join(parts) if parts else "支撑位分析: 无有效数据"

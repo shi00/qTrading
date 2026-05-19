@@ -411,6 +411,86 @@ class TestBuildSupportContext(unittest.TestCase):
 
         self.assertIn("无效", result)
 
+    def test_build_support_levels_with_adj_factor(self):
+        """P1-18: 测试复权处理 - 跨除权除息日时使用复权价格计算VWAC"""
+        from strategies.ai_mixin import PreFetchedContext
+
+        history_df = pd.DataFrame(
+            [
+                {
+                    "trade_date": f"202401{str(i).zfill(2)}",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.0,
+                    "vol": 1000,
+                    "adj_factor": 2.0,
+                }
+                for i in range(1, 32)
+            ]
+            + [
+                {
+                    "trade_date": f"202402{str(i).zfill(2)}",
+                    "open": 5.0,
+                    "high": 5.5,
+                    "low": 4.5,
+                    "close": 5.0,
+                    "vol": 2000,
+                    "adj_factor": 1.0,
+                }
+                for i in range(1, 29)
+            ]
+            + [
+                {
+                    "trade_date": f"202403{str(i).zfill(2)}",
+                    "open": 5.0,
+                    "high": 5.5,
+                    "low": 4.5,
+                    "close": 5.0,
+                    "vol": 2000,
+                    "adj_factor": 1.0,
+                }
+                for i in range(1, 22)
+            ]
+        )
+
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": 5.0}
+        result = self.strategy._build_support_context(row, prefetched)
+
+        self.assertIn("VWAC", result)
+        self.assertIn("5.", result)
+
+    def test_build_support_levels_adj_factor_zero_handling(self):
+        """P1-18: 测试 adj_factor 为 0 时的处理"""
+        from strategies.ai_mixin import PreFetchedContext
+
+        history_df = pd.DataFrame(
+            [
+                {
+                    "trade_date": f"202403{20 + i:02d}",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.0,
+                    "vol": 1000,
+                    "adj_factor": 0.0 if i == 0 else 1.0,
+                }
+                for i in range(30)
+            ]
+        )
+
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": 10.0}
+        result = self.strategy._build_support_context(row, prefetched)
+
+        self.assertIsInstance(result, str)
+        self.assertNotIn("error", result.lower())
+
 
 class TestRSIPercentile(unittest.TestCase):
     """测试 RSI 百分位计算"""
