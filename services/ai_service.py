@@ -544,7 +544,7 @@ class AIService:
                     on_chunk=on_chunk,
                     temperature=temperature,
                     timeout=timeout,
-                    response_format={"type": "json_object"} if json_mode and not on_chunk else None,
+                    response_format={"type": "json_object"} if json_mode else None,
                 )
                 response_content = result["content"]
 
