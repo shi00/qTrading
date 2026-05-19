@@ -24,6 +24,12 @@ VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "ne
 STRATEGY_CONTEXT_MAX_LEN = 1600
 
 
+class AIServiceUnavailableError(Exception):
+    """P1-12: 所有 LLM 供应商都不可用时抛出"""
+
+    pass
+
+
 def validate_ai_analysis_response(response: dict) -> dict:
     if not isinstance(response, dict):
         return {"error": "Invalid response type", "score": 0}
@@ -574,6 +580,138 @@ class AIService:
 
         return {"content": response_content}
 
+    async def _chat_completion_with_failover(
+        self,
+        messages: list,
+        timeout: float = 120.0,
+        json_mode: bool = True,
+        on_chunk=None,
+    ) -> dict:
+        """
+        P1-12: 带多供应商 fallback 的云端分析
+
+        当主供应商失败时，自动切换到备用供应商。
+        仅对可恢复错误（RateLimitError, ServiceUnavailableError, Timeout）进行 fallback。
+        永久错误（AuthenticationError, ContentPolicyViolationError）直接抛出。
+
+        Args:
+            messages: 消息列表
+            timeout: 超时时间
+            json_mode: 是否启用 JSON 模式
+            on_chunk: 流式回调
+
+        Returns:
+            dict: 解析后的响应
+
+        Raises:
+            AIServiceUnavailableError: 所有供应商都失败时抛出
+        """
+        from utils.config_handler import ConfigHandler
+
+        failover_config = ConfigHandler.get_failover_config()
+        primary = failover_config.get("primary", "")
+        fallbacks = failover_config.get("fallbacks", [])
+
+        models_to_try = [primary] + fallbacks
+        last_error: Exception | None = None
+
+        for i, model in enumerate(models_to_try):
+            if not model:
+                continue
+
+            try:
+                logger.debug(
+                    "[AIService] Failover | Attempt %d/%d: %s",
+                    i + 1,
+                    len(models_to_try),
+                    model,
+                )
+
+                result = await self._chat_completion(
+                    messages,
+                    provider="cloud",
+                    timeout=timeout,
+                    json_mode=json_mode,
+                    on_chunk=on_chunk,
+                )
+
+                if i > 0:
+                    logger.info(
+                        "[AIService] Failover | ✅ Succeeded on fallback model: %s",
+                        model,
+                    )
+
+                return result
+
+            except Exception as e:
+                last_error = e
+                error_type = type(e).__name__
+
+                if LITELLM_AVAILABLE:
+                    try:
+                        import litellm
+
+                        auth_error = litellm.AuthenticationError
+                        policy_error = litellm.ContentPolicyViolationError
+                        rate_error = litellm.RateLimitError
+                        service_error = litellm.ServiceUnavailableError
+                        internal_error = litellm.InternalServerError
+
+                        if isinstance(e, auth_error):
+                            logger.error(
+                                "[AIService] Failover | ❌ Authentication error for %s, not retrying",
+                                model,
+                            )
+                            raise
+                        if isinstance(e, policy_error):
+                            logger.error(
+                                "[AIService] Failover | ❌ Content policy violation for %s, not retrying",
+                                model,
+                            )
+                            raise
+
+                        is_transient = isinstance(
+                            e,
+                            (
+                                rate_error,
+                                service_error,
+                                internal_error,
+                            ),
+                        )
+                    except (TypeError, AttributeError):
+                        is_transient = False
+
+                is_transient = is_transient or isinstance(
+                    e,
+                    (
+                        TimeoutError,
+                        httpx.TimeoutException,
+                        httpx.ConnectError,
+                        httpx.ReadError,
+                        ConnectionError,
+                        OSError,
+                    ),
+                )
+
+                if is_transient:
+                    logger.warning(
+                        "[AIService] Failover | ⚠️ %s failed (%s: %s), trying next",
+                        model,
+                        error_type,
+                        str(e)[:100],
+                    )
+                    continue
+                else:
+                    logger.error(
+                        "[AIService] Failover | ❌ Non-transient error for %s: %s",
+                        model,
+                        error_type,
+                    )
+                    raise
+
+        all_models_tried = ", ".join(m for m in models_to_try if m)
+        raise AIServiceUnavailableError(f"All LLM providers failed. Tried: [{all_models_tried}]") from last_error
+
     @log_async_operation(
         operation_name="analyze_stock",
         log_args=False,
@@ -796,16 +934,21 @@ class AIService:
                 )
 
         try:
-            # Analyze Stock uses Cloud by default as it requires high reasoning capability
-            res = await self._chat_completion(
+            # P1-12: Analyze Stock uses Cloud with failover by default
+            res = await self._chat_completion_with_failover(
                 messages,
-                provider="cloud",
                 timeout=120.0,
                 json_mode=True,
                 on_chunk=on_chunk,
             )
             return validate_ai_analysis_response(res)
 
+        except AIServiceUnavailableError as ae:
+            logger.error(
+                f"[AIService] Analyze | ❌ All providers failed: {ae}",
+                exc_info=True,
+            )
+            return {"error": "All LLM providers unavailable", "score": 0}
         except (TimeoutError, httpx.TimeoutException) as te:
             logger.error(
                 f"[AIService] Analyze | ❌ Timeout (120s exceeded): {type(te).__name__}",

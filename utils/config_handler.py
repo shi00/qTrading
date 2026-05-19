@@ -105,6 +105,7 @@ class ConfigHandler:
         "llm_azure_deployment_name": "",  # Azure specific
         "llm_custom_models": {},  # User-defined model pool
         "llm_provider_extras": {},  # Provider-specific extras (nested structure)
+        "llm_failover_models": [],  # P1-12: Fallback models for cloud analysis
         "ai_api_key": "",
         # Local AI Configuration
         "local_model_path": "",
@@ -796,6 +797,34 @@ class ConfigHandler:
             "azure_resource_name": azure_resource_name,
             "azure_deployment_name": azure_deployment_name,
             "custom_models": copy.deepcopy(custom_models),
+        }
+
+    @staticmethod
+    def get_failover_config() -> dict:
+        """
+        P1-12: 获取多供应商 fallback 配置
+
+        Returns:
+            {
+                "primary": str,  # 主供应商模型 "provider/model"
+                "fallbacks": list[str],  # 备用供应商模型列表
+            }
+        """
+        llm_config = ConfigHandler.get_llm_config()
+        provider = llm_config.get("provider", "")
+        model = llm_config.get("model", "")
+        primary = f"{provider}/{model}" if provider else model
+
+        config = ConfigHandler.load_config()
+        fallbacks = config.get("llm_failover_models", [])
+
+        if not isinstance(fallbacks, list):
+            fallbacks = []
+
+        return {
+            "primary": primary,
+            "fallbacks": fallbacks,
+            "primary_config": llm_config,
         }
 
     @staticmethod
