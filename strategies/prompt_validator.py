@@ -154,10 +154,13 @@ def get_declarations() -> list[DataDeclaration]:
 def _init_declarations() -> list[DataDeclaration]:
     """初始化数据声明列表"""
     from data.persistence.models import (
+        DailyIndicators,
         Dividend,
         FinaAudit,
         FinaMainbz,
+        FinancialReports,
         MacroEconomy,
+        MarketNews,
         PledgeStat,
         ShiborDaily,
         StkHoldernumber,
@@ -171,9 +174,39 @@ def _init_declarations() -> list[DataDeclaration]:
             injector=lambda: check_multi_period_data("roe"),
         ),
         DataDeclaration(
+            name="multi_period_gross_margin",
+            prompt_claim="近8季度毛利率趋势",
+            injector=lambda: check_multi_period_data("grossprofit_margin"),
+        ),
+        DataDeclaration(
+            name="multi_period_revenue_yoy",
+            prompt_claim="近8季度营收增速趋势",
+            injector=lambda: check_multi_period_data("or_yoy"),
+        ),
+        DataDeclaration(
+            name="multi_period_profit_yoy",
+            prompt_claim="近8季度净利润增速趋势",
+            injector=lambda: check_multi_period_data("netprofit_yoy"),
+        ),
+        DataDeclaration(
             name="cashflow_vs_profit",
             prompt_claim="经营现金流与净利润对比",
             injector=lambda: check_field_exists("n_cashflow_act"),
+        ),
+        DataDeclaration(
+            name="goodwill_ratio",
+            prompt_claim="商誉占总资产比例",
+            injector=lambda: check_field_exists("goodwill"),
+        ),
+        DataDeclaration(
+            name="total_assets",
+            prompt_claim="总资产规模",
+            injector=lambda: check_field_exists("total_assets"),
+        ),
+        DataDeclaration(
+            name="debt_ratio",
+            prompt_claim="负债率趋势",
+            injector=lambda: check_multi_period_data("debt_to_assets"),
         ),
         DataDeclaration(
             name="audit_opinion",
@@ -189,6 +222,11 @@ def _init_declarations() -> list[DataDeclaration]:
             name="pledge_ratio",
             prompt_claim="质押比例",
             injector=lambda: check_table_has_data(PledgeStat.__tablename__),
+        ),
+        DataDeclaration(
+            name="valuation_metrics",
+            prompt_claim="估值指标(PE/PB/股息率)",
+            injector=lambda: check_table_has_data(DailyIndicators.__tablename__),
         ),
         DataDeclaration(
             name="macro_economy",
@@ -214,5 +252,15 @@ def _init_declarations() -> list[DataDeclaration]:
             name="main_business",
             prompt_claim="主营业务构成",
             injector=lambda: check_table_has_data(FinaMainbz.__tablename__),
+        ),
+        DataDeclaration(
+            name="recent_news",
+            prompt_claim="近期新闻",
+            injector=lambda: check_table_has_data(MarketNews.__tablename__),
+        ),
+        DataDeclaration(
+            name="financial_reports",
+            prompt_claim="财务报表数据",
+            injector=lambda: check_table_has_data(FinancialReports.__tablename__),
         ),
     ]

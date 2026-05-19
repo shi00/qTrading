@@ -171,6 +171,9 @@ class TushareClient:
             self._loaded_years: set[str] = set()
             self._calendar_lock = threading.Lock()
 
+            self._capability_cache: dict[str, bool] = {}
+            self._capability_cache_lock = threading.Lock()
+
             self.token = token or ConfigHandler.get_token()
             self.timeout = ConfigHandler.get_tushare_timeout()
             self.max_retries = ConfigHandler.get_request_max_retries()
@@ -196,7 +199,44 @@ class TushareClient:
 
         self._rate_limiter, self._api_limiters = self._build_rate_limiters()
 
+        with self._capability_cache_lock:
+            self._capability_cache.clear()
+
         logger.info(f"[API] Token updated. Client re-initialized with timeout={self.timeout}s")
+
+    def is_api_available(self, api_name: str) -> bool | None:
+        """
+        Check if an API is available for the current token.
+
+        Returns:
+            True: API is available
+            False: API is known to be unavailable (permission denied)
+            None: Unknown (not tested yet)
+        """
+        with self._capability_cache_lock:
+            return self._capability_cache.get(api_name)
+
+    def mark_api_unavailable(self, api_name: str) -> None:
+        """Mark an API as unavailable for the current token."""
+        with self._capability_cache_lock:
+            self._capability_cache[api_name] = False
+            logger.warning(f"[API] Capability cached: '{api_name}' marked as UNAVAILABLE for current token")
+
+    def mark_api_available(self, api_name: str) -> None:
+        """Mark an API as available for the current token."""
+        with self._capability_cache_lock:
+            self._capability_cache[api_name] = True
+
+    def clear_capability_cache(self) -> None:
+        """Clear all cached capabilities. Call after token change."""
+        with self._capability_cache_lock:
+            self._capability_cache.clear()
+            logger.info("[API] Capability cache cleared")
+
+    def get_capability_cache(self) -> dict[str, bool]:
+        """Get a copy of the capability cache."""
+        with self._capability_cache_lock:
+            return dict(self._capability_cache)
 
     async def _handle_api_call(self, func: typing.Callable, **kwargs: typing.Any):
         """Async wrapper that yields to event loop during rate limit / backoff
@@ -206,6 +246,11 @@ class TushareClient:
         - On rate-limit error: reduce_rate() on the bucket (permanent slowdown)
         - On success: on_success() for gradual rate recovery
         - Shorter backoff (5-15s) instead of 60-240s exponential
+
+        Capability Caching (P1-#26):
+        - Check capability cache before making API call
+        - Cache permission denied errors to avoid repeated failed calls
+        - Clear cache on token change
         """
         import functools
 
@@ -217,6 +262,11 @@ class TushareClient:
             api_name = str(func.args[0])
         else:
             api_name = getattr(func, "__name__", str(func))
+
+        capability = self.is_api_available(api_name)
+        if capability is False:
+            logger.debug(f"[tushare_api] SKIPPING {api_name}: known unavailable (cached)")
+            raise TushareAPIPermissionError(api_name, f"API '{api_name}' is cached as unavailable for current token")
 
         formatted_kwargs = {}
         for k, v in kwargs.items():
@@ -254,6 +304,8 @@ class TushareClient:
                 if result is not None and api_name in self._COLUMN_RENAMES:
                     result = result.rename(columns=self._COLUMN_RENAMES[api_name])
 
+                self.mark_api_available(api_name)
+
                 if api_limiter:
                     api_limiter.on_success()
                 elif self._rate_limiter:
@@ -282,6 +334,7 @@ class TushareClient:
                 )
 
                 if is_permission_error:
+                    self.mark_api_unavailable(api_name)
                     logger.error(
                         f"[tushare_api] PERMISSION_DENIED ({api_name}): {error_msg}",
                     )

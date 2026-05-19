@@ -264,6 +264,11 @@ class TestTushareClientConstants:
         assert "top10_holders" in TushareClient._SLOW_API_OVERRIDES
         assert "concept_detail" in TushareClient._SLOW_API_OVERRIDES
 
+    def test_fast_api_overrides(self):
+        assert "daily" in TushareClient._FAST_API_OVERRIDES
+        assert "daily_basic" in TushareClient._FAST_API_OVERRIDES
+        assert "trade_cal" in TushareClient._FAST_API_OVERRIDES
+
 
 class TestTushareClientReset:
     def test_reset_clears_instance(self):
