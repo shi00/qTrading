@@ -100,7 +100,9 @@ class TestInitializeServices:
 
         assert result["success"] is False
         assert result["error"] == "db_init_failed"
-        assert "connection refused" in result["detail"]
+        detail = result.get("detail", "")
+        assert isinstance(detail, str)
+        assert "connection refused" in detail
 
     @pytest.mark.asyncio
     async def test_db_init_failed_with_toast(self):
@@ -156,7 +158,9 @@ class TestInitializeServices:
 
         assert result["success"] is False
         assert result["error"] == "task_manager_init_failed"
-        assert "tm error" in result["detail"]
+        detail = result.get("detail", "")
+        assert isinstance(detail, str)
+        assert "tm error" in detail
 
     @pytest.mark.asyncio
     async def test_db_upgrade_needed(self):
