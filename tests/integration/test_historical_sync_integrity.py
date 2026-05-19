@@ -95,9 +95,11 @@ class TestHistoricalSyncIntegrity:
         d5 = datetime.date(2024, 1, 5)
 
         cached_dates = {d1}
-        mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(
-            side_effect=lambda table: cached_dates if table in ("daily_quotes", "daily_indicators") else set()
-        )
+
+        async def mock_get_cached_dates(table):
+            return cached_dates
+
+        mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(side_effect=mock_get_cached_dates)
         mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(
             return_value={d1: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []}}
         )
