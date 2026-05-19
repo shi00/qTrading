@@ -25,6 +25,10 @@ def _make_svc_with_cloud():
         }
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
         svc = AIService()
     return svc
 
@@ -434,7 +438,7 @@ class TestAnalyzeStockDeepBranches:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
 
     @pytest.mark.asyncio
@@ -448,7 +452,7 @@ class TestAnalyzeStockDeepBranches:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
 
     @pytest.mark.asyncio
     async def test_general_exception_returns_error(self):

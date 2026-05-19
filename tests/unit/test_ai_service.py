@@ -763,6 +763,10 @@ class TestAIServiceAnalyzeTimeoutHandling:
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
         svc = AIService()
         svc._chat_completion = AsyncMock(side_effect=TimeoutError("read timeout"))
         result = await svc.analyze_stock(
@@ -770,7 +774,7 @@ class TestAIServiceAnalyzeTimeoutHandling:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
 
     @pytest.mark.asyncio
@@ -788,6 +792,10 @@ class TestAIServiceAnalyzeTimeoutHandling:
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
         svc = AIService()
         svc._chat_completion = AsyncMock(side_effect=httpx.TimeoutException("connect timeout"))
         result = await svc.analyze_stock(
@@ -795,7 +803,7 @@ class TestAIServiceAnalyzeTimeoutHandling:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
 
     @pytest.mark.asyncio
@@ -1303,6 +1311,10 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
         svc = AIService()
         svc._chat_completion = AsyncMock(side_effect=TimeoutError())
         result = await svc.analyze_stock(
@@ -1310,7 +1322,7 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
 
     @pytest.mark.asyncio
@@ -1328,6 +1340,10 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
         svc = AIService()
         svc._chat_completion = AsyncMock(side_effect=httpx.ReadTimeout("read timeout"))
         result = await svc.analyze_stock(
@@ -1335,7 +1351,7 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
 
     @pytest.mark.asyncio
@@ -1353,6 +1369,10 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
         mock_ch.get_ai_api_key.return_value = "key"
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
         svc = AIService()
         svc._chat_completion = AsyncMock(side_effect=httpx.ConnectTimeout("connect timeout"))
         result = await svc.analyze_stock(
@@ -1360,5 +1380,5 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             tech_info={},
             news_list=[],
         )
-        assert result["error"] == "Analysis timeout"
+        assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0

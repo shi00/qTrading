@@ -119,6 +119,10 @@ class TestUniversalRulesSeparateSystemMessage:
             mock_cfg.get_ai_news_prompt.return_value = ""
             mock_cfg.get_setting.return_value = False
             mock_cfg.get_ai_provider.return_value = "cloud"
+            mock_cfg.get_failover_config.return_value = {
+                "primary": "deepseek/deepseek-v4-flash",
+                "fallbacks": [],
+            }
 
             with patch("services.ai_service.DataSanitizer"):
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
@@ -135,6 +139,7 @@ class TestUniversalRulesSeparateSystemMessage:
                                 )
 
         system_msgs = [m for m in captured_messages if m.get("role") == "system"]
+        user_msgs = [m for m in captured_messages if m.get("role") == "user"]
         assert len(system_msgs) >= 2
 
         rules_msg = system_msgs[0]["content"]
@@ -143,10 +148,20 @@ class TestUniversalRulesSeparateSystemMessage:
         assert _UNIVERSAL_RULES.strip() in rules_msg, (
             "_UNIVERSAL_RULES should still be in first system message even with override"
         )
-        assert custom_prompt in strategy_msg, "Custom prompt should appear in the strategy system message"
+        assert "<user_custom_instructions>" in rules_msg, (
+            "First system message should mention user_custom_instructions tag when override is provided"
+        )
+        assert custom_prompt not in strategy_msg, "Custom prompt should NOT appear in strategy_rules (P1-14 fix)"
         assert _UNIVERSAL_RULES.strip() not in strategy_msg, (
             "_UNIVERSAL_RULES should NOT be merged into the strategy message"
         )
+
+        if user_msgs:
+            user_msg = user_msgs[0]["content"]
+            assert "<user_custom_instructions>" in user_msg, (
+                "User custom instructions should be in user message (P1-14 fix)"
+            )
+            assert custom_prompt in user_msg, "Custom prompt should appear in user_custom_instructions tag"
 
     def test_import_statement_uses_get_base_prompt(self):
         from strategies.strategy_prompts import get_base_prompt as _g
