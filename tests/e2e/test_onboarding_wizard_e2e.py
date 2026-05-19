@@ -10,11 +10,13 @@ Run:
     2. Run E2E tests:
        pytest tests/e2e/test_onboarding_wizard_e2e.py -m e2e --headed
 
-Note: Smoke tests (TestOnboardingWizardSmoke) run automatically when
-    Playwright is installed and the app server is reachable. They skip
-    gracefully otherwise. Full E2E tests (TestOnboardingWizardE2E,
-    TestOnboardingWizardE2EShortcuts) still require explicit server setup.
+Note: All E2E tests run automatically when Playwright is installed and
+    the app server is reachable. They skip gracefully otherwise.
+    For full wizard flow tests that require a test database, set
+    E2E_TEST_DB=1 environment variable.
 """
+
+import os
 
 import pytest
 
@@ -39,6 +41,10 @@ def _playwright_available():
         return False
 
 
+def _has_test_db_env():
+    return os.environ.get("E2E_TEST_DB", "").lower() in ("1", "true", "yes")
+
+
 skip_if_no_playwright = pytest.mark.skipif(
     not _playwright_available(),
     reason="playwright not installed",
@@ -47,6 +53,11 @@ skip_if_no_playwright = pytest.mark.skipif(
 skip_if_no_server = pytest.mark.skipif(
     not _is_server_reachable(),
     reason="application server not reachable on localhost:8550",
+)
+
+skip_if_no_test_db = pytest.mark.skipif(
+    not _has_test_db_env(),
+    reason="E2E_TEST_DB=1 not set (requires test database for full wizard flow)",
 )
 
 
@@ -98,9 +109,11 @@ class TestOnboardingWizardSmoke:
 
 
 class TestOnboardingWizardE2E:
-    """Full E2E tests: require explicit server setup"""
+    """Full E2E tests: require Playwright + server + test database (E2E_TEST_DB=1)"""
 
-    @pytest.mark.skip(reason="Requires running application server with test DB")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    @skip_if_no_test_db
     def test_wizard_navigation_flow(self, page):
         page.goto("http://localhost:8550")
 
@@ -126,7 +139,9 @@ class TestOnboardingWizardE2E:
         host_value = page.input_value("input[placeholder*='主机']")
         assert host_value == "localhost"
 
-    @pytest.mark.skip(reason="Requires running application server with test DB")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    @skip_if_no_test_db
     def test_required_step_validation(self, page):
         page.goto("http://localhost:8550")
 
@@ -140,7 +155,9 @@ class TestOnboardingWizardE2E:
 
         page.wait_for_selector("text=请填写", timeout=3000)
 
-    @pytest.mark.skip(reason="Requires running application server with test DB")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    @skip_if_no_test_db
     def test_skip_optional_step(self, page):
         page.goto("http://localhost:8550")
 
@@ -169,7 +186,9 @@ class TestOnboardingWizardE2E:
 
         page.wait_for_selector("text=数据同步", timeout=5000)
 
-    @pytest.mark.skip(reason="Requires running application server with test DB")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    @skip_if_no_test_db
     def test_complete_wizard_flow(self, page):
         page.goto("http://localhost:8550")
 
@@ -210,7 +229,9 @@ class TestOnboardingWizardE2E:
 class TestOnboardingWizardE2EShortcuts:
     """E2E tests for wizard shortcuts and edge cases"""
 
-    @pytest.mark.skip(reason="Requires running application server with test DB")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    @skip_if_no_test_db
     def test_back_navigation_preserves_input(self, page):
         page.goto("http://localhost:8550")
 
@@ -234,7 +255,9 @@ class TestOnboardingWizardE2EShortcuts:
         assert host_value == "myhost"
         assert port_value == "9999"
 
-    @pytest.mark.skip(reason="Requires running application server with test DB")
+    @skip_if_no_playwright
+    @skip_if_no_server
+    @skip_if_no_test_db
     def test_language_switch_preserves_state(self, page):
         page.goto("http://localhost:8550")
 
