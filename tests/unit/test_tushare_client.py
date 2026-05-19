@@ -239,14 +239,14 @@ class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
         mock_ch.get_tushare_api_limit.return_value = 120
-        client._rate_limiter, client._slow_api_limiters = client._build_rate_limiters()
+        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is not None
-        assert "top10_holders" in client._slow_api_limiters
+        assert "top10_holders" in client._api_limiters
 
     def test_without_limit(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
         mock_ch.get_tushare_api_limit.return_value = 0
-        client._rate_limiter, client._slow_api_limiters = client._build_rate_limiters()
+        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is None
 
 

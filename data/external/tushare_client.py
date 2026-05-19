@@ -38,9 +38,30 @@ class TushareClient:
         "cn_m": {"month": "period"},
     }
 
-    _SLOW_API_OVERRIDES = {
+    _SLOW_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
         "top10_holders": 0.5,
+        "stk_holdernumber": 0.5,
         "concept_detail": 0.3,
+        "top_list": 0.5,
+        "top_inst": 0.5,
+        "moneyflow": 0.5,
+        "moneyflow_hsgt": 0.5,
+        "hk_hold": 0.5,
+        "limit_list": 0.5,
+        "margin_detail": 0.5,
+        "fina_audit": 0.5,
+        "fina_mainbz": 0.5,
+        "repurchase": 0.5,
+    }
+
+    _FAST_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
+        "daily": 2.5,
+        "daily_basic": 2.5,
+        "adj_factor": 2.5,
+        "trade_cal": 5.0,
+        "stock_basic": 5.0,
+        "index_daily": 2.5,
+        "index_weight": 2.5,
     }
 
     def __new__(cls, token: str | None = None):
@@ -59,8 +80,8 @@ class TushareClient:
 
     def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket]]:
         """
-        S2-1 fix: Build rate limiters based on config.
-        Extracted to avoid code duplication between __init__ and set_token.
+        Build rate limiters based on config.
+        Supports three tiers: default, slow APIs, and fast APIs.
         """
         limit_per_min = ConfigHandler.get_tushare_api_limit()
         if not limit_per_min or limit_per_min <= 0:
@@ -68,7 +89,7 @@ class TushareClient:
             return None, {}
 
         rate_per_sec = limit_per_min / 60.0
-        capacity = max(10, rate_per_sec * 5)
+        capacity = max(10, rate_per_sec * 2)
         rate_limiter = TokenBucket(
             start_tokens=capacity,
             capacity=capacity,
@@ -78,11 +99,12 @@ class TushareClient:
             f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
         )
 
-        slow_api_limiters: dict[str, TokenBucket] = {}
+        api_limiters: dict[str, TokenBucket] = {}
+
         for api_name, factor in self._SLOW_API_OVERRIDES.items():
             slow_rate = rate_per_sec * factor
-            slow_capacity = max(5, slow_rate * 5)
-            slow_api_limiters[api_name] = TokenBucket(
+            slow_capacity = max(5, slow_rate * 2)
+            api_limiters[api_name] = TokenBucket(
                 start_tokens=slow_capacity,
                 capacity=slow_capacity,
                 rate=slow_rate,
@@ -91,7 +113,19 @@ class TushareClient:
                 f"[API] Slow API limiter for '{api_name}': {slow_rate * 60:.0f} req/min (factor={factor})",
             )
 
-        return rate_limiter, slow_api_limiters
+        for api_name, factor in self._FAST_API_OVERRIDES.items():
+            fast_rate = rate_per_sec * factor
+            fast_capacity = max(10, fast_rate * 2)
+            api_limiters[api_name] = TokenBucket(
+                start_tokens=fast_capacity,
+                capacity=fast_capacity,
+                rate=fast_rate,
+            )
+            logger.info(
+                f"[API] Fast API limiter for '{api_name}': {fast_rate * 60:.0f} req/min (factor={factor})",
+            )
+
+        return rate_limiter, api_limiters
 
     def __init__(self, token: str | None = None):
         if self._initialized:
@@ -111,8 +145,7 @@ class TushareClient:
             self.timeout = ConfigHandler.get_tushare_timeout()
             self.max_retries = ConfigHandler.get_request_max_retries()
 
-            # S2-1 fix: Use shared rate limiter builder
-            self._rate_limiter, self._slow_api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
 
             if self.token:
                 ts.set_token(self.token)
@@ -131,8 +164,7 @@ class TushareClient:
         ts.set_token(token)
         self.pro = ts.pro_api(timeout=self.timeout)
 
-        # S2-1 fix: Use shared rate limiter builder
-        self._rate_limiter, self._slow_api_limiters = self._build_rate_limiters()
+        self._rate_limiter, self._api_limiters = self._build_rate_limiters()
 
         logger.info(f"[API] Token updated. Client re-initialized with timeout={self.timeout}s")
 
@@ -164,15 +196,13 @@ class TushareClient:
                 formatted_kwargs[k] = v
         kwargs = formatted_kwargs
 
-        slow_limiter = getattr(self, "_slow_api_limiters", {}).get(api_name)
-        if slow_limiter and logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                f"[tushare_api] api_name='{api_name}' -> slow_limiter active ({slow_limiter.rate * 60:.0f}/min)"
-            )
+        api_limiter = getattr(self, "_api_limiters", {}).get(api_name)
+        if api_limiter and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"[tushare_api] api_name='{api_name}' -> api_limiter active ({api_limiter.rate * 60:.0f}/min)")
 
         for i in range(self.max_retries):
-            if slow_limiter:
-                await slow_limiter.consume_async(1)
+            if api_limiter:
+                await api_limiter.consume_async(1)
             elif self._rate_limiter:
                 await self._rate_limiter.consume_async(1)
 
@@ -194,8 +224,8 @@ class TushareClient:
                 if result is not None and api_name in self._COLUMN_RENAMES:
                     result = result.rename(columns=self._COLUMN_RENAMES[api_name])
 
-                if slow_limiter:
-                    slow_limiter.on_success()
+                if api_limiter:
+                    api_limiter.on_success()
                 elif self._rate_limiter:
                     self._rate_limiter.on_success()
 
@@ -233,7 +263,7 @@ class TushareClient:
                     raise e
 
                 if is_rate_limit:
-                    active_limiter = slow_limiter or self._rate_limiter
+                    active_limiter = api_limiter or self._rate_limiter
                     if active_limiter:
                         active_limiter.reduce_rate(factor=0.5)
 

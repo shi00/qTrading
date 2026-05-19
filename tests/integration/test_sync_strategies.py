@@ -90,7 +90,7 @@ class TestSyncStrategiesUseRateLimiter:
             mock_ch.get_tushare_api_limit.return_value = 120
             mock_ch.get_setting.return_value = False
             client = TushareClient()
-            assert hasattr(client, "_rate_limiter") or hasattr(client, "_slow_api_limiters")
+            assert hasattr(client, "_rate_limiter") or hasattr(client, "_api_limiters")
         TushareClient._instance = None
 
     @pytest.mark.asyncio

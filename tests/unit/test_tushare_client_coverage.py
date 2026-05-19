@@ -105,12 +105,12 @@ class TestTushareClientHandleApiCallPartialFunc:
             assert result is not None
 
     @pytest.mark.asyncio
-    async def test_slow_limiter_consume_and_on_success(self):
+    async def test_api_limiter_consume_and_on_success(self):
         client = _make_client(limit=120)
-        slow_limiter = client._slow_api_limiters.get("top10_holders")
-        assert slow_limiter is not None
-        slow_limiter.consume_async = AsyncMock()
-        slow_limiter.on_success = MagicMock()
+        api_limiter = client._api_limiters.get("top10_holders")
+        assert api_limiter is not None
+        api_limiter.consume_async = AsyncMock()
+        api_limiter.on_success = MagicMock()
 
         async def fake_wait_for(coro, timeout=None):
             return pd.DataFrame({"a": [1]})
@@ -119,8 +119,8 @@ class TestTushareClientHandleApiCallPartialFunc:
             partial_func = functools.partial(client.pro.top10_holders, "top10_holders")
             result = await client._handle_api_call(partial_func)
             assert result is not None
-            slow_limiter.consume_async.assert_called()
-            slow_limiter.on_success.assert_called()
+            api_limiter.consume_async.assert_called()
+            api_limiter.on_success.assert_called()
 
     @pytest.mark.asyncio
     async def test_rate_limiter_consume_and_on_success(self):
@@ -133,7 +133,7 @@ class TestTushareClientHandleApiCallPartialFunc:
             return pd.DataFrame({"a": [1]})
 
         mock_func = MagicMock()
-        mock_func.__name__ = "daily"
+        mock_func.__name__ = "income"
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=fake_wait_for):
             result = await client._handle_api_call(mock_func)
             assert result is not None

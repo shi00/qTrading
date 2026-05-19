@@ -27,7 +27,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 1
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -47,7 +47,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 1
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -68,7 +68,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 3
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -87,7 +87,7 @@ class TestTushareClientBoundaryConditions:
         client = object.__new__(TushareClient)
         client._initialized = True
         client.max_retries = 1
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -115,7 +115,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 1
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -132,7 +132,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 1
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -161,7 +161,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 1
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 
@@ -178,7 +178,7 @@ class TestTushareClientBoundaryConditions:
         client._initialized = True
         client.max_retries = 2
         client._rate_limiter = None
-        client._slow_api_limiters = {}
+        client._api_limiters = {}
         client.pro = MagicMock()
         client.timeout = 5
 

@@ -253,9 +253,9 @@ class HolderSyncStrategy(ISyncStrategy):
                     elapsed_info = ""
                     api_client = getattr(self.context, "api", None)
                     if api_client:
-                        slow_limiter = getattr(api_client, "_slow_api_limiters", {}).get("top10_holders")
-                        if slow_limiter:
-                            elapsed_info = f", rate={slow_limiter.current_rate_per_min:.0f}/min"
+                        api_limiter = getattr(api_client, "_api_limiters", {}).get("top10_holders")
+                        if api_limiter:
+                            elapsed_info = f", rate={api_limiter.current_rate_per_min:.0f}/min"
 
                     logger.info(
                         f"[HolderSync] top10_holders | Progress: {i + 1}/{remaining} "

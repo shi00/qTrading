@@ -731,7 +731,7 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
         )
-        ctx.api._slow_api_limiters = {}
+        ctx.api._api_limiters = {}
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
         result = await strategy._sync_top10_holders("20240331")
@@ -747,7 +747,7 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         ctx.api = MagicMock()
         big_df = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(1000)], "holder_name": ["Test"] * 1000})
         ctx.api.get_top10_holders = AsyncMock(return_value=big_df)
-        ctx.api._slow_api_limiters = {}
+        ctx.api._api_limiters = {}
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
         result = await strategy._sync_top10_holders("20240331")
@@ -766,7 +766,7 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         )
         mock_limiter = MagicMock()
         mock_limiter.current_rate_per_min = 120.0
-        ctx.api._slow_api_limiters = {"top10_holders": mock_limiter}
+        ctx.api._api_limiters = {"top10_holders": mock_limiter}
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
         result = await strategy._sync_top10_holders("20240331")
