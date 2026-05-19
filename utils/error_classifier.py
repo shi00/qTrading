@@ -10,6 +10,11 @@ A-P0-1 fix: Removed reverse dependency on ui.i18n.
 classify_error now returns message_key instead of translated message.
 Callers in the UI layer should use I18n.get(error_info["message_key"]) to get
 the translated message. For db context with format args, use message_key + format_args.
+
+P1-17 fix: Added explicit handling for LiteLLM permanent errors.
+Permanent errors (AuthenticationError, ContentPolicyViolationError, etc.)
+should not be retried, while transient errors (RateLimitError, ServiceUnavailableError)
+can be retried.
 """
 
 SYSTEM_LEVEL_EXCEPTIONS = (
@@ -37,12 +42,61 @@ RECOVERABLE_CODES = {
     "refused",
 }
 
+PERMANENT_ERROR_CODES = {
+    "auth_failed",
+    "forbidden",
+    "not_found",
+    "model_not_found",
+    "content_policy",
+    "insufficient_quota",
+}
+
 try:
     import asyncpg  # type: ignore[import-untyped]
 
     _ASYNCPG_AVAILABLE = True
 except ImportError:
     _ASYNCPG_AVAILABLE = False
+
+try:
+    from litellm.exceptions import (  # type: ignore[import-untyped]
+        AuthenticationError as LiteLLMAuthenticationError,
+        ContentPolicyViolationError,
+        NotFoundError as LiteLLMNotFoundError,
+        PermissionDeniedError,
+        RateLimitError,
+        ServiceUnavailableError,
+    )
+
+    _LITELLM_AVAILABLE = True
+except ImportError:
+    _LITELLM_AVAILABLE = False
+    LiteLLMAuthenticationError = None  # type: ignore[misc,assignment]
+    ContentPolicyViolationError = None  # type: ignore[misc,assignment]
+    PermissionDeniedError = None  # type: ignore[misc,assignment]
+    LiteLLMNotFoundError = None  # type: ignore[misc,assignment]
+    RateLimitError = None  # type: ignore[misc,assignment]
+    ServiceUnavailableError = None  # type: ignore[misc,assignment]
+
+LITELLM_PERMANENT_EXCEPTIONS = (
+    (
+        LiteLLMAuthenticationError,
+        ContentPolicyViolationError,
+        PermissionDeniedError,
+        LiteLLMNotFoundError,
+    )
+    if _LITELLM_AVAILABLE
+    else ()
+)
+
+LITELLM_TRANSIENT_EXCEPTIONS = (
+    (
+        RateLimitError,
+        ServiceUnavailableError,
+    )
+    if _LITELLM_AVAILABLE
+    else ()
+)
 
 
 def classify_severity(e: Exception, context: str = "general") -> str:
@@ -94,30 +148,51 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         return {"code": "unknown", "message_key": "wizard_err_token_unknown"}
 
     if context == "llm":
+        if _LITELLM_AVAILABLE and isinstance(e, LITELLM_PERMANENT_EXCEPTIONS):
+            if isinstance(e, LiteLLMAuthenticationError):
+                return {"code": "auth_failed", "message_key": "llm_err_auth_failed", "should_retry": False}
+            if isinstance(e, ContentPolicyViolationError):
+                return {"code": "content_policy", "message_key": "llm_err_content_policy", "should_retry": False}
+            if isinstance(e, PermissionDeniedError):
+                return {"code": "forbidden", "message_key": "llm_err_forbidden", "should_retry": False}
+            if isinstance(e, LiteLLMNotFoundError):
+                return {"code": "not_found", "message_key": "llm_err_not_found", "should_retry": False}
+
+        if _LITELLM_AVAILABLE and isinstance(e, LITELLM_TRANSIENT_EXCEPTIONS):
+            if isinstance(e, RateLimitError):
+                return {"code": "rate_limit", "message_key": "llm_err_rate_limit", "should_retry": True}
+            if isinstance(e, ServiceUnavailableError):
+                return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
+
+        if "insufficient_quota" in error_str or "quota" in error_str or "402" in error_str:
+            return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota", "should_retry": False}
+        if "content policy" in error_str or "content violation" in error_str:
+            return {"code": "content_policy", "message_key": "llm_err_content_policy", "should_retry": False}
         if "401" in error_str or "unauthorized" in error_str or "invalid api key" in error_str:
-            return {"code": "auth_failed", "message_key": "llm_err_auth_failed"}
+            return {"code": "auth_failed", "message_key": "llm_err_auth_failed", "should_retry": False}
         if "403" in error_str or "forbidden" in error_str:
-            return {"code": "forbidden", "message_key": "llm_err_forbidden"}
+            return {"code": "forbidden", "message_key": "llm_err_forbidden", "should_retry": False}
         if "404" in error_str or "not found" in error_str:
-            return {"code": "not_found", "message_key": "llm_err_not_found"}
+            return {"code": "not_found", "message_key": "llm_err_not_found", "should_retry": False}
         if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
-            return {"code": "rate_limit", "message_key": "llm_err_rate_limit"}
+            return {"code": "rate_limit", "message_key": "llm_err_rate_limit", "should_retry": True}
         if "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
-            return {"code": "server_error", "message_key": "llm_err_server"}
+            return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
         if "timeout" in error_str or "timed out" in error_str:
-            return {"code": "timeout", "message_key": "llm_err_timeout"}
+            return {"code": "timeout", "message_key": "llm_err_timeout", "should_retry": True}
         if "connection" in error_str or "network" in error_str or "connect" in error_str:
-            return {"code": "network", "message_key": "llm_err_network"}
+            return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
         if "dns" in error_str or "getaddrinfo" in error_str:
-            return {"code": "dns", "message_key": "llm_err_dns"}
+            return {"code": "dns", "message_key": "llm_err_dns", "should_retry": True}
         if "ssl" in error_str or "certificate" in error_str:
-            return {"code": "ssl", "message_key": "llm_err_ssl"}
+            return {"code": "ssl", "message_key": "llm_err_ssl", "should_retry": True}
         if "model" in error_str and ("not found" in error_str or "unsupported" in error_str):
             return {
                 "code": "model_not_found",
                 "message_key": "llm_err_model_not_found",
+                "should_retry": False,
             }
-        return {"code": "unknown", "message_key": "llm_err_unknown"}
+        return {"code": "unknown", "message_key": "llm_err_unknown", "should_retry": False}
 
     if context == "db":
         if error_type == "ValueError":

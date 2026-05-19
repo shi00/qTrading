@@ -354,6 +354,8 @@
     "llm_err_dns": "DNS 解析失败，请检查域名或网络设置",
     "llm_err_ssl": "SSL 证书错误，请检查网络环境",
     "llm_err_model_not_found": "模型不存在或不支持，请检查模型名称",
+    "llm_err_content_policy": "内容违规，请求被拒绝",
+    "llm_err_insufficient_quota": "账户余额不足，请充值后重试",
     "llm_err_unknown": "连接失败，请查看日志获取详细信息",
     "llm_azure_need_resource": "请填写 Azure 资源名称",
     "llm_azure_need_deployment": "请填写 Azure 部署名称",

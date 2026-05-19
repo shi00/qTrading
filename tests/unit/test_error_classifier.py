@@ -90,6 +90,72 @@ class TestClassifyErrorLLMContext:
         assert result["code"] == "unknown"
         assert result["message_key"] == "llm_err_unknown"
 
+    def test_should_retry_field_for_permanent_errors(self):
+        result = classify_error(Exception("401 unauthorized"), context="llm")
+        assert result["code"] == "auth_failed"
+        assert result.get("should_retry") is False
+
+    def test_should_retry_field_for_transient_errors(self):
+        result = classify_error(Exception("429 too many requests"), context="llm")
+        assert result["code"] == "rate_limit"
+        assert result.get("should_retry") is True
+
+    def test_content_policy_violation(self):
+        result = classify_error(Exception("content policy violation"), context="llm")
+        assert result["code"] == "content_policy"
+        assert result.get("should_retry") is False
+
+    def test_insufficient_quota(self):
+        result = classify_error(Exception("insufficient_quota error"), context="llm")
+        assert result["code"] == "insufficient_quota"
+        assert result.get("should_retry") is False
+
+
+class TestClassifyErrorLLMTypeMatching:
+    def test_litellm_authentication_error(self):
+        try:
+            from litellm.exceptions import AuthenticationError
+
+            err = AuthenticationError("test", "test-provider", "test-model")
+            result = classify_error(err, context="llm")
+            assert result["code"] == "auth_failed"
+            assert result.get("should_retry") is False
+        except ImportError:
+            pytest.skip("litellm not available")
+
+    def test_litellm_rate_limit_error(self):
+        try:
+            from litellm.exceptions import RateLimitError
+
+            err = RateLimitError("test", "test-provider", "test-model")
+            result = classify_error(err, context="llm")
+            assert result["code"] == "rate_limit"
+            assert result.get("should_retry") is True
+        except ImportError:
+            pytest.skip("litellm not available")
+
+    def test_litellm_content_policy_violation_error(self):
+        try:
+            from litellm.exceptions import ContentPolicyViolationError
+
+            err = ContentPolicyViolationError("test", "test-provider", "test-model")
+            result = classify_error(err, context="llm")
+            assert result["code"] == "content_policy"
+            assert result.get("should_retry") is False
+        except ImportError:
+            pytest.skip("litellm not available")
+
+    def test_litellm_service_unavailable_error(self):
+        try:
+            from litellm.exceptions import ServiceUnavailableError
+
+            err = ServiceUnavailableError("test", "test-provider", "test-model")
+            result = classify_error(err, context="llm")
+            assert result["code"] == "server_error"
+            assert result.get("should_retry") is True
+        except ImportError:
+            pytest.skip("litellm not available")
+
 
 class TestClassifyErrorDBContext:
     def test_value_error_format(self):
