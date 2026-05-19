@@ -17,8 +17,12 @@ Note: All E2E tests run automatically when Playwright is installed and
 """
 
 import os
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    pass
 
 
 def _is_server_reachable(url="http://localhost:8550", timeout=2):
@@ -64,7 +68,7 @@ skip_if_no_test_db = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def browser_context():
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright  # type: ignore[import-untyped]
 
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=True)
