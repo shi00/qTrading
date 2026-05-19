@@ -17,6 +17,36 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
+class TushareAPIPermissionError(Exception):
+    """
+    P1-26 fix: Structured exception for Tushare API permission errors.
+
+    Raised when the user's Tushare account lacks permission to access
+    a specific API endpoint. This error should be caught by sync strategies
+    to skip unavailable APIs and update UI capability indicators.
+    """
+
+    def __init__(self, api_name: str, message: str):
+        self.api_name = api_name
+        self.message = message
+        super().__init__(f"Permission denied for API '{api_name}': {message}")
+
+    def __str__(self) -> str:
+        return f"TushareAPIPermissionError(api={self.api_name}, message={self.message})"
+
+
+PERMISSION_DENIED_KEYWORDS = (
+    "权限",
+    "积分不足",
+    "未授权",
+    "请求接口的权限",
+    "no permission",
+    "permission denied",
+    "没有权限",
+    "无权访问",
+)
+
+
 from utils.singleton_registry import register_singleton
 
 
@@ -233,34 +263,29 @@ class TushareClient:
             except Exception as e:
                 import random
 
-                error_msg = str(e).lower()
-                is_permission_error = (
-                    "权限" in error_msg
-                    or "积分" in error_msg
-                    or "permission" in error_msg
-                    or "无权" in error_msg
-                    or "没有权限" in error_msg
-                )
+                error_msg = str(e)
+                error_msg_lower = error_msg.lower()
+                is_permission_error = any(k in error_msg_lower for k in PERMISSION_DENIED_KEYWORDS)
                 is_rate_limit = (
-                    "每分钟最多访问" in error_msg
-                    or "抱歉" in error_msg
-                    or "检测到" in error_msg
-                    or "429" in error_msg
-                    or "rate limit" in error_msg
-                    or "频次超限" in error_msg
+                    "每分钟最多访问" in error_msg_lower
+                    or "抱歉" in error_msg_lower
+                    or "检测到" in error_msg_lower
+                    or "429" in error_msg_lower
+                    or "rate limit" in error_msg_lower
+                    or "频次超限" in error_msg_lower
                 )
                 is_network_error = (
                     isinstance(e, (requests.exceptions.RequestException, TimeoutError, asyncio.TimeoutError))
-                    or "timeout" in error_msg.lower()
-                    or "connection" in error_msg.lower()
-                    or "timed out" in error_msg.lower()
+                    or "timeout" in error_msg_lower
+                    or "connection" in error_msg_lower
+                    or "timed out" in error_msg_lower
                 )
 
                 if is_permission_error:
                     logger.error(
                         f"[tushare_api] PERMISSION_DENIED ({api_name}): {error_msg}",
                     )
-                    raise e
+                    raise TushareAPIPermissionError(api_name, error_msg) from e
 
                 if is_rate_limit:
                     active_limiter = api_limiter or self._rate_limiter
