@@ -79,13 +79,40 @@ class TestHistoricalSyncIntegrity:
         集成测试：同步中断后恢复
 
         场景：模拟同步过程中断，验证断点续传正确性
+        - 已有缓存日期：20240101
+        - 交易日历范围：20240101, 20240102, 20240103
+        - 期望：只同步 20240102 和 20240103
         """
-        mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240101"})
-        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={"20240101": 90})
+        import datetime
+
+        d1 = datetime.date(2024, 1, 1)
+        d2 = datetime.date(2024, 1, 2)
+        d3 = datetime.date(2024, 1, 3)
+
+        mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(return_value={d1})
+        mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={d1: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []}}
+        )
+
+        mock_sync_strategy.context.processor = MagicMock()
+        mock_sync_strategy.context.processor.trade_calendar = MagicMock()
+        mock_sync_strategy.context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[d1, d2, d3])
+
+        sync_calls = []
+
+        async def fake_sync_one(date, **kwargs):
+            sync_calls.append(date)
+            return True
+
+        mock_sync_strategy.sync_daily_market_snapshot = AsyncMock(side_effect=fake_sync_one)
 
         result = SyncResult()
+        await mock_sync_strategy._run_historical_sync(days=3, progress_callback=None, result=result)
 
-        assert result is not None
+        assert d1 not in sync_calls, "20240101 should be skipped (cached), but was synced"
+        assert d2 in sync_calls, "20240102 should be synced"
+        assert d3 in sync_calls, "20240103 should be synced"
+        assert result.added >= 2, f"Expected at least 2 added, got {result.added}"
 
     @pytest.mark.asyncio
     async def test_low_quality_data_triggers_resync(self, mock_sync_strategy):

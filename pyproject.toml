@@ -89,6 +89,7 @@ markers = [
 ]
 
 [tool.coverage.run]
+branch = true
 source = ["core", "data", "services", "strategies", "utils", "ui", "config", "main"]
 omit = [
     "data/tiktoken_cache/*",
@@ -97,8 +98,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 85
-per_file_minimum = 80
+fail_under = 80
+per_file_minimum = 75
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
