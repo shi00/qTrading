@@ -466,7 +466,7 @@ class TestFinancialSyncFullSyncErrorPaths:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_empty_data_marks_complete_to_avoid_infinite_retry(self):
+    async def test_empty_data_not_marked_complete_allows_retry(self):
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(return_value=None)
         ctx.api.get_balancesheet = AsyncMock(return_value=None)
@@ -477,7 +477,7 @@ class TestFinancialSyncFullSyncErrorPaths:
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result is not None
-        ctx.cache.mark_stock_step4_completed.assert_awaited()
+        ctx.cache.mark_stock_step4_completed.assert_not_awaited()
 
 
 class TestFinancialSyncFullSyncProgress:
