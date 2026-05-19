@@ -128,7 +128,7 @@
     "db_upgrade_success_content": "Database has been successfully upgraded to the latest version.",
     "db_upgrade_error_title": "Upgrade Failed",
     "db_upgrade_error_content": "An error occurred during database upgrade: {error}\n\nPlease check the log file for more details.",
-    "db_upgrade_migration": "Performing database migration..."
+    "db_upgrade_migration": "Performing database migration...",
     "tab_pledge_stat": "Stock Pledge",
     "tab_repurchase": "Repurchase",
     "tab_limit_list": "Limit Up/Down List",

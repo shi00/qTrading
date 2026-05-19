@@ -934,7 +934,7 @@
     "db_upgrade_success_content": "数据库已成功升级到最新版本。",
     "db_upgrade_error_title": "升级失败",
     "db_upgrade_error_content": "数据库升级过程中发生错误: {error}\n\n请查看日志文件获取更多详细信息。",
-    "db_upgrade_migration": "执行数据库迁移..."
+    "db_upgrade_migration": "执行数据库迁移...",
     "tab_pledge_stat": "股权质押",
     "tab_repurchase": "回购",
     "tab_limit_list": "涨跌停列表",
