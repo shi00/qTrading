@@ -649,21 +649,21 @@ class AIService:
 
                 if LITELLM_AVAILABLE:
                     try:
-                        import litellm
+                        from litellm.exceptions import (
+                            AuthenticationError,
+                            ContentPolicyViolationError,
+                            RateLimitError,
+                            ServiceUnavailableError,
+                            InternalServerError,
+                        )
 
-                        auth_error = litellm.AuthenticationError
-                        policy_error = litellm.ContentPolicyViolationError
-                        rate_error = litellm.RateLimitError
-                        service_error = litellm.ServiceUnavailableError
-                        internal_error = litellm.InternalServerError
-
-                        if isinstance(e, auth_error):
+                        if isinstance(e, AuthenticationError):
                             logger.error(
                                 "[AIService] Failover | ❌ Authentication error for %s, not retrying",
                                 model,
                             )
                             raise
-                        if isinstance(e, policy_error):
+                        if isinstance(e, ContentPolicyViolationError):
                             logger.error(
                                 "[AIService] Failover | ❌ Content policy violation for %s, not retrying",
                                 model,
@@ -673,12 +673,12 @@ class AIService:
                         is_transient = isinstance(
                             e,
                             (
-                                rate_error,
-                                service_error,
-                                internal_error,
+                                RateLimitError,
+                                ServiceUnavailableError,
+                                InternalServerError,
                             ),
                         )
-                    except (TypeError, AttributeError):
+                    except ImportError:
                         is_transient = False
 
                 is_transient = is_transient or isinstance(
