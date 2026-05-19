@@ -210,7 +210,7 @@ class ReviewManager:
         Returns formatted XML string for few-shot learning.
 
         P0-5 fix: as_of parameter prevents look-ahead bias. When provided,
-        only predictions with trade_date <= as_of are included, preventing
+        only predictions with trade_date < as_of are included, preventing
         future data from leaking into historical replay contexts.
 
         Corner cases:

@@ -199,7 +199,7 @@ class TestScreenerDaoGetLearningContext:
         await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date)
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
-        assert "trade_date <= $2" in sql
+        assert "trade_date < $2" in sql
         assert call_args[0][1] == ("WIN", as_of_date, 3)
 
     @pytest.mark.asyncio

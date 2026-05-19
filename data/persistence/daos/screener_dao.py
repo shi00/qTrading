@@ -221,7 +221,7 @@ class ScreenerDao(BaseDao):
             sql = f"""
                 SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
                 FROM screening_history
-                WHERE prediction_result = $1 AND alpha IS NOT NULL AND trade_date <= $2
+                WHERE prediction_result = $1 AND alpha IS NOT NULL AND trade_date < $2
                 ORDER BY alpha {order}, t1_pct {order}
                 LIMIT $3
             """
