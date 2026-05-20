@@ -24,9 +24,11 @@ def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Deduplicate financial DataFrame by end_date, preferring the latest disclosure.
 
-    For DataFrames with 'ann_date' column, sorts by [end_date, ann_date] ascending
-    and keeps the last row per end_date. This ensures we select the most recently
-    disclosed report for each financial period (handles revised reports).
+    For DataFrames with 'ann_date' column, sorts by [end_date, ann_date, update_flag]
+    ascending and keeps the last row per end_date. This ensures we select the most
+    recently disclosed report for each financial period (handles revised reports).
+
+    update_flag: "1" means revised data, should be preferred over original ("0" or None).
 
     For DataFrames without 'ann_date', falls back to simple end_date dedup.
     """
@@ -34,9 +36,12 @@ def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     if "ann_date" in df.columns:
-        return df.sort_values(by=["end_date", "ann_date"], ascending=[True, True]).drop_duplicates(
-            subset=["end_date"], keep="last"
-        )
+        sort_cols = ["end_date", "ann_date"]
+        ascending = [True, True]
+        if "update_flag" in df.columns:
+            sort_cols.append("update_flag")
+            ascending.append(True)
+        return df.sort_values(by=sort_cols, ascending=ascending).drop_duplicates(subset=["end_date"], keep="last")
     return df.sort_values("end_date").drop_duplicates(subset=["end_date"], keep="last")
 
 

@@ -668,7 +668,7 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             ts_code=ts_code,
-            fields="ts_code,end_date,n_cashflow_act,c_cashflow_return_pay,n_cashflow_inv",
+            fields="ts_code,ann_date,end_date,n_cashflow_act,c_cashflow_return_pay,n_cashflow_inv",
         )
 
     async def get_balancesheet(
@@ -685,7 +685,7 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             ts_code=ts_code,
-            fields="ts_code,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill",
+            fields="ts_code,ann_date,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill",
         )
 
     async def get_top_list(self, trade_date: str | None):  # type: ignore[untyped]

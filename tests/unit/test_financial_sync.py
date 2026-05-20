@@ -842,3 +842,51 @@ class TestFinancialDedupWithAnnDate:
         assert q1_row["revenue"] == 250.0
         q4_row = df[df["end_date"] == "20231231"].iloc[0]
         assert q4_row["revenue"] == 150.0
+
+    @pytest.mark.asyncio
+    async def test_dedup_with_update_flag(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "end_date": ["20240331", "20240331", "20240331"],
+                    "ann_date": ["20240428", "20240428", "20240428"],
+                    "update_flag": ["0", "1", "0"],
+                    "revenue": [100.0, 150.0, 200.0],
+                }
+            )
+        )
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
+        ctx.api.get_fina_audit = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        assert len(df) == 1
+        assert df.iloc[0]["revenue"] == 150.0
+
+    @pytest.mark.asyncio
+    async def test_dedup_ann_date_and_update_flag_combined(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 4,
+                    "end_date": ["20240331", "20240331", "20240331", "20240331"],
+                    "ann_date": ["20240428", "20240428", "20240428", "20240430"],
+                    "update_flag": ["0", "1", "0", "1"],
+                    "revenue": [100.0, 150.0, 200.0, 250.0],
+                }
+            )
+        )
+        ctx.api.get_balancesheet = AsyncMock(return_value=None)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
+        ctx.api.get_fina_audit = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        assert len(df) == 1
+        assert df.iloc[0]["revenue"] == 250.0
