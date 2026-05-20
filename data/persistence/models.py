@@ -56,7 +56,7 @@ class StockBasic(Base):
 
 class StockConcepts(Base):
     __tablename__ = "stock_concepts"
-    ts_code = Column(String, primary_key=True, index=True)
+    ts_code = Column(String, primary_key=True)
     concept_name = Column(String)
     concept_id = Column(String, primary_key=True)
     updated_at = Column(DateTime(timezone=False), server_default=func.now())
@@ -111,7 +111,7 @@ class DailyIndicators(Base):
 class MoneyflowDaily(Base):
     __tablename__ = "moneyflow_daily"
     ts_code = Column(String, primary_key=True)
-    trade_date = Column(Date, primary_key=True, index=True)
+    trade_date = Column(Date, primary_key=True)
     buy_sm_vol = Column(BigInteger)
     buy_sm_amount = Column(Numeric(20, 4))
     sell_sm_vol = Column(BigInteger)
