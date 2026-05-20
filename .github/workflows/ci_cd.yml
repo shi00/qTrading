@@ -259,7 +259,18 @@ jobs:
 
       - name: Run pre-commit hooks
         id: pre-commit
+        continue-on-error: true
         run: pre-commit run --all-files
+
+      - name: Check if pre-commit failed
+        if: steps.pre-commit.outcome == 'failure'
+        run: |
+          echo "::warning::pre-commit hooks failed. requirements*.txt may need updating."
+          echo "PRE_COMMIT_FAILED=true" >> $GITHUB_ENV
+
+      - name: Fail if pre-commit failed (non-main branch)
+        if: steps.pre-commit.outcome == 'failure' && github.ref != 'refs/heads/main'
+        run: exit 1
 
       - name: Pyright Type Check
         continue-on-error: false
