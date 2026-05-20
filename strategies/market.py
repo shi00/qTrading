@@ -304,7 +304,7 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                     [
                         pl.col("amount").sum(),
                         pl.col("vol").sum(),
-                        pl.col("price").mean(),
+                        ((pl.col("price") * pl.col("amount")).sum() / pl.col("amount").sum()).alias("price"),
                     ],
                 )
                 .join(base_lf, on="ts_code", how="inner")
