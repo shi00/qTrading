@@ -1,4 +1,5 @@
 import logging
+from typing import TypedDict
 
 from data.domain_services.market_data_service import MarketDataService
 from data.external.news_subscription import NewsSubscriptionService
@@ -10,7 +11,15 @@ from utils.scheduler_service import SchedulerService
 logger = logging.getLogger(__name__)
 
 
-async def initialize_services(cache_manager, show_toast_fn=None):
+class InitResult(TypedDict):
+    success: bool
+    error: str | None
+    detail: str | None
+    current_rev: str | None
+    head_rev: str | None
+
+
+async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     try:
         await cache_manager.init_db()
     except DatabaseMigrationNeeded as e:
@@ -26,7 +35,7 @@ async def initialize_services(cache_manager, show_toast_fn=None):
         logger.error(f"[Bootstrap] Database initialization failed: {e}", exc_info=True)
         if show_toast_fn:
             show_toast_fn(f"数据库初始化失败: {e}", "error")
-        return {"success": False, "error": "db_init_failed", "detail": str(e)}
+        return {"success": False, "error": "db_init_failed", "detail": str(e), "current_rev": None, "head_rev": None}
 
     MetaDataManager.preload_aliases()
 
@@ -34,7 +43,7 @@ async def initialize_services(cache_manager, show_toast_fn=None):
         logger.error("[Bootstrap] Database engine not created after init_db().")
         if show_toast_fn:
             show_toast_fn("数据库引擎未创建，请检查配置", "error")
-        return {"success": False, "error": "db_engine_missing"}
+        return {"success": False, "error": "db_engine_missing", "detail": None, "current_rev": None, "head_rev": None}
 
     try:
         await TaskManager().init_db()
@@ -42,13 +51,19 @@ async def initialize_services(cache_manager, show_toast_fn=None):
         logger.error(f"[Bootstrap] TaskManager init failed: {e}", exc_info=True)
         if show_toast_fn:
             show_toast_fn(f"TaskManager 初始化失败: {e}", "error")
-        return {"success": False, "error": "task_manager_init_failed", "detail": str(e)}
+        return {
+            "success": False,
+            "error": "task_manager_init_failed",
+            "detail": str(e),
+            "current_rev": None,
+            "head_rev": None,
+        }
 
     SchedulerService().start()
     NewsSubscriptionService().start()
     MarketDataService().start()
 
-    return {"success": True}
+    return {"success": True, "error": None, "detail": None, "current_rev": None, "head_rev": None}
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
