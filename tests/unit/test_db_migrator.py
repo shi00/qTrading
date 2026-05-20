@@ -1,7 +1,131 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from data.persistence.db_migrator import DatabaseMigrator
+from data.persistence.db_migrator import DatabaseMigrator, DatabaseMigrationNeeded
+
+
+class TestDatabaseMigrationNeeded:
+    def test_exception_message(self):
+        exc = DatabaseMigrationNeeded("old_rev", "new_rev")
+        assert exc.current_rev == "old_rev"
+        assert exc.head_rev == "new_rev"
+        assert "old_rev" in str(exc)
+        assert "new_rev" in str(exc)
+
+    def test_exception_with_none_current_rev(self):
+        exc = DatabaseMigrationNeeded(None, "new_rev")
+        assert exc.current_rev is None
+        assert exc.head_rev == "new_rev"
+
+
+class TestShouldAutoMigrate:
+    def test_auto_migrate_env_1(self, monkeypatch):
+        monkeypatch.setenv("AUTO_MIGRATE", "1")
+        result = DatabaseMigrator._should_auto_migrate()
+        assert result is True
+
+    def test_auto_migrate_env_true(self, monkeypatch):
+        monkeypatch.setenv("AUTO_MIGRATE", "true")
+        result = DatabaseMigrator._should_auto_migrate()
+        assert result is True
+
+    def test_auto_migrate_env_yes(self, monkeypatch):
+        monkeypatch.setenv("AUTO_MIGRATE", "yes")
+        result = DatabaseMigrator._should_auto_migrate()
+        assert result is True
+
+    def test_auto_migrate_env_false(self, monkeypatch):
+        monkeypatch.setenv("AUTO_MIGRATE", "false")
+        result = DatabaseMigrator._should_auto_migrate()
+        assert result is False
+
+    def test_auto_migrate_env_empty(self, monkeypatch):
+        monkeypatch.delenv("AUTO_MIGRATE", raising=False)
+        result = DatabaseMigrator._should_auto_migrate()
+        assert result is False
+
+    def test_auto_migrate_env_random(self, monkeypatch):
+        monkeypatch.setenv("AUTO_MIGRATE", "random")
+        result = DatabaseMigrator._should_auto_migrate()
+        assert result is False
+
+
+class TestCheckSchemaStatus:
+    @pytest.mark.asyncio
+    async def test_check_schema_status_returns_tuple(self):
+        mock_engine = _make_engine(has_alembic=True, has_old_schema=True)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value="head_rev")
+
+            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="current_rev")):
+                current, head, needs = await DatabaseMigrator.check_schema_status(mock_engine)
+                assert current == "current_rev"
+                assert head == "head_rev"
+                assert needs is True
+
+    @pytest.mark.asyncio
+    async def test_check_schema_status_no_migration_needed(self):
+        mock_engine = _make_engine(has_alembic=True, has_old_schema=True)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value="same_rev")
+
+            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="same_rev")):
+                current, head, needs = await DatabaseMigrator.check_schema_status(mock_engine)
+                assert current == "same_rev"
+                assert head == "same_rev"
+                assert needs is False
+
+
+class TestInitDbMigrationNeeded:
+    @pytest.mark.asyncio
+    async def test_raises_migration_needed_when_auto_migrate_disabled(self):
+        mock_engine = _make_engine(has_alembic=False, has_old_schema=False)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value="head_rev")
+
+            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="old_rev")):
+                with pytest.raises(DatabaseMigrationNeeded) as exc_info:
+                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=False)
+
+                assert exc_info.value.current_rev == "old_rev"
+                assert exc_info.value.head_rev == "head_rev"
+
+    @pytest.mark.asyncio
+    async def test_auto_migrate_none_uses_env_var(self, monkeypatch):
+        monkeypatch.setenv("AUTO_MIGRATE", "false")
+        mock_engine = _make_engine(has_alembic=False, has_old_schema=False)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value="head_rev")
+
+            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="old_rev")):
+                with pytest.raises(DatabaseMigrationNeeded):
+                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=None)
+
+
+class TestInitDbErrorHandling:
+    @pytest.mark.asyncio
+    async def test_get_head_revision_failure_raises(self):
+        mock_engine = _make_engine(has_alembic=False, has_old_schema=False)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("failed to get head"))
+
+            with pytest.raises(Exception, match="failed to get head"):
+                await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
 
 def _make_engine(has_alembic=False, has_old_schema=False, connect_error=None):

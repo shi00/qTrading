@@ -1,6 +1,6 @@
 import contextlib
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 import flet as ft
 import pytest
@@ -592,6 +592,121 @@ class TestAIBrainTab:
         tab.will_unmount()
         self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
 
+    def test_init_exception_handled(self, mock_page):
+        with patch("ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel", side_effect=Exception("init error")):
+            tab = self._make_tab()
+            assert tab.content is not None
+
+    def test_update_theme(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.update_theme()
+
+    def test_safe_update(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab._safe_update()
+
+    def test_safe_update_no_page(self, mock_page):
+        tab = self._make_tab()
+        tab._safe_update()
+
+    @pytest.mark.asyncio
+    async def test_save_ai_settings_exception(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, wrap_mock_page(mock_page))
+        tab.ai_max_candidates_input.value = "30"
+        tab.strategy_min_turnover_input.value = "2.0"
+        tab.ai_concurrency_input.value = "5"
+        tab.ai_prompt_input.value = "test prompt"
+        tab.ai_news_prompt_input.value = "news prompt"
+        tab.llm_config_panel = MagicMock()
+        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.local_model_panel = MagicMock()
+        tab.local_model_panel.get_current_config.return_value = {"model_path": ""}
+        self.mock_ch.set_ai_max_candidates.side_effect = Exception("save error")
+        with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
+            await tab._save_ai_settings(None)
+        tab.show_snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_ai_settings_with_local_model_not_found(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, wrap_mock_page(mock_page))
+        tab.ai_max_candidates_input.value = "30"
+        tab.strategy_min_turnover_input.value = "2.0"
+        tab.ai_concurrency_input.value = "5"
+        tab.ai_prompt_input.value = "test prompt"
+        tab.ai_news_prompt_input.value = "news prompt"
+        tab.llm_config_panel = MagicMock()
+        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.local_model_panel = MagicMock()
+        tab.local_model_panel.get_current_config.return_value = {"model_path": "/nonexistent/model.gguf"}
+        with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
+            with patch("os.path.exists", return_value=False):
+                with patch("services.ai_service.AIService") as mock_ai:
+                    mock_ai.return_value.reload_config = AsyncMock()
+                    await tab._save_ai_settings(None)
+        tab.show_snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_ai_settings_with_local_model_changed(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, wrap_mock_page(mock_page))
+        tab.ai_max_candidates_input.value = "30"
+        tab.strategy_min_turnover_input.value = "2.0"
+        tab.ai_concurrency_input.value = "5"
+        tab.ai_prompt_input.value = "test prompt"
+        tab.ai_news_prompt_input.value = "news prompt"
+        tab.llm_config_panel = MagicMock()
+        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.local_model_panel = MagicMock()
+        tab.local_model_panel.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
+        with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
+            with patch("os.path.exists", return_value=True):
+                with patch("services.ai_service.AIService") as mock_ai:
+                    mock_ai.return_value.reload_config = AsyncMock()
+                    with patch("services.local_model_manager.LocalModelManager.get_instance") as mock_lmm:
+                        mock_lmm_instance = MagicMock()
+                        mock_lmm_instance.get_loaded_model_md5 = MagicMock(return_value="old_md5")
+                        mock_lmm_instance.calculate_file_md5 = AsyncMock(return_value="new_md5")
+                        mock_lmm.return_value = mock_lmm_instance
+                        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+                            mock_tpm_instance = MagicMock()
+                            mock_tpm_instance.run_async = AsyncMock(return_value="new_md5")
+                            mock_tpm.return_value = mock_tpm_instance
+                            await tab._save_ai_settings(None)
+        tab.show_snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_ai_settings_with_local_model_same_md5(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, wrap_mock_page(mock_page))
+        tab.ai_max_candidates_input.value = "30"
+        tab.strategy_min_turnover_input.value = "2.0"
+        tab.ai_concurrency_input.value = "5"
+        tab.ai_prompt_input.value = "test prompt"
+        tab.ai_news_prompt_input.value = "news prompt"
+        tab.llm_config_panel = MagicMock()
+        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.local_model_panel = MagicMock()
+        tab.local_model_panel.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
+        with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
+            with patch("os.path.exists", return_value=True):
+                with patch("services.ai_service.AIService") as mock_ai:
+                    mock_ai.return_value.reload_config = AsyncMock()
+                    with patch("services.local_model_manager.LocalModelManager.get_instance") as mock_lmm:
+                        mock_lmm_instance = MagicMock()
+                        mock_lmm_instance.get_loaded_model_md5 = MagicMock(return_value="same_md5")
+                        mock_lmm_instance.calculate_file_md5 = AsyncMock(return_value="same_md5")
+                        mock_lmm.return_value = mock_lmm_instance
+                        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+                            mock_tpm_instance = MagicMock()
+                            mock_tpm_instance.run_async = AsyncMock(return_value="same_md5")
+                            mock_tpm.return_value = mock_tpm_instance
+                            await tab._save_ai_settings(None)
+        tab.show_snack.assert_called()
+
 
 class TestSystemTab:
     patches: list
@@ -761,6 +876,118 @@ class TestSystemTab:
         tab.db_timeout_input.value = "30"
         tab.save_db_pool_settings(None)
         snack.assert_called_once()
+
+    def test_on_theme_change_exception(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.theme_dropdown.value = "dark"
+        with patch("ui.theme.apply_page_theme", side_effect=Exception("theme error")):
+            tab.on_theme_change(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_valid(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "8"
+        tab.cpu_workers_input.value = "4"
+        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm_instance.reload_config = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            await tab.save_thread_pool_settings(None)
+        self.mock_ch.set_max_io_workers.assert_called_with(8)
+        self.mock_ch.set_max_cpu_workers.assert_called_with(4)
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_empty(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = ""
+        tab.cpu_workers_input.value = "4"
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_io_too_low(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "2"
+        tab.cpu_workers_input.value = "4"
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_io_too_high(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "999"
+        tab.cpu_workers_input.value = "4"
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_cpu_too_low(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "8"
+        tab.cpu_workers_input.value = "0"
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_cpu_too_high(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "8"
+        tab.cpu_workers_input.value = "999"
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_invalid_format(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "abc"
+        tab.cpu_workers_input.value = "4"
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_settings_exception(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.io_workers_input.value = "8"
+        tab.cpu_workers_input.value = "4"
+        self.mock_ch.set_max_io_workers.side_effect = Exception("save error")
+        await tab.save_thread_pool_settings(None)
+        snack.assert_called()
+
+    def test_save_no_proxy_domains_exception(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        tab.show_snack = snack
+        set_page(tab, mock_page)
+        tab.no_proxy_input.value = "localhost"
+        self.mock_ch.set_no_proxy_domains.side_effect = Exception("save error")
+        tab.save_no_proxy_domains(None)
+        snack.assert_called()
 
     def test_save_db_pool_settings_overflow_too_high(self, mock_page):
         snack = MagicMock()

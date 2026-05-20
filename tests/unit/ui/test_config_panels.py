@@ -1481,3 +1481,290 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         with patch.object(panel, "update", side_effect=Exception("update error")):
             panel._safe_update()
+
+
+class TestDatabaseConfigPanelExtended:
+    def test_load_password_enabled(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        mock_config_handler_db.get_db_password.return_value = "saved_password"
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, load_password=True)
+        assert panel.db_password_input.value == "saved_password"
+
+    def test_load_password_disabled(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        mock_config_handler_db.get_db_password.return_value = "saved_password"
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, load_password=False)
+        assert panel.db_password_input.value == ""
+
+    def test_did_mount_subscribes_locale(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel.did_mount()
+        mock_i18n_db.subscribe.assert_called_once()
+        assert panel._locale_subscription_id == "sub_id"
+
+    def test_will_unmount_unsubscribes_locale(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel._locale_subscription_id = "sub_id"
+        panel.will_unmount()
+        mock_i18n_db.unsubscribe.assert_called_once_with("sub_id")
+        assert panel._locale_subscription_id is None
+
+    def test_will_unmount_no_subscription(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel._locale_subscription_id = None
+        panel.will_unmount()
+        mock_i18n_db.unsubscribe.assert_not_called()
+
+    def test_on_locale_change_preserves_values(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel.db_host_input.value = "myhost"
+        panel.db_port_input.value = "5433"
+        panel.db_user_input.value = "myuser"
+        panel.db_password_input.value = "mypass"
+        panel.db_name_input.value = "mydb"
+        panel.db_create_checkbox.value = False
+        panel._on_locale_change("zh_CN")
+        assert panel.db_host_input.value == "myhost"
+        assert panel.db_port_input.value == "5433"
+        assert panel.db_user_input.value == "myuser"
+        assert panel.db_password_input.value == "mypass"
+        assert panel.db_name_input.value == "mydb"
+        assert panel.db_create_checkbox.value is False
+
+    def test_on_locale_change_exception_handled(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        mock_i18n_db.get.side_effect = RuntimeError("i18n error")
+        panel._on_locale_change("zh_CN")
+
+    def test_on_input_change_calls_callback(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        on_change = MagicMock()
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, on_change=on_change)
+        panel._on_input_change(None)
+        on_change.assert_called_once()
+
+    def test_test_connection_already_verifying(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel._is_verifying = True
+        panel.db_host_input.value = "localhost"
+        panel.db_port_input.value = "5432"
+        panel.db_user_input.value = "postgres"
+        panel.db_password_input.value = "pass"
+        panel.db_name_input.value = "astock"
+        import asyncio
+
+        result = asyncio.run(panel.test_connection())
+        assert result is False
+
+    def test_show_success_updates_status(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel._show_success("Success message")
+        assert panel.status_text.value == "Success message"
+
+    def test_show_error_updates_status(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel._show_error("Error message")
+        assert panel.status_text.value == "Error message"
+
+    def test_show_warning_updates_status(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
+        panel._show_warning("Warning message")
+        assert panel.status_text.value == "Warning message"
+
+    def test_compact_mode(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, compact=True)
+        assert panel.compact is True
+
+    def test_show_header_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, show_header=False)
+        assert panel.show_header is False
+
+    def test_show_save_button_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
+        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, show_save_button=False)
+        assert panel._show_save_button is False
+
+
+class TestLocalModelConfigPanelExtended:
+    def test_compact_mode(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, compact=True)
+        assert panel._compact is True
+
+    def test_show_save_button(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, show_save_button=True)
+        assert panel._show_save_button is True
+
+    def test_on_gpu_auto_change(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.gpu_auto_switch.value = False
+        panel._on_gpu_auto_change(None)
+        assert panel.gpu_layers_input.visible is True
+
+    def test_on_gpu_auto_change_calls_on_change(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        on_change = MagicMock()
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_change=on_change)
+        panel._on_gpu_auto_change(None)
+        on_change.assert_called_once()
+
+    def test_on_select_file_click(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.did_mount()
+        with patch.object(panel.file_picker, "pick_files"):
+            panel._on_select_file_click(None)
+            panel.file_picker.pick_files.assert_called_once()
+
+    def test_on_file_picked(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        mock_event = MagicMock()
+        mock_event.files = [MagicMock(path="/path/to/model.gguf")]
+        panel._on_file_picked(mock_event)
+        assert panel.model_path_input.value == "/path/to/model.gguf"
+
+    def test_on_file_picked_calls_on_change(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        on_change = MagicMock()
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_change=on_change)
+        mock_event = MagicMock()
+        mock_event.files = [MagicMock(path="/path/to/model.gguf")]
+        panel._on_file_picked(mock_event)
+        on_change.assert_called_once()
+
+    def test_on_save_click_calls_on_save(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        on_save = MagicMock()
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_save=on_save)
+        panel.model_path_input.value = "/path/to/model.gguf"
+        panel.timeout_input.value = "300"
+        panel.threads_input.value = 4
+        panel.gpu_auto_switch.value = True
+        panel.gpu_layers_input.value = 0
+        panel.batch_input.value = "512"
+        panel.ctx_input.value = "4096"
+        panel.flash_attn_switch.value = True
+        panel._on_save_click(None)
+        on_save.assert_called_once()
+
+    def test_did_mount_adds_file_picker(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.did_mount()
+        assert panel.file_picker in mock_page.overlay
+
+    def test_will_unmount_removes_file_picker(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.did_mount()
+        panel.will_unmount()
+
+    def test_will_unmount_no_file_picker(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.will_unmount()
+
+    def test_on_input_change_calls_on_change(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        on_change = MagicMock()
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_change=on_change)
+        panel._on_input_change(None)
+        on_change.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_verify_model_exception(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.model_path_input.value = "/path/to/model.gguf"
+        panel.timeout_input.value = "300"
+        with patch("os.path.exists", return_value=True):
+            with patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance:
+                mock_get_instance.side_effect = Exception("load error")
+                result = await panel.async_verify_model()
+        assert result is False
+
+    def test_show_success(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel._show_success("Success message")
+        assert panel.status_text.value == "Success message"
+
+    def test_show_error(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel._show_error("Error message")
+        assert panel.status_text.value == "Error message"
+
+    def test_set_loading_state(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        on_loading = MagicMock()
+        panel = _make_local_panel(
+            mock_config_handler_local,
+            mock_i18n_local,
+            mock_page,
+            on_loading_change=on_loading,
+            show_internal_loading=True,
+        )
+        panel._set_loading_state(True)
+        assert panel.progress_indicator.visible is True
+        assert panel.verify_button.disabled is True
+        on_loading.assert_called_with(True)
+
+
+class TestTushareConfigPanelExtended:
+    def test_compact_mode(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)
+        assert panel._compact is True
+
+    def test_show_save_button_false(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=False)
+        assert panel.save_button.visible is False
+
+    def test_show_register_link_false(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_register_link=False)
+        assert panel._show_register_link is False
+
+    def test_on_register_click(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        with patch("webbrowser.open_new_tab") as mock_open:
+            panel._on_register_click(None)
+            mock_open.assert_called_once()
+
+    def test_did_mount_subscribes_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel.did_mount()
+        mock_i18n.subscribe.assert_called_once()
+
+    def test_will_unmount_unsubscribes_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._locale_subscription_id = "sub_id"
+        panel.will_unmount()
+        mock_i18n.unsubscribe.assert_called_once_with("sub_id")
+
+    def test_will_unmount_no_subscription(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._locale_subscription_id = None
+        panel.will_unmount()
+        mock_i18n.unsubscribe.assert_not_called()
+
+    def test_set_loading_state(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_loading = MagicMock()
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_loading_change=on_loading)
+        panel._set_loading_state(True)
+        assert panel.verify_button.disabled is True
+        on_loading.assert_called_with(True)
+
+    def test_set_loading_state_internal_disabled(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_loading = MagicMock()
+        panel = _make_tushare_panel(
+            mock_ch_for_panels, mock_i18n, mock_page, on_loading_change=on_loading, show_internal_loading=False
+        )
+        panel._set_loading_state(True)
+        on_loading.assert_called_with(True)
+
+    def test_show_success(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._show_success("Success message")
+        assert panel.status_text.value == "Success message"
+
+    def test_show_error(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._show_error("Error message")
+        assert panel.status_text.value == "Error message"
+
+    def test_show_warning(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._show_warning("Warning message")
+        assert panel.status_text.value == "Warning message"
+
+    def test_safe_update(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._safe_update()
+
+    def test_safe_update_no_page(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel.page = None
+        panel._safe_update()
