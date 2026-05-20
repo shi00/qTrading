@@ -305,15 +305,6 @@ async def main(page: ft.Page):
 
                         error_str = str(upgrade_error)
 
-                        def on_exit_click(e):
-                            logger.warning("[Main] User chose to exit after upgrade failure: %s", error_str)
-                            os._exit(1)
-
-                        def on_retry_click(e):
-                            logger.info("[Main] User chose to retry upgrade after failure.")
-                            _hide_dialog(error_dialog)
-                            page.run_task(on_upgrade_click, e)
-
                         error_dialog = ft.AlertDialog(
                             modal=True,
                             title=ft.Text(I18n.get("db_upgrade_error_title", default="升级失败")),
@@ -326,11 +317,20 @@ async def main(page: ft.Page):
                             actions=[
                                 ft.TextButton(
                                     I18n.get("exit_program", default="退出程序"),
-                                    on_click=on_exit_click,
+                                    on_click=lambda e: [
+                                        logger.warning(
+                                            "[Main] User chose to exit after upgrade failure: %s", error_str
+                                        ),
+                                        os._exit(1),
+                                    ],
                                 ),
                                 ft.ElevatedButton(
                                     I18n.get("retry_upgrade", default="重试升级"),
-                                    on_click=on_retry_click,
+                                    on_click=lambda e: [
+                                        logger.info("[Main] User chose to retry upgrade after failure."),
+                                        _hide_dialog(error_dialog),
+                                        page.run_task(on_upgrade_click, e),
+                                    ],
                                 ),
                             ],
                             actions_alignment=ft.MainAxisAlignment.END,
