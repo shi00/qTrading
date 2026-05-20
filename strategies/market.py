@@ -60,6 +60,12 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
         chg_min = p.get("pct_chg_min", 2)
         chg_max = p.get("pct_chg_max", 7)
         turnover = p.get("turnover_min", 3)
+        if chg_min >= chg_max:
+            logger.warning(
+                f"[VolumeBreakoutStrategy] pct_chg_min ({chg_min}) >= pct_chg_max ({chg_max}), "
+                f"auto-adjusting pct_chg_max to {chg_min + 0.5}"
+            )
+            chg_max = chg_min + 0.5
         return (
             lf.drop_nulls(subset=["pct_chg", "turnover_rate"])
             .filter(pl.col("pct_chg").is_between(chg_min, chg_max))

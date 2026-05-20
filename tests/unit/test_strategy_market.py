@@ -108,6 +108,43 @@ class TestVolumeBreakoutStrategy(unittest.TestCase):
         pct_values = result["pct_chg"].to_list()
         self.assertEqual(pct_values, sorted(pct_values, reverse=True))
 
+    def test_breakout_min_greater_than_max_auto_adjusts(self):
+        """pct_chg_min > pct_chg_max 时自动调整"""
+        sample_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "涨幅8.3", "pct_chg": 8.3, "turnover_rate": 8.0},
+                {"ts_code": "000002.SZ", "name": "涨幅9.0", "pct_chg": 9.0, "turnover_rate": 5.0},
+                {"ts_code": "000003.SZ", "name": "涨幅5.0", "pct_chg": 5.0, "turnover_rate": 4.0},
+            ]
+        )
+        lf = pl.from_pandas(sample_df).lazy()
+        context = {"params": {"pct_chg_min": 8, "pct_chg_max": 5, "turnover_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertEqual(result.height, 1)
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertNotIn("000002.SZ", ts_codes)
+        self.assertNotIn("000003.SZ", ts_codes)
+
+    def test_breakout_min_equals_max_auto_adjusts(self):
+        """pct_chg_min == pct_chg_max 时自动调整"""
+        sample_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "涨幅5.3", "pct_chg": 5.3, "turnover_rate": 8.0},
+                {"ts_code": "000002.SZ", "name": "涨幅5.0", "pct_chg": 5.0, "turnover_rate": 5.0},
+                {"ts_code": "000003.SZ", "name": "涨幅3.0", "pct_chg": 3.0, "turnover_rate": 4.0},
+            ]
+        )
+        lf = pl.from_pandas(sample_df).lazy()
+        context = {"params": {"pct_chg_min": 5, "pct_chg_max": 5, "turnover_min": 3}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        self.assertGreater(result.height, 0)
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertNotIn("000003.SZ", ts_codes)
+
 
 class TestNorthboundHoldingStrategy(unittest.TestCase):
     """测试北向持股策略"""
