@@ -61,7 +61,7 @@
 | **HTTP 客户端** | requests + httpx (异步) + urllib3 |
 | **代码质量** | Ruff (Linter + Formatter) + Pyright (类型检查) |
 | **CI/CD** | GitHub Actions (Linux + Windows 双平台，含 PyInstaller 打包) |
-| **依赖管理** | pip-tools (`pyproject.toml` → `requirements*.txt`，pre-commit 自动同步) |
+| **依赖管理** | uv (`pyproject.toml` → `requirements*.txt`，`--universal` 跨平台锁定，pre-commit 自动同步) |
 
 ---
 
@@ -494,7 +494,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR 必须通过
 4. **Alembic Migration** (验证 upgrade → downgrade → upgrade，确保迁移幂等可逆)
 5. **Unit & Integration Tests** (含 e2e)
 6. **Per-File (≥ 75%) & Overall Coverage (≥ 80%)**
-7. **requirements*.txt 同步验证** (Windows job 强制 `pip-compile` 输出与提交内容一致；不一致时自动在 main 分支创建修复 commit)
+7. **requirements*.txt 同步验证** (Windows job 强制 `uv pip compile --universal` 输出与提交内容一致；不一致时自动在 main 分支创建修复 commit)
 
 发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → Inno Setup 制作安装包 → GitHub Release 发布。
 
@@ -507,9 +507,9 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR 必须通过
 | `ruff-check` | Ruff Lint 检查 (自动修复 `--fix`) |
 | `ruff-format` | Ruff 代码格式化 |
 | `type-ignore-reason` | 拒绝裸 `# type: ignore` (必须带 `[reason]`) |
-| `pip-compile-core` | 同步 `pyproject.toml` → `requirements.txt` |
-| `pip-compile-dev` | 同步 `pyproject.toml[dev]` → `requirements-dev.txt` |
-| `pip-compile-optional` | 同步 `pyproject.toml[optional]` → `requirements-optional.txt` |
+| `pip-compile-core` | 同步 `pyproject.toml` → `requirements.txt` (使用 `uv pip compile --universal`) |
+| `pip-compile-dev` | 同步 `pyproject.toml[dev]` → `requirements-dev.txt` (使用 `uv pip compile --universal`) |
+| `pip-compile-optional` | 同步 `pyproject.toml[optional]` → `requirements-optional.txt` (使用 `uv pip compile --universal`) |
 
 ---
 
@@ -535,9 +535,9 @@ python -m alembic downgrade -1
 pip-audit -s osv -r requirements.txt --desc
 
 # 依赖同步 (通常由 pre-commit 自动触发)
-pip-compile pyproject.toml -o requirements.txt
-pip-compile --extra dev pyproject.toml -o requirements-dev.txt
-pip-compile --extra optional pyproject.toml -o requirements-optional.txt
+uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
+uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
+uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
 
 # Pre-commit
 pre-commit run --all-files
@@ -598,7 +598,7 @@ python main.py
    - 运行时依赖加到 `[project] dependencies`
    - 开发依赖加到 `[project.optional-dependencies] dev`
    - 可选依赖加到 `[project.optional-dependencies] optional`
-2. `git commit` 时 pre-commit 会自动运行 `pip-compile` 重新生成对应的 `requirements*.txt`。
+2. `git commit` 时 pre-commit 会自动运行 `uv pip compile --universal` 重新生成对应的 `requirements*.txt`。
 3. 本地安装新依赖: `pip install -r requirements.txt -r requirements-dev.txt`。
 
 ### 10.7 排查典型问题

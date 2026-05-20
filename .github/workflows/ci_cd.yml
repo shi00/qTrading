@@ -94,6 +94,9 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+
       - name: Install pre-commit
         run: pip install pre-commit
 
@@ -255,6 +258,9 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+
       - name: Install pre-commit
         run: pip install pre-commit
 
@@ -320,13 +326,15 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+
       - name: Recompile requirements
         shell: bash
         run: |
-          pip install pip-tools
-          pip-compile pyproject.toml -o requirements.txt
-          pip-compile --extra dev pyproject.toml -o requirements-dev.txt
-          pip-compile --extra optional pyproject.toml -o requirements-optional.txt
+          uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
+          uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
+          uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
 
       - name: Commit and push updated requirements
         shell: bash
@@ -337,7 +345,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update requirements*.txt via pip-compile"
+            git commit -m "chore: update requirements*.txt via uv pip compile"
             git push
             echo "::notice::requirements*.txt have been updated and pushed to main."
           fi

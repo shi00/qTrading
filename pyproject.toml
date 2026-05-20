@@ -46,7 +46,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.0",
     "pandas-stubs>=3.0.0.250204",
-    "pip-tools>=7.5.0",
+    "uv>=0.7.0",
     "pip-audit>=2.10.0",
 ]
 optional = [
