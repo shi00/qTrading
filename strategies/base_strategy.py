@@ -1,4 +1,5 @@
 import logging
+import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -15,26 +16,36 @@ logger = logging.getLogger(__name__)
 #       ...
 #
 # StrategyManager reads _STRATEGY_REGISTRY to auto-discover all strategies.
+# Thread-safe: uses RLock to protect concurrent registration during import.
 # ============================================================================
 
 _STRATEGY_REGISTRY: dict[str, type] = {}
+_REGISTRY_LOCK = threading.RLock()
 
 
 def register_strategy(key: str):
     """
     Decorator to auto-register a strategy class.
     The key is used as the strategy identifier in StrategyManager.
+    Thread-safe: uses RLock to protect concurrent registration.
     """
 
     def decorator(cls):
-        if key in _STRATEGY_REGISTRY:
-            logger.warning(
-                f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}",
-            )
-        _STRATEGY_REGISTRY[key] = cls
+        with _REGISTRY_LOCK:
+            if key in _STRATEGY_REGISTRY:
+                logger.warning(
+                    f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}",
+                )
+            _STRATEGY_REGISTRY[key] = cls
         return cls
 
     return decorator
+
+
+def get_strategy_registry() -> dict[str, type]:
+    """Return a copy of the strategy registry for thread-safe read access."""
+    with _REGISTRY_LOCK:
+        return _STRATEGY_REGISTRY.copy()
 
 
 class BaseStrategy(ABC):

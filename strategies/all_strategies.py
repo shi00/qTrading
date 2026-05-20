@@ -11,7 +11,7 @@ Adding a new strategy requires ONLY:
 
 import logging
 
-from strategies.base_strategy import _STRATEGY_REGISTRY
+from strategies.base_strategy import get_strategy_registry
 from core.i18n import I18n
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,8 @@ class StrategyManager:
     def __init__(self):
         _import_all_strategies()
         self.strategies = {}
-        for k, cls in _STRATEGY_REGISTRY.items():
+        registry = get_strategy_registry()
+        for k, cls in registry.items():
             instance = cls()
             instance.key = k
             self.strategies[k] = instance
