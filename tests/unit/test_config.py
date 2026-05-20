@@ -49,6 +49,7 @@ class TestConfigModule:
         import config
 
         importlib.reload(config)
+        assert config.DB_URL_SYNC is not None
         assert "+asyncpg" not in config.DB_URL_SYNC
         assert config.DB_URL_SYNC == "postgresql://user:pass@host:5432/db"
 
