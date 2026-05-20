@@ -3,6 +3,8 @@ import logging
 import os
 import time
 
+from decimal import Decimal
+
 import flet as ft
 import pandas as pd
 
@@ -89,7 +91,7 @@ def _format_cell_value(col: str, val) -> str:
             if val > 10_000:
                 return f"{val / 10_000:.2f}{I18n.get('unit_wan', '万')}"
             return f"{val:,.0f}"
-        if isinstance(val, float):
+        if isinstance(val, (float, Decimal)):
             return f"{val:.2f}"
     return str(val)
 

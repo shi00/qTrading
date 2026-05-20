@@ -1,5 +1,7 @@
 import logging
 
+from decimal import Decimal
+
 import flet as ft
 
 from ui.components.chart_utils import generate_kline_png
@@ -355,7 +357,7 @@ class StockDetailDialog(ft.AlertDialog):
     def _format_val(self, key, suffix=""):
         """Format a value with handling for NaN"""
         val = self.stock_data.get(key)
-        if val is None or (isinstance(val, float) and val != val):  # NaN check
+        if val is None or (isinstance(val, (float, Decimal)) and val != val):  # NaN check
             return "-"
         try:
             return f"{float(val):.2f}{suffix}"
@@ -365,7 +367,7 @@ class StockDetailDialog(ft.AlertDialog):
     def _format_mv(self, key):
         """Format market value in 亿"""
         val = self.stock_data.get(key)
-        if val is None or (isinstance(val, float) and val != val):
+        if val is None or (isinstance(val, (float, Decimal)) and val != val):
             return "-"
         try:
             # Tushare returns in 万元, convert to 亿
@@ -376,7 +378,7 @@ class StockDetailDialog(ft.AlertDialog):
     def _format_vol(self, key):
         """Format volume"""
         val = self.stock_data.get(key)
-        if val is None or (isinstance(val, float) and val != val):
+        if val is None or (isinstance(val, (float, Decimal)) and val != val):
             return "-"
         try:
             v = float(val)
@@ -389,7 +391,7 @@ class StockDetailDialog(ft.AlertDialog):
     def _format_amount(self, key):
         """Format amount in 亿"""
         val = self.stock_data.get(key)
-        if val is None or (isinstance(val, float) and val != val):
+        if val is None or (isinstance(val, (float, Decimal)) and val != val):
             return "-"
         try:
             # Amount is in 千元

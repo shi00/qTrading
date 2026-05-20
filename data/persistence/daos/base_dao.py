@@ -3,6 +3,7 @@ import datetime
 import logging
 import time
 import typing
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -132,17 +133,17 @@ class BaseDao:
             if val is None:
                 return None
 
-            # Catch all variants of NaNs/NaTs safely before anything is coerced to float('nan')
             try:
                 if pd.isna(val):
                     return None
             except (ValueError, TypeError):
-                # multi-dimensional np arrays or un-hashable types that 'isna' dislikes
                 pass
 
             if isinstance(val, (np.int64, np.int32, np.int16, np.int8)):  # type: ignore[union-attr]
                 return int(val)
             if isinstance(val, (np.float64, np.float32)):  # type: ignore[union-attr]
+                return float(val)
+            if isinstance(val, Decimal):
                 return float(val)
             if isinstance(val, (np.bool_)):
                 return bool(val)

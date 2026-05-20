@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -479,7 +480,7 @@ class TaskManager:
         """
         if val is None:
             return None
-        if isinstance(val, float) and pd.isna(val):
+        if isinstance(val, (float, Decimal)) and pd.isna(val):
             return None
         try:
             dt = datetime.datetime.fromisoformat(str(val))

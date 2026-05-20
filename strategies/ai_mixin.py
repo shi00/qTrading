@@ -18,6 +18,7 @@ The Mixin handles:
 
 import asyncio
 import logging
+from decimal import Decimal
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -532,7 +533,7 @@ class AIStrategyMixin:
                 thinking_raw = res.get("thinking", "")
                 row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
                 row_dict["confidence"] = (
-                    min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else 50
+                    min(100, max(1, int(confidence))) if isinstance(confidence, (int, float, Decimal)) else 50
                 )
                 final_rows.append(row_dict)
 
@@ -1091,7 +1092,7 @@ class AIStrategyMixin:
             if not stock_tl.empty:
                 row = stock_tl.iloc[0]
                 reason = row.get("reason")
-                reason = reason if reason and not (isinstance(reason, float) and reason != reason) else "N/A"
+                reason = reason if reason and not (isinstance(reason, (float, Decimal)) and reason != reason) else "N/A"
                 net_amt = sf(row.get("net_amount"))
                 net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
                 parts.append(

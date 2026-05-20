@@ -1,6 +1,7 @@
 import datetime
 import functools
 import logging
+from decimal import Decimal
 
 import pandas as pd
 import sqlalchemy as sa
@@ -113,7 +114,7 @@ class ScreenerDao(BaseDao):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
             val = df["max_td"].iloc[0]
-            if val is not None and not (isinstance(val, float) and val != val):
+            if val is not None and not (isinstance(val, (float, Decimal)) and val != val):
                 return str(val)
         return None  # type: ignore[untyped]
 

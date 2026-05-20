@@ -1,5 +1,6 @@
 import pandas as pd
 import polars as pl
+from decimal import Decimal
 
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
@@ -291,7 +292,7 @@ class LargePEStrategy(PolarsBaseStrategy):
         total_mv = row.get("total_mv", 0)
         mv_yi = (
             round(total_mv / 10000, 1)
-            if total_mv and not (isinstance(total_mv, float) and total_mv != total_mv)
+            if total_mv and not (isinstance(total_mv, (float, Decimal)) and total_mv != total_mv)
             else "N/A"
         )
         pe = fv(row.get("pe_ttm"))
