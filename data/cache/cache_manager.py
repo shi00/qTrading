@@ -1013,20 +1013,21 @@ class CacheManager:
                 batch_results[key] = raw
 
         for key, df in batch_results.items():
-            if df is not None and not df.empty:
-                if "ts_code" in df.columns:
-                    grouped = df.groupby("ts_code")
-                    for code in ts_codes:
-                        try:
-                            code_df = grouped.get_group(code)
-                            result[code][key] = code_df
-                        except KeyError:
-                            pass
-                else:
-                    for code in ts_codes:
-                        code_df = df[df["ts_code"] == code]
-                        if not code_df.empty:
-                            result[code][key] = code_df
+            if df is None or df.empty:
+                continue
+            if "ts_code" not in df.columns:
+                logger.warning(
+                    "[CacheManager] prefetch_auxiliary_data: %s missing ts_code column, skipping",
+                    key,
+                )
+                continue
+            grouped = df.groupby("ts_code")
+            for code in ts_codes:
+                try:
+                    code_df = grouped.get_group(code)
+                    result[code][key] = code_df
+                except KeyError:
+                    pass
 
         return result
 
