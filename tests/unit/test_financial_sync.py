@@ -890,3 +890,60 @@ class TestFinancialDedupWithAnnDate:
         df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
         assert len(df) == 1
         assert df.iloc[0]["revenue"] == 250.0
+
+
+class TestPeakDisclosureSeason:
+    """Tests for peak disclosure season detection and adjustments."""
+
+    def test_is_peak_disclosure_season_april(self):
+        from data.sync.financial import _is_peak_disclosure_season
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 4, 15)
+            assert _is_peak_disclosure_season() is True
+
+    def test_is_peak_disclosure_season_august(self):
+        from data.sync.financial import _is_peak_disclosure_season
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 8, 20)
+            assert _is_peak_disclosure_season() is True
+
+    def test_is_peak_disclosure_season_october(self):
+        from data.sync.financial import _is_peak_disclosure_season
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 10, 25)
+            assert _is_peak_disclosure_season() is True
+
+    def test_is_not_peak_disclosure_season_january(self):
+        from data.sync.financial import _is_peak_disclosure_season
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 1, 15)
+            assert _is_peak_disclosure_season() is False
+
+    def test_is_not_peak_disclosure_season_june(self):
+        from data.sync.financial import _is_peak_disclosure_season
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 15)
+            assert _is_peak_disclosure_season() is False
+
+    def test_get_seasonal_adjustments_normal_season(self):
+        from data.sync.financial import _get_seasonal_adjustments
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 15)
+            factor, multiplier = _get_seasonal_adjustments()
+            assert factor == 1
+            assert multiplier == 1.0
+
+    def test_get_seasonal_adjustments_peak_season(self):
+        from data.sync.financial import _get_seasonal_adjustments
+
+        with patch("data.sync.financial.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 4, 15)
+            factor, multiplier = _get_seasonal_adjustments()
+            assert factor == 2
+            assert multiplier == 2.0

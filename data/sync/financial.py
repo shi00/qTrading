@@ -20,6 +20,39 @@ from utils.time_utils import get_now, parse_date
 logger = logging.getLogger(__name__)
 
 
+def _is_peak_disclosure_season() -> bool:
+    """
+    Check if current month is in peak financial disclosure season.
+
+    Peak seasons in A-share market:
+    - April: Annual reports deadline (April 30)
+    - August: Semi-annual reports deadline (August 31)
+    - October: Q3 quarterly reports deadline (October 31)
+
+    During peak seasons, we reduce concurrency and increase delays
+    to avoid overwhelming the Tushare API and reduce rate limit errors.
+
+    Returns:
+        True if current month is in peak disclosure season.
+    """
+    current_month = get_now().month
+    return current_month in (4, 8, 10)
+
+
+def _get_seasonal_adjustments() -> tuple[int, float]:
+    """
+    Get concurrency and delay adjustments based on disclosure season.
+
+    Returns:
+        Tuple of (concurrency_factor, delay_multiplier):
+        - concurrency_factor: 1 for normal, 2 for peak (divide concurrency by this)
+        - delay_multiplier: 1.0 for normal, 2.0 for peak (multiply delay by this)
+    """
+    if _is_peak_disclosure_season():
+        return 2, 2.0
+    return 1, 1.0
+
+
 def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Deduplicate financial DataFrame by end_date, preferring the latest disclosure.
@@ -448,8 +481,21 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
         total_saved = 0
         total_mainbz_rows = 0
         total_audit_rows = 0
-        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
-        semaphore = asyncio.Semaphore(concurrency)
+
+        concurrency_factor, delay_multiplier = _get_seasonal_adjustments()
+        base_concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
+        adjusted_concurrency = max(1, base_concurrency // concurrency_factor)
+        base_delay = ConfigHandler.get_sync_request_delay(is_heavy=False)
+        adjusted_delay = base_delay * delay_multiplier
+
+        if _is_peak_disclosure_season():
+            logger.info(
+                f"[FinancialSync] Peak disclosure season detected. "
+                f"Adjusting concurrency: {base_concurrency} → {adjusted_concurrency}, "
+                f"delay: {base_delay}s → {adjusted_delay}s"
+            )
+
+        semaphore = asyncio.Semaphore(adjusted_concurrency)
 
         for day_str in dates_to_sync:
             df_disclosure = await self.context.api.get_disclosure_date(date=day_str)
@@ -468,9 +514,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
                 async with semaphore:
                     try:
-                        await asyncio.sleep(
-                            ConfigHandler.get_sync_request_delay(is_heavy=False),
-                        )
+                        await asyncio.sleep(adjusted_delay)
                         df, aux_counts = await self._fetch_comprehensive_financial_data(
                             ts_code,
                             period=period,
