@@ -330,7 +330,7 @@ graph TB
 
 ### 1. 环境要求
 
-* Python 3.11+
+* Python 3.13+
 * PostgreSQL 14+
 
 ### 2. 安装
