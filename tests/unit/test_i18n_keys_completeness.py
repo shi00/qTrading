@@ -80,6 +80,17 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             "exit_confirm_content",
             "common_cancel",
             "common_confirm",
+            "db_upgrade_needed_title",
+            "db_upgrade_needed_content",
+            "db_upgrade_btn",
+            "db_upgrade_in_progress_title",
+            "db_upgrade_in_progress_content",
+            "db_upgrade_success_title",
+            "db_upgrade_success_content",
+            "db_upgrade_error_title",
+            "db_upgrade_error_content",
+            "exit_program",
+            "retry_upgrade",
         ]
 
         missing_zh = [k for k in required_keys if k not in zh_keys]
@@ -100,6 +111,16 @@ class TestI18nKeysCompleteness(unittest.TestCase):
 
         self.assertFalse(remaining_zh, f"Deprecated qfq keys still in zh_CN: {remaining_zh}")
         self.assertFalse(remaining_en, f"Deprecated qfq keys still in en_US: {remaining_en}")
+
+    def test_db_upgrade_skip_key_removed(self):
+        """P0-6: db_upgrade_skip key should be removed since upgrade is now mandatory."""
+        zh_keys = self._load_keys("zh_CN")
+        en_keys = self._load_keys("en_US")
+
+        deprecated_key = "db_upgrade_skip"
+
+        self.assertNotIn(deprecated_key, zh_keys, f"Deprecated key '{deprecated_key}' still in zh_CN")
+        self.assertNotIn(deprecated_key, en_keys, f"Deprecated key '{deprecated_key}' still in en_US")
 
 
 if __name__ == "__main__":
