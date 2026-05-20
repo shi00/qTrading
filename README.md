@@ -87,6 +87,12 @@ astock_screener/
 ├── main.py                 # 应用入口，服务编排与生命周期管理
 ├── config.py               # 全局配置（数据库连接、tiktoken 缓存等）
 │
+├── core/                   # 核心层（架构基础，不依赖任何其他层）
+│   └── i18n.py                 # 国际化引擎（中/英双语）
+│
+├── app/                    # 引导层（服务编排，仅 main.py 调用）
+│   └── bootstrap.py            # 启动初始化、服务编排
+│
 ├── data/                   # 数据层
 │   ├── cache/              # 缓存管理
 │   │   └── cache_manager.py    # 单例缓存管理器，DAO 统一入口
@@ -115,6 +121,7 @@ astock_screener/
 │   │   ├── db_config_service.py # 数据库配置服务
 │   │   ├── metadata_manager.py # 元数据管理
 │   │   ├── review_manager.py   # AI 回顾管理器
+│   │   ├── app_state_service.py # 应用状态服务
 │   │   ├── quality_gate.py     # 数据质量门控装饰器
 │   │   └── data_quality.py     # 数据质量检查
 │   ├── sync/               # 数据同步策略
@@ -140,6 +147,7 @@ astock_screener/
 │   ├── oversold_strategy.py    # 超跌反弹策略
 │   ├── fundamental.py          # 基本面策略（价值、成长）
 │   ├── market.py               # 市场策略（突破、北向）
+│   ├── utils.py                # 策略工具函数
 │   └── all_strategies.py       # 策略注册汇总
 │
 ├── services/               # 服务层
@@ -149,7 +157,7 @@ astock_screener/
 │
 ├── ui/                     # 表现层 (MVVM)
 │   ├── app_layout.py           # 主布局（5 标签页导航）
-│   ├── i18n.py                 # 国际化引擎
+│   ├── i18n.py                 # UI 层国际化封装（核心引擎在 core/i18n.py）
 │   ├── theme.py                # 主题管理
 │   ├── components/             # 可复用组件
 │   │   ├── config_panels/      # 配置面板
@@ -161,6 +169,8 @@ astock_screener/
 │   │   ├── toast_manager.py    # 消息提示
 │   │   ├── market_dashboard.py # 市场仪表盘
 │   │   ├── news_feed.py        # 新闻订阅
+│   │   ├── chart_utils.py      # 图表工具
+│   │   ├── settings_widgets.py # 设置组件
 │   │   ├── stock_detail_dialog.py
 │   │   └── health_report_dialog.py
 │   ├── viewmodels/             # 视图模型
@@ -192,7 +202,13 @@ astock_screener/
 │   ├── shutdown.py             # 优雅退出协调器
 │   ├── logger.py               # 日志配置
 │   ├── loop_local.py           # 事件循环本地存储
-│   └── log_decorators.py       # 日志装饰器
+│   ├── log_decorators.py       # 日志装饰器
+│   ├── singleton_registry.py   # 单例注册表
+│   ├── error_classifier.py     # 错误分类器
+│   ├── correlation.py          # 相关性工具
+│   ├── prompt_guard.py         # Prompt 安全防护
+│   ├── sanitizers.py           # 数据脱敏工具
+│   └── time_utils.py           # 时间工具函数
 │
 ├── tests/                  # 测试层（100+ 文件，~2700 用例）
 │   ├── conftest.py             # 全局测试配置
