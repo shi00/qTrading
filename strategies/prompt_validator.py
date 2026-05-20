@@ -154,6 +154,7 @@ def get_declarations() -> list[DataDeclaration]:
 def _init_declarations() -> list[DataDeclaration]:
     """初始化数据声明列表"""
     from data.persistence.models import (
+        BlockTrade,
         DailyIndicators,
         Dividend,
         FinaAudit,
@@ -161,10 +162,13 @@ def _init_declarations() -> list[DataDeclaration]:
         FinancialReports,
         MacroEconomy,
         MarketNews,
+        MoneyflowDaily,
+        NorthboundHolding,
         PledgeStat,
         ShiborDaily,
         StkHoldernumber,
         Top10Holders,
+        TopList,
     )
 
     return [
@@ -262,5 +266,35 @@ def _init_declarations() -> list[DataDeclaration]:
             name="financial_reports",
             prompt_claim="财务报表数据",
             injector=lambda: check_table_has_data(FinancialReports.__tablename__),
+        ),
+        DataDeclaration(
+            name="northbound_holding",
+            prompt_claim="北向资金持仓",
+            injector=lambda: check_table_has_data(NorthboundHolding.__tablename__),
+        ),
+        DataDeclaration(
+            name="top_list",
+            prompt_claim="龙虎榜数据",
+            injector=lambda: check_table_has_data(TopList.__tablename__),
+        ),
+        DataDeclaration(
+            name="block_trade",
+            prompt_claim="大宗交易记录",
+            injector=lambda: check_table_has_data(BlockTrade.__tablename__),
+        ),
+        DataDeclaration(
+            name="moneyflow",
+            prompt_claim="资金流向数据",
+            injector=lambda: check_table_has_data(MoneyflowDaily.__tablename__),
+        ),
+        DataDeclaration(
+            name="monetary_capital",
+            prompt_claim="货币资金余额",
+            injector=lambda: check_field_exists("monetary_capital"),
+        ),
+        DataDeclaration(
+            name="accounts_receivable",
+            prompt_claim="应收账款规模",
+            injector=lambda: check_field_exists("accounts_receiv"),
         ),
     ]
