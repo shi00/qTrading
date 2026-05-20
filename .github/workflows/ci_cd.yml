@@ -115,6 +115,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
         run: |
           python -m alembic upgrade head
+          python -m alembic check
           python -m alembic downgrade base
           python -m alembic upgrade head
 
