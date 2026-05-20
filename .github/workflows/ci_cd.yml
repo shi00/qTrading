@@ -94,10 +94,11 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Ruff Check & Format
-        run: |
-          python -m ruff check .
-          python -m ruff format --check .
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit hooks
+        run: pre-commit run --all-files
 
       - name: Security Audit (pip-audit)
         run: |
@@ -204,7 +205,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      requirements_outdated: ${{ steps.set-outdated-flag.outputs.outdated }}
+      pre_commit_outcome: ${{ steps.pre-commit.outcome }}
 
     steps:
       - name: Checkout Code
@@ -244,36 +245,6 @@ jobs:
           pip install --prefer-binary -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           pip install --prefer-binary -r requirements-dev.txt
 
-      - name: Verify requirements.txt is up to date
-        id: verify-requirements
-        continue-on-error: true
-        shell: bash
-        run: |
-          pip install pip-tools
-          pip-compile pyproject.toml -o requirements_check.txt
-          diff requirements.txt requirements_check.txt || (echo "::error::requirements.txt is out of date. Run: pip-compile pyproject.toml -o requirements.txt" && exit 1)
-          pip-compile --extra dev pyproject.toml -o requirements_dev_check.txt
-          diff requirements-dev.txt requirements_dev_check.txt || (echo "::error::requirements-dev.txt is out of date. Run: pip-compile --extra dev pyproject.toml -o requirements-dev.txt" && exit 1)
-          pip-compile --extra optional pyproject.toml -o requirements_optional_check.txt
-          diff requirements-optional.txt requirements_optional_check.txt || (echo "::error::requirements-optional.txt is out of date. Run: pip-compile --extra optional pyproject.toml -o requirements-optional.txt" && exit 1)
-
-      - name: Set requirements outdated flag
-        id: set-outdated-flag
-        if: always()
-        shell: bash
-        run: |
-          if [ "${{ steps.verify-requirements.outcome }}" = "failure" ]; then
-            echo "outdated=true" >> $GITHUB_OUTPUT
-          else
-            echo "outdated=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Warn if requirements are outdated
-        if: steps.set-outdated-flag.outputs.outdated == 'true'
-        shell: bash
-        run: |
-          echo "::warning::requirements*.txt are out of date. An auto-fix commit will be pushed to main."
-
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
         run: |
@@ -283,10 +254,12 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Ruff Check & Format
-        run: |
-          python -m ruff check .
-          python -m ruff format --check .
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit hooks
+        id: pre-commit
+        run: pre-commit run --all-files
 
       - name: Pyright Type Check
         continue-on-error: false
@@ -319,7 +292,7 @@ jobs:
   update-requirements:
     name: Update requirements*.txt
     needs: ci-checks-windows
-    if: always() && needs.ci-checks-windows.outputs.requirements_outdated == 'true' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    if: always() && needs.ci-checks-windows.outputs.pre_commit_outcome == 'failure' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:
