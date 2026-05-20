@@ -301,9 +301,17 @@ async def main(page: ft.Page):
                     except Exception as upgrade_error:
                         _hide_dialog(in_progress_dialog)
 
-                        import os
-
                         error_str = str(upgrade_error)
+
+                        async def on_exit_click(e):
+                            logger.warning("[Main] User chose to exit after upgrade failure: %s", error_str)
+                            _hide_dialog(error_dialog)
+                            cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=1.0)
+                            if not cleanup_ok:
+                                logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
+                            page.window.prevent_close = False
+                            page.window.destroy()
+                            coordinator._force_exit(1)
 
                         error_dialog = ft.AlertDialog(
                             modal=True,
@@ -317,12 +325,7 @@ async def main(page: ft.Page):
                             actions=[
                                 ft.TextButton(
                                     I18n.get("exit_program", default="退出程序"),
-                                    on_click=lambda e: [
-                                        logger.warning(
-                                            "[Main] User chose to exit after upgrade failure: %s", error_str
-                                        ),
-                                        os._exit(1),
-                                    ],
+                                    on_click=lambda e: page.run_task(on_exit_click, e),
                                 ),
                                 ft.ElevatedButton(
                                     I18n.get("retry_upgrade", default="重试升级"),
