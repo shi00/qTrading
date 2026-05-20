@@ -30,8 +30,7 @@ env/
 # IDE / Editor
 .idea/
 .vscode/
-.trae/settings.local.json
-.trae/documents/
+.trae/
 
 # Build & Bundling tools
 *.spec
