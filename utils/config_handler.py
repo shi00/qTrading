@@ -76,6 +76,7 @@ class ConfigHandler:
         "auto_update_enabled": False,
         "enable_news_alerts": True,
         "log_level": "INFO",
+        "log_format": "text",
         "theme_name": "dark",
         "auto_update_time": "16:30",
         "log_max_mb": 5,
@@ -408,6 +409,15 @@ class ConfigHandler:
     @staticmethod
     def set_log_level(level):
         return ConfigHandler.save_config({"log_level": level.upper()})
+
+    @staticmethod
+    def get_log_format():
+        config = ConfigHandler.load_config()
+        return config.get("log_format", ConfigHandler.DEFAULT_CONFIG["log_format"]).lower()
+
+    @staticmethod
+    def set_log_format(log_format):
+        return ConfigHandler.save_config({"log_format": log_format.lower()})
 
     @classmethod
     def get_init_history_years(cls) -> int:

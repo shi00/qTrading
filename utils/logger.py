@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -7,8 +8,47 @@ import config
 from utils.config_handler import ConfigHandler
 from utils.time_utils import get_now
 
-# Define logs dir path (creation happens in setup_logging)
 LOG_DIR = os.path.join(config.APP_ROOT, "logs")
+
+
+class JSONFormatter(logging.Formatter):
+    """
+    JSON formatter for structured logging.
+    Outputs logs in JSON format suitable for centralized log systems
+    (Loki, ELK, Datadog, CloudWatch, etc.).
+    """
+
+    def format(self, record):
+        log_data = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "correlation_id": getattr(record, "correlation_id", "-"),
+            "thread": record.threadName,
+            "file": f"{record.filename}:{record.lineno}",
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_data, ensure_ascii=False)
+
+
+def _get_formatter(use_json: bool = False) -> logging.Formatter:
+    """
+    Get the appropriate formatter based on configuration.
+
+    Args:
+        use_json: If True, use JSON formatter; otherwise use text formatter.
+
+    Returns:
+        logging.Formatter instance.
+    """
+    if use_json:
+        return JSONFormatter(datefmt="%Y-%m-%d %H:%M:%S")
+    return logging.Formatter(
+        "%(asctime)s [%(levelname)s] [%(correlation_id)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 def setup_logging(name="astock_screener"):
@@ -16,16 +56,14 @@ def setup_logging(name="astock_screener"):
     Setup structured logging with rotation.
     - Console: INFO level
     - File: DEBUG level, max 5MB per file, keep last 5 files
+    - Supports JSON format via ConfigHandler.get_log_format()
     """
-    # 1. Ensure logs directory exists (Safe side-effect)
     if not os.path.exists(LOG_DIR):
         try:
             os.makedirs(LOG_DIR)
         except Exception as e:
-            # Fallback for permission errors - print to stderr
             sys.stderr.write(f"Failed to create log directory {LOG_DIR}: {e}\n")
 
-    # 2. Load config with robustness
     try:
         current_level = ConfigHandler.get_log_level()
     except (ValueError, OSError, RuntimeError):
@@ -39,15 +77,17 @@ def setup_logging(name="astock_screener"):
     }
     logging_level = level_map.get(current_level, logging.INFO)
 
+    try:
+        log_format = ConfigHandler.get_log_format()
+    except (ValueError, OSError, RuntimeError):
+        log_format = "text"
+    use_json = log_format.lower() == "json"
+
     logger = logging.getLogger()
     logger.setLevel(logging_level)
 
-    # Check what we already have
-    # Note: StreamHandler is a parent of FileHandler, so strict type check or order matters.
-    # We want standard Stdout handler.
     has_console = any(type(h) is logging.StreamHandler for h in logger.handlers)
 
-    # Check for our specific file handlers by filename
     has_app_log = False
     has_error_log = False
 
@@ -55,15 +95,11 @@ def setup_logging(name="astock_screener"):
         if isinstance(h, RotatingFileHandler):
             if "app.log" in h.baseFilename:
                 has_app_log = True
-                h.setLevel(logging_level)  # Update level if config changed
+                h.setLevel(logging_level)
             elif "error.log" in h.baseFilename:
                 has_error_log = True
 
-    # Formatter
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] [%(correlation_id)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    formatter = _get_formatter(use_json)
 
     from utils.correlation import CorrelationFilter
 

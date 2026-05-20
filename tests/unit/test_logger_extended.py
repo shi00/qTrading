@@ -258,3 +258,149 @@ class TestSetupLoggingDegradation:
         ):
             logger = setup_logging("error_rollover_fail_test")
         assert logger is not None
+
+
+class TestJSONFormatter:
+    def test_json_formatter_basic(self):
+        import json
+
+        from utils.logger import JSONFormatter
+
+        formatter = JSONFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=10,
+            msg="test message",
+            args=(),
+            exc_info=None,
+        )
+        record.threadName = "MainThread"
+        record.correlation_id = "test-123"
+
+        result = formatter.format(record)
+        data = json.loads(result)
+
+        assert data["level"] == "INFO"
+        assert data["logger"] == "test"
+        assert data["message"] == "test message"
+        assert data["correlation_id"] == "test-123"
+        assert data["thread"] == "MainThread"
+        assert data["file"] == "test.py:10"
+
+    def test_json_formatter_with_exception(self):
+        import json
+        import sys
+
+        from utils.logger import JSONFormatter
+
+        formatter = JSONFormatter()
+        try:
+            raise ValueError("test error")
+        except ValueError:
+            exc_info = sys.exc_info()
+            record = logging.LogRecord(
+                name="test",
+                level=logging.ERROR,
+                pathname="test.py",
+                lineno=20,
+                msg="error occurred",
+                args=(),
+                exc_info=exc_info,
+            )
+            record.threadName = "MainThread"
+
+        result = formatter.format(record)
+        data = json.loads(result)
+
+        assert data["level"] == "ERROR"
+        assert "exception" in data
+        assert "ValueError" in data["exception"]
+
+    def test_json_formatter_missing_correlation_id(self):
+        import json
+
+        from utils.logger import JSONFormatter
+
+        formatter = JSONFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=10,
+            msg="test message",
+            args=(),
+            exc_info=None,
+        )
+        record.threadName = "MainThread"
+
+        result = formatter.format(record)
+        data = json.loads(result)
+
+        assert data["correlation_id"] == "-"
+
+
+class TestLogFormatSelection:
+    def setup_method(self):
+        self.root_logger = logging.getLogger()
+        self.original_handlers = self.root_logger.handlers[:]
+        self.root_logger.handlers = []
+
+    def teardown_method(self):
+        self.root_logger.handlers = self.original_handlers
+
+    def test_text_format_by_default(self, tmp_path):
+        from utils.logger import _get_formatter
+
+        formatter = _get_formatter(use_json=False)
+        assert isinstance(formatter, logging.Formatter)
+        assert not isinstance(formatter, type("JSONFormatter", (), {}))
+
+    def test_json_format_when_configured(self, tmp_path):
+        from utils.logger import JSONFormatter, _get_formatter
+
+        formatter = _get_formatter(use_json=True)
+        assert isinstance(formatter, JSONFormatter)
+
+    def test_setup_logging_uses_json_format(self, tmp_path):
+        from utils.logger import JSONFormatter
+
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_format", return_value="json"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+        ):
+            logger = setup_logging("json_format_test")
+
+        file_handlers = [
+            h
+            for h in logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler) and "app.log" in h.baseFilename
+        ]
+        assert len(file_handlers) == 1
+        assert isinstance(file_handlers[0].formatter, JSONFormatter)
+
+    def test_setup_logging_uses_text_format(self, tmp_path):
+        from utils.logger import JSONFormatter
+
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_format", return_value="text"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+        ):
+            logger = setup_logging("text_format_test")
+
+        file_handlers = [
+            h
+            for h in logger.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler) and "app.log" in h.baseFilename
+        ]
+        assert len(file_handlers) == 1
+        assert not isinstance(file_handlers[0].formatter, JSONFormatter)
