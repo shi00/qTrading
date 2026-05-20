@@ -24,7 +24,7 @@ _OP_MAP = {
 class DatabaseManager:
     """
     Manages database interactions for the Data Explorer feature.
-    Provides read-only access (with safety checks) to the SQLite database.
+    Provides read-only access (with safety checks) to the PostgreSQL database.
 
     P0-3: All queries are built using SQLAlchemy Core to completely
     eliminate f-string SQL injection vectors.
