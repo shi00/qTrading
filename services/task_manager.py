@@ -13,7 +13,6 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-import pandas as pd
 
 from core.i18n import I18n
 from utils.error_classifier import classify_error, classify_severity
@@ -480,7 +479,7 @@ class TaskManager:
         """
         if val is None:
             return None
-        if isinstance(val, (float, Decimal)) and pd.isna(val):
+        if isinstance(val, (float, Decimal)) and val != val:  # NaN check (faster than pd.isna)
             return None
         try:
             dt = datetime.datetime.fromisoformat(str(val))
