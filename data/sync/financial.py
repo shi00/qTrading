@@ -20,6 +20,26 @@ from utils.time_utils import get_now, parse_date
 logger = logging.getLogger(__name__)
 
 
+def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Deduplicate financial DataFrame by end_date, preferring the latest disclosure.
+
+    For DataFrames with 'ann_date' column, sorts by [end_date, ann_date] ascending
+    and keeps the last row per end_date. This ensures we select the most recently
+    disclosed report for each financial period (handles revised reports).
+
+    For DataFrames without 'ann_date', falls back to simple end_date dedup.
+    """
+    if df is None or df.empty:
+        return df
+
+    if "ann_date" in df.columns:
+        return df.sort_values(by=["end_date", "ann_date"], ascending=[True, True]).drop_duplicates(
+            subset=["end_date"], keep="last"
+        )
+    return df.sort_values("end_date").drop_duplicates(subset=["end_date"], keep="last")
+
+
 class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
     """
     Strategy for syncing financial reports and fundamental data.
@@ -732,33 +752,13 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
             # 2. Proceed with Core Financial Merging (Income/Balance/Indicator)
             dfs = []
             if isinstance(df_inc, pd.DataFrame) and not df_inc.empty:
-                dfs.append(
-                    df_inc.sort_values("end_date").drop_duplicates(
-                        subset=["end_date"],
-                        keep="last",
-                    ),
-                )
+                dfs.append(_dedup_financial_df(df_inc))
             if isinstance(df_bal, pd.DataFrame) and not df_bal.empty:
-                dfs.append(
-                    df_bal.sort_values("end_date").drop_duplicates(
-                        subset=["end_date"],
-                        keep="last",
-                    ),
-                )
+                dfs.append(_dedup_financial_df(df_bal))
             if isinstance(df_fina, pd.DataFrame) and not df_fina.empty:
-                dfs.append(
-                    df_fina.sort_values("end_date").drop_duplicates(
-                        subset=["end_date"],
-                        keep="last",
-                    ),
-                )
+                dfs.append(_dedup_financial_df(df_fina))
             if isinstance(df_cf, pd.DataFrame) and not df_cf.empty:
-                dfs.append(
-                    df_cf.sort_values("end_date").drop_duplicates(
-                        subset=["end_date"],
-                        keep="last",
-                    ),
-                )
+                dfs.append(_dedup_financial_df(df_cf))
 
             if not dfs:
                 return None, aux_counts
