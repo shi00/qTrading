@@ -235,8 +235,13 @@ class CacheManager:
     _read_db = read_db
 
     # --- Init & Reset ---
-    async def init_db(self, force: bool = False):
-        """Initialize Tables"""
+    async def init_db(self, force: bool = False, auto_migrate: bool | None = None):
+        """Initialize Tables
+
+        Args:
+            force: Force re-initialization even if already initialized
+            auto_migrate: Override for AUTO_MIGRATE env var. If True, automatically run migrations.
+        """
         async with self._init_lock:
             if self._schema_initialized and not force:
                 return
@@ -252,7 +257,7 @@ class CacheManager:
             from data.persistence.db_migrator import DatabaseMigrator, DatabaseMigrationNeeded
 
             try:
-                await DatabaseMigrator.init_db(self.engine)
+                await DatabaseMigrator.init_db(self.engine, auto_migrate=auto_migrate)
 
                 self._schema_initialized = True
                 logger.debug("[CacheManager] Schema | Init completed without errors.")
@@ -298,7 +303,7 @@ class CacheManager:
                 logger.debug("[CacheManager] Wipe | Dropped all tables via SQLAlchemy DDL API.")
 
             self._schema_initialized = False
-            await self.init_db(force=True)
+            await self.init_db(force=True, auto_migrate=True)
         finally:
             try:
                 from data.persistence.daos.base_dao import BaseDao

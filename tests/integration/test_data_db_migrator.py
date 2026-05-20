@@ -43,7 +43,7 @@ class TestDatabaseMigrator:
 
         from data.persistence.db_migrator import DatabaseMigrator
 
-        await DatabaseMigrator.init_db(engine)
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         args, _ = mock_thread_pool.run_async.call_args
         run_alembic_func = args[1]
@@ -72,7 +72,7 @@ class TestDatabaseMigrator:
 
         from data.persistence.db_migrator import DatabaseMigrator
 
-        await DatabaseMigrator.init_db(engine)
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         args, _ = mock_thread_pool.run_async.call_args
         args[1]()
@@ -93,7 +93,7 @@ class TestDatabaseMigrator:
 
         from data.persistence.db_migrator import DatabaseMigrator
 
-        await DatabaseMigrator.init_db(engine)
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         args, _ = mock_thread_pool.run_async.call_args
         args[1]()
@@ -116,7 +116,7 @@ class TestDatabaseMigrator:
 
         from data.persistence.db_migrator import DatabaseMigrator
 
-        await DatabaseMigrator.init_db(engine)
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         args, _ = mock_thread_pool.run_async.call_args
         args[1]()
@@ -137,7 +137,7 @@ class TestDatabaseMigrator:
 
         from data.persistence.db_migrator import DatabaseMigrator
 
-        await DatabaseMigrator.init_db(engine)
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         args, _ = mock_thread_pool.run_async.call_args
         args[1]()

@@ -101,7 +101,12 @@ class TestHistoricalSyncIntegrity:
 
         mock_sync_strategy.context.cache.get_cached_dates_for_table = AsyncMock(side_effect=mock_get_cached_dates)
         mock_sync_strategy.context.cache.get_bulk_sync_quality_scores = AsyncMock(
-            return_value={d1: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []}}
+            return_value={
+                d1: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []},
+                d2: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []},
+                d3: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []},
+                d5: {"score": 95, "expected_base": 5000, "tables": {}, "issues": []},
+            }
         )
 
         mock_sync_strategy.context.processor = MagicMock()

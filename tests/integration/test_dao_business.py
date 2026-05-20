@@ -506,7 +506,7 @@ class TestScreenerDao:
         wins, losses = await screener_dao.get_learning_examples(limit=3)
         assert len(wins) == 1
         assert wins["prediction_result"].iloc[0] == "WIN"
-        assert wins["alpha"].iloc[0] == 3.8
+        assert float(wins["alpha"].iloc[0]) == 3.8
 
     async def test_save_screening_results_sets_review_status_pending(self, screener_dao, clean_db):
         """保存筛选结果时，review_status 应自动设为 PENDING"""
@@ -645,10 +645,10 @@ class TestScreenerDao:
 
         history_updated = await screener_dao.get_screening_history()
         assert history_updated["review_status"].iloc[0] == REVIEW_STATUS_COMPLETED
-        assert history_updated["t5_price"].iloc[0] == 11.2
-        assert history_updated["t5_pct"].iloc[0] == 12.0
-        assert history_updated["index_pct"].iloc[0] == 1.4
-        assert history_updated["alpha"].iloc[0] == 3.6
+        assert float(history_updated["t5_price"].iloc[0]) == 11.2
+        assert float(history_updated["t5_pct"].iloc[0]) == 12.0
+        assert float(history_updated["index_pct"].iloc[0]) == 1.4
+        assert float(history_updated["alpha"].iloc[0]) == 3.6
 
     async def test_get_pending_reviews_filters_by_review_status(self, screener_dao, clean_db):
         """get_pending_reviews 应返回未完成复盘的记录并排除 COMPLETED"""
@@ -971,8 +971,8 @@ class TestHolderDao:
         assert result["holder_num_change"].iloc[2] == -5000
 
         assert result["holder_num_ratio"].iloc[0] is None or pd.isna(result["holder_num_ratio"].iloc[0])
-        assert abs(result["holder_num_ratio"].iloc[1] - (-5.0)) < 0.01
-        assert abs(result["holder_num_ratio"].iloc[2] - (-5.26)) < 0.1
+        assert abs(float(result["holder_num_ratio"].iloc[1]) - (-5.0)) < 0.01
+        assert abs(float(result["holder_num_ratio"].iloc[2]) - (-5.26)) < 0.1
 
     async def test_holder_number_change_multi_stock(self, holder_dao, clean_db):
         """测试多股票股东户数变化计算互不干扰"""
@@ -1001,12 +1001,12 @@ class TestHolderDao:
         result_1 = await holder_dao.get_stk_holdernumber("000001.SZ")
         result_1 = result_1.sort_values("end_date")
         assert result_1["holder_num_change"].iloc[1] == -10000
-        assert abs(result_1["holder_num_ratio"].iloc[1] - (-10.0)) < 0.01
+        assert abs(float(result_1["holder_num_ratio"].iloc[1]) - (-10.0)) < 0.01
 
         result_2 = await holder_dao.get_stk_holdernumber("000002.SZ")
         result_2 = result_2.sort_values("end_date")
         assert result_2["holder_num_change"].iloc[1] == 10000
-        assert abs(result_2["holder_num_ratio"].iloc[1] - 20.0) < 0.01
+        assert abs(float(result_2["holder_num_ratio"].iloc[1]) - 20.0) < 0.01
 
     async def test_holder_number_change_incremental_update(self, holder_dao, clean_db):
         """测试增量更新时历史数据的变化率被正确重算"""
@@ -1039,7 +1039,7 @@ class TestHolderDao:
         assert len(result) == 2
         assert pd.isna(result["holder_num_change"].iloc[0])
         assert result["holder_num_change"].iloc[1] == -10000
-        assert abs(result["holder_num_ratio"].iloc[1] - (-10.0)) < 0.01
+        assert abs(float(result["holder_num_ratio"].iloc[1]) - (-10.0)) < 0.01
 
 
 @pytest.mark.asyncio

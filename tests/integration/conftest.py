@@ -91,13 +91,26 @@ async def test_engine():
     if _test_engine is None:
         await _ensure_test_db()
 
+        import config
+
+        original_db_url = config.DB_URL
+        config.DB_URL = TEST_DB_URL
+
+        original_env_db_url = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = TEST_DB_URL
+
         _test_engine = create_async_engine(TEST_DB_URL, echo=False)
 
-        from data.persistence.models import Base
+        from data.persistence.db_migrator import DatabaseMigrator
 
-        async with _test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+        try:
+            await DatabaseMigrator.init_db(_test_engine, auto_migrate=True)
+        finally:
+            config.DB_URL = original_db_url
+            if original_env_db_url is not None:
+                os.environ["DATABASE_URL"] = original_env_db_url
+            elif "DATABASE_URL" in os.environ:
+                del os.environ["DATABASE_URL"]
 
     yield _test_engine
 
@@ -165,13 +178,6 @@ def _reset_thread_pool():
 
 @pytest_asyncio.fixture(autouse=True)
 async def db_schema_ready(test_engine):
-    from data.persistence.models import Base
-    from sqlalchemy import inspect
+    from data.persistence.db_migrator import DatabaseMigrator
 
-    async with test_engine.connect() as conn:
-        existing = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
-        expected = set(Base.metadata.tables.keys())
-        missing = expected - existing
-        if missing:
-            await conn.run_sync(Base.metadata.create_all)
-            await conn.commit()
+    await DatabaseMigrator.init_db(test_engine, auto_migrate=True)

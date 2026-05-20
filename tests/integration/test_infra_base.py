@@ -157,7 +157,7 @@ class TestDatabaseBase(_AssertionMixin):
         self.engine = self._test_engine_ref
 
         self.cache = CacheManager()
-        await self.cache.init_db()
+        await self.cache.init_db(auto_migrate=True)
 
         await _truncate_all_tables(self.cache.engine)
 
