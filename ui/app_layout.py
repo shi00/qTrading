@@ -7,6 +7,7 @@ import flet as ft
 
 from ui.i18n import I18n
 from ui.theme import AppColors
+from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
@@ -19,9 +20,10 @@ logger = logging.getLogger(__name__)
 class NavTabs(IntEnum):
     MARKET = 0
     SCREENER = 1
-    DATA = 2
-    TASKS = 3
-    SETTINGS = 4
+    BACKTEST = 2
+    DATA = 3
+    TASKS = 4
+    SETTINGS = 5
 
 
 class AppLayout(ft.Container):
@@ -125,6 +127,16 @@ class AppLayout(ft.Container):
                     ),  # pragma: no cover
                 ),  # pragma: no cover
                 ft.NavigationRailDestination(  # pragma: no cover
+                    icon=ft.Icons.ASSESSMENT_OUTLINED,  # pragma: no cover
+                    selected_icon=ft.Icons.ASSESSMENT,  # pragma: no cover
+                    label=I18n.get("nav_backtest"),  # pragma: no cover
+                    label_content=ft.Text(  # pragma: no cover
+                        I18n.get("nav_backtest"),  # pragma: no cover
+                        size=12,  # pragma: no cover
+                        weight=ft.FontWeight.BOLD,  # pragma: no cover
+                    ),  # pragma: no cover
+                ),  # pragma: no cover
+                ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.STORAGE_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.STORAGE_ROUNDED,  # pragma: no cover
                     label=I18n.get("nav_data"),  # pragma: no cover
@@ -187,6 +199,8 @@ class AppLayout(ft.Container):
             view = HomeView(on_run_strategy=self.run_strategy_from_home)
         elif index == NavTabs.SCREENER:
             view = ScreenerView(self.page)  # type: ignore[untyped]
+        elif index == NavTabs.BACKTEST:
+            view = BacktestView(self.page)  # type: ignore[untyped]
         elif index == NavTabs.DATA:
             view = DataExplorerView()
         elif index == NavTabs.TASKS:

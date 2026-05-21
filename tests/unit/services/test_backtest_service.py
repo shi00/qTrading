@@ -1,0 +1,240 @@
+"""BacktestService 单元测试"""
+
+from datetime import date
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pandas as pd
+import pytest
+
+from services.backtest_service import BacktestService
+from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.base_strategy import BaseStrategy
+
+
+class MockStrategy(BaseStrategy):
+    """用于测试的 Mock 策略"""
+
+    required_context_keys = []
+
+    def __init__(self):
+        super().__init__("mock_strategy", "Mock Strategy for Testing")
+
+    async def filter(self, context):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "close": [10.0, 20.0],
+            }
+        )
+
+
+class TestBacktestService:
+    @pytest.fixture
+    def mock_cache(self) -> MagicMock:
+        cache = MagicMock()
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        cal_df = pd.DataFrame(
+            {
+                "cal_date": [d.strftime("%Y%m%d") for d in trade_dates],
+                "is_open": ["1"] * len(trade_dates),
+            }
+        )
+        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+
+        quotes_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"] * 3,
+                "trade_date": [
+                    date(2024, 1, 2),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                    date(2024, 1, 4),
+                ],
+                "open": [10.0, 20.0, 10.5, 21.0, 11.0, 22.0],
+                "high": [10.5, 21.0, 11.0, 22.0, 11.5, 23.0],
+                "low": [9.5, 19.0, 10.0, 20.0, 10.5, 21.0],
+                "close": [10.2, 20.5, 10.8, 21.5, 11.2, 22.5],
+                "vol": [1000000, 2000000, 1100000, 2200000, 1200000, 2400000],
+                "amount": [10000000, 40000000, 11000000, 45000000, 12000000, 50000000],
+                "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                "is_tradable": [True, True, True, True, True, True],
+            }
+        )
+        cache.get_daily_quotes = AsyncMock(return_value=quotes_df)
+
+        benchmark_df = pd.DataFrame(
+            {
+                "ts_code": ["000300.SH"] * 3,
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "pct_chg": [0.1, 0.1, 0.1],
+                "close": [3000.0, 3010.0, 3020.0],
+            }
+        )
+        cache.get_index_daily_range = AsyncMock(return_value=benchmark_df)
+
+        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+
+        backtest_dao = MagicMock()
+        backtest_dao.save_result = AsyncMock(return_value=1)
+        backtest_dao.get_result = AsyncMock(return_value=None)
+        backtest_dao.list_results = AsyncMock(return_value=[])
+        backtest_dao.delete_result = AsyncMock(return_value=True)
+        cache.backtest_dao = backtest_dao
+
+        return cache
+
+    @pytest.fixture
+    def backtest_config(self) -> BacktestConfig:
+        return BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            initial_capital=1_000_000.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_service_runs_backtest_with_strategy_key(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        with patch(
+            "services.backtest_service.get_strategy_registry",
+            return_value={"mock_strategy": MockStrategy},
+        ):
+            service = BacktestService(cache=mock_cache)
+
+            result = await service.run_backtest(
+                strategy_key="mock_strategy",
+                config=backtest_config,
+                persist=False,
+            )
+
+            assert result is not None
+            assert isinstance(result, BacktestResult)
+            assert result.strategy_name == "mock_strategy"
+
+    @pytest.mark.asyncio
+    async def test_service_raises_on_unknown_strategy(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        with patch(
+            "services.backtest_service.get_strategy_registry",
+            return_value={},
+        ):
+            service = BacktestService(cache=mock_cache)
+
+            with pytest.raises(ValueError, match="Strategy not found"):
+                await service.run_backtest(
+                    strategy_key="unknown_strategy",
+                    config=backtest_config,
+                )
+
+    @pytest.mark.asyncio
+    async def test_service_persists_results(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        with patch(
+            "services.backtest_service.get_strategy_registry",
+            return_value={"mock_strategy": MockStrategy},
+        ):
+            service = BacktestService(cache=mock_cache)
+
+            await service.run_backtest(
+                strategy_key="mock_strategy",
+                config=backtest_config,
+                persist=True,
+            )
+
+            mock_cache.backtest_dao.save_result.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_service_runs_backtest_with_strategy_instance(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        service = BacktestService(cache=mock_cache)
+
+        strategy = MockStrategy()
+
+        result = await service.run_backtest_with_strategy(
+            strategy=strategy,
+            config=backtest_config,
+            persist=False,
+        )
+
+        assert result is not None
+        assert isinstance(result, BacktestResult)
+        assert result.strategy_name == "mock_strategy"
+
+    @pytest.mark.asyncio
+    async def test_service_gets_result(
+        self,
+        mock_cache: MagicMock,
+    ) -> None:
+        service = BacktestService(cache=mock_cache)
+
+        mock_cache.backtest_dao.get_result = AsyncMock(return_value={"run_id": "test123", "strategy_name": "test"})
+
+        result = await service.get_result("test123")
+
+        assert result is not None
+        assert result["run_id"] == "test123"
+
+    @pytest.mark.asyncio
+    async def test_service_lists_results(
+        self,
+        mock_cache: MagicMock,
+    ) -> None:
+        service = BacktestService(cache=mock_cache)
+
+        mock_cache.backtest_dao.list_results = AsyncMock(
+            return_value=[
+                {"run_id": "test1", "strategy_name": "strategy1"},
+                {"run_id": "test2", "strategy_name": "strategy2"},
+            ]
+        )
+
+        results = await service.list_results()
+
+        assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_service_deletes_result(
+        self,
+        mock_cache: MagicMock,
+    ) -> None:
+        service = BacktestService(cache=mock_cache)
+
+        success = await service.delete_result("test123")
+
+        assert success is True
+        mock_cache.backtest_dao.delete_result.assert_called_once_with("test123")
+
+    def test_submit_backtest_task_without_task_manager(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        service = BacktestService(cache=mock_cache)
+
+        task_id = service.submit_backtest_task(
+            strategy_key="mock_strategy",
+            config=backtest_config,
+        )
+
+        assert task_id is None

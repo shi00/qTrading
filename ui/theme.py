@@ -424,6 +424,7 @@ class AppStyles:
     """应用组件样式工厂 — 全部使用语义 Token"""
 
     # --- Size Tokens (统一控件宽度，消除魔术数字) ---
+    CONTROL_WIDTH_XS = 80  # 超小型控件：短标签、小按钮
     CONTROL_WIDTH_SM = 120  # 小型控件：数字输入、线程数、连接池
     CONTROL_WIDTH_MD = 200  # 中型控件：Dropdown 下拉框、单行选择
     CONTROL_WIDTH_LG = 400  # 大型控件：Token/URL 输入框

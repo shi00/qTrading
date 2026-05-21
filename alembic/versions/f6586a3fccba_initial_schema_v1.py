@@ -1138,6 +1138,7 @@ def _create_table_screening_thinking() -> None:
 
 _ALL_EXPECTED_TABLES = [
     "app_state",
+    "backtest_results",
     "block_trade",
     "daily_indicators",
     "daily_quotes",

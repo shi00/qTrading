@@ -14,6 +14,7 @@ from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.holder_dao import HolderDao
+from data.persistence.daos.backtest_dao import BacktestDAO
 from tests.conftest import reset_singleton as _reset_singleton_ctx
 
 
@@ -46,6 +47,7 @@ def _make_mgr():
     mgr.screener_dao = MagicMock(spec=ScreenerDao)
     mgr.macro_dao = MagicMock(spec=MacroDao)
     mgr.holder_dao = MagicMock(spec=HolderDao)
+    mgr.backtest_dao = MagicMock(spec=BacktestDAO)
     mgr._maintenance_event_lazy = None
     mgr._init_lock_lazy = None
     return mgr

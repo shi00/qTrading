@@ -14,6 +14,7 @@ from data.constants import get_health_depth_full_trade_days
 from data.data_dictionary import TABLE_DEFINITIONS
 
 # DAOs
+from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
     BaseDao,
 )  # Expose static helpers via BaseDao if needed, or keeping usage internal
@@ -76,6 +77,7 @@ class CacheManager:
         self.screener_dao = ScreenerDao(self.engine)
         self.macro_dao = MacroDao(self.engine)
         self.holder_dao = HolderDao(self.engine)
+        self.backtest_dao = BacktestDAO(self.engine)
 
         self._initialized = True
         self._schema_initialized = False
@@ -150,6 +152,7 @@ class CacheManager:
         self.screener_dao.engine = self.engine
         self.macro_dao.engine = self.engine
         self.holder_dao.engine = self.engine
+        self.backtest_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 

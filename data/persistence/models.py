@@ -616,6 +616,42 @@ class AppState(Base):
     updated_at = Column(DateTime(timezone=False), server_default=func.now(), onupdate=func.now())
 
 
+class BacktestResultModel(Base):
+    __tablename__ = "backtest_results"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id = Column(String(16), unique=True, nullable=False)
+    strategy_name = Column(String, nullable=False)
+    params_snapshot = Column(JSONB)
+
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    initial_capital = Column(Numeric(20, 4))
+
+    total_return = Column(Numeric(12, 6))
+    annualized_return = Column(Numeric(12, 6))
+    sharpe_ratio = Column(Numeric(12, 6))
+    max_drawdown = Column(Numeric(12, 6))
+    calmar_ratio = Column(Numeric(12, 6))
+    ic_mean = Column(Numeric(12, 6))
+    ic_ir = Column(Numeric(12, 6))
+    win_rate = Column(Numeric(8, 4))
+    profit_factor = Column(Numeric(12, 6))
+    total_trades = Column(Integer)
+
+    nav_curve_json = Column(JSONB)
+    trades_json = Column(JSONB)
+    period_stats_json = Column(JSONB)
+
+    executed_at = Column(DateTime(timezone=False), server_default=func.now())
+    duration_ms = Column(Integer)
+
+    __table_args__ = (
+        Index("ix_backtest_results_strategy", "strategy_name"),
+        Index("ix_backtest_results_date", "executed_at"),
+    )
+
+
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
     exclude = exclude or {"updated_at", "created_at"}
     return [c.name for c in model_class.__table__.columns if c.name not in exclude]
