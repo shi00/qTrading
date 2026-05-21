@@ -355,6 +355,8 @@ class AppColors:
     TABLE_GRID = "#2C2C2C"
     TABLE_GRID_V = "#2C2C2C"
     TABLE_GRID_H = "#2C2C2C"
+    TABLE_ROW_HOVER = "#333333"
+    CARD_BG = "#1E1E1E"
     INPUT_BG = "#2D2D2D"
     INPUT_BORDER = "#424242"
     INPUT_TEXT = "#FFFFFF"
