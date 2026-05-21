@@ -37,6 +37,7 @@ dependencies = [
     "cryptography>=48.0.0",
     "readerwriterlock>=1.0.9",
     "cachetools>=7.1.0",
+    "pydantic>=2.11.0",
 ]
 
 [project.optional-dependencies]

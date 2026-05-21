@@ -4,11 +4,15 @@ import json
 import logging
 import os
 import re
+from typing import Any, TypeVar
+from collections.abc import Callable
 
 import keyring
+from pydantic import ValidationError
 from readerwriterlock import rwlock
 
 import config
+from utils.config_models import AppConfig, ConfigValidationResult, get_default_config
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 from utils.security_utils import DecryptionError, SecurityManager
 
@@ -70,105 +74,29 @@ class ConfigHandler:
     _last_load_time = 0
     _lock = rwlock.RWLockFair()
 
-    DEFAULT_CONFIG = {
-        "ts_token": "",
-        "onboarding_complete": False,
-        "auto_update_enabled": False,
-        "enable_news_alerts": True,
-        "log_level": "INFO",
-        "log_format": "text",
-        "theme_name": "dark",
-        "auto_update_time": "16:30",
-        "log_max_mb": 5,
-        "log_backup_count": 5,
-        # Database Configuration
-        "db_host": "127.0.0.1",
-        "db_port": 5432,
-        "db_user": "postgres",
-        "db_name": "astock",
-        "db_url": "",
-        "db_password_encrypted": "",
-        "db_connection_pool_size": 10,
-        "db_pool_pre_ping": True,
-        "db_pool_recycle": 1800,
-        "db_pool_timeout": 30,
-        "db_max_overflow": 5,
-        # Heavy sync tasks (Historical Data, Financial Reports)
-        "sync_max_concurrent_heavy": 3,
-        "max_batch_rows": 20000,
-        "no_proxy_domains": [],
-        # LLM Provider Configuration
-        "llm_provider": "deepseek",
-        "llm_model": "deepseek-v4-flash",
-        "llm_base_url": "",
-        "llm_api_version": AZURE_DEFAULT_API_VERSION,  # Azure specific
-        "llm_azure_resource_name": "",  # Azure specific
-        "llm_azure_deployment_name": "",  # Azure specific
-        "llm_custom_models": {},  # User-defined model pool
-        "llm_provider_extras": {},  # Provider-specific extras (nested structure)
-        "llm_failover_models": [],  # P1-12: Fallback models for cloud analysis
-        "ai_api_key": "",
-        # Local AI Configuration
-        "local_model_path": "",
-        "local_model_timeout": 90,
-        "ai_system_prompt": DEFAULT_AI_PROMPT,
-        "ai_news_prompt": DEFAULT_NEWS_PROMPT,
-        "ai_prompt_dump_enabled": False,
-        "ai_max_candidates": 30,
-        "strategy_min_turnover": 2.0,
-        # Max parallel AI analysis tasks (Cloud API or Local Threads)
-        # Prevents API Rate Limits (429) or Local Resource exhaustion
-        "ai_max_concurrent_analysis": 5,
-        "request_max_retries": 3,
-        "tushare_timeout": 30,
-        "tushare_api_rate_limit": 200,
-        "locale": "zh",
-        "max_io_workers": 16,
-        "max_cpu_workers": 4,
-        "max_concurrent_tasks": 0,
-        "sync_request_delay_heavy": 0.0,
-        "sync_request_delay_light": 0.0,
-        "news_poll_interval": 60,
-        "market_data_poll_interval": 30,
-        # Persisted scheduler idempotency keys
-        "scheduler_last_daily_update": "",
-        "scheduler_last_nightly_prediction": "",
-        "scheduler_last_doubao_refresh": "",
-        # Local AI Advanced Settings
-        "local_n_threads": 4,
-        "local_n_batch": 512,
-        "local_n_ctx": 2048,
-        "local_flash_attn": True,
-        "local_n_gpu_layers": 0,
-        # Concurrency
-        "sync_concurrency_light": 20,
-        # Initialization History Horizon
-        "init_history_years": 3,
-        # Doubao AI Tagging Schedule
-        "doubao_schedule_enabled": False,
-        "doubao_schedule_time": "10:00",
-        # Data Sync Integrity Configuration
-        "sync_integrity": {
-            # Stop-loss thresholds to prevent infinite retries
-            "max_retry_days_per_sync": 30,
-            "max_retry_stocks_per_sync": 100,
-            "enable_adaptive_retry": True,
-            # Quality score threshold
-            "quality_threshold": 80,
-            # Tolerance ratios for data completeness
-            "quotes_tolerance_ratio": 0.95,
-            "indicators_tolerance_ratio": 0.90,
-            "moneyflow_tolerance_ratio": 0.80,
-            "financial_min_periods": 4,
-            # Quality score weights (configurable)
-            "quality_weights": {
-                "daily_quotes": 30,
-                "daily_indicators": 25,
-                "moneyflow_daily": 20,
-                "margin_daily": 10,
-            },
-        },
-    }
+    DEFAULT_CONFIG = get_default_config()
+
+    T = TypeVar("T")
+
+    @staticmethod
+    def get_typed(key: str, expected_type: type[T], default: T) -> T:
+        """类型安全的通用 getter"""
+        cfg = ConfigHandler.load_config()
+        val = cfg.get(key, default)
+        try:
+            if expected_type is bool and isinstance(val, str):
+                return expected_type(val.lower() == "true")  # type: ignore[return-value]
+            return expected_type(val)  # type: ignore[call-arg]
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def set_typed(key: str, value: object, validator: Callable[..., bool] | None = None) -> bool:
+        """类型安全的通用 setter"""
+        if validator and not validator(value):
+            logger.warning(f"[ConfigHandler] Validation failed for {key}: {value}")
+            return False
+        return ConfigHandler.save_config({key: value})
 
     @staticmethod
     def _deep_merge_defaults(current: dict, defaults: dict) -> tuple[dict, bool]:
@@ -291,7 +219,7 @@ class ConfigHandler:
 
     @staticmethod
     def load_config():
-        """Load config with Read Lock"""
+        """Load config with Read Lock and Validation"""
         with ConfigHandler._lock.gen_rlock():
             if ConfigHandler._config_cache is not None:
                 return ConfigHandler._config_cache.copy()
@@ -299,25 +227,65 @@ class ConfigHandler:
             if os.path.exists(CONFIG_FILE):
                 try:
                     with open(CONFIG_FILE, encoding="utf-8") as f:
-                        ConfigHandler._config_cache = json.load(f)
+                        raw_data = json.load(f)
+                        validated = AppConfig.model_validate(raw_data)
+                        ConfigHandler._config_cache = validated.model_dump()
                         return ConfigHandler._config_cache.copy()
+                except ValidationError as e:
+                    logger.warning(f"[ConfigHandler] Config validation failed: {e}")
+                    ConfigHandler._config_cache = get_default_config()
+                    return ConfigHandler._config_cache.copy()
                 except Exception as e:
                     logger.warning(f"[ConfigHandler] Failed to load config file: {e}")
                     return {}
             return {}
 
     @staticmethod
+    def load_config_with_validation() -> ConfigValidationResult:
+        """加载配置并返回验证详情 (供 UI 层使用)"""
+        with ConfigHandler._lock.gen_rlock():
+            if os.path.exists(CONFIG_FILE):
+                try:
+                    with open(CONFIG_FILE, encoding="utf-8") as f:
+                        raw_data = json.load(f)
+                        validated = AppConfig.model_validate(raw_data)
+                        return ConfigValidationResult(
+                            is_valid=True,
+                            config=validated.model_dump(),
+                            errors=[],
+                            used_defaults=False,
+                        )
+                except ValidationError as e:
+                    errors = [str(err) for err in e.errors()]
+                    return ConfigValidationResult(
+                        is_valid=False,
+                        config=get_default_config(),
+                        errors=errors,
+                        used_defaults=True,
+                    )
+                except Exception as e:
+                    return ConfigValidationResult(
+                        is_valid=False,
+                        config={},
+                        errors=[str(e)],
+                        used_defaults=False,
+                    )
+            return ConfigValidationResult(
+                is_valid=True,
+                config=get_default_config(),
+                errors=[],
+                used_defaults=True,
+            )
+
+    @staticmethod
     def save_config(config_data, replace=False):
         """
-        Save config with Write Lock and Atomic Write
+        Save config with Write Lock, Validation and Atomic Write
         :param config_data: Dict to save
         :param replace: If True, replaces entire config with config_data. If False, merges.
         """
         try:
             with ConfigHandler._lock.gen_wlock():
-                # C-P1-7: Do NOT call load_config() inside write lock!
-                # RWLockFair does NOT support same-thread wlock->rlock reentry (deadlock).
-                # Read directly from _config_cache or file instead.
                 if replace:
                     current_config = config_data.copy()
                 else:
@@ -331,6 +299,13 @@ class ConfigHandler:
                         except (json.JSONDecodeError, OSError):
                             pass
                     current_config.update(config_data)
+
+                try:
+                    validated = AppConfig.model_validate(current_config)
+                    current_config = validated.model_dump()
+                except ValidationError as e:
+                    logger.error(f"[ConfigHandler] Invalid config data: {e}")
+                    return False
 
                 success = ConfigHandler._save_json_atomically(
                     current_config,
@@ -389,8 +364,7 @@ class ConfigHandler:
 
     @staticmethod
     def is_onboarding_complete():
-        config = ConfigHandler.load_config()
-        return config.get("onboarding_complete", ConfigHandler.DEFAULT_CONFIG["onboarding_complete"])
+        return ConfigHandler.get_typed("onboarding_complete", bool, False)
 
     @staticmethod
     def set_onboarding_complete(complete=True):
@@ -398,94 +372,80 @@ class ConfigHandler:
 
     @staticmethod
     def is_auto_update_enabled():
-        config = ConfigHandler.load_config()
-        return config.get("auto_update_enabled", ConfigHandler.DEFAULT_CONFIG["auto_update_enabled"])
+        return ConfigHandler.get_typed("auto_update_enabled", bool, False)
 
     @staticmethod
     def get_log_level():
-        config = ConfigHandler.load_config()
-        return config.get("log_level", ConfigHandler.DEFAULT_CONFIG["log_level"]).upper()
+        return ConfigHandler.get_typed("log_level", str, "INFO").upper()
 
     @staticmethod
     def set_log_level(level):
-        return ConfigHandler.save_config({"log_level": level.upper()})
+        return ConfigHandler.set_typed("log_level", level.upper())
 
     @staticmethod
     def get_log_format():
-        config = ConfigHandler.load_config()
-        return config.get("log_format", ConfigHandler.DEFAULT_CONFIG["log_format"]).lower()
+        return ConfigHandler.get_typed("log_format", str, "text").lower()
 
     @staticmethod
     def set_log_format(log_format):
-        return ConfigHandler.save_config({"log_format": log_format.lower()})
+        return ConfigHandler.set_typed("log_format", log_format.lower())
 
     @classmethod
     def get_init_history_years(cls) -> int:
-        """获取初始化数据年限，默认 3 年"""
-        # Note: Using get_setting internally via class method or static
-        return int(ConfigHandler.get_setting("init_history_years", 3))  # type: ignore[arg-type]
+        return ConfigHandler.get_typed("init_history_years", int, 3)
 
     @classmethod
     def set_init_history_years(cls, years: int):
-        """设置初始化数据年限 (1-5)"""
         years = max(1, min(5, int(years)))
-        return ConfigHandler.save_config({"init_history_years": years})
+        return ConfigHandler.set_typed("init_history_years", years)
 
     @staticmethod
     def get_auto_update_time():
-        config = ConfigHandler.load_config()
-        return config.get("auto_update_time", ConfigHandler.DEFAULT_CONFIG["auto_update_time"])
+        return ConfigHandler.get_typed("auto_update_time", str, "16:30")
 
     @classmethod
     def is_doubao_schedule_enabled(cls) -> bool:
-        return cls.load_config().get("doubao_schedule_enabled", False)
+        return ConfigHandler.get_typed("doubao_schedule_enabled", bool, False)
 
     @classmethod
     def set_doubao_schedule_enabled(cls, enabled: bool):
-        return cls.save_config({"doubao_schedule_enabled": bool(enabled)})
+        return ConfigHandler.set_typed("doubao_schedule_enabled", bool(enabled))
 
     @classmethod
     def get_doubao_schedule_time(cls) -> str:
-        return cls.load_config().get("doubao_schedule_time", "10:00")
+        return ConfigHandler.get_typed("doubao_schedule_time", str, "10:00")
 
     @classmethod
     def set_doubao_schedule_time(cls, time_str: str):
-        return cls.save_config({"doubao_schedule_time": str(time_str)})
+        return ConfigHandler.set_typed("doubao_schedule_time", str(time_str))
 
     @staticmethod
     def get_log_max_mb():
-        config = ConfigHandler.load_config()
-        return config.get("log_max_mb", ConfigHandler.DEFAULT_CONFIG["log_max_mb"])
+        return ConfigHandler.get_typed("log_max_mb", int, 5)
 
     @staticmethod
     def get_log_backup_count():
-        config = ConfigHandler.load_config()
-        return config.get("log_backup_count", ConfigHandler.DEFAULT_CONFIG["log_backup_count"])
+        return ConfigHandler.get_typed("log_backup_count", int, 5)
 
     @staticmethod
     def get_db_connection_pool_size():
-        config = ConfigHandler.load_config()
-        return config.get("db_connection_pool_size", ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"])
+        return ConfigHandler.get_typed("db_connection_pool_size", int, 10)
 
     @staticmethod
     def get_db_pool_pre_ping():
-        config = ConfigHandler.load_config()
-        return config.get("db_pool_pre_ping", ConfigHandler.DEFAULT_CONFIG["db_pool_pre_ping"])
+        return ConfigHandler.get_typed("db_pool_pre_ping", bool, True)
 
     @staticmethod
     def get_db_pool_recycle():
-        config = ConfigHandler.load_config()
-        return config.get("db_pool_recycle", ConfigHandler.DEFAULT_CONFIG["db_pool_recycle"])
+        return ConfigHandler.get_typed("db_pool_recycle", int, 1800)
 
     @staticmethod
     def get_db_pool_timeout():
-        config = ConfigHandler.load_config()
-        return config.get("db_pool_timeout", ConfigHandler.DEFAULT_CONFIG["db_pool_timeout"])
+        return ConfigHandler.get_typed("db_pool_timeout", int, 30)
 
     @staticmethod
     def get_db_max_overflow():
-        config = ConfigHandler.load_config()
-        return config.get("db_max_overflow", ConfigHandler.DEFAULT_CONFIG["db_max_overflow"])
+        return ConfigHandler.get_typed("db_max_overflow", int, 5)
 
     @staticmethod
     def get_db_url():
@@ -575,28 +535,26 @@ class ConfigHandler:
     @staticmethod
     def get_db_config() -> dict:
         """Get database configuration components."""
-        config = ConfigHandler.load_config()
         password = ConfigHandler.get_db_password()
-
         return {
-            "host": config.get("db_host", ConfigHandler.DEFAULT_CONFIG["db_host"]),
-            "port": config.get("db_port", ConfigHandler.DEFAULT_CONFIG["db_port"]),
-            "user": config.get("db_user", ConfigHandler.DEFAULT_CONFIG["db_user"]),
+            "host": ConfigHandler.get_typed("db_host", str, "127.0.0.1"),
+            "port": ConfigHandler.get_typed("db_port", int, 5432),
+            "user": ConfigHandler.get_typed("db_user", str, "postgres"),
             "password": password,
-            "database": config.get("db_name", ConfigHandler.DEFAULT_CONFIG["db_name"]),
+            "database": ConfigHandler.get_typed("db_name", str, "astock"),
         }
 
     @staticmethod
     def set_db_connection_pool_size(size):
-        return ConfigHandler.save_config({"db_connection_pool_size": int(size)})
+        return ConfigHandler.set_typed("db_connection_pool_size", int(size))
 
     @staticmethod
     def set_db_max_overflow(overflow):
-        return ConfigHandler.save_config({"db_max_overflow": int(overflow)})
+        return ConfigHandler.set_typed("db_max_overflow", int(overflow))
 
     @staticmethod
     def set_db_pool_timeout(timeout):
-        return ConfigHandler.save_config({"db_pool_timeout": int(timeout)})
+        return ConfigHandler.set_typed("db_pool_timeout", int(timeout))
 
     @staticmethod
     def get_sync_concurrency():
@@ -610,20 +568,17 @@ class ConfigHandler:
 
     @staticmethod
     def get_max_batch_rows():
-        config = ConfigHandler.load_config()
-        return config.get("max_batch_rows", ConfigHandler.DEFAULT_CONFIG["max_batch_rows"])
+        return ConfigHandler.get_typed("max_batch_rows", int, 20000)
 
     @staticmethod
     def set_max_batch_rows(rows):
-        return ConfigHandler.save_config({"max_batch_rows": int(rows)})
+        return ConfigHandler.set_typed("max_batch_rows", int(rows))
 
     @staticmethod
     def get_no_proxy_domains():
-        """
-        Get domains that should BYPASS proxy (NO_PROXY).
-        """
+        """Get domains that should BYPASS proxy (NO_PROXY)."""
         config = ConfigHandler.load_config()
-        val = config.get("no_proxy_domains", ConfigHandler.DEFAULT_CONFIG["no_proxy_domains"])
+        val = config.get("no_proxy_domains", [])
         if isinstance(val, list):
             return list(val)
         return []
@@ -650,9 +605,7 @@ class ConfigHandler:
 
     @staticmethod
     def get_llm_provider() -> str:
-        """获取当前 LLM 供应商 ID"""
-        config = ConfigHandler.load_config()
-        return config.get("llm_provider", ConfigHandler.DEFAULT_CONFIG["llm_provider"])
+        return ConfigHandler.get_typed("llm_provider", str, "deepseek")
 
     @staticmethod
     def save_llm_config(
@@ -762,9 +715,9 @@ class ConfigHandler:
                 except Exception as exc:
                     logger.debug(f"[ConfigHandler] Keyring migration for ai_api_key skipped: {exc}")
 
-        provider = config.get("llm_provider", ConfigHandler.DEFAULT_CONFIG["llm_provider"])
-        model = config.get("llm_model", ConfigHandler.DEFAULT_CONFIG["llm_model"])
-        base_url = config.get("llm_base_url", ConfigHandler.DEFAULT_CONFIG["llm_base_url"])
+        provider = config.get("llm_provider", "deepseek")
+        model = config.get("llm_model", "deepseek-v4-flash")
+        base_url = config.get("llm_base_url", "")
 
         if not base_url:
             from utils.llm_providers import LLM_PROVIDERS
@@ -772,12 +725,12 @@ class ConfigHandler:
             provider_config = LLM_PROVIDERS.get(provider, {})
             base_url = provider_config.get("base_url", "")
 
-        provider_extras = config.get("llm_provider_extras", ConfigHandler.DEFAULT_CONFIG["llm_provider_extras"])
+        provider_extras = config.get("llm_provider_extras", {})
 
-        api_version = ConfigHandler.DEFAULT_CONFIG["llm_api_version"]
-        azure_resource_name = ConfigHandler.DEFAULT_CONFIG["llm_azure_resource_name"]
-        azure_deployment_name = ConfigHandler.DEFAULT_CONFIG["llm_azure_deployment_name"]
-        custom_models = ConfigHandler.DEFAULT_CONFIG["llm_custom_models"]
+        api_version = AZURE_DEFAULT_API_VERSION
+        azure_resource_name = ""
+        azure_deployment_name = ""
+        custom_models: dict[str, Any] = {}
 
         if "azure" in provider_extras:
             azure_config = provider_extras["azure"]
@@ -785,18 +738,14 @@ class ConfigHandler:
             azure_resource_name = azure_config.get("resource_name", "")
             azure_deployment_name = azure_config.get("deployment_name", "")
         else:
-            api_version = config.get("llm_api_version", ConfigHandler.DEFAULT_CONFIG["llm_api_version"])
-            azure_resource_name = config.get(
-                "llm_azure_resource_name", ConfigHandler.DEFAULT_CONFIG["llm_azure_resource_name"]
-            )
-            azure_deployment_name = config.get(
-                "llm_azure_deployment_name", ConfigHandler.DEFAULT_CONFIG["llm_azure_deployment_name"]
-            )
+            api_version = config.get("llm_api_version", AZURE_DEFAULT_API_VERSION)
+            azure_resource_name = config.get("llm_azure_resource_name", "")
+            azure_deployment_name = config.get("llm_azure_deployment_name", "")
 
         if "custom_models" in provider_extras:
             custom_models = provider_extras["custom_models"]
         else:
-            custom_models = config.get("llm_custom_models", ConfigHandler.DEFAULT_CONFIG["llm_custom_models"])
+            custom_models = config.get("llm_custom_models", {})
 
         return {
             "provider": provider,
@@ -863,13 +812,13 @@ class ConfigHandler:
     def get_local_ai_config() -> dict:
         """Get local AI configuration"""
         return {
-            "local_model_path": ConfigHandler.get_setting("local_model_path", ""),
-            "local_model_timeout": ConfigHandler.get_setting("local_model_timeout", 90),
-            "n_threads": ConfigHandler.get_setting("local_n_threads", 4),
-            "n_batch": ConfigHandler.get_setting("local_n_batch", 512),
-            "n_ctx": ConfigHandler.get_setting("local_n_ctx", 4096),
-            "flash_attn": ConfigHandler.get_setting("local_flash_attn", True),
-            "n_gpu_layers": ConfigHandler.get_setting("local_n_gpu_layers", 0),
+            "local_model_path": ConfigHandler.get_typed("local_model_path", str, ""),
+            "local_model_timeout": ConfigHandler.get_typed("local_model_timeout", int, 90),
+            "n_threads": ConfigHandler.get_typed("local_n_threads", int, 4),
+            "n_batch": ConfigHandler.get_typed("local_n_batch", int, 512),
+            "n_ctx": ConfigHandler.get_typed("local_n_ctx", int, 2048),
+            "flash_attn": ConfigHandler.get_typed("local_flash_attn", bool, True),
+            "n_gpu_layers": ConfigHandler.get_typed("local_n_gpu_layers", int, 0),
         }
 
     @staticmethod
@@ -943,18 +892,15 @@ class ConfigHandler:
 
     @staticmethod
     def get_ai_max_candidates():
-        config = ConfigHandler.load_config()
-        return config.get("ai_max_candidates", ConfigHandler.DEFAULT_CONFIG["ai_max_candidates"])
+        return ConfigHandler.get_typed("ai_max_candidates", int, 30)
 
     @staticmethod
     def set_ai_max_candidates(val):
-        return ConfigHandler.save_config({"ai_max_candidates": int(val)})
+        return ConfigHandler.set_typed("ai_max_candidates", int(val))
 
     @staticmethod
     def get_sync_max_concurrent_heavy():
-        config = ConfigHandler.load_config()
-        # Enforce bounds [1, 10]
-        val = int(config.get("sync_max_concurrent_heavy", ConfigHandler.DEFAULT_CONFIG["sync_max_concurrent_heavy"]))
+        val = ConfigHandler.get_typed("sync_max_concurrent_heavy", int, 3)
         return max(1, min(val, 10))
 
     @staticmethod
@@ -964,88 +910,71 @@ class ConfigHandler:
 
     @staticmethod
     def get_strategy_min_turnover():
-        config = ConfigHandler.load_config()
-        min_turnover = config.get("strategy_min_turnover", ConfigHandler.DEFAULT_CONFIG["strategy_min_turnover"])
-        return float(min_turnover)
+        return ConfigHandler.get_typed("strategy_min_turnover", float, 2.0)
 
     @staticmethod
     def set_strategy_min_turnover(val):
-        return ConfigHandler.save_config({"strategy_min_turnover": float(val)})
+        return ConfigHandler.set_typed("strategy_min_turnover", float(val))
 
     @staticmethod
     def get_ai_max_concurrent_analysis():
-        config = ConfigHandler.load_config()
-        # Direct key access without legacy fallback
-        return int(config.get("ai_max_concurrent_analysis", ConfigHandler.DEFAULT_CONFIG["ai_max_concurrent_analysis"]))
+        return ConfigHandler.get_typed("ai_max_concurrent_analysis", int, 5)
 
     @staticmethod
     def set_ai_max_concurrent_analysis(val):
-        return ConfigHandler.save_config({"ai_max_concurrent_analysis": int(val)})
+        return ConfigHandler.set_typed("ai_max_concurrent_analysis", int(val))
 
     @staticmethod
     def get_sync_concurrency_light():
-        config = ConfigHandler.load_config()
-        # Default to 20 for lightweight requests (e.g. concepts, list, calendar)
-        return config.get("sync_concurrency_light", ConfigHandler.DEFAULT_CONFIG["sync_concurrency_light"])
+        return ConfigHandler.get_typed("sync_concurrency_light", int, 20)
 
     @staticmethod
     def set_sync_concurrency_light(val):
-        return ConfigHandler.save_config({"sync_concurrency_light": int(val)})
+        return ConfigHandler.set_typed("sync_concurrency_light", int(val))
 
     # === API Robustness Parameters ===
 
     @staticmethod
     def get_sync_retry_count():
-        config = ConfigHandler.load_config()
-        return int(config.get("request_max_retries", ConfigHandler.DEFAULT_CONFIG["request_max_retries"]))
+        return ConfigHandler.get_typed("request_max_retries", int, 3)
 
     @staticmethod
     def get_request_max_retries():
-        config = ConfigHandler.load_config()
-        # Default to 3 if missing, matching DEFAULT_CONFIG
-        return config.get("request_max_retries", ConfigHandler.DEFAULT_CONFIG["request_max_retries"])
+        return ConfigHandler.get_typed("request_max_retries", int, 3)
 
     @staticmethod
     def get_tushare_timeout():
-        config = ConfigHandler.load_config()
-        # Default to 30s for Tushare specifically
-        return config.get("tushare_timeout", ConfigHandler.DEFAULT_CONFIG["tushare_timeout"])
+        return ConfigHandler.get_typed("tushare_timeout", int, 30)
 
     @staticmethod
     def set_tushare_timeout(seconds):
-        return ConfigHandler.save_config(
-            {"tushare_timeout": int(seconds) if seconds is not None else None},
-        )
+        return ConfigHandler.set_typed("tushare_timeout", int(seconds))
 
     @staticmethod
     def get_tushare_api_limit():
-        config = ConfigHandler.load_config()
-        # Default to 200 req/min (safe default)
-        return config.get("tushare_api_rate_limit", ConfigHandler.DEFAULT_CONFIG["tushare_api_rate_limit"])
+        return ConfigHandler.get_typed("tushare_api_rate_limit", int, 200)
 
     @staticmethod
     def set_tushare_api_limit(limit):
-        return ConfigHandler.save_config({"tushare_api_rate_limit": int(limit)})
+        return ConfigHandler.set_typed("tushare_api_rate_limit", int(limit))
 
     # === Localization ===
     @staticmethod
     def get_locale():
-        config = ConfigHandler.load_config()
-        return config.get("locale", ConfigHandler.DEFAULT_CONFIG["locale"])
+        return ConfigHandler.get_typed("locale", str, "zh")
 
     @staticmethod
     def set_locale(locale):
-        return ConfigHandler.save_config({"locale": locale})
+        return ConfigHandler.set_typed("locale", locale)
 
     # === Theme ===
     @staticmethod
     def get_theme_name():
-        config = ConfigHandler.load_config()
-        return config.get("theme_name", ConfigHandler.DEFAULT_CONFIG["theme_name"])
+        return ConfigHandler.get_typed("theme_name", str, "dark")
 
     @staticmethod
     def set_theme_name(theme_name):
-        return ConfigHandler.save_config({"theme_name": theme_name})
+        return ConfigHandler.set_typed("theme_name", theme_name)
 
     # === Scheduler ===
     # ai_prediction_time removed as it was unused
@@ -1055,7 +984,7 @@ class ConfigHandler:
     def get_max_io_workers():
         """Get max IO threads from config, capped by DB connection pool capacity."""
         config = ConfigHandler.load_config()
-        val = config.get("max_io_workers", ConfigHandler.DEFAULT_CONFIG["max_io_workers"])
+        val = config.get("max_io_workers", 16)
         try:
             io_workers = int(val)
         except (ValueError, TypeError):
@@ -1064,16 +993,8 @@ class ConfigHandler:
         if io_workers <= 0:
             io_workers = os.cpu_count() or 4
 
-        try:
-            db_pool_size = int(
-                config.get("db_connection_pool_size", ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"])
-            )
-        except (ValueError, TypeError):
-            db_pool_size = ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"]
-        try:
-            db_max_overflow = int(config.get("db_max_overflow", ConfigHandler.DEFAULT_CONFIG["db_max_overflow"]))
-        except (ValueError, TypeError):
-            db_max_overflow = ConfigHandler.DEFAULT_CONFIG["db_max_overflow"]
+        db_pool_size = ConfigHandler.get_typed("db_connection_pool_size", int, 10)
+        db_max_overflow = ConfigHandler.get_typed("db_max_overflow", int, 5)
         db_capacity = db_pool_size + db_max_overflow
 
         if io_workers > db_capacity:
@@ -1086,21 +1007,16 @@ class ConfigHandler:
 
     @staticmethod
     def set_max_io_workers(count):
-        return ConfigHandler.save_config({"max_io_workers": int(count)})
+        return ConfigHandler.set_typed("max_io_workers", int(count))
 
     @staticmethod
     def get_max_cpu_workers():
         """Get max CPU threads from config."""
-        config = ConfigHandler.load_config()
-        val = config.get("max_cpu_workers", ConfigHandler.DEFAULT_CONFIG["max_cpu_workers"])
-        try:
-            return int(val)
-        except (ValueError, TypeError):
-            return 0
+        return ConfigHandler.get_typed("max_cpu_workers", int, 4)
 
     @staticmethod
     def set_max_cpu_workers(count):
-        return ConfigHandler.save_config({"max_cpu_workers": int(count)})
+        return ConfigHandler.set_typed("max_cpu_workers", int(count))
 
     # === Task Manager Configuration ===
     @staticmethod
@@ -1108,76 +1024,60 @@ class ConfigHandler:
         """Get max concurrent tasks for TaskManager.
         Defaults to cpu_workers count to avoid overwhelming the CPU pool.
         Falls back to 5 if neither is configured."""
-        config = ConfigHandler.load_config()
-        val = config.get("max_concurrent_tasks", ConfigHandler.DEFAULT_CONFIG["max_concurrent_tasks"])
-        try:
-            val = int(val)
-        except (ValueError, TypeError):
-            val = 0
+        val = ConfigHandler.get_typed("max_concurrent_tasks", int, 0)
         if val > 0:
             return val
-        # Fallback: derive from CPU pool size, or use 5
         cpu = ConfigHandler.get_max_cpu_workers()
         return cpu if cpu > 0 else 5
 
     @staticmethod
     def set_max_concurrent_tasks(count):
-        return ConfigHandler.save_config({"max_concurrent_tasks": int(count)})
+        return ConfigHandler.set_typed("max_concurrent_tasks", int(count))
 
     # === Sync Rate Limiting ===
     @staticmethod
     def get_sync_request_delay(is_heavy=False):
-        config = ConfigHandler.load_config()
         if is_heavy:
-            return config.get("sync_request_delay_heavy", ConfigHandler.DEFAULT_CONFIG["sync_request_delay_heavy"])
-        return config.get("sync_request_delay_light", ConfigHandler.DEFAULT_CONFIG["sync_request_delay_light"])
+            return ConfigHandler.get_typed("sync_request_delay_heavy", float, 0.0)
+        return ConfigHandler.get_typed("sync_request_delay_light", float, 0.0)
 
     @staticmethod
     def set_sync_request_delay(delay, is_heavy=False):
         key = "sync_request_delay_heavy" if is_heavy else "sync_request_delay_light"
-        return ConfigHandler.save_config({key: float(delay)})
+        return ConfigHandler.set_typed(key, float(delay))
 
     # === Polling Intervals ===
     @staticmethod
     def get_news_poll_interval():
-        config = ConfigHandler.load_config()
-        return config.get("news_poll_interval", ConfigHandler.DEFAULT_CONFIG["news_poll_interval"])
+        return ConfigHandler.get_typed("news_poll_interval", int, 60)
 
     @staticmethod
     def set_news_poll_interval(seconds):
-        return ConfigHandler.save_config({"news_poll_interval": int(max(10, seconds))})
+        return ConfigHandler.set_typed("news_poll_interval", int(max(10, seconds)))
 
     @staticmethod
     def get_market_data_poll_interval():
-        config = ConfigHandler.load_config()
-        return config.get("market_data_poll_interval", ConfigHandler.DEFAULT_CONFIG["market_data_poll_interval"])
+        return ConfigHandler.get_typed("market_data_poll_interval", int, 30)
 
     @staticmethod
     def set_market_data_poll_interval(seconds):
-        return ConfigHandler.save_config(
-            {"market_data_poll_interval": int(max(10, seconds))},
-        )
+        return ConfigHandler.set_typed("market_data_poll_interval", int(max(10, seconds)))
 
     @staticmethod
     def get_sync_integrity_config():
         """获取数据完整性检查配置"""
         config = ConfigHandler.load_config()
-        sync_integrity = config.get("sync_integrity", ConfigHandler.DEFAULT_CONFIG["sync_integrity"])
-        si_defaults = ConfigHandler.DEFAULT_CONFIG["sync_integrity"]
+        defaults = get_default_config()["sync_integrity"]
+        sync_integrity = config.get("sync_integrity", defaults)
         return {
-            "quotes_tolerance_ratio": sync_integrity.get(
-                "quotes_tolerance_ratio", si_defaults["quotes_tolerance_ratio"]
-            ),
+            "quotes_tolerance_ratio": sync_integrity.get("quotes_tolerance_ratio", defaults["quotes_tolerance_ratio"]),
             "indicators_tolerance_ratio": sync_integrity.get(
-                "indicators_tolerance_ratio", si_defaults["indicators_tolerance_ratio"]
+                "indicators_tolerance_ratio", defaults["indicators_tolerance_ratio"]
             ),
             "moneyflow_tolerance_ratio": sync_integrity.get(
-                "moneyflow_tolerance_ratio", si_defaults["moneyflow_tolerance_ratio"]
+                "moneyflow_tolerance_ratio", defaults["moneyflow_tolerance_ratio"]
             ),
-            "financial_min_periods": sync_integrity.get("financial_min_periods", si_defaults["financial_min_periods"]),
-            "quality_threshold": sync_integrity.get("quality_threshold", si_defaults["quality_threshold"]),
-            "quality_weights": sync_integrity.get(
-                "quality_weights",
-                si_defaults["quality_weights"],
-            ),
+            "financial_min_periods": sync_integrity.get("financial_min_periods", defaults["financial_min_periods"]),
+            "quality_threshold": sync_integrity.get("quality_threshold", defaults["quality_threshold"]),
+            "quality_weights": sync_integrity.get("quality_weights", defaults["quality_weights"]),
         }

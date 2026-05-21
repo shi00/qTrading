@@ -193,6 +193,17 @@ def isolate_config_file():
 
 
 @pytest.fixture(autouse=True)
+def reset_config_cache():
+    """
+    Reset ConfigHandler._config_cache before each test to prevent cross-test pollution.
+    """
+    from utils.config_handler import ConfigHandler
+
+    ConfigHandler._config_cache = None
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_mock_keyring_store():
     """Clear mock keyring password store between tests to prevent leakage."""
     yield
