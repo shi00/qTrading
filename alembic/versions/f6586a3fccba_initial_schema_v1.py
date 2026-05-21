@@ -203,8 +203,8 @@ def _create_all_tables_fresh() -> None:
         sa.Column("stk_div", sa.Numeric(12, 4), nullable=True),
         sa.Column("stk_bo_rate", sa.Numeric(12, 4), nullable=True),
         sa.Column("stk_co_rate", sa.Numeric(12, 4), nullable=True),
-        sa.Column("cash_div", sa.Numeric(20, 4), nullable=True),
-        sa.Column("cash_div_tax", sa.Numeric(20, 4), nullable=True),
+        sa.Column("cash_div", sa.Numeric(12, 4), nullable=True),
+        sa.Column("cash_div_tax", sa.Numeric(12, 4), nullable=True),
         sa.Column("record_date", sa.Date(), nullable=True),
         sa.Column("ex_date", sa.Date(), nullable=True),
         sa.Column(
@@ -251,8 +251,8 @@ def _create_all_tables_fresh() -> None:
         sa.Column("end_date", sa.Date(), nullable=False),
         sa.Column("ann_date", sa.Date(), nullable=False),
         sa.Column("type", sa.String(), nullable=True),
-        sa.Column("p_change_min", sa.Numeric(8, 4), nullable=True),
-        sa.Column("p_change_max", sa.Numeric(8, 4), nullable=True),
+        sa.Column("p_change_min", sa.Numeric(12, 4), nullable=True),
+        sa.Column("p_change_max", sa.Numeric(12, 4), nullable=True),
         sa.Column("net_profit_min", sa.Numeric(20, 4), nullable=True),
         sa.Column("net_profit_max", sa.Numeric(20, 4), nullable=True),
         sa.Column(
@@ -562,12 +562,6 @@ def _create_all_tables_fresh() -> None:
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_index(
-        op.f("ix_moneyflow_daily_trade_date"),
-        "moneyflow_daily",
-        ["trade_date"],
-        unique=False,
-    )
     op.create_table(
         "moneyflow_hsgt",
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -649,7 +643,7 @@ def _create_all_tables_fresh() -> None:
         sa.Column("end_date", sa.Date(), nullable=True),
         sa.Column("proc", sa.String(), nullable=True),
         sa.Column("exp_date", sa.Date(), nullable=True),
-        sa.Column("vol", sa.Numeric(20, 4), nullable=True),
+        sa.Column("vol", sa.BigInteger(), nullable=True),
         sa.Column("amount", sa.Numeric(20, 4), nullable=True),
         sa.Column("high_limit", sa.Numeric(12, 4), nullable=True),
         sa.Column("low_limit", sa.Numeric(12, 4), nullable=True),
@@ -670,7 +664,7 @@ def _create_all_tables_fresh() -> None:
     op.create_index(op.f("ix_repurchase_ann_date"), "repurchase", ["ann_date"], unique=False)
     op.create_table(
         "screening_history",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("run_id", sa.String(16), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("strategy_name", sa.String(), nullable=False),
@@ -735,12 +729,7 @@ def _create_all_tables_fresh() -> None:
         ["run_id"],
         unique=False,
     )
-    op.create_index(
-        "idx_screening_history_trade_date",
-        "screening_history",
-        ["trade_date"],
-        unique=False,
-    )
+
     _create_partial_index(
         "screening_history", "idx_sh_prediction_result", "prediction_result", "prediction_result IS NOT NULL"
     )
@@ -799,8 +788,8 @@ def _create_all_tables_fresh() -> None:
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
         sa.Column("ann_date", sa.Date(), nullable=True),
-        sa.Column("holder_num", sa.Integer(), nullable=True),
-        sa.Column("holder_num_change", sa.Integer(), nullable=True),
+        sa.Column("holder_num", sa.BigInteger(), nullable=True),
+        sa.Column("holder_num_change", sa.BigInteger(), nullable=True),
         sa.Column("holder_num_ratio", sa.Numeric(12, 4), nullable=True),
         sa.Column(
             "updated_at",
@@ -848,7 +837,7 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_basic")),
     )
     op.create_index(op.f("ix_stock_basic_list_date"), "stock_basic", ["list_date"], unique=False)
-    op.create_index("idx_stock_basic_delist_date", "stock_basic", ["delist_date"], unique=False)
+    op.create_index(op.f("ix_stock_basic_delist_date"), "stock_basic", ["delist_date"], unique=False)
     op.create_index("idx_stock_basic_dates", "stock_basic", ["list_date", "delist_date"], unique=False)
     op.create_index("idx_stock_basic_status", "stock_basic", ["list_status", "list_date"], unique=False)
     op.create_table(
@@ -870,7 +859,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "concept_id", name=op.f("pk_stock_concepts")),
     )
-    op.create_index(op.f("ix_stock_concepts_ts_code"), "stock_concepts", ["ts_code"], unique=False)
+
     op.create_table(
         "stock_sync_status",
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -964,10 +953,10 @@ def _create_all_tables_fresh() -> None:
         sa.Column("end_date", sa.Date(), nullable=False),
         sa.Column("ann_date", sa.Date(), nullable=True),
         sa.Column("holder_name", sa.String(), nullable=False),
-        sa.Column("hold_amount", sa.Numeric(20, 4), nullable=True),
+        sa.Column("hold_amount", sa.BigInteger(), nullable=True),
         sa.Column("hold_ratio", sa.Numeric(12, 4), nullable=True),
         sa.Column("hold_float_ratio", sa.Numeric(12, 4), nullable=True),
-        sa.Column("hold_change", sa.Numeric(20, 4), nullable=True),
+        sa.Column("hold_change", sa.BigInteger(), nullable=True),
         sa.Column("holder_type", sa.String(), nullable=True),
         sa.Column(
             "updated_at",
@@ -1041,11 +1030,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("cal_date", name=op.f("pk_trade_cal")),
     )
-    op.create_index(
-        "idx_trade_cal_date_open_exchange",
-        "trade_cal",
-        ["cal_date", "is_open", "exchange"],
-    )
+
     op.create_table(
         "app_state",
         sa.Column("key", sa.String(), nullable=False),
@@ -1065,7 +1050,7 @@ def _create_table_screening_history() -> None:
     """Create screening_history and screening_thinking tables (for legacy DBs missing them)."""
     op.create_table(
         "screening_history",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("run_id", sa.String(16), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("strategy_name", sa.String(), nullable=False),
@@ -1271,11 +1256,11 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_suspend_d_trade_date"), table_name="suspend_d")
     op.drop_table("suspend_d")
     op.drop_table("stock_sync_status")
-    op.drop_index(op.f("ix_stock_concepts_ts_code"), table_name="stock_concepts")
+
     op.drop_table("stock_concepts")
     op.drop_index("idx_stock_basic_status", table_name="stock_basic")
     op.drop_index("idx_stock_basic_dates", table_name="stock_basic")
-    op.drop_index("idx_stock_basic_delist_date", table_name="stock_basic")
+    op.drop_index(op.f("ix_stock_basic_delist_date"), table_name="stock_basic")
     op.drop_index(op.f("ix_stock_basic_list_date"), table_name="stock_basic")
     op.drop_table("stock_basic")
     op.drop_index(op.f("ix_stk_holdernumber_end_date"), table_name="stk_holdernumber")
@@ -1284,7 +1269,6 @@ def downgrade() -> None:
     op.drop_index("idx_sh_run_id", table_name="screening_history")
     op.drop_index("idx_sh_date_code", table_name="screening_history")
     op.drop_index("idx_sh_date_strategy", table_name="screening_history")
-    op.drop_index("idx_screening_history_trade_date", table_name="screening_history")
     op.drop_table("screening_thinking")
     op.drop_table("screening_history")
     op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")
@@ -1293,7 +1277,6 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_northbound_holding_trade_date"), table_name="northbound_holding")
     op.drop_table("northbound_holding")
     op.drop_table("moneyflow_hsgt")
-    op.drop_index(op.f("ix_moneyflow_daily_trade_date"), table_name="moneyflow_daily")
     op.drop_index("ix_moneyflow_daily_date_code", table_name="moneyflow_daily")
     op.drop_table("moneyflow_daily")
     op.drop_table("market_news")
