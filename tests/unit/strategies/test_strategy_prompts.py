@@ -2,8 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
-
 from strategies.strategy_prompts import (
     _UNIVERSAL_RULES,
     STRATEGY_PROMPTS,
@@ -48,7 +46,9 @@ class TestCleanRules:
             assert "Some prompt content" in result
 
     def test_clean_rules_heuristic_marker_removal(self):
-        text_with_marker = "Some prompt content\n\n【输出格式】你必须只返回一个合法 JSON 对象，包含 conclusion_label 字段..."
+        text_with_marker = (
+            "Some prompt content\n\n【输出格式】你必须只返回一个合法 JSON 对象，包含 conclusion_label 字段..."
+        )
 
         with patch("utils.config_handler.ConfigHandler.get_strategy_prompt", return_value=text_with_marker):
             result = get_base_prompt("value")

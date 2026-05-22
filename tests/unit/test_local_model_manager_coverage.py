@@ -377,9 +377,6 @@ class TestLocalModelManagerInit:
 class TestLocalModelManagerGetLoadLock:
     @pytest.mark.asyncio
     async def test_get_load_lock_creates_new_lock_per_loop(self):
-        import asyncio
-
-        loop = asyncio.get_running_loop()
         lock1 = LocalModelManager._get_load_lock()
         lock2 = LocalModelManager._get_load_lock()
 

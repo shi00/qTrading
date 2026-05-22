@@ -183,7 +183,7 @@ class TestAIBrainTabSaveAISettings:
         tab.ai_concurrency_input = MagicMock()
         tab.ai_concurrency_input.value = "999"
 
-        with patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch:
+        with patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"):
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called()
 
@@ -210,7 +210,7 @@ class TestAIBrainTabSaveAISettings:
         tab._safe_update = MagicMock()
 
         with (
-            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
             patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
         ):

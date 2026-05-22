@@ -689,8 +689,6 @@ class TestGenerateSignals:
 
     @pytest.mark.asyncio
     async def test_strategy_exception_with_fail_fast(self):
-        from dataclasses import replace
-
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),

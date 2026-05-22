@@ -3,8 +3,6 @@
 import datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 class TestOfflineCalendarGetInstance:
     def test_get_instance_success(self):

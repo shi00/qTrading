@@ -485,7 +485,7 @@ class TestBaseDaoWriteDb:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = False
 
-            result = await dao._write_db("INSERT INTO t VALUES (1)", conn=mock_conn)
+            await dao._write_db("INSERT INTO t VALUES (1)", conn=mock_conn)
             mock_conn.exec_driver_sql.assert_called_once()
 
     @pytest.mark.asyncio
