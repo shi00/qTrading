@@ -12,6 +12,7 @@ import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS
 from data.sync.base import ISyncStrategy, SyncResult
+from data.persistence.daos.base_dao import EngineDisposedError
 from core.i18n import I18n
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
@@ -171,6 +172,10 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
         except asyncio.CancelledError:
             logger.debug("[FinancialSync] Stop | Operation cancelled.")
             result.status = "cancelled"
+        except EngineDisposedError:
+            logger.warning("[FinancialSync] Run | Engine disposed, stopping sync.")
+            result.status = "failed"
+            result.errors.append("Engine disposed during sync")
         except Exception as e:
             logger.error(
                 f"[FinancialSync] Run | ❌ Top-level failure: {e}",
@@ -333,7 +338,9 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                                     df_merged[col] = None
 
                     except (AttributeError, NameError, TypeError, ImportError):
-                        raise  # Critical errors must propagate
+                        raise
+                    except EngineDisposedError:
+                        raise
                     except Exception as e:
                         has_error = True
                         logger.warning(
@@ -364,11 +371,12 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                             f"[FinancialSync] StockSync | {ts_code} incomplete, pending retry.",
                         )
 
+            except EngineDisposedError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"[FinancialSync] StockSync | ⚠️ Failed for {ts_code}: {e}",
                 )
-                # Don't abort all, just this stock
 
             # Per-stock progress update (advance progress bar for processed stocks)
             if processed:
@@ -463,6 +471,8 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                     "%Y-%m-%d %H:%M:%S",
                 )
             start_date_dt = last_sync_dt + datetime.timedelta(days=1)
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(f"[FinancialSync] Date parse | ⚠️ Failed to parse last_sync_date, using 30-day fallback: {e}")
             start_date_dt = get_now() - datetime.timedelta(days=30)
@@ -533,6 +543,8 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                             )
                             if count > 0:
                                 result["saved"] = count
+                    except EngineDisposedError:
+                        raise
                     except Exception as e:
                         logger.warning(
                             f"[FinancialSync] Incremental | ⚠️ Failed {ts_code} period={period}: {e}",
@@ -638,6 +650,8 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                         row_count,
                     )
 
+                except EngineDisposedError:
+                    raise
                 except Exception as e:
                     err_str = str(e).lower()
                     if "permission" in err_str or "积分" in err_str or "no access" in err_str:
@@ -739,6 +753,8 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                     row_count = await save_func(df)
                     return row_count if row_count is not None else len(df)
                 return 0
+            except EngineDisposedError:
+                raise
             except Exception as e:
                 err_str = str(e).lower()
                 if "permission" in err_str or "积分" in err_str:
@@ -826,6 +842,8 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
             return df_merged, aux_counts
 
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[FinancialSync] Fetch | ⚠️ Comprehensive data failed for {ts_code}: {e}",
@@ -884,6 +902,8 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                             len(periods) * len(ts_codes),
                             I18n.get("status_repairing", period=period, code=ts_code),
                         )
+                except EngineDisposedError:
+                    raise
                 except Exception as e:
                     logger.debug(f"[Repair] Failed for {ts_code} period={period}: {e}")
 

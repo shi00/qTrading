@@ -22,6 +22,7 @@ from data.constants import (
     SYNC_RESULT_SAVE_FAILED,
 )
 from data.sync.base import ISyncStrategy, SyncResult
+from data.persistence.daos.base_dao import EngineDisposedError
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
@@ -87,6 +88,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
             if trade_date is not None:
                 return trade_date
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.debug(f"[HistoricalSync] get_latest_trade_date failed, using today: {e}")
         return get_now().date()
@@ -133,11 +136,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                 result.table_stats[table] = {"count": 0}
                             result.table_stats[table]["count"] += info.get("count", 0)
 
+                except EngineDisposedError:
+                    raise
                 except Exception as qe:
                     logger.warning(f"[HistoricalSync] Report | Failed to collect quality scores: {qe}")
 
         except asyncio.CancelledError:
             result.status = "cancelled"
+        except EngineDisposedError:
+            logger.warning("[HistoricalSync] Run | Engine disposed, stopping sync.")
+            result.status = "failed"
+            result.errors.append("Engine disposed during sync")
         except Exception as e:
             logger.error(
                 f"[HistoricalSync] Run | ❌ Top-level failure: {e}",
@@ -175,6 +184,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 start_date, end_date
             )
             trade_dates = list(reversed(trade_date_objs))
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed: {e}",
@@ -192,6 +203,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         try:
             sync_integrity_config = ConfigHandler.get_sync_integrity_config()
             QUALITY_THRESHOLD = sync_integrity_config.get("quality_threshold", 80)
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(f"[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults: {e}")
             QUALITY_THRESHOLD = 80
@@ -261,6 +274,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         for d in low_quality_dates:
                             existing.discard(d)
                             existing_str.discard(normalize_date(d))
+                except EngineDisposedError:
+                    raise
                 except Exception as qe:
                     logger.warning(f"[HistoricalSync] QualityCheck | Failed: {qe}")
 
@@ -273,6 +288,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.debug(
                     f"[HistoricalSync] Resume | Skipped {skipped} high-quality dates (threshold={QUALITY_THRESHOLD}).",
                 )
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(f"[HistoricalSync] Resume | ⚠️ Cache check failed: {e}")
 
@@ -319,6 +336,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             total_days,
                             I18n.get("progress_sync_market").format(date=date.strftime("%Y%m%d")),
                         )
+                except EngineDisposedError:
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"[HistoricalSync] DaySync | ⚠️ Failed {date}: {e}",
@@ -383,6 +402,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                 f"[HistoricalSync] Retry | ✅ Recovered {date}",
                             )
                             result.added += 1
+                        except EngineDisposedError:
+                            raise
                         except Exception as retry_e:
                             logger.warning(
                                 f"[HistoricalSync] Retry | ⚠️ Failed {date}: {retry_e}",
@@ -461,6 +482,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             try:
                 # Return (key, data, error)
                 return (key, await func(trade_date=trade_date), None)
+            except EngineDisposedError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"[HistoricalSync] DaySync | ⚠️ Fetch {name} failed for {trade_date}: {e}",
@@ -475,6 +498,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if valid:
                     return ("index", pd.concat(valid, ignore_index=True), None)
                 return ("index", None, None)
+            except EngineDisposedError:
+                raise
             except Exception as e:
                 return ("index", None, e)
 
@@ -533,6 +558,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         "success": True,
                         "result_status": SYNC_RESULT_HAS_DATA,
                     }
+                except EngineDisposedError:
+                    raise
                 except Exception as e:
                     if critical:
                         logger.error(
@@ -651,6 +678,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 north_result = {"saved": None, "fetched": 0, "success": False}
             else:
                 north_result = {"saved": 0, "fetched": 0, "success": True}
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical): {e}",
@@ -757,6 +786,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 f"[HistoricalSync] MoneyFlow | ❌ Network error: {e}",
             )
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed: {e}",
@@ -785,6 +816,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.error(
                 f"[HistoricalSync] Northbound | ❌ Network error: {e}",
             )
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(

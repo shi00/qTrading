@@ -8,6 +8,7 @@ import typing
 from collections import OrderedDict
 
 from data.cache.cache_manager import CacheManager
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
@@ -248,6 +249,9 @@ class NewsSubscriptionService:
 
         try:
             await self._fetch_and_notify()
+        except EngineDisposedError:
+            logger.warning("[NewsService] Engine disposed during fetch, stopping.")
+            self._running = False
         except Exception as e:
             logger.error(
                 f"[NewsService] Error in background fetch task: {e}",
@@ -330,6 +334,9 @@ class NewsSubscriptionService:
                 await asyncio.sleep(0)
 
             except asyncio.CancelledError:
+                break
+            except EngineDisposedError:
+                logger.warning("[NewsService] Engine disposed during processing, stopping loop.")
                 break
             except Exception as e:
                 logger.error(
@@ -506,5 +513,8 @@ class NewsSubscriptionService:
                         data=new_items,
                     )
 
+        except EngineDisposedError:
+            logger.warning("[NewsService] Engine disposed during poll, stopping.")
+            self._running = False
         except Exception as e:
             logger.warning(f"[NewsService] Poll failed: {e}", exc_info=True)

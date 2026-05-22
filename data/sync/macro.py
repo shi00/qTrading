@@ -10,6 +10,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
 from .base import ISyncStrategy, SyncResult
+from data.persistence.daos.base_dao import EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ class MacroSyncStrategy(ISyncStrategy):
             elif trade_date:
                 parsed = parse_date(str(trade_date))
                 return parsed.date() if hasattr(parsed, "date") else parsed
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.debug(f"[MacroSync] Effective trade date fallback: {e}")
         return get_now().date()
@@ -86,6 +89,10 @@ class MacroSyncStrategy(ISyncStrategy):
             if self._check_cancelled(result):
                 return result
             await self._sync_index_weights(result)
+        except EngineDisposedError:
+            logger.warning("[MacroSync] Run | Engine disposed, stopping sync.")
+            result.status = "failed"
+            result.errors.append("Engine disposed during sync")
         except Exception as e:
             logger.error(f"[MacroSync] Failed: {e}", exc_info=True)
             result.status = "failed"
@@ -132,6 +139,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     count or 0,
                 )
 
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(f"[MacroSync] Monthly | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Macro Monthly: {e}")
@@ -245,6 +254,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     count or 0,
                 )
 
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Shibor: {e}")
@@ -308,6 +319,8 @@ class MacroSyncStrategy(ISyncStrategy):
                         if count:
                             iw_saved += count
                             result.added += count
+                except EngineDisposedError:
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}",
@@ -320,6 +333,8 @@ class MacroSyncStrategy(ISyncStrategy):
             )
             logger.debug(f"[MacroSync] IndexWeight | Total: {iw_saved} records")
 
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}",

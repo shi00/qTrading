@@ -8,6 +8,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
 from .base import ISyncStrategy, SyncResult
+from data.persistence.daos.base_dao import EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,8 @@ class HolderSyncStrategy(ISyncStrategy):
                     return trade_date.date()
                 elif isinstance(trade_date, datetime.date):
                     return trade_date
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.debug(f"[HolderSync] Effective trade date fallback: {e}")
         return get_now().date()
@@ -133,6 +136,10 @@ class HolderSyncStrategy(ISyncStrategy):
                     f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}",
                 )
 
+        except EngineDisposedError:
+            logger.warning("[HolderSync] Run | Engine disposed, stopping sync.")
+            result.status = "failed"
+            result.errors.append("Engine disposed during sync")
         except Exception as e:
             logger.error(f"[HolderSync] Run | ❌ Top-level failure: {e}", exc_info=True)
             result.status = "failed"
@@ -157,6 +164,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 f"[HolderSync] Table | stk_holdernumber enddate={enddate}: no data",
             )
             return 0
+        except EngineDisposedError:
+            raise
         except Exception as e:
             self._log_sync_error("stk_holdernumber", enddate, e)
             return -1
@@ -229,6 +238,8 @@ class HolderSyncStrategy(ISyncStrategy):
                         all_dfs.append(df)
                         total_rows += len(df)
                     consecutive_errors = 0
+                except EngineDisposedError:
+                    raise
                 except Exception as e:
                     stock_errors += 1
                     consecutive_errors += 1
@@ -290,6 +301,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 return -1
 
             return total_rows
+        except EngineDisposedError:
+            raise
         except Exception as e:
             self._log_sync_error("top10_holders", period, e)
             return -1
@@ -302,6 +315,8 @@ class HolderSyncStrategy(ISyncStrategy):
         """
         try:
             return await self.context.cache.get_existing_top10_ts_codes(period)
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[HolderSync] top10_holders | Failed to query existing ts_codes "
@@ -326,6 +341,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 f"[HolderSync] top10_holders | Checkpoint saved: {len(combined)} records for period={period}",
             )
             return True
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[HolderSync] top10_holders | Checkpoint save failed for period={period}: {e}",
@@ -366,6 +383,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 f"[HolderSync] Table | {table_name} end_date={end_date}: no data",
             )
             return 0
+        except EngineDisposedError:
+            raise
         except Exception as e:
             err_str = str(e).lower()
             if "permission" in err_str or "积分" in err_str:
@@ -404,6 +423,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 try:
                     df = await self.context.api.get_pledge_stat(end_date=end_date)
                     all_api_failed = False
+                except EngineDisposedError:
+                    raise
                 except Exception as api_err:
                     logger.debug(
                         f"[HolderSync] pledge_stat | API error for end_date={end_date}: {api_err}",

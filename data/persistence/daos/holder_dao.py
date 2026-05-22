@@ -4,7 +4,7 @@ import pandas as pd
 
 from data.persistence.models import StkHoldernumber, Top10Holders, get_model_columns, get_model_pk_columns
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 from .financial_dao import _chunked_in_query
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,8 @@ class HolderDao(BaseDao):
                 """
                 await self._write_db(sql, tuple(chunk))
             logger.debug(f"[HolderDao] Calculated holder changes for {len(ts_codes)} stocks")
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to calculate holder changes: {e}")
 
