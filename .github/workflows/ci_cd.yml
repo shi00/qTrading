@@ -222,7 +222,7 @@ jobs:
               percent = 0.0
           
           with open("coverage_percent.txt", "w", encoding="utf-8") as f:
-              f.write(f"{percent:.2f}")
+              f.write(f"{percent:.2f}\n")
           
           try:
               pyproject = Path("pyproject.toml")
@@ -236,7 +236,7 @@ jobs:
               per_file_minimum = 80
           
           with open("coverage_thresholds.txt", "w", encoding="utf-8") as f:
-              f.write(f"{fail_under}\n{per_file_minimum}")
+              f.write(f"{fail_under}\n{per_file_minimum}\n")
           PY
           echo "COVERAGE_PERCENT=$(cat coverage_percent.txt)" >> "$GITHUB_ENV"
           {
