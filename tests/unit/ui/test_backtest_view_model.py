@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import date
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -298,7 +300,7 @@ class TestBacktestViewModelRunBacktest:
         on_result = MagicMock()
         vm.bind(on_update=on_update, on_status=on_status, on_progress=on_progress, on_result=on_result)
 
-        captured_factory = None
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
 
         def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
             nonlocal captured_factory
@@ -346,7 +348,7 @@ class TestBacktestViewModelRunBacktest:
         on_progress = MagicMock()
         vm.bind(on_progress=on_progress)
 
-        captured_factory = None
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
 
         def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
             nonlocal captured_factory
@@ -367,6 +369,7 @@ class TestBacktestViewModelRunBacktest:
 
             await vm.run_backtest("test_strategy", config)
 
+        assert captured_factory is not None
         await captured_factory(task_id="task_456")
 
         progress_calls = [c for c in on_progress.call_args_list if len(c[0]) >= 2 and c[0][0] == 0.5]
@@ -382,7 +385,7 @@ class TestBacktestViewModelRunBacktest:
         on_progress = MagicMock()
         vm.bind(on_status=on_status, on_progress=on_progress)
 
-        captured_factory = None
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
 
         def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
             nonlocal captured_factory
@@ -402,6 +405,7 @@ class TestBacktestViewModelRunBacktest:
 
             await vm.run_backtest("test_strategy", config)
 
+        assert captured_factory is not None
         with pytest.raises(RuntimeError, match="strategy crashed"):
             await captured_factory(task_id="task_789")
 
@@ -493,7 +497,7 @@ class TestBacktestViewModelRunBacktest:
 
         config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
 
-        captured_factory = None
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
 
         def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
             nonlocal captured_factory
@@ -511,6 +515,7 @@ class TestBacktestViewModelRunBacktest:
 
             await vm.run_backtest("test_strategy", config)
 
+        assert captured_factory is not None
         with pytest.raises(ValueError, match="config error"):
             await captured_factory(task_id="task_err")
 
