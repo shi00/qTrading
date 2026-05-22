@@ -103,3 +103,117 @@ class TestPriceAdjustment:
 
         assert stock1["qfq_close"].to_list()[1] == pytest.approx(11.2, rel=0.01)
         assert stock2["qfq_close"].to_list()[1] == pytest.approx(22.2, rel=0.01)
+
+
+class TestExRightDate:
+    """除权日复权价格计算专项测试"""
+
+    def test_ex_right_dividend(self) -> None:
+        """测试除权除息日复权价格计算。
+
+        场景：股票 10 送 10，adj_factor 从 1.0 变为 0.5
+        复权后，除权前的价格应该调整为原来的一半。
+        """
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)],
+                "open": [20.0, 10.0, 10.5],
+                "high": [20.5, 10.5, 11.0],
+                "low": [19.5, 9.5, 10.0],
+                "close": [20.2, 10.2, 10.8],
+                "adj_factor": [0.5, 0.5, 0.5],
+            }
+        )
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        result = engine._apply_qfq(quotes_df)
+
+        assert result["raw_open"].to_list() == [20.0, 10.0, 10.5]
+        assert result["raw_close"].to_list() == [20.2, 10.2, 10.8]
+
+        qfq_close = result["qfq_close"].to_list()
+        assert qfq_close[0] == pytest.approx(20.2, rel=0.01)
+        assert qfq_close[1] == pytest.approx(10.2, rel=0.01)
+        assert qfq_close[2] == pytest.approx(10.8, rel=0.01)
+
+    def test_ex_right_with_subsequent_adjustment(self) -> None:
+        """测试除权后继续有复权因子变化。
+
+        场景：除权日 adj_factor=0.5，之后 adj_factor=0.25（再次除权）
+        """
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "open": [20.0, 10.0, 10.5, 5.0],
+                "high": [20.5, 10.5, 11.0, 5.5],
+                "low": [19.5, 9.5, 10.0, 4.5],
+                "close": [20.2, 10.2, 10.8, 5.2],
+                "adj_factor": [0.5, 0.5, 0.25, 0.25],
+            }
+        )
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        result = engine._apply_qfq(quotes_df)
+
+        qfq_close = result["qfq_close"].to_list()
+        latest_adj = 0.25
+
+        assert qfq_close[0] == pytest.approx(20.2 * 0.5 / latest_adj, rel=0.01)
+        assert qfq_close[1] == pytest.approx(10.2 * 0.5 / latest_adj, rel=0.01)
+        assert qfq_close[2] == pytest.approx(10.8 * 0.25 / latest_adj, rel=0.01)
+        assert qfq_close[3] == pytest.approx(5.2, rel=0.01)
+
+    def test_ex_right_preserves_trading_value(self) -> None:
+        """测试除权日成交金额使用原始价格。
+
+        关键：成交金额必须使用 raw_open/raw_close，不能用 qfq 价格。
+        """
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 1), date(2024, 1, 2)],
+                "open": [20.0, 10.0],
+                "high": [20.5, 10.5],
+                "low": [19.5, 9.5],
+                "close": [20.2, 10.2],
+                "adj_factor": [0.5, 0.5],
+            }
+        )
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        result = engine._apply_qfq(quotes_df)
+
+        raw_open = result["raw_open"].to_list()
+        raw_close = result["raw_close"].to_list()
+
+        assert raw_open[0] == 20.0
+        assert raw_open[1] == 10.0
+        assert raw_close[0] == 20.2
+        assert raw_close[1] == 10.2
+
+        volume = 1000
+        gross_amount_day1 = raw_open[0] * volume
+        gross_amount_day2 = raw_open[1] * volume
+
+        assert gross_amount_day1 == 20000.0
+        assert gross_amount_day2 == 10000.0

@@ -692,3 +692,149 @@ class TestPnlAfterExDividend:
             f"Got pnl={stock_pos['pnl']}, expected={expected_pnl}, "
             f"qfq_cost_basis={qfq_cost_basis}, qfq_market_value={qfq_market_value}"
         )
+
+
+class TestICCalculationWithRebalanceFreq:
+    """IC 计算与调仓频率对齐的专项测试"""
+
+    def _make_engine(self, **kwargs):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 2, 28),
+            **kwargs,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        return engine
+
+    def test_ic_with_daily_freq_uses_next_day_return(self) -> None:
+        """测试 daily 频率下 IC 使用次日收益。"""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            date(2024, 1, 4),
+        ]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)],
+                "execution_date": [date(2024, 1, 3)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": trade_dates,
+                "raw_open": [10.0, 10.0, 10.5],
+                "raw_close": [10.0, 10.2, 10.8],
+                "qfq_open": [10.0, 10.0, 10.5],
+                "qfq_close": [10.0, 10.2, 10.8],
+            }
+        )
+        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert len(ic_series) == 2
+
+    def test_ic_with_weekly_freq_uses_weekly_return(self) -> None:
+        """测试 weekly 频率下 IC 使用周度收益。
+
+        场景：
+        - 信号日：2024-01-08（周一）
+        - 执行日：2024-01-09
+        - 下一次调仓日：2024-01-15（下周一）
+        - IC 应计算 01-09 open 到 01-15 open 的收益
+        """
+        engine = self._make_engine(rebalance_freq="weekly")
+        trade_dates = [
+            date(2024, 1, 8),
+            date(2024, 1, 9),
+            date(2024, 1, 10),
+            date(2024, 1, 11),
+            date(2024, 1, 15),
+            date(2024, 1, 16),
+        ]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 8)],
+                "execution_date": [date(2024, 1, 9)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": trade_dates,
+                "raw_open": [10.0, 10.0, 10.2, 10.3, 10.5, 10.6],
+                "raw_close": [10.0, 10.1, 10.3, 10.4, 10.7, 10.8],
+                "qfq_open": [10.0, 10.0, 10.2, 10.3, 10.5, 10.6],
+                "qfq_close": [10.0, 10.1, 10.3, 10.4, 10.7, 10.8],
+            }
+        )
+        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert len(ic_series) == 5
+
+    def test_ic_with_monthly_freq_uses_monthly_return(self) -> None:
+        """测试 monthly 频率下 IC 使用月度收益。
+
+        场景：
+        - 信号日：2024-01-29
+        - 执行日：2024-01-30
+        - 下一次调仓日：2024-02-01（下月初）
+        """
+        engine = self._make_engine(rebalance_freq="monthly")
+        trade_dates = [
+            date(2024, 1, 29),
+            date(2024, 1, 30),
+            date(2024, 1, 31),
+            date(2024, 2, 1),
+            date(2024, 2, 2),
+        ]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 29)],
+                "execution_date": [date(2024, 1, 30)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 5,
+                "trade_date": trade_dates,
+                "raw_open": [10.0, 10.0, 10.1, 10.5, 10.6],
+                "raw_close": [10.0, 10.1, 10.2, 10.7, 10.8],
+                "qfq_open": [10.0, 10.0, 10.1, 10.5, 10.6],
+                "qfq_close": [10.0, 10.1, 10.2, 10.7, 10.8],
+            }
+        )
+        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert len(ic_series) == 4
+
+    def test_ic_returns_zero_for_insufficient_data(self) -> None:
+        """测试数据不足时 IC 返回 0。"""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [],
+                "execution_date": [],
+                "ts_code": [],
+                "signal_rank": [],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": trade_dates,
+                "raw_open": [10.0, 10.5],
+                "raw_close": [10.2, 10.7],
+                "qfq_open": [10.0, 10.5],
+                "qfq_close": [10.2, 10.7],
+            }
+        )
+        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert len(ic_series) == 1
+        assert ic_series[0] == 0.0
