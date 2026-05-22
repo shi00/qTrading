@@ -8,8 +8,8 @@ requires-python = ">=3.13"
 # brotlicffi: Fast Brotli compression support for urllib3 (optional dep, must be explicit)
 # playwright: Browser automation for E2E tests and scraping helpers
 dependencies = [
-    "flet==0.28.3",
-    "flet-desktop==0.28.3",
+    "flet==0.85.1",
+    "flet-desktop==0.85.1",
     "tushare==1.4.29",
     "akshare>=1.18.60",
     "requests>=2.34.0",
