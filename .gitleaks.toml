@@ -1,0 +1,50 @@
+title = "Gitleaks configuration for AStockScreener"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Allow test fixtures and mock data"
+paths = [
+  '''tests/fixtures/.*''',
+  '''tests/.*/fixtures/.*''',
+  '''tests/unit/test_.*\.py$''',
+  '''tests/integration/test_.*\.py$''',
+  '''tests/e2e/test_.*\.py$''',
+]
+
+[[allowlists]]
+description = "Allow example config files"
+paths = [
+  '''config/example.*\.yaml$''',
+  '''config/example.*\.yml$''',
+  '''config/example.*\.json$''',
+  '''.*\.example$''',
+]
+
+[[allowlists]]
+description = "Allow documentation"
+paths = [
+  '''docs/.*\.md$''',
+  '''README\.md$''',
+  '''CLAUDE\.md$''',
+]
+
+[[allowlists]]
+description = "Allow mock/fake tokens in test code"
+regexes = [
+  '''test_token_[a-zA-Z0-9]+''',
+  '''fake_api_key_[a-zA-Z0-9]+''',
+  '''mock_secret_[a-zA-Z0-9]+''',
+  '''ci_astock_default_pwd''',
+]
+
+[[allowlists]]
+description = "Allow placeholder patterns in code"
+regexes = [
+  '''YOUR_API_KEY_HERE''',
+  '''YOUR_TOKEN_HERE''',
+  '''<YOUR_API_KEY>''',
+  '''\$\{.*\}''',
+  '''\{\{.*\}\}''',
+]
