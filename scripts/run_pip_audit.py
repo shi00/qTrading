@@ -66,7 +66,10 @@ def check_expired_vulnerabilities(allowlist: dict) -> list[str]:
             continue
 
         try:
-            reevaluate_at = datetime.strptime(reevaluate_at_str, "%Y-%m-%d").date()
+            if isinstance(reevaluate_at_str, date):
+                reevaluate_at = reevaluate_at_str
+            else:
+                reevaluate_at = datetime.strptime(reevaluate_at_str, "%Y-%m-%d").date()
         except ValueError:
             print(f"ERROR: Invalid date format for {vuln_id}: {reevaluate_at_str}")
             sys.exit(1)
