@@ -11,6 +11,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      - dependency-name: "flet"
+        versions: [">0.28.3"]
+      - dependency-name: "flet-desktop"
+        versions: [">0.28.3"]
     groups:
       pip:
         patterns: ["*"]
+        exclude-patterns:
+          - "flet"
+          - "flet-desktop"

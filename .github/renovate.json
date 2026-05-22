@@ -34,6 +34,11 @@
       "description": "Do not update Python version automatically",
       "matchPackageNames": ["python"],
       "enabled": false
+    },
+    {
+      "description": "Pin flet and flet-desktop to 0.28.3 - UI framework stability critical",
+      "matchPackageNames": ["flet", "flet-desktop"],
+      "enabled": false
     }
   ],
   "lockFileMaintenance": {
