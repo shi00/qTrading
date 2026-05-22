@@ -42,6 +42,27 @@ hiddenimports = [
     "llama_cpp",
 ]
 
+
+def collect_cuda_dlls():
+    """Collect llama-cpp-python CUDA DLLs for packaging."""
+    binaries = []
+    try:
+        import llama_cpp
+        llama_dir = Path(llama_cpp.__file__).parent
+        for dll_pattern in ["*.dll", "**/*.dll"]:
+            for dll in llama_dir.glob(dll_pattern):
+                if dll.is_file():
+                    binaries.append((str(dll), "."))
+                    print(f"[CUDA Hook] Collected DLL: {dll.name}")
+    except ImportError:
+        print("[CUDA Hook] llama_cpp not installed, skipping CUDA DLL collection")
+    except Exception as e:
+        print(f"[CUDA Hook] Warning: Failed to collect CUDA DLLs: {e}")
+    return binaries
+
+
+cuda_binaries = collect_cuda_dlls()
+
 excludes = [
     "tkinter",
     "test",
@@ -86,7 +107,7 @@ if not icon_path.exists():
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
+    binaries=cuda_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -45,6 +45,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.5",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.5.0",
     "ruff>=0.15.0",
     "pandas-stubs>=3.0.0.250204",
     "uv>=0.7.0",
