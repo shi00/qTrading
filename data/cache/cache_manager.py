@@ -182,6 +182,7 @@ class CacheManager:
         self._disposed = True
         if self.engine is not None:
             await self.engine.dispose()
+            self.engine = None
         try:
             from data.persistence.daos.base_dao import BaseDao
 

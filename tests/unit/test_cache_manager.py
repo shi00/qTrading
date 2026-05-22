@@ -222,8 +222,9 @@ class TestCacheManagerClose:
     @pytest.mark.asyncio
     async def test_close_disposes_engine(self):
         mgr = _make_mgr()
-        mgr.engine = MagicMock()
-        mgr.engine.dispose = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.dispose = AsyncMock()
+        mgr.engine = mock_engine
         with (
             patch("utils.loop_local.get_loop_local") as mock_gll,
             patch("utils.loop_local.del_loop_local"),
@@ -236,7 +237,8 @@ class TestCacheManagerClose:
             mock_gll.return_value.set = MagicMock()
             await mgr.close()
             assert mgr._disposed is True
-            mgr.engine.dispose.assert_called_once_with()
+            mock_engine.dispose.assert_called_once_with()
+            assert mgr.engine is None
 
     @pytest.mark.asyncio
     async def test_close_no_engine(self):

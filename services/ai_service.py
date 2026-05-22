@@ -647,6 +647,8 @@ class AIService:
                 last_error = e
                 error_type = type(e).__name__
 
+                is_transient = False
+
                 if LITELLM_AVAILABLE:
                     try:
                         from litellm.exceptions import (

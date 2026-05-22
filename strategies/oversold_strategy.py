@@ -258,8 +258,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 logger.warning("[OversoldStrategy] No historical data found.")
                 return pd.DataFrame()
 
-            # Fix: Polars requires pyarrow for pandas 'Int64' (nullable int).
-            # Cast to float64 to bypass pyarrow dependency.
+            history_pdf = history_pdf.copy()
+
             for col in history_pdf.select_dtypes(include=["Int64"]).columns:
                 history_pdf[col] = history_pdf[col].astype("float64")
 
