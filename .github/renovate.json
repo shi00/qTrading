@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices"
+  ],
+  "schedule": [
+    "after 10pm and before 5am every weekday",
+    "every weekend"
+  ],
+  "timezone": "Asia/Shanghai",
+  "packageRules": [
+    {
+      "description": "Auto-merge non-major updates for stable packages",
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchCurrentVersion": "!/^0/",
+      "automerge": true
+    },
+    {
+      "description": "Auto-merge dev dependencies",
+      "matchDepTypes": ["dev-dependencies"],
+      "automerge": true
+    },
+    {
+      "description": "Require approval for major updates",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Group Python type stubs together",
+      "matchPackagePatterns": ["^-types$"],
+      "groupName": "python-type-stubs"
+    },
+    {
+      "description": "Do not update Python version automatically",
+      "matchPackageNames": ["python"],
+      "enabled": false
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["before 5am on Monday"]
+  },
+  "pip_requirements": {
+    "fileMatch": ["^requirements(-dev|-optional)?\\.txt$"]
+  },
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "labels": ["dependencies", "renovate"],
+  "commitMessagePrefix": "chore(deps):",
+  "commitMessageAction": "update",
+  "semanticCommits": "enabled"
+}
