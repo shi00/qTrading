@@ -483,6 +483,39 @@ class TestExecuteSql:
         result = dm.execute_sql("REVOKE ALL ON stock_basic FROM user")
         assert result["success"] is False
 
+    def test_read_only_transaction_enforced(self):
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        mock_result.fetchmany.return_value = [(1,)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = dm.execute_sql("SELECT 1")
+        assert result["success"] is True
+
+        mock_conn.execution_options.assert_called_once_with(isolation_level="REPEATABLE READ")
+
+        execute_calls = mock_conn.execute.call_args_list
+        assert len(execute_calls) >= 2
+        first_sql = str(execute_calls[0][0][0])
+        assert "READ ONLY" in first_sql.upper()
+
+    def test_read_only_transaction_rejects_write(self):
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.side_effect = Exception("cannot execute INSERT in a read-only transaction")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = dm.execute_sql("SELECT INTO temp_table FROM stock_basic")
+        assert result["success"] is False
+        assert "read-only" in result["error"].lower()
+
 
 class TestDatabaseConfigServiceSQLInjection:
     @pytest.mark.asyncio

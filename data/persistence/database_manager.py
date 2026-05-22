@@ -305,27 +305,33 @@ class DatabaseManager:
                     "error": f"Security Alert: Dangerous keyword '{kw.strip()}' detected in query.",
                 }
 
-        # 2. Execute with strictly Read-Only connection and Memory Protection
+        # 2. Execute with strictly Read-Only transaction and Memory Protection
+        # P0-1: Use REPEATABLE READ + SET TRANSACTION READ ONLY instead of
+        # AUTOCOMMIT.  AUTOCOMMIT is NOT read-only — it auto-commits every
+        # statement, allowing writes to slip through if keyword/sqlparse checks
+        # are bypassed (e.g. SELECT ... INTO, COPY ... TO PROGRAM).
         conn = None
         try:
             with self._engine.connect() as conn:  # type: ignore[union-attr]
-                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-                result = conn.execute(sa.text(sql_query))
+                conn = conn.execution_options(isolation_level="REPEATABLE READ")
+                with conn.begin():
+                    conn.execute(sa.text("SET TRANSACTION READ ONLY"))
+                    result = conn.execute(sa.text(sql_query))
 
-                # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
-                MAX_FETCH = 2000
+                    # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
+                    MAX_FETCH = 2000
 
-                cols = list(result.keys())
-                rows = result.fetchmany(MAX_FETCH)
+                    cols = list(result.keys())
+                    rows = result.fetchmany(MAX_FETCH)
 
-                df = pd.DataFrame(rows, columns=cols)
+                    df = pd.DataFrame(rows, columns=cols)
 
-                return {
-                    "success": True,
-                    "data": df,
-                    "error": None
-                    if len(rows) < MAX_FETCH
-                    else f"Warning: Result truncated to {MAX_FETCH} rows for performance.",
-                }
+                    return {
+                        "success": True,
+                        "data": df,
+                        "error": None
+                        if len(rows) < MAX_FETCH
+                        else f"Warning: Result truncated to {MAX_FETCH} rows for performance.",
+                    }
         except Exception as e:
             return {"success": False, "data": None, "error": str(e)}
