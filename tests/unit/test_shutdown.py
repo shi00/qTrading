@@ -164,11 +164,12 @@ class TestShutdownCoordinatorCleanupSteps:
             patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
-            mock_sched.scheduler.running = True
+            mock_sched._instance = mock_sched.return_value
+            mock_sched._instance.scheduler.running = True
             mock_news._instance = None
             mock_mds._instance = None
             await coord._step1_stop_services()
-            mock_sched.return_value.stop.assert_called_once()
+            mock_sched._instance.stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_step1_stop_news_service(self):

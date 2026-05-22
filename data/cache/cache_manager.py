@@ -79,7 +79,6 @@ class CacheManager:
         self.holder_dao = HolderDao(self.engine)
         self.backtest_dao = BacktestDAO(self.engine)
 
-        self._initialized = True
         self._schema_initialized = False
 
         if not connection_string:
@@ -87,9 +86,11 @@ class CacheManager:
                 "[CacheManager] No DB_URL configured, skipping engine creation. "
                 "Engine will be created after onboarding wizard completes."
             )
+            self._initialized = True
             return
 
         self._create_engine(connection_string)
+        self._initialized = True
         logger.debug("[CacheManager] Initialized with AsyncEngine: %s", self._sanitize_url(connection_string))
 
     def _get_connection_string(self) -> str | None:
