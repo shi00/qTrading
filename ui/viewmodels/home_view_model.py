@@ -76,12 +76,14 @@ class HomeViewModel:
         Returns: dict or None
         """
         data = None
-        # Retry loop for initial data availability
         for _ in range(5):
             data = MarketDataService().get_cached_data()
             if data:
                 break
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                raise
 
         if data:
             self.last_market_data = data
@@ -168,6 +170,8 @@ class HomeViewModel:
                 limit=self.PAGE_SIZE,
                 offset=offset,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[HomeVM] Error fetching news: {e}", exc_info=True)
             return None

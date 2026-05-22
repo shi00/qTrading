@@ -562,7 +562,7 @@ class AIStrategyMixin:
 
             except asyncio.CancelledError:
                 logger.info("[AIStrategyMixin] Task cancelled")
-                break
+                raise
             except Exception as e:
                 logger.error(
                     f"[AIStrategyMixin] Task error for {stock_name}: {e}",

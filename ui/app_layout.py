@@ -297,7 +297,7 @@ class AppLayout(ft.Container):
         try:
             await asyncio.sleep(self.DEBOUNCE_MS / 1000)
         except asyncio.CancelledError:
-            return
+            raise
 
         index = self._pending_tab_index
         if index is None or index == self._current_tab_index:
