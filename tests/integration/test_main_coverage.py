@@ -129,9 +129,10 @@ class _FakeProgressBar:
 
 
 class _FakeColumn:
-    def __init__(self, controls=None, spacing=10):
+    def __init__(self, controls=None, spacing=10, horizontal_alignment=None):
         self.controls = controls or []
         self.spacing = spacing
+        self.horizontal_alignment = horizontal_alignment
 
 
 class _FakeRow:
@@ -215,8 +216,6 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main.ft, "FontWeight", SimpleNamespace(BOLD="bold"))
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
     monkeypatch.setattr(app_main.ft, "alignment", SimpleNamespace(center="center"))
-    monkeypatch.setattr(app_main.ft, "colors", SimpleNamespace(RED="red", RED_400="red400"))
-    monkeypatch.setattr(app_main.ft, "icons", SimpleNamespace(ERROR_OUTLINE="error", REFRESH="refresh"))
     monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
     monkeypatch.setattr(app_main.ProxyManager, "apply_smart_proxy_policy", lambda: None)
     monkeypatch.setattr(app_main.ConfigHandler, "ensure_defaults", lambda: None)
@@ -243,8 +242,8 @@ class TestMainDbUpgradeNeeded:
         monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
 
         with (
-            patch("app.bootstrap.initialize_services") as mock_init,
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
         ):
             mock_init.return_value = {"success": False, "error": "db_upgrade_needed"}
 
@@ -264,8 +263,8 @@ class TestMainDbUpgradeNeeded:
         monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
 
         with (
-            patch("app.bootstrap.initialize_services") as mock_init,
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
             patch("data.persistence.db_migrator.DatabaseMigrator.init_db", new_callable=AsyncMock) as mock_migrate,
         ):
             mock_init.return_value = {"success": False, "error": "db_upgrade_needed"}
@@ -289,8 +288,8 @@ class TestMainDbInitFailed:
         monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
 
         with (
-            patch("app.bootstrap.initialize_services") as mock_init,
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
         ):
             mock_init.return_value = {"success": False, "error": "db_init_failed", "detail": "connection refused"}
 
@@ -318,8 +317,8 @@ class TestMainDbInitFailed:
             return {"success": True}
 
         with (
-            patch("app.bootstrap.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
             patch("ui.app_layout.AppLayout") as mock_layout,
         ):
             mock_init.side_effect = mock_init_services
@@ -343,8 +342,8 @@ class TestMainDbInitFailed:
         monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
 
         with (
-            patch("app.bootstrap.initialize_services") as mock_init,
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
             patch("ui.app_layout.AppLayout") as mock_layout,
         ):
             mock_init.return_value = {"success": False, "error": "db_init_failed", "detail": "error"}
@@ -369,7 +368,7 @@ class TestMainOnboardingFlow:
     async def test_onboarding_needed_shows_wizard(self, monkeypatch):
         _prepare_main(monkeypatch)
 
-        with patch("app.bootstrap.check_onboarding_needed", return_value=True):
+        with patch("main.check_onboarding_needed", return_value=True):
             page = _DummyPage()
             await app_main.main(page)
 
@@ -383,10 +382,10 @@ class TestMainOnboardingFlow:
         _prepare_main(monkeypatch)
 
         with (
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
-            patch("app.bootstrap.initialize_services") as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_ns,
+            patch("main.NewsSubscriptionService") as mock_ns,
         ):
             mock_init.return_value = {"success": True}
             mock_layout_instance = MagicMock()
@@ -407,10 +406,10 @@ class TestMainServicesSuccess:
         _prepare_main(monkeypatch)
 
         with (
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
-            patch("app.bootstrap.initialize_services") as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_ns,
+            patch("main.NewsSubscriptionService") as mock_ns,
         ):
             mock_init.return_value = {"success": True}
             mock_layout_instance = MagicMock()
@@ -452,6 +451,18 @@ class TestMainWindowDestroyError:
                 super().__init__()
                 self.window = _WindowWithDestroyError()
 
+            def run_task(self, coro, *args):
+                import asyncio
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if asyncio.iscoroutine(coro):
+                        loop.create_task(coro)
+                    elif asyncio.iscoroutinefunction(coro):
+                        loop.create_task(coro(*args))
+                except RuntimeError:
+                    pass
+
         page = _PageWithDestroyError()
         await app_main.main(page)
 
@@ -464,7 +475,7 @@ class TestMainWindowDestroyError:
         confirm_btn = cast(_FakeTextButton, dialog.actions[1])
         assert confirm_btn.on_click is not None
         confirm_btn.on_click(MagicMock())
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.1)
 
         assert any("destroy ignored" in msg.lower() or "Window destroy" in msg for msg in logger_spy.debugs)
 
@@ -482,7 +493,7 @@ class TestMainScheduleAsync:
             def run_task(self, coro):
                 self._run_task_called = True
 
-        with patch("app.bootstrap.check_onboarding_needed", return_value=False):
+        with patch("main.check_onboarding_needed", return_value=False):
             page = _PageWithRunTask()
             await app_main.main(page)
 
@@ -569,10 +580,10 @@ class TestMainConfigHandlerCalls:
         monkeypatch.setattr(app_main.ConfigHandler, "is_onboarding_complete", track_is_onboarding_complete)
 
         with (
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
-            patch("app.bootstrap.initialize_services") as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_ns,
+            patch("main.NewsSubscriptionService") as mock_ns,
         ):
             mock_init.return_value = {"success": True}
             mock_layout_instance = MagicMock()
@@ -597,10 +608,10 @@ class TestMainMaskSensitive:
         monkeypatch.setattr(app_main, "logger", logger_spy)
 
         with (
-            patch("app.bootstrap.check_onboarding_needed", return_value=False),
-            patch("app.bootstrap.initialize_services") as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_ns,
+            patch("main.NewsSubscriptionService") as mock_ns,
         ):
             mock_init.return_value = {"success": True}
             mock_layout_instance = MagicMock()

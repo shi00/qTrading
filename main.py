@@ -377,18 +377,18 @@ async def main(page: ft.Page):
                     ft.Container(
                         content=ft.Column(
                             [
-                                ft.Icon(ft.icons.ERROR_OUTLINE, color=ft.colors.RED, size=48),  # type: ignore[attr-defined]
+                                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
                                 ft.Text(
                                     I18n.get("error_db_init_failed", default="数据库初始化失败"),
                                     size=20,
                                     weight=ft.FontWeight.BOLD,
                                 ),
-                                ft.Text(str(result.get("detail", ""))[:200], color=ft.colors.RED_400, size=14),  # type: ignore[attr-defined]
+                                ft.Text(str(result.get("detail", ""))[:200], color=ft.Colors.RED_400, size=14),
                                 ft.Row(
                                     [
                                         ft.ElevatedButton(
                                             I18n.get("retry", default="重试"),
-                                            icon=ft.icons.REFRESH,  # type: ignore[attr-defined]
+                                            icon=ft.Icons.REFRESH,
                                             on_click=lambda e: page.run_task(on_retry_click, e),
                                         ),
                                         ft.TextButton(
