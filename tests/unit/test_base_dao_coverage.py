@@ -291,7 +291,7 @@ class TestBaseDaoSaveUpsert:
                 )
 
     @pytest.mark.asyncio
-    async def test_connection_error_returns_zero(self):
+    async def test_connection_error_raises_disposed(self):
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
         mock_conn.execute.side_effect = Exception("no active connection")
@@ -319,14 +319,14 @@ class TestBaseDaoSaveUpsert:
             mock_pg.return_value = mock_stmt
             mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
 
-            result = await dao._save_upsert(
-                pd.DataFrame({"id": [1]}),
-                "test_table",
-                ["id"],
-                ["id"],
-                conn=mock_conn,
-            )
-            assert result == 0
+            with pytest.raises(EngineDisposedError):
+                await dao._save_upsert(
+                    pd.DataFrame({"id": [1]}),
+                    "test_table",
+                    ["id"],
+                    ["id"],
+                    conn=mock_conn,
+                )
 
     @pytest.mark.asyncio
     async def test_suppress_errors_returns_negative_one(self):
@@ -422,7 +422,7 @@ class TestBaseDaoWriteDb:
                 await dao._write_db("INSERT INTO t VALUES (1)")
 
     @pytest.mark.asyncio
-    async def test_connection_error_returns_zero(self):
+    async def test_connection_error_raises_disposed(self):
         mock_conn = AsyncMock()
         mock_conn.exec_driver_sql.side_effect = Exception("no active connection")
         mock_engine = _setup_mock_engine_begin(mock_conn)
@@ -435,8 +435,8 @@ class TestBaseDaoWriteDb:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = False
 
-            result = await dao._write_db("INSERT INTO t VALUES (1)")
-            assert result == 0
+            with pytest.raises(EngineDisposedError):
+                await dao._write_db("INSERT INTO t VALUES (1)")
 
     @pytest.mark.asyncio
     async def test_suppress_errors_returns_negative_one(self):

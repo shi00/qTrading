@@ -626,8 +626,8 @@ class TestBaseDaoWriteDbExtended:
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            result = await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn)
-            assert result == 0
+            with pytest.raises(EngineDisposedError):
+                await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn)
 
     @pytest.mark.asyncio
     async def test_write_params_as_tuple(self):
@@ -1048,8 +1048,8 @@ class TestBaseDaoSaveUpsertExtended:
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
             mock_stmt.on_conflict_do_update.return_value = mock_stmt
-            result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
-            assert result == 0
+            with pytest.raises(EngineDisposedError):
+                await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
 
     @pytest.mark.asyncio
     async def test_upsert_default_suppress_errors_is_false(self):

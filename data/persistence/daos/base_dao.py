@@ -242,7 +242,6 @@ class BaseDao:
             raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
-            # Suppress "no active connection" errors during shutdown
             err_str = str(e)
             if any(
                 msg in err_str
@@ -255,7 +254,9 @@ class BaseDao:
                 logger.warning(
                     f"[{self.__class__.__name__}] DB Closed during write (Shutdown): {e}",
                 )
-                return 0
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {e}"
+                ) from e
 
             if suppress_errors:
                 logger.warning(
@@ -449,7 +450,9 @@ class BaseDao:
                 logger.warning(
                     f"[{self.__class__.__name__}] DB Closed during upsert (Shutdown): {e}",
                 )
-                return 0
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {e}"
+                ) from e
 
             if suppress_errors:
                 logger.warning(
