@@ -63,9 +63,6 @@ class CacheManager:
 
         connection_string = self._get_connection_string()
 
-        self._maintenance_event_lazy = None
-        self._init_lock_lazy = None
-
         self.engine: AsyncEngine | None = None
         self._disposed = False
 

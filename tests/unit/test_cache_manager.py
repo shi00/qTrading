@@ -48,8 +48,6 @@ def _make_mgr():
     mgr.macro_dao = MagicMock(spec=MacroDao)
     mgr.holder_dao = MagicMock(spec=HolderDao)
     mgr.backtest_dao = MagicMock(spec=BacktestDAO)
-    mgr._maintenance_event_lazy = None
-    mgr._init_lock_lazy = None
     return mgr
 
 
@@ -903,7 +901,6 @@ class TestCacheManagerBulkQualityScores:
     async def test_get_field_completeness(self):
         mgr = CacheManager.__new__(CacheManager)
         mgr._initialized = True
-        mgr._maintenance_event_lazy = None
         mgr.quote_dao = MagicMock()
         mgr.quote_dao.get_field_completeness = AsyncMock(return_value={})
         with patch("utils.loop_local.get_loop_local") as mock_gll:

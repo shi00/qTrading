@@ -771,8 +771,9 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         layout._current_tab_index = 0
         layout._pending_tab_index = 2
-        with patch("asyncio.sleep", side_effect=asyncio.CancelledError):
-            await layout._execute_tab_switch()
+        with pytest.raises(asyncio.CancelledError):
+            with patch("asyncio.sleep", side_effect=asyncio.CancelledError):
+                await layout._execute_tab_switch()
         assert layout._current_tab_index == 0
 
     @pytest.mark.asyncio
