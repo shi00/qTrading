@@ -1,0 +1,15 @@
+ignored_vulnerabilities:
+  - id: CVE-2025-69872
+    package: diskcache
+    reason: |
+      diskcache <= 5.6.3 uses pickle for serialization by default.
+      An attacker who can write to the cache directory can achieve arbitrary code execution
+      when the program reads the cache. This is a known vulnerability but diskcache has not
+      released a fixed version yet.
+      
+      Mitigation: The application does not expose the cache directory to untrusted users.
+      The cache is only used internally for performance optimization.
+    reviewer: louis2sin@gmail.com
+    added: 2026-05-22
+    reevaluate_at: 2026-08-22
+    upstream_issue: https://github.com/grantjenks/python-diskcache/issues/286
