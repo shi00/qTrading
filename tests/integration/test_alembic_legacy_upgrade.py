@@ -84,7 +84,7 @@ def test_fresh_db_upgrade_still_works(fresh_db, monkeypatch):
     command.upgrade(_make_cfg(fresh_db), "head")
     eng = create_engine(fresh_db)
     tables = set(inspect(eng).get_table_names())
-    assert {"daily_quotes", "screening_history", "task_history", "app_state"}.issubset(tables)
+    assert {"daily_quotes", "screening_history", "task_history", "app_state", "backtest_results"}.issubset(tables)
     dq_cols = {c["name"] for c in inspect(eng).get_columns("daily_quotes")}
     for qfq in ("qfq_open", "qfq_high", "qfq_low", "qfq_close"):
         assert qfq not in dq_cols
