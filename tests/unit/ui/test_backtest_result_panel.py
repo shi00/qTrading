@@ -71,8 +71,8 @@ def sample_result(backtest_config: BacktestConfig) -> BacktestResult:
                 "excess_return": [0.02, -0.03],
             }
         ),
-        data_warnings=[],
-        failed_signal_dates=[],
+        data_warnings=(),
+        failed_signal_dates=(),
         run_id="test_run_001",
         executed_at=datetime(2024, 1, 31, 12, 0, 0),
         duration_ms=1000,
@@ -94,8 +94,8 @@ def empty_result(backtest_config: BacktestConfig) -> BacktestResult:
         metrics={},
         ic_series=pl.Series(),
         period_stats=pl.DataFrame(),
-        data_warnings=[],
-        failed_signal_dates=[],
+        data_warnings=(),
+        failed_signal_dates=(),
         run_id="empty_run_001",
         executed_at=datetime(2024, 1, 31, 12, 0, 0),
         duration_ms=500,
@@ -249,7 +249,7 @@ class TestBacktestResultPanel:
         container = panel._build_trades_table()
 
         assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.DataTable)
+        assert isinstance(container.content, ft.Column)
 
     def test_build_trades_table_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
         panel._result = empty_result

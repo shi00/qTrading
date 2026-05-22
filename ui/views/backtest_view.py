@@ -12,7 +12,7 @@ import logging
 
 import flet as ft
 
-from strategies.backtest.config import BacktestResult
+from strategies.backtest.config import BacktestConfig, BacktestResult
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
@@ -44,6 +44,14 @@ class BacktestView(ft.Container):
         self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)
         self.progress_bar = ft.ProgressBar(visible=False, width=400)
         self.progress_text = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
+
+        self.cancel_button = ft.ElevatedButton(
+            text=I18n.get("common_cancel"),
+            on_click=self._on_cancel_backtest,
+            visible=False,
+            bgcolor=AppColors.ERROR,
+            color=ft.Colors.WHITE,
+        )
 
         self.config_panel = BacktestConfigPanel(on_run_backtest=self._on_run_backtest)
         self.result_panel = BacktestResultPanel()
@@ -80,7 +88,7 @@ class BacktestView(ft.Container):
                     ],
                     spacing=16,
                 ),
-                ft.Row([self.progress_bar, self.progress_text], spacing=8),
+                ft.Row([self.progress_bar, self.progress_text, self.cancel_button], spacing=8),
                 ft.Container(height=16),
                 ft.Row(
                     [
@@ -130,6 +138,7 @@ class BacktestView(ft.Container):
 
         self.progress_bar.visible = True
         self.progress_bar.value = 0
+        self.cancel_button.visible = True
         self.status_text.value = I18n.get("backtest_starting")
         self.status_text.color = AppColors.PRIMARY
         self.update()
@@ -146,10 +155,13 @@ class BacktestView(ft.Container):
         )
 
         self.page.run_task(
-            self.vm.run_backtest,
+            self._start_backtest,
             self._selected_strategy,
             backtest_config,
         )
+
+    async def _start_backtest(self, strategy_key: str, config: BacktestConfig):
+        await self.vm.run_backtest(strategy_key, config)
 
     def _on_vm_update(self):
         """ViewModel 更新回调。"""
@@ -157,9 +169,18 @@ class BacktestView(ft.Container):
             self.update()
 
     def _on_vm_status(self, message: str, color: str):
-        """状态更新回调。"""
         self.status_text.value = message
         self.status_text.color = color
+        if not self.vm.is_running:
+            self.cancel_button.visible = False
+        if self.page:
+            self.update()
+
+    def _on_cancel_backtest(self, e):
+        self.vm.cancel_backtest()
+        self.cancel_button.visible = False
+        self.status_text.value = I18n.get("common_cancelling")
+        self.status_text.color = AppColors.WARNING
         if self.page:
             self.update()
 
@@ -171,9 +192,9 @@ class BacktestView(ft.Container):
             self.update()
 
     def _on_vm_result(self, result: BacktestResult):
-        """结果回调。"""
         self.result_panel.set_result(result)
         self.progress_bar.visible = False
+        self.cancel_button.visible = False
         if self.page:
             self.update()
 

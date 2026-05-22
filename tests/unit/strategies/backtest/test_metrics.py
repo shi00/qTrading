@@ -1,5 +1,7 @@
 """回测指标计算模块单元测试"""
 
+from datetime import date
+
 import polars as pl
 import pytest
 
@@ -185,3 +187,37 @@ class TestBacktestMetrics:
         assert metrics["total_return"] > 0
         assert metrics["sharpe_ratio"] > 0
         assert metrics["max_drawdown"] >= 0
+
+    def test_calc_nav_curve_from_positions(self) -> None:
+        positions = pl.DataFrame(
+            {
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "total_value": [1_000_000.0, 1_010_000.0, 1_005_000.0],
+            }
+        )
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        nav = BacktestMetrics.calc_nav_curve(positions, 1_000_000.0, trade_dates)
+        assert len(nav) == 3
+        assert float(nav[0]) == 1_000_000.0
+        assert float(nav[-1]) == 1_005_000.0
+
+    def test_calc_nav_curve_empty_positions(self) -> None:
+        positions = pl.DataFrame()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        nav = BacktestMetrics.calc_nav_curve(positions, 500_000.0, trade_dates)
+        assert len(nav) == 2
+        assert all(v == 500_000.0 for v in nav.to_list())
+
+    def test_calc_daily_returns(self) -> None:
+        nav = pl.Series([1_000_000.0, 1_010_000.0, 1_005_000.0])
+        returns = BacktestMetrics.calc_daily_returns(nav)
+        assert len(returns) == 3
+        assert float(returns[0]) == 0.0
+        assert float(returns[1]) == pytest.approx(0.01, rel=1e-4)
+        assert float(returns[2]) == pytest.approx(-0.00495, abs=1e-4)
+
+    def test_calc_daily_returns_single_value(self) -> None:
+        nav = pl.Series([1_000_000.0])
+        returns = BacktestMetrics.calc_daily_returns(nav)
+        assert len(returns) == 1
+        assert float(returns[0]) == 0.0

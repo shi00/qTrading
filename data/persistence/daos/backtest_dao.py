@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 import pandas as pd
 import sqlalchemy as sa
 
-from data.persistence.daos.base_dao import BaseDao
+from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 from data.persistence.models import BacktestResultModel, get_model_columns, get_model_pk_columns
-
-if TYPE_CHECKING:
-    from strategies.backtest.config import BacktestResult
 
 logger = logging.getLogger(__name__)
 
@@ -23,51 +19,71 @@ class BacktestDAO(BaseDao):
     def __init__(self, engine=None):
         super().__init__(engine)
 
-    async def save_result(self, result: BacktestResult) -> int:
+    async def save_result(self, result: dict) -> int:
         """
         保存回测结果到数据库。
 
         Args:
-            result: 回测结果对象
+            result: 回测结果字典，由调用方从 BacktestResult 转换而来
 
         Returns:
             插入的记录 ID
         """
         nav_curve_data = []
-        if result.nav_curve is not None and not result.nav_curve.is_empty():
-            nav_curve_data = result.nav_curve.to_dicts()
+        nav_curve = result.get("nav_curve")
+        if nav_curve is not None and not nav_curve.is_empty():
+            nav_curve_data = nav_curve.to_dicts()
 
         trades_data = []
-        if result.trades is not None and not result.trades.is_empty():
-            trades_data = result.trades.to_dicts()
+        trades = result.get("trades")
+        if trades is not None and not trades.is_empty():
+            trades_data = trades.to_dicts()
 
         period_stats_data = []
-        if result.period_stats is not None and not result.period_stats.is_empty():
-            period_stats_data = result.period_stats.to_dicts()
+        period_stats = result.get("period_stats")
+        if period_stats is not None and not period_stats.is_empty():
+            period_stats_data = period_stats.to_dicts()
+
+        config = result.get("config")
+        metrics = result.get("metrics", {})
+
+        profit_factor = metrics.get("profit_factor")
+        if profit_factor is not None and not isinstance(profit_factor, (int, float)):
+            profit_factor = None
+        if profit_factor is not None and profit_factor == float("inf"):
+            profit_factor = None
 
         df = pd.DataFrame(
             [
                 {
-                    "run_id": result.run_id,
-                    "strategy_name": result.strategy_name,
-                    "params_snapshot": result.params_snapshot,
-                    "start_date": result.config.start_date,
-                    "end_date": result.config.end_date,
-                    "initial_capital": result.config.initial_capital,
-                    "total_return": result.metrics.get("total_return"),
-                    "annualized_return": result.metrics.get("annualized_return"),
-                    "sharpe_ratio": result.metrics.get("sharpe_ratio"),
-                    "max_drawdown": result.metrics.get("max_drawdown"),
-                    "calmar_ratio": result.metrics.get("calmar_ratio"),
-                    "ic_mean": result.metrics.get("ic_mean"),
-                    "ic_ir": result.metrics.get("ic_ir"),
-                    "win_rate": result.metrics.get("win_rate"),
-                    "profit_factor": result.metrics.get("profit_factor"),
-                    "total_trades": result.metrics.get("total_trades"),
+                    "run_id": result.get("run_id"),
+                    "strategy_name": result.get("strategy_name"),
+                    "params_snapshot": result.get("params_snapshot"),
+                    "start_date": result.get("start_date") or (config.start_date if config else None),
+                    "end_date": result.get("end_date") or (config.end_date if config else None),
+                    "initial_capital": result.get("initial_capital") or (config.initial_capital if config else None),
+                    "total_return": metrics.get("total_return"),
+                    "annualized_return": metrics.get("annualized_return"),
+                    "sharpe_ratio": metrics.get("sharpe_ratio"),
+                    "max_drawdown": metrics.get("max_drawdown"),
+                    "calmar_ratio": metrics.get("calmar_ratio"),
+                    "ic_mean": metrics.get("ic_mean"),
+                    "ic_ir": metrics.get("ic_ir"),
+                    "win_rate": metrics.get("win_rate"),
+                    "profit_factor": profit_factor,
+                    "total_trades": metrics.get("total_trades"),
+                    "volatility": metrics.get("volatility"),
+                    "information_ratio": metrics.get("information_ratio"),
+                    "tracking_error": metrics.get("tracking_error"),
                     "nav_curve_json": nav_curve_data,
                     "trades_json": trades_data,
                     "period_stats_json": period_stats_data,
-                    "duration_ms": result.duration_ms,
+                    "execution_price": result.get("execution_price"),
+                    "allow_limit_up_buy": result.get("allow_limit_up_buy"),
+                    "allow_limit_down_sell": result.get("allow_limit_down_sell"),
+                    "slippage_model": result.get("slippage_model"),
+                    "app_version": result.get("app_version"),
+                    "duration_ms": result.get("duration_ms"),
                 }
             ]
         )
@@ -153,6 +169,9 @@ class BacktestDAO(BaseDao):
         try:
             await self._write_db(stmt)
             return True
+        except EngineDisposedError:
+            logger.warning("[BacktestDAO] Engine disposed, skipping delete for %s", run_id)
+            return False
         except Exception as e:
             logger.error("[BacktestDAO] Failed to delete result %s: %s", run_id, e)
             return False

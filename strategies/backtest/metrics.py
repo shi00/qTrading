@@ -15,6 +15,23 @@ class BacktestMetrics:
     """回测指标计算器"""
 
     @staticmethod
+    def calc_nav_curve(
+        positions: pl.DataFrame,
+        initial_capital: float,
+        trade_dates: list,
+    ) -> pl.Series:
+        if positions.is_empty():
+            return pl.Series([initial_capital] * len(trade_dates))
+        return positions["total_value"]
+
+    @staticmethod
+    def calc_daily_returns(nav_curve: pl.Series) -> pl.Series:
+        if len(nav_curve) <= 1:
+            return pl.Series([0.0] * len(nav_curve))
+        returns = nav_curve.pct_change()
+        return returns.fill_null(0.0)
+
+    @staticmethod
     def calc_total_return(nav_curve: pl.Series) -> float:
         if len(nav_curve) == 0:
             return 0.0

@@ -210,6 +210,24 @@ class AIStrategyMixin:
                     ) from None
         return end_date
 
+    @staticmethod
+    def compute_learning_as_of(trade_date_raw, is_backtest: bool):
+        import datetime as _dt
+
+        from utils.time_utils import parse_date
+
+        as_of = None
+        if trade_date_raw is not None:
+            try:
+                as_of = parse_date(str(trade_date_raw))
+                if isinstance(as_of, _dt.datetime):
+                    as_of = as_of.date()
+            except Exception:
+                pass
+        if as_of is not None and is_backtest:
+            as_of = as_of - _dt.timedelta(days=8)
+        return as_of
+
     async def run_ai_analysis(
         self,
         candidates_df: pd.DataFrame,
@@ -286,17 +304,7 @@ class AIStrategyMixin:
                 from data.persistence.review_manager import ReviewManager
 
                 rm = ReviewManager()
-                trade_date_raw = context.get("trade_date")
-                as_of = None
-                if trade_date_raw is not None:
-                    from utils.time_utils import parse_date
-
-                    try:
-                        as_of = parse_date(str(trade_date_raw))
-                        if isinstance(as_of, datetime.datetime):
-                            as_of = as_of.date()
-                    except Exception:
-                        pass
+                as_of = self.compute_learning_as_of(context.get("trade_date"), context.get("is_backtest", False))
                 history_context = await rm.get_learning_context(as_of=as_of)
             except Exception as e:
                 logger.warning(

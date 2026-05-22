@@ -30,6 +30,20 @@ def backtest_config() -> BacktestConfig:
     )
 
 
+def _result_to_dict(result: BacktestResult) -> dict:
+    return {
+        "run_id": result.run_id,
+        "strategy_name": result.strategy_name,
+        "params_snapshot": result.params_snapshot,
+        "config": result.config,
+        "metrics": result.metrics,
+        "nav_curve": result.nav_curve,
+        "trades": result.trades,
+        "period_stats": result.period_stats,
+        "duration_ms": result.duration_ms,
+    }
+
+
 @pytest.fixture
 def backtest_result(backtest_config: BacktestConfig) -> BacktestResult:
     return BacktestResult(
@@ -80,8 +94,8 @@ def backtest_result(backtest_config: BacktestConfig) -> BacktestResult:
                 "monthly_return": [0.01],
             }
         ),
-        data_warnings=[],
-        failed_signal_dates=[],
+        data_warnings=(),
+        failed_signal_dates=(),
         run_id="test_run_001",
         executed_at=datetime(2024, 1, 31, 12, 0, 0),
         duration_ms=1000,
@@ -103,8 +117,8 @@ def empty_result(backtest_config: BacktestConfig) -> BacktestResult:
         metrics={},
         ic_series=pl.Series(),
         period_stats=pl.DataFrame(),
-        data_warnings=[],
-        failed_signal_dates=[],
+        data_warnings=(),
+        failed_signal_dates=(),
         run_id="empty_run_001",
         executed_at=datetime(2024, 1, 31, 12, 0, 0),
         duration_ms=500,
@@ -120,7 +134,7 @@ class TestBacktestDAO:
     ) -> None:
         dao._save_upsert = AsyncMock(return_value=1)
 
-        result_id = await dao.save_result(backtest_result)
+        result_id = await dao.save_result(_result_to_dict(backtest_result))
 
         assert result_id == 1
         dao._save_upsert.assert_called_once()
@@ -135,7 +149,7 @@ class TestBacktestDAO:
     ) -> None:
         dao._save_upsert = AsyncMock(return_value=1)
 
-        result_id = await dao.save_result(empty_result)
+        result_id = await dao.save_result(_result_to_dict(empty_result))
 
         assert result_id == 1
         dao._save_upsert.assert_called_once()

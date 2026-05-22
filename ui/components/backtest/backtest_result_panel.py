@@ -30,6 +30,8 @@ class BacktestResultPanel(ft.Container):
     def __init__(self):
         super().__init__(expand=True)
         self._result: BacktestResult | None = None
+        self._trades_page: int = 0
+        self._trades_page_size: int = 50
         self.content = self._build_empty_content()
 
     def set_result(self, result: BacktestResult):
@@ -136,9 +138,9 @@ class BacktestResultPanel(ft.Container):
         row2 = ft.Row(
             [
                 self._metric_card(
-                    I18n.get("backtest_metric_calmar"),
-                    f"{metrics.get('calmar_ratio', 0):.2f}",
-                    AppColors.TEXT_PRIMARY,
+                    I18n.get("backtest_metric_profit_factor"),
+                    f"{metrics.get('profit_factor', 0):.2f}",
+                    AppColors.SUCCESS if metrics.get("profit_factor", 0) > 1 else AppColors.ERROR,
                 ),
                 self._metric_card(
                     I18n.get("backtest_metric_ic_mean"),
@@ -151,9 +153,9 @@ class BacktestResultPanel(ft.Container):
                     self._get_color_for_ic(metrics.get("ic_ir", 0)),
                 ),
                 self._metric_card(
-                    I18n.get("backtest_metric_win_rate"),
-                    f"{metrics.get('win_rate', 0) * 100:.1f}%",
-                    AppColors.SUCCESS if metrics.get("win_rate", 0) > 0.5 else AppColors.TEXT_PRIMARY,
+                    I18n.get("backtest_metric_total_trades"),
+                    f"{metrics.get('total_trades', 0)}",
+                    AppColors.TEXT_PRIMARY,
                 ),
             ],
             spacing=12,
@@ -254,6 +256,11 @@ class BacktestResultPanel(ft.Container):
             )
 
         trades_df = self._result.trades
+        total_rows = len(trades_df)
+        total_pages = max(1, (total_rows + self._trades_page_size - 1) // self._trades_page_size)
+        start = self._trades_page * self._trades_page_size
+        end = min(start + self._trades_page_size, total_rows)
+
         columns = [
             ft.DataColumn(ft.Text(I18n.get("backtest_col_date"), color=AppColors.TEXT_PRIMARY)),
             ft.DataColumn(ft.Text(I18n.get("backtest_col_code"), color=AppColors.TEXT_PRIMARY)),
@@ -264,7 +271,7 @@ class BacktestResultPanel(ft.Container):
         ]
 
         rows = []
-        for row in trades_df.iter_rows(named=True):
+        for row in trades_df[start:end].iter_rows(named=True):
             action = row.get("action", "")
             action_color = AppColors.SUCCESS if action == "buy" else AppColors.ERROR
             pnl = row.get("realized_pnl", 0)
@@ -283,14 +290,51 @@ class BacktestResultPanel(ft.Container):
                 )
             )
 
+        page_info = ft.Text(
+            f"{start + 1}-{end} / {total_rows}",
+            size=12,
+            color=AppColors.TEXT_SECONDARY,
+        )
+
+        def _prev_page(e):
+            if self._trades_page > 0:
+                self._trades_page -= 1
+                self.content = self._build_content()
+                self.update()
+
+        def _next_page(e):
+            if self._trades_page < total_pages - 1:
+                self._trades_page += 1
+                self.content = self._build_content()
+                self.update()
+
+        pagination = ft.Row(
+            [
+                ft.IconButton(ft.Icons.NAVIGATE_BEFORE, on_click=_prev_page, disabled=self._trades_page == 0),
+                page_info,
+                ft.IconButton(
+                    ft.Icons.NAVIGATE_NEXT, on_click=_next_page, disabled=self._trades_page >= total_pages - 1
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=8,
+        )
+
         return ft.Container(
-            content=ft.DataTable(
-                columns=columns,
-                rows=rows[:100],
-                heading_row_color=AppColors.TABLE_HEADER_BG,
-                data_row_color={"hovered": AppColors.TABLE_ROW_HOVER},
-                border=ft.border.all(1, AppColors.DIVIDER),
-                vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
+            content=ft.Column(
+                [
+                    ft.DataTable(
+                        columns=columns,
+                        rows=rows,
+                        heading_row_color=AppColors.TABLE_HEADER_BG,
+                        data_row_color={"hovered": AppColors.TABLE_ROW_HOVER},
+                        border=ft.border.all(1, AppColors.DIVIDER),
+                        vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
+                    ),
+                    pagination,
+                ],
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
             ),
             padding=16,
             expand=True,
@@ -325,7 +369,7 @@ class BacktestResultPanel(ft.Container):
 
         return ft.Container(
             content=ft.BarChart(
-                bar_groups=bars[:50],
+                bar_groups=bars,
                 border=ft.border.all(1, AppColors.DIVIDER),
                 left_axis=ft.ChartAxis(labels_size=50),
                 bottom_axis=ft.ChartAxis(labels_size=40),

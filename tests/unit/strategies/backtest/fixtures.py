@@ -133,7 +133,7 @@ def make_signals_df(
     """构造信号 DataFrame。
 
     Args:
-        signals: 信号列表，每个元素包含 signal_date, execution_date, ts_code, rank
+        signals: 信号列表，每个元素包含 signal_date, execution_date, ts_code, signal_rank
 
     Returns:
         信号 DataFrame

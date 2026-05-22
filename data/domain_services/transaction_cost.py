@@ -65,7 +65,7 @@ class TransactionCostModel:
         commission = max(gross_amount * self.config.commission_rate, self.config.commission_min)
 
         stamp_duty = 0.0
-        if not is_buy:
+        if not is_buy or self.config.stamp_duty_buy:
             stamp_duty = gross_amount * self.config.stamp_duty_rate
 
         transfer_fee = gross_amount * self.config.transfer_fee_rate

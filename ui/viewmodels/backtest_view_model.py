@@ -13,9 +13,9 @@ from collections.abc import Callable
 from datetime import date
 
 from data.cache.cache_manager import CacheManager
-from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, BacktestResult
+from services.backtest_service import BacktestService
 from strategies.base_strategy import get_strategy_registry
 from ui.i18n import I18n
 
@@ -35,12 +35,17 @@ class BacktestViewModel:
     4. 猡理回测结果和状态
     """
 
-    def __init__(self):
-        self.cache = CacheManager()
-        self.service = BacktestService(cache=self.cache)
+    def __init__(
+        self,
+        cache: CacheManager | None = None,
+        service: BacktestService | None = None,
+    ):
+        self.cache = cache or CacheManager()
+        self.service = service or BacktestService(cache=self.cache)
 
         self._result: BacktestResult | None = None
         self._is_running: bool = False
+        self._task_id: str | None = None
 
         self.on_update: Callable | None = None
         self.on_status: Callable[[str, str], None] | None = None
@@ -127,6 +132,7 @@ class BacktestViewModel:
 
         self._is_running = True
         self._result = None
+        self._task_id = None
 
         if self.on_status:
             self.on_status(I18n.get("backtest_starting"), "blue")
@@ -141,12 +147,16 @@ class BacktestViewModel:
                         self.on_progress(progress, message)
                     TaskManager().update_progress(task_id, progress, message)
 
+                def _cancel_check() -> bool:
+                    return TaskManager().is_cancelled(task_id)
+
                 result = await self.service.run_backtest(
                     strategy_key=strategy_key,
                     config=config,
                     params=params,
                     progress_callback=_progress_callback,
                     persist=persist,
+                    cancel_check=_cancel_check,
                 )
 
                 self._result = result
@@ -164,7 +174,7 @@ class BacktestViewModel:
                 return I18n.get("backtest_success").format(sharpe=f"{result.metrics['sharpe_ratio']:.2f}")
 
             except Exception as e:
-                logger.error(f"[BacktestVM] Backtest failed: {e}", exc_info=True)
+                logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
                 if self.on_status:
                     self.on_status(I18n.get("backtest_failed").format(error=str(e)), "red")
                 raise
@@ -181,10 +191,16 @@ class BacktestViewModel:
             cancellable=True,
         )
 
+        self._task_id = task_id
+
         if task_id is None:
             self._is_running = False
             if self.on_status:
                 self.on_status(I18n.get("backtest_task_rejected"), "orange")
+
+    def cancel_backtest(self) -> None:
+        if self._task_id:
+            TaskManager().cancel_task(self._task_id)
 
     async def get_historical_results(
         self,

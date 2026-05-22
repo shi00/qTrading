@@ -81,7 +81,12 @@ class TestMakeQuotesDf:
 class TestMakeSignalsDf:
     def test_basic_signals(self) -> None:
         signals = [
-            {"signal_date": date(2024, 1, 2), "execution_date": date(2024, 1, 3), "ts_code": "000001.SZ", "rank": 1},
+            {
+                "signal_date": date(2024, 1, 2),
+                "execution_date": date(2024, 1, 3),
+                "ts_code": "000001.SZ",
+                "signal_rank": 1,
+            },
         ]
         df = make_signals_df(signals)
 

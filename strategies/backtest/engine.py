@@ -18,6 +18,7 @@ from strategies.backtest.adapter import BacktestStrategyAdapter
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.backtest.data_provider import BacktestDataProvider
 from strategies.backtest.metrics import BacktestMetrics
+from strategies.backtest.portfolio import PortfolioSimulator
 
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
@@ -53,6 +54,7 @@ class VectorBacktestEngine:
         strategy: BaseStrategy,
         params: dict | None = None,
         progress_callback: Callable[[float, str], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
         start_time = time.perf_counter()
         run_id = uuid.uuid4().hex[:16]
@@ -71,17 +73,21 @@ class VectorBacktestEngine:
         if progress_callback:
             progress_callback(0.1, "Running strategy on each period...")
 
+        failed_signal_dates: list[dict] = []
+
         signals = await self._generate_signals(
             strategy,
             params,
             trade_dates,
             progress_callback,
+            failed_signal_dates,
+            cancel_check,
         )
 
         if progress_callback:
             progress_callback(0.5, "Simulating trades...")
 
-        trades, positions, skipped_orders = self._simulate_trades(
+        trades, positions, skipped_orders, sim_warnings = self._simulate_trades(
             signals,
             quotes_df,
             trade_dates,
@@ -90,12 +96,12 @@ class VectorBacktestEngine:
         if progress_callback:
             progress_callback(0.7, "Calculating portfolio returns...")
 
-        nav_curve, daily_returns = self._calc_portfolio_nav(
+        nav_curve = BacktestMetrics.calc_nav_curve(
             positions,
-            quotes_df,
-            benchmark_df,
+            self.config.initial_capital,
             trade_dates,
         )
+        daily_returns = BacktestMetrics.calc_daily_returns(nav_curve)
 
         if progress_callback:
             progress_callback(0.8, "Calculating metrics...")
@@ -143,8 +149,8 @@ class VectorBacktestEngine:
             run_id=run_id,
             executed_at=datetime.datetime.now(),
             duration_ms=duration_ms,
-            data_warnings=[],
-            failed_signal_dates=[],
+            data_warnings=tuple(sim_warnings),
+            failed_signal_dates=tuple(failed_signal_dates),
         )
 
     async def _get_trade_dates(self) -> list[date]:
@@ -246,11 +252,17 @@ class VectorBacktestEngine:
         params: dict | None,
         trade_dates: list[date],
         progress_callback: Callable[[float, str], None] | None = None,
+        failed_signal_dates: list[dict] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> pl.DataFrame:
         signals_list = []
         total_dates = len(trade_dates)
 
         for i, signal_date in enumerate(trade_dates[:-1]):
+            if cancel_check and cancel_check():
+                logger.warning("[VectorBacktestEngine] Cancelled during signal generation at %s", signal_date)
+                break
+
             try:
                 context = await self.data_provider.build_context(
                     signal_date,
@@ -267,12 +279,13 @@ class VectorBacktestEngine:
                 )
 
                 if signal_df is not None and not signal_df.is_empty():
-                    signal_df = signal_df.with_columns(pl.col("rank").alias("signal_rank"))
                     signals_list.append(signal_df)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"[Backtest] Strategy failed on {signal_date}: {e}")
+                logger.warning("[Backtest] Strategy failed on %s: %s", signal_date, e)
+                if failed_signal_dates is not None:
+                    failed_signal_dates.append({"date": signal_date, "error": str(e)})
                 if self.config.fail_fast:
                     raise
 
@@ -285,275 +298,68 @@ class VectorBacktestEngine:
 
         return pl.concat(signals_list)
 
+    def _is_rebalance_day(
+        self,
+        exec_date: date,
+        trade_dates: list[date],
+        signals: pl.DataFrame,
+        rebalance_freq: str,
+    ) -> bool:
+        if rebalance_freq == "daily":
+            return True
+
+        if rebalance_freq == "signal":
+            if signals.is_empty():
+                return False
+            day_signals = signals.filter(pl.col("execution_date") == exec_date)
+            return not day_signals.is_empty()
+
+        try:
+            idx = trade_dates.index(exec_date)
+        except ValueError:
+            return False
+
+        if idx == 0:
+            return True
+
+        prev_date = trade_dates[idx - 1]
+
+        if rebalance_freq == "weekly":
+            return exec_date.isocalendar()[1] != prev_date.isocalendar()[1]
+
+        if rebalance_freq == "monthly":
+            return exec_date.month != prev_date.month
+
+        return True
+
     def _simulate_trades(
         self,
         signals: pl.DataFrame,
         quotes_df: pl.DataFrame,
         trade_dates: list[date],
-    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-        """
-        模拟交易执行（涨跌停/停牌处理版本）。
-
-        返回：
-        - trades: 交易明细
-        - positions: 持仓明细
-        - skipped_orders: 跳过订单明细（涨跌停/停牌）
-        """
+    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
         if signals.is_empty():
             return (
                 pl.DataFrame(),
                 pl.DataFrame(),
                 pl.DataFrame(),
+                [],
             )
 
-        positions_list = []
-        trades_list = []
-        skipped_list = []
-        current_positions: dict[str, dict] = {}
-        cash = self.config.initial_capital
+        simulator = PortfolioSimulator(self.config, self.cost_model)
 
         for exec_date in trade_dates:
             day_signals = signals.filter(pl.col("execution_date") == exec_date)
-
             day_quotes = quotes_df.filter(pl.col("trade_date") == exec_date)
-
-            if day_signals.is_empty() and not current_positions:
-                positions_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "cash": cash,
-                        "positions": {},
-                        "total_value": cash,
-                    }
-                )
-                continue
-
-            for ts_code, pos in list(current_positions.items()):
-                quote = day_quotes.filter(pl.col("ts_code") == ts_code)
-
-                if quote.is_empty():
-                    skipped_list.append(
-                        {
-                            "trade_date": exec_date,
-                            "ts_code": ts_code,
-                            "direction": "sell",
-                            "reason": "no_quote",
-                            "intended_volume": pos["volume"],
-                        }
-                    )
-                    continue
-
-                is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
-                if is_tradable is False:
-                    skipped_list.append(
-                        {
-                            "trade_date": exec_date,
-                            "ts_code": ts_code,
-                            "direction": "sell",
-                            "reason": "suspended",
-                            "intended_volume": pos["volume"],
-                        }
-                    )
-                    continue
-
-                limit_status = quote.select("limit_status").item() if "limit_status" in quote.columns else None
-                if limit_status == "down_limit":
-                    skipped_list.append(
-                        {
-                            "trade_date": exec_date,
-                            "ts_code": ts_code,
-                            "direction": "sell",
-                            "reason": "down_limit",
-                            "intended_volume": pos["volume"],
-                        }
-                    )
-                    continue
-
-                exit_price = float(quote.select("raw_open").item())
-                volume = pos["volume"]
-
-                cost = self.cost_model.calculate(
-                    price=exit_price,
-                    volume=volume,
-                    is_buy=False,
-                )
-
-                realized_pnl = cost.net_amount - pos["cost_basis"]
-
-                trades_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "action": "sell",
-                        "price": exit_price,
-                        "volume": volume,
-                        "gross_amount": cost.gross_amount,
-                        "total_cost": cost.total_cost,
-                        "net_amount": cost.net_amount,
-                        "realized_pnl": realized_pnl,
-                        "hold_days": (exec_date - pos["entry_date"]).days,
-                    }
-                )
-
-                cash += cost.net_amount
-                del current_positions[ts_code]
-
-            if not day_signals.is_empty():
-                signals_sorted = day_signals.sort("signal_rank", descending=True)
-                signals_sorted = signals_sorted.head(self.config.max_position_count)
-
-                available_cash = cash * (1 - 0.1)
-                position_value = available_cash / min(
-                    len(signals_sorted),
-                    self.config.max_position_count,
-                )
-
-                for row in signals_sorted.iter_rows(named=True):
-                    ts_code = row["ts_code"]
-                    quote = day_quotes.filter(pl.col("ts_code") == ts_code)
-
-                    if quote.is_empty():
-                        skipped_list.append(
-                            {
-                                "trade_date": exec_date,
-                                "ts_code": ts_code,
-                                "direction": "buy",
-                                "reason": "no_quote",
-                                "intended_volume": 0,
-                            }
-                        )
-                        continue
-
-                    is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
-                    if is_tradable is False:
-                        skipped_list.append(
-                            {
-                                "trade_date": exec_date,
-                                "ts_code": ts_code,
-                                "direction": "buy",
-                                "reason": "suspended",
-                                "intended_volume": 0,
-                            }
-                        )
-                        continue
-
-                    limit_status = quote.select("limit_status").item() if "limit_status" in quote.columns else None
-                    if limit_status == "up_limit":
-                        skipped_list.append(
-                            {
-                                "trade_date": exec_date,
-                                "ts_code": ts_code,
-                                "direction": "buy",
-                                "reason": "up_limit",
-                                "intended_volume": 0,
-                            }
-                        )
-                        continue
-
-                    entry_price = float(quote.select("raw_open").item())
-
-                    volume = int(position_value / entry_price / 100) * 100
-
-                    if volume <= 0:
-                        skipped_list.append(
-                            {
-                                "trade_date": exec_date,
-                                "ts_code": ts_code,
-                                "direction": "buy",
-                                "reason": "insufficient_cash",
-                                "intended_volume": 0,
-                            }
-                        )
-                        continue
-
-                    cost = self.cost_model.calculate(
-                        price=entry_price,
-                        volume=volume,
-                        is_buy=True,
-                    )
-
-                    if cost.net_amount > cash:
-                        skipped_list.append(
-                            {
-                                "trade_date": exec_date,
-                                "ts_code": ts_code,
-                                "direction": "buy",
-                                "reason": "insufficient_cash",
-                                "intended_volume": volume,
-                            }
-                        )
-                        continue
-
-                    trades_list.append(
-                        {
-                            "trade_date": exec_date,
-                            "ts_code": ts_code,
-                            "action": "buy",
-                            "price": entry_price,
-                            "volume": volume,
-                            "gross_amount": cost.gross_amount,
-                            "total_cost": cost.total_cost,
-                            "net_amount": cost.net_amount,
-                            "realized_pnl": 0.0,
-                            "hold_days": 0,
-                        }
-                    )
-
-                    current_positions[ts_code] = {
-                        "volume": volume,
-                        "cost_basis": cost.net_amount,
-                        "entry_date": exec_date,
-                        "entry_price": entry_price,
-                    }
-
-                    cash -= cost.net_amount
-
-            total_value = cash
-            positions_detail = {}
-            for ts_code, pos in current_positions.items():
-                quote = day_quotes.filter(pl.col("ts_code") == ts_code)
-                if not quote.is_empty():
-                    market_price = float(quote.select("qfq_close").item())
-                    market_value = market_price * pos["volume"]
-                    total_value += market_value
-                    positions_detail[ts_code] = {
-                        "volume": pos["volume"],
-                        "market_value": market_value,
-                        "pnl": market_value - pos["cost_basis"],
-                    }
-
-            positions_list.append(
-                {
-                    "trade_date": exec_date,
-                    "cash": cash,
-                    "positions": positions_detail,
-                    "total_value": total_value,
-                }
+            is_rebalance = self._is_rebalance_day(
+                exec_date,
+                trade_dates,
+                signals,
+                self.config.rebalance_freq,
             )
+            simulator.process_day(exec_date, day_signals, day_quotes, is_rebalance)
 
-        return (
-            pl.DataFrame(trades_list) if trades_list else pl.DataFrame(),
-            pl.DataFrame(positions_list),
-            pl.DataFrame(skipped_list) if skipped_list else pl.DataFrame(),
-        )
-
-    def _calc_portfolio_nav(
-        self,
-        positions: pl.DataFrame,
-        quotes_df: pl.DataFrame,
-        benchmark_df: pl.DataFrame,
-        trade_dates: list[date],
-    ) -> tuple[pl.Series, pl.Series]:
-        if positions.is_empty():
-            nav = pl.Series([self.config.initial_capital] * len(trade_dates))
-            returns = pl.Series([0.0] * len(trade_dates))
-            return nav, returns
-
-        nav = positions["total_value"]
-        returns = nav.pct_change()
-        returns = returns.fill_null(0.0)
-
-        return nav, returns
+        return simulator.get_results()
 
     def _calc_ic_series(
         self,
@@ -572,6 +378,12 @@ class VectorBacktestEngine:
         if signals.is_empty():
             return pl.Series([], dtype=pl.Float64)
 
+        quotes_by_date: dict[date, pl.DataFrame] = {}
+        for d in trade_dates:
+            subset = quotes_df.filter(pl.col("trade_date") == d)
+            if not subset.is_empty():
+                quotes_by_date[d] = subset
+
         ic_values = []
 
         for i, signal_date in enumerate(trade_dates[:-1]):
@@ -583,7 +395,10 @@ class VectorBacktestEngine:
                 ic_values.append(0.0)
                 continue
 
-            execution_quotes = quotes_df.filter(pl.col("trade_date") == execution_date)
+            execution_quotes = quotes_by_date.get(execution_date)
+            if execution_quotes is None:
+                ic_values.append(0.0)
+                continue
 
             next_rebalance_date = self._get_next_rebalance_date(execution_date, trade_dates, self.config.rebalance_freq)
 
@@ -591,7 +406,10 @@ class VectorBacktestEngine:
                 ic_values.append(0.0)
                 continue
 
-            next_rebalance_quotes = quotes_df.filter(pl.col("trade_date") == next_rebalance_date)
+            next_rebalance_quotes = quotes_by_date.get(next_rebalance_date)
+            if next_rebalance_quotes is None:
+                ic_values.append(0.0)
+                continue
 
             signal_quotes = day_signals.join(execution_quotes, on="ts_code", how="inner").join(
                 next_rebalance_quotes, on="ts_code", how="inner", suffix="_exit"
@@ -601,11 +419,12 @@ class VectorBacktestEngine:
                 ic_values.append(0.0)
                 continue
 
+            entry_price_col = "qfq_close" if self.config.execution_price == "next_close" else "qfq_open"
             forward_return = signal_quotes.select(
                 [
                     "ts_code",
                     "signal_rank",
-                    ((pl.col("qfq_close_exit") / pl.col("qfq_open") - 1) * 100).alias("fwd_ret"),
+                    ((pl.col("qfq_close_exit") / pl.col(entry_price_col) - 1) * 100).alias("fwd_ret"),
                 ]
             )
 
@@ -623,35 +442,26 @@ class VectorBacktestEngine:
         trade_dates: list[date],
         rebalance_freq: str,
     ) -> date | None:
-        """
-        根据调仓频率确定下一个调仓日。
-
-        Args:
-            execution_date: 当前执行日
-            trade_dates: 交易日列表
-            rebalance_freq: 调仓频率 ("daily", "weekly", "monthly", "signal")
-
-        Returns:
-            下一个调仓日，如果超出范围则返回 None
-        """
         try:
             current_idx = trade_dates.index(execution_date)
         except ValueError:
             return None
 
-        if rebalance_freq == "daily":
+        if rebalance_freq in ("daily", "signal"):
             next_idx = current_idx + 1
-        elif rebalance_freq == "weekly":
-            next_idx = min(current_idx + 5, len(trade_dates) - 1)
-        elif rebalance_freq == "monthly":
-            next_idx = min(current_idx + 22, len(trade_dates) - 1)
-        else:
-            next_idx = current_idx + 1
+            if next_idx >= len(trade_dates):
+                return None
+            return trade_dates[next_idx]
 
-        if next_idx >= len(trade_dates):
-            return None
+        for j in range(current_idx + 1, len(trade_dates)):
+            candidate = trade_dates[j]
+            prev_date = trade_dates[j - 1]
+            if rebalance_freq == "weekly" and candidate.isocalendar()[1] != prev_date.isocalendar()[1]:
+                return candidate
+            if rebalance_freq == "monthly" and candidate.month != prev_date.month:
+                return candidate
 
-        return trade_dates[next_idx]
+        return None
 
     def _calc_benchmark_returns(
         self,
@@ -669,14 +479,14 @@ class VectorBacktestEngine:
         if benchmark_df.is_empty():
             return pl.Series([0.0] * len(trade_dates))
 
-        returns = []
-        for _i, d in enumerate(trade_dates):
-            day_bm = benchmark_df.filter(pl.col("trade_date") == d)
-            if day_bm.is_empty():
-                returns.append(0.0)
-            else:
-                pct_chg = float(day_bm.select("pct_chg").item())
-                returns.append(pct_chg / 100)
+        bm_dict: dict[date, float] = {}
+        for row in benchmark_df.iter_rows(named=True):
+            trade_date_val = row["trade_date"]
+            if isinstance(trade_date_val, str):
+                trade_date_val = datetime.datetime.strptime(trade_date_val, "%Y%m%d").date()
+            bm_dict[trade_date_val] = float(row["pct_chg"]) / 100
+
+        returns = [bm_dict.get(d, 0.0) for d in trade_dates]
 
         return pl.Series(returns)
 

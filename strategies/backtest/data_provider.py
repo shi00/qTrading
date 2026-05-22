@@ -179,9 +179,6 @@ class BacktestDataProvider:
 
     @staticmethod
     def _normalize_trade_date(value: date | str) -> str:
-        """Normalize trade_date to YYYYMMDD string."""
-        if value is None:
-            return None
         if isinstance(value, date):
             return value.strftime("%Y%m%d")
         if isinstance(value, str):

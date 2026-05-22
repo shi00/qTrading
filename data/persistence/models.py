@@ -5,6 +5,7 @@ These models represent the database schema previously defined in schema.sql.
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     Date,
     DateTime,
@@ -638,10 +639,19 @@ class BacktestResultModel(Base):
     win_rate = Column(Numeric(8, 4))
     profit_factor = Column(Numeric(12, 6))
     total_trades = Column(Integer)
+    volatility = Column(Numeric(12, 6))
+    information_ratio = Column(Numeric(12, 6))
+    tracking_error = Column(Numeric(12, 6))
 
     nav_curve_json = Column(JSONB)
     trades_json = Column(JSONB)
     period_stats_json = Column(JSONB)
+
+    execution_price = Column(String(20))
+    allow_limit_up_buy = Column(Boolean)
+    allow_limit_down_sell = Column(Boolean)
+    slippage_model = Column(String(20))
+    app_version = Column(String(32))
 
     executed_at = Column(DateTime(timezone=False), server_default=func.now())
     duration_ms = Column(Integer)

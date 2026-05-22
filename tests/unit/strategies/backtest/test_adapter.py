@@ -123,7 +123,7 @@ class TestBacktestStrategyAdapter:
             "execution_date",
             "ts_code",
             "score",
-            "rank",
+            "signal_rank",
             "target_weight",
             "reason",
         ]
@@ -205,8 +205,8 @@ class TestBacktestStrategyAdapter:
             execution_date=date(2024, 1, 2),
         )
 
-        if not result.is_empty() and "rank" in result.columns:
-            ranks = result["rank"].to_list()
+        if not result.is_empty() and "signal_rank" in result.columns:
+            ranks = result["signal_rank"].to_list()
             assert len(set(ranks)) == len(ranks)
 
     @pytest.mark.asyncio
@@ -594,7 +594,7 @@ class TestBacktestStrategyAdapter:
         )
 
         assert result is not None
-        ranks = result["rank"].to_list()
+        ranks = result["signal_rank"].to_list()
         assert ranks == [3, 2, 1]
 
     def test_normalize_signal_output_direct(

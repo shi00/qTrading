@@ -233,6 +233,7 @@ class AppLayout(ft.Container):
             nav_keys = [  # pragma: no cover
                 "nav_market",  # pragma: no cover
                 "nav_screener",  # pragma: no cover
+                "nav_backtest",  # pragma: no cover
                 "nav_data",  # pragma: no cover
                 "nav_tasks",  # pragma: no cover
                 "nav_settings",  # pragma: no cover

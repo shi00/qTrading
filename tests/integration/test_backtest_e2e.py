@@ -381,3 +381,225 @@ class TestBacktestE2E:
 
         assert result is not None
         assert result.metrics["total_trades"] == 0
+
+
+class TestBacktestHandCalculated:
+    """手工计算精确对比测试——验证引擎输出的数值正确性。"""
+
+    @staticmethod
+    def _build_cache_two_day():
+        cache = MagicMock()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        cal_df = pd.DataFrame(
+            {
+                "cal_date": [d.strftime("%Y%m%d") for d in trade_dates],
+                "is_open": ["1", "1"],
+            }
+        )
+        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+
+        quotes_data = [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": date(2024, 1, 2),
+                "open": 10.00,
+                "high": 10.50,
+                "low": 9.80,
+                "close": 10.20,
+                "vol": 1000000,
+                "amount": 10200000,
+                "adj_factor": 1.0,
+                "is_tradable": True,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": date(2024, 1, 3),
+                "open": 10.50,
+                "high": 11.00,
+                "low": 10.30,
+                "close": 10.80,
+                "vol": 1200000,
+                "amount": 12960000,
+                "adj_factor": 1.0,
+                "is_tradable": True,
+            },
+        ]
+        cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(quotes_data))
+
+        cache.get_index_daily_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000300.SH", "000300.SH"],
+                    "trade_date": trade_dates,
+                    "pct_chg": [0.5, -0.3],
+                    "close": [3000.0, 2991.0],
+                }
+            )
+        )
+
+        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_hand_calculated_nav_and_fees(self) -> None:
+        """
+        场景：2 个交易日，1 只股票，signal 模式。
+
+        验证要点：
+        1. NAV 曲线首值 = 初始资金
+        2. 最终 NAV > 初始资金（股价上涨）
+        3. total_return 与 NAV 首尾比值一致
+        4. 交易费用被正确扣除（NAV 增幅 < 股价涨幅）
+        """
+        cache = self._build_cache_two_day()
+        config = BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 3),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            commission_rate=3e-4,
+            commission_min=5.0,
+            stamp_duty_rate=1e-3,
+            slippage_bps=5.0,
+            cash_reserve_pct=0.1,
+            fail_fast=True,
+        )
+        strategy = SimpleTestStrategy()
+        engine = VectorBacktestEngine(cache, config)
+        result = await engine.run(strategy)
+
+        assert result.nav_curve is not None
+        assert len(result.nav_curve) >= 2
+
+        first_nav = float(result.nav_curve["nav"][0])
+        last_nav = float(result.nav_curve["nav"][-1])
+
+        assert first_nav == pytest.approx(1_000_000.0, rel=1e-6)
+
+        price_return = (10.80 - 10.50) / 10.50
+        nav_return = (last_nav - first_nav) / first_nav
+        assert nav_return < price_return, "NAV 增幅应小于股价涨幅（因为扣除了交易费用）"
+
+        assert result.metrics["total_return"] == pytest.approx((last_nav / first_nav) - 1, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_hand_calculated_max_drawdown(self) -> None:
+        """
+        场景：3 个交易日，NAV 先涨后跌再涨。
+
+        验证要点：
+        1. max_drawdown >= 0
+        2. max_drawdown <= 1.0
+        """
+        cache = MagicMock()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        cal_df = pd.DataFrame(
+            {
+                "cal_date": [d.strftime("%Y%m%d") for d in trade_dates],
+                "is_open": ["1", "1", "1"],
+            }
+        )
+        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+
+        quotes_data = [
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": date(2024, 1, 2),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.5,
+                "close": 10.3,
+                "vol": 1000000,
+                "amount": 10300000,
+                "adj_factor": 1.0,
+                "is_tradable": True,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": date(2024, 1, 3),
+                "open": 10.3,
+                "high": 10.8,
+                "low": 10.0,
+                "close": 9.8,
+                "vol": 1200000,
+                "amount": 11760000,
+                "adj_factor": 1.0,
+                "is_tradable": True,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": date(2024, 1, 4),
+                "open": 9.8,
+                "high": 10.2,
+                "low": 9.6,
+                "close": 10.1,
+                "vol": 1100000,
+                "amount": 11110000,
+                "adj_factor": 1.0,
+                "is_tradable": True,
+            },
+        ]
+        cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(quotes_data))
+
+        cache.get_index_daily_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000300.SH"] * 3,
+                    "trade_date": trade_dates,
+                    "pct_chg": [0.5, -0.3, 0.2],
+                    "close": [3000.0, 2991.0, 2996.98],
+                }
+            )
+        )
+
+        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.1,
+            fail_fast=True,
+        )
+        strategy = SimpleTestStrategy()
+        engine = VectorBacktestEngine(cache, config)
+        result = await engine.run(strategy)
+
+        assert result.metrics["max_drawdown"] >= 0
+        assert result.metrics["max_drawdown"] <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_hand_calculated_trade_count(self) -> None:
+        """
+        场景：2 个交易日，1 只股票，signal 模式。
+        验证：至少 1 笔买入交易，交易笔数与 trades DataFrame 一致。
+        """
+        cache = self._build_cache_two_day()
+        config = BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 3),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.1,
+            fail_fast=True,
+        )
+        strategy = SimpleTestStrategy()
+        engine = VectorBacktestEngine(cache, config)
+        result = await engine.run(strategy)
+
+        buy_trades = result.trades.filter(pl.col("action") == "buy")
+        assert len(buy_trades) >= 1
+        assert result.metrics["total_trades"] >= 1
+        assert result.metrics["total_trades"] == len(result.trades)

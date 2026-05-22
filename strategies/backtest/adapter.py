@@ -9,6 +9,7 @@ import logging
 from datetime import date
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import polars as pl
 
 if TYPE_CHECKING:
@@ -110,8 +111,6 @@ class BacktestStrategyAdapter:
         if result_df is None or (hasattr(result_df, "empty") and result_df.empty):
             return pl.DataFrame()
 
-        import pandas as pd
-
         if isinstance(result_df, pd.DataFrame):
             if "ts_code" not in result_df.columns:
                 logger.warning("[BacktestAdapter] Strategy result missing 'ts_code' column, returning empty DataFrame")
@@ -155,7 +154,7 @@ class BacktestStrategyAdapter:
             "execution_date": [execution_date] * num_rows,
             "ts_code": ts_codes,
             "score": score_col if score_col else [None] * num_rows,
-            "rank": ranks,
+            "signal_rank": ranks,
             "target_weight": target_weights,
             "reason": reason_col if reason_col else [None] * num_rows,
         }

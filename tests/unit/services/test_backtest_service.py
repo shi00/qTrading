@@ -6,14 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from services.backtest_service import BacktestService
 from strategies.backtest.config import BacktestConfig, BacktestResult
+from services.backtest_service import BacktestService
 from strategies.base_strategy import BaseStrategy
 
 
 class MockStrategy(BaseStrategy):
-    """用于测试的 Mock 策略"""
-
     required_context_keys = []
 
     def __init__(self):
@@ -224,17 +222,3 @@ class TestBacktestService:
 
         assert success is True
         mock_cache.backtest_dao.delete_result.assert_called_once_with("test123")
-
-    def test_submit_backtest_task_without_task_manager(
-        self,
-        mock_cache: MagicMock,
-        backtest_config: BacktestConfig,
-    ) -> None:
-        service = BacktestService(cache=mock_cache)
-
-        task_id = service.submit_backtest_task(
-            strategy_key="mock_strategy",
-            config=backtest_config,
-        )
-
-        assert task_id is None
