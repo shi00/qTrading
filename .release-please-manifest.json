@@ -9,5 +9,6 @@
       "draft": false,
       "prerelease": false
     }
-  }
+  },
+  ".": "0.1.0"
 }
