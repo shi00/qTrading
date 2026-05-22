@@ -516,6 +516,42 @@ class TestExecuteSql:
         assert result["success"] is False
         assert "read-only" in result["error"].lower()
 
+    def test_dangerous_keyword_tab_bypass_blocked(self):
+        dm = _make_dm()
+        result = dm.execute_sql("DROP\tstock_basic")
+        assert result["success"] is False
+        assert "DROP" in result["error"]
+
+    def test_dangerous_keyword_newline_bypass_blocked(self):
+        dm = _make_dm()
+        result = dm.execute_sql("DELETE\nFROM stock_basic")
+        assert result["success"] is False
+        assert "DELETE" in result["error"]
+
+    def test_dangerous_keyword_comment_bypass_blocked(self):
+        dm = _make_dm()
+        result = dm.execute_sql("ALTER(--comment)stock_basic ADD col INT")
+        assert result["success"] is False
+
+    def test_dangerous_keyword_case_insensitive(self):
+        dm = _make_dm()
+        result = dm.execute_sql("drop table stock_basic")
+        assert result["success"] is False
+        assert "DROP" in result["error"]
+
+    def test_safe_word_not_blocked(self):
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        mock_result.fetchmany.return_value = [(1,)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        result = dm.execute_sql("SELECT * FROM stock_basic WHERE name = 'updated record'")
+        assert result["success"] is True
+
 
 class TestDatabaseConfigServiceSQLInjection:
     @pytest.mark.asyncio

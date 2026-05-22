@@ -1,4 +1,5 @@
 import logging
+import re
 import typing
 
 import pandas as pd
@@ -284,26 +285,20 @@ class DatabaseManager:
                 }
 
         # 1.5. Defense-in-depth: Block dangerous keywords even if sqlparse misclassifies
-        upper_sql = sql_query.upper().strip()
-        DANGEROUS_KEYWORDS = [
-            "DROP ",
-            "DELETE ",
-            "INSERT ",
-            "UPDATE ",
-            "ALTER ",
-            "CREATE ",
-            "TRUNCATE ",
-            "EXECUTE ",
-            "GRANT ",
-            "REVOKE ",
-        ]
-        for kw in DANGEROUS_KEYWORDS:
-            if kw in upper_sql:
-                return {
-                    "success": False,
-                    "data": None,
-                    "error": f"Security Alert: Dangerous keyword '{kw.strip()}' detected in query.",
-                }
+        # P0-2: Use regex word-boundary matching instead of trailing-space strings.
+        # Trailing-space matching ("DROP ") can be bypassed with tabs, newlines,
+        # or comments: DROP\ttable, DROP\n table, DROP(--comment)table.
+        _DANGEROUS_KEYWORD_PATTERN = re.compile(
+            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE)\b",
+            re.IGNORECASE,
+        )
+        match = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)
+        if match:
+            return {
+                "success": False,
+                "data": None,
+                "error": f"Security Alert: Dangerous keyword '{match.group(1).upper()}' detected in query.",
+            }
 
         # 2. Execute with strictly Read-Only transaction and Memory Protection
         # P0-1: Use REPEATABLE READ + SET TRANSACTION READ ONLY instead of
