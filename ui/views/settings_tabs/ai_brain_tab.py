@@ -16,7 +16,8 @@ from ui.components.config_panels.local_model_config_panel import LocalModelConfi
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from utils.config_handler import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT, ConfigHandler
+from utils.config_handler import ConfigHandler
+from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
 from utils.log_decorators import UILogger
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -104,8 +105,6 @@ class AIBrainTab(ft.Container):
         )  # pragma: no cover
 
         news_prompt_val = ConfigHandler.get_ai_news_prompt()  # pragma: no cover
-        if not news_prompt_val:  # pragma: no cover
-            news_prompt_val = DEFAULT_NEWS_PROMPT  # pragma: no cover
 
         self.ai_news_prompt_input = ft.TextField(  # pragma: no cover
             label=I18n.get("settings_news_prompt"),  # pragma: no cover

@@ -12,7 +12,13 @@ from pydantic import ValidationError
 from readerwriterlock import rwlock
 
 import config
-from utils.config_models import AppConfig, ConfigValidationResult, get_default_config
+from utils.config_models import (
+    DEFAULT_AI_PROMPT,
+    DEFAULT_NEWS_PROMPT,
+    AppConfig,
+    ConfigValidationResult,
+    get_default_config,
+)
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 from utils.security_utils import DecryptionError, SecurityManager
 
@@ -20,53 +26,6 @@ logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
-
-DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
-你是一个专业的金融量化分析助手，专注于A股市场分析。
-
-## 数据注入说明
-系统已为你注入以下扩展数据，请重点融合分析：
-
-### 财务数据扩展
-- **fina_audit**: 审计结果矩阵，务必关注"强调事项"和"非标意见"
-- **fina_mainbz**: 主营业务结构，横向比较营收比例与成本结构
-- **多期财务数据**: 捕捉横跨周期的拐点（不得仅考察最新一期）
-
-### 分析要点
-1. 审计意见类型及强调事项对股价的影响
-2. 主营业务结构变化趋势，识别转型信号
-3. 多期财务指标连载数据，发现周期性规律
-
-请基于提供的数据（行情、财务、新闻等）进行客观分析，不要提供投资建议。
-输出格式要求清晰、结构化，关键指标请高亮显示。
-"""
-
-DEFAULT_NEWS_PROMPT = """你是金融量化分析师。请对新闻进行分类。
-**MUST output valid JSON ONLY. NO markdown (no ```json). NO reasoning. NEVER output an empty string.**
-
-# 分类体系 (L1 code -> L2 code)
-- finance -> a_stock, hk_us, futures, precious_metals, forex, macro_policy
-- macro_economy -> macro_data, fiscal_policy, intl_macro
-- geopolitics -> conflict, energy
-- industry -> tech, consumer, energy_sector, financial_sector
-- other -> livelihood, entertainment
-
-# JSON 格式要求
-{"category_L1": "L1 code (English)", "category_L2": "L2 code (English)", "sentiment": "Positive/Neutral/Negative", "emoji": "相关Emoji"}
-
-# 示例
-User: 紫金矿业发现金矿
-Assistant: {"category_L1": "finance", "category_L2": "precious_metals", "sentiment": "Positive", "emoji": "🥇"}
-
-User: 某明星去旅游了
-Assistant: {"category_L1": "other", "category_L2": "entertainment", "sentiment": "Neutral", "emoji": "🍉"}"""
-
-
-# I will assume DEFAULT_AI_PROMPT is unchanged and skip re-pasting it in thought trace.
-# But for replace_file_content, I need to be precise.
-# The previous `view_file` showed the whole file.
-# I can target `class ConfigHandler` and replace it entirely OR replace methods.
-# Replacing the whole class is safer to ensure order and new methods are there.
 
 
 class ConfigHandler:

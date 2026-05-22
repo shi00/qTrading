@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
-_DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
+DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 
 你是一位专业的A股量化分析师，擅长从多维度综合分析股票投资价值。
 你的分析基于历史行情、财务指标、资金流向等客观数据，结合市场情绪和行业趋势，
@@ -55,26 +55,25 @@ _DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 
 """
 
-_DEFAULT_NEWS_PROMPT = """# A股新闻分析提示词
+DEFAULT_NEWS_PROMPT = """你是金融量化分析师。请对新闻进行分类。
+**MUST output valid JSON ONLY. NO markdown (no ```json). NO reasoning. NEVER output an empty string.**
 
-你是一位专业的A股市场新闻分析师，擅长从新闻中提取关键信息并评估其对股价的潜在影响。
+# 分类体系 (L1 code -> L2 code)
+- finance -> a_stock, hk_us, futures, precious_metals, forex, macro_policy
+- macro_economy -> macro_data, fiscal_policy, intl_macro
+- geopolitics -> conflict, energy
+- industry -> tech, consumer, energy_sector, financial_sector
+- other -> livelihood, entertainment
 
-## 分析要点
+# JSON 格式要求
+{"category_L1": "L1 code (English)", "category_L2": "L2 code (English)", "sentiment": "Positive/Neutral/Negative", "emoji": "相关Emoji"}
 
-1. **事件识别**: 识别新闻类型 (业绩、重组、政策、行业、公司事件等)
-2. **影响评估**: 评估事件对股价的潜在影响方向和程度
-3. **时效判断**: 判断事件的时间敏感性和持续性
-4. **风险识别**: 识别潜在的风险因素
+# 示例
+User: 紫金矿业发现金矿
+Assistant: {"category_L1": "finance", "category_L2": "precious_metals", "sentiment": "Positive", "emoji": "🥇"}
 
-## 输出格式
-
-1. **事件类型**: 分类标签
-2. **重要程度**: 高/中/低
-3. **影响方向**: 利好/利空/中性
-4. **核心内容**: 一句话概括新闻要点
-5. **投资启示**: 对投资决策的参考意义
-
-"""
+User: 某明星去旅游了
+Assistant: {"category_L1": "other", "category_L2": "entertainment", "sentiment": "Neutral", "emoji": "🍉"}"""
 
 
 class SyncIntegrityConfig(BaseModel):
@@ -169,8 +168,8 @@ class AppConfig(BaseModel):
 
     sync_integrity: SyncIntegrityConfig = SyncIntegrityConfig()
 
-    ai_system_prompt: str = Field(default=_DEFAULT_AI_PROMPT)
-    ai_news_prompt: str = Field(default=_DEFAULT_NEWS_PROMPT)
+    ai_system_prompt: str = Field(default=DEFAULT_AI_PROMPT)
+    ai_news_prompt: str = Field(default=DEFAULT_NEWS_PROMPT)
 
     scheduler_last_daily_update: str = ""
     scheduler_last_nightly_prediction: str = ""

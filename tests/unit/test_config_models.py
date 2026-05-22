@@ -4,7 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from utils.config_handler import ConfigHandler
-from utils.config_models import AppConfig, ConfigValidationResult, SyncIntegrityConfig, get_default_config
+from utils.config_models import (
+    AppConfig,
+    ConfigValidationResult,
+    DEFAULT_AI_PROMPT,
+    DEFAULT_NEWS_PROMPT,
+    SyncIntegrityConfig,
+    get_default_config,
+)
 
 
 class TestSyncIntegrityConfig:
@@ -284,3 +291,29 @@ class TestLocalAiConfigConsistency:
         ai_config = ConfigHandler.get_local_ai_config()
         pydantic_default = get_default_config()["local_n_ctx"]
         assert ai_config["n_ctx"] == pydantic_default
+
+
+class TestPromptDefaultsSingleSource:
+    def test_config_models_is_single_source(self):
+        from utils.config_handler import DEFAULT_AI_PROMPT as ch_ai, DEFAULT_NEWS_PROMPT as ch_news
+
+        assert ch_ai is DEFAULT_AI_PROMPT
+        assert ch_news is DEFAULT_NEWS_PROMPT
+
+    def test_app_config_uses_same_defaults(self):
+        cfg = AppConfig()
+        assert cfg.ai_system_prompt == DEFAULT_AI_PROMPT
+        assert cfg.ai_news_prompt == DEFAULT_NEWS_PROMPT
+
+    def test_get_default_config_uses_same_defaults(self):
+        defaults = get_default_config()
+        assert defaults["ai_system_prompt"] == DEFAULT_AI_PROMPT
+        assert defaults["ai_news_prompt"] == DEFAULT_NEWS_PROMPT
+
+    def test_news_prompt_is_json_classification_format(self):
+        assert "JSON" in DEFAULT_NEWS_PROMPT
+        assert "category_L1" in DEFAULT_NEWS_PROMPT
+
+    def test_ai_prompt_has_analysis_framework(self):
+        assert "分析框架" in DEFAULT_AI_PROMPT
+        assert "技术面" in DEFAULT_AI_PROMPT
