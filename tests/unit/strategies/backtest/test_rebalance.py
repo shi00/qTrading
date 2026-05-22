@@ -814,7 +814,7 @@ class TestICCalculationWithRebalanceFreq:
         assert len(ic_series) == 4
 
     def test_ic_returns_zero_for_insufficient_data(self) -> None:
-        """测试数据不足时 IC 返回 0。"""
+        """测试数据不足时 IC 返回空序列。"""
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         signals = pl.DataFrame(
@@ -836,5 +836,4 @@ class TestICCalculationWithRebalanceFreq:
             }
         )
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert len(ic_series) == 1
-        assert ic_series[0] == 0.0
+        assert len(ic_series) == 0

@@ -270,3 +270,109 @@ def _async_b64():
     fut = loop.create_future()
     fut.set_result("base64data")
     return fut
+
+
+class TestStockDetailDialogFormatVolException:
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {})
+
+    def test_format_vol_exception_returns_dash(self):
+        dlg = self._make_dialog({"vol": "invalid"})
+        result = dlg._format_vol("vol")
+        assert result == "-"
+
+
+class TestStockDetailDialogFormatAmountException:
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {})
+
+    def test_format_amount_exception_returns_dash(self):
+        dlg = self._make_dialog({"amount": "invalid"})
+        result = dlg._format_amount("amount")
+        assert result == "-"
+
+
+class TestStockDetailDialogLoadChart:
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None, data_processor=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {}, data_processor=data_processor)
+
+    @pytest.mark.asyncio
+    async def test_load_chart_empty_dataframe(self, mock_page):
+        import pandas as pd
+        import asyncio
+
+        mock_dp = MagicMock()
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        fut.set_result(pd.DataFrame())
+        mock_dp.get_stock_history = MagicMock(return_value=fut)
+
+        dlg = self._make_dialog(data_processor=mock_dp)
+        set_page(dlg, mock_page)
+        dlg.chart_container = MagicMock()
+
+        await dlg.load_chart("000001.SZ")
+        dlg.chart_container.update.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_load_chart_exception(self, mock_page):
+        mock_dp = MagicMock()
+        mock_dp.get_stock_history = MagicMock(side_effect=Exception("network error"))
+
+        dlg = self._make_dialog(data_processor=mock_dp)
+        set_page(dlg, mock_page)
+        dlg.chart_container = MagicMock()
+
+        await dlg.load_chart("000001.SZ")
+        dlg.chart_container.update.assert_called()

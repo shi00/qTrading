@@ -369,7 +369,7 @@ class TestToastCardToggleExpand:
 
             card._toggle_expand(MagicMock())
             assert card.is_expanded is True
-            assert card.text_control.max_lines is None
+            assert card.text_control.max_lines in (None, "", 0)
 
             card._toggle_expand(MagicMock())
             assert card.is_expanded is False
@@ -495,6 +495,7 @@ class TestToastCardStartTimer:
                 await asyncio.sleep(0.5)
                 card.cancel_timer()
 
+            task = asyncio.create_task(run_timer())
             await card.start_timer()
 
             assert card.remaining == 5

@@ -664,7 +664,12 @@ class TestBaseDaoChunkedInQuery:
 
     @pytest.mark.asyncio
     async def test_multiple_chunks(self):
-        mock_read_fn = AsyncMock(return_value=pd.DataFrame({"id": [1, 2, 3, 4, 5, 6]}))
+        call_count = 0
+
+        async def mock_read_fn(sql, params):
+            nonlocal call_count
+            call_count += 1
+            return pd.DataFrame({"id": [call_count * 2 - 1, call_count * 2]})
 
         result = await BaseDao.chunked_in_query(
             mock_read_fn,

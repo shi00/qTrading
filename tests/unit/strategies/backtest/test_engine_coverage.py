@@ -554,6 +554,8 @@ class TestGetTradeDates:
 
     @pytest.mark.asyncio
     async def test_empty_dataframe_raises(self):
+        import pandas as pd
+
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
@@ -561,7 +563,7 @@ class TestGetTradeDates:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_trade_cal = AsyncMock(return_value=pl.DataFrame())
+        engine.cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
 
         with pytest.raises(ValueError, match="No trade dates found"):
             await engine._get_trade_dates()
@@ -586,6 +588,8 @@ class TestLoadQuotes:
 
     @pytest.mark.asyncio
     async def test_empty_dataframe_raises(self):
+        import pandas as pd
+
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
@@ -593,7 +597,7 @@ class TestLoadQuotes:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_daily_quotes = AsyncMock(return_value=pl.DataFrame())
+        engine.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
 
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
 
@@ -622,6 +626,8 @@ class TestLoadBenchmark:
 
     @pytest.mark.asyncio
     async def test_empty_dataframe_returns_empty_df(self):
+        import pandas as pd
+
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
@@ -630,7 +636,7 @@ class TestLoadBenchmark:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_index_daily_range = AsyncMock(return_value=pl.DataFrame())
+        engine.cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
 
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
 
@@ -683,8 +689,17 @@ class TestGenerateSignals:
 
     @pytest.mark.asyncio
     async def test_strategy_exception_with_fail_fast(self):
-        engine = self._make_engine()
-        engine.config.fail_fast = True
+        from dataclasses import replace
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            fail_fast=True,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.data_provider = MagicMock()
+        engine.strategy_adapter = MagicMock()
         engine.data_provider.build_context = AsyncMock(return_value={})
         engine.strategy_adapter.generate_signal = AsyncMock(side_effect=Exception("strategy error"))
 
@@ -699,8 +714,15 @@ class TestGenerateSignals:
 
     @pytest.mark.asyncio
     async def test_strategy_exception_without_fail_fast(self):
-        engine = self._make_engine()
-        engine.config.fail_fast = False
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            fail_fast=False,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.data_provider = MagicMock()
+        engine.strategy_adapter = MagicMock()
         engine.data_provider.build_context = AsyncMock(return_value={})
         engine.strategy_adapter.generate_signal = AsyncMock(side_effect=Exception("strategy error"))
 
