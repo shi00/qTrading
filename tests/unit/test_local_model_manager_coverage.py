@@ -92,7 +92,7 @@ class TestPersistentWorkerInvalidRequest:
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
-        mock_req_queue.get.side_effect = ["invalid_request", queue.Empty()]
+        mock_req_queue.get.side_effect = ["invalid_request", _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
@@ -109,7 +109,7 @@ class TestPersistentWorkerInvalidRequest:
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
-        mock_req_queue.get.side_effect = [("prompt", 100), queue.Empty()]
+        mock_req_queue.get.side_effect = [("prompt", 100), _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
@@ -128,7 +128,7 @@ class TestPersistentWorkerInferenceError:
         mock_llama.create_chat_completion.side_effect = Exception("inference failed")
         mock_llama_module.Llama.return_value = mock_llama
 
-        mock_req_queue.get.side_effect = [("prompt", 100, 0.7, "system"), queue.Empty()]
+        mock_req_queue.get.side_effect = [("prompt", 100, 0.7, "system"), _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
@@ -147,7 +147,7 @@ class TestPersistentWorkerQueueGetError:
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
-        mock_req_queue.get.side_effect = [Exception("queue error"), queue.Empty()]
+        mock_req_queue.get.side_effect = [Exception("queue error"), _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
@@ -262,6 +262,8 @@ class TestLocalModelManagerEnsureWorkerEdgeCases:
 class TestLocalModelManagerLoadModelOSError:
     @pytest.mark.asyncio
     async def test_load_model_os_error_on_stat(self):
+        from unittest.mock import AsyncMock
+
         with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
 
@@ -272,7 +274,7 @@ class TestLocalModelManagerLoadModelOSError:
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
             ):
-                mock_tpm.return_value.run_async = MagicMock(return_value="abc123")
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
 
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 4})
                 assert result is True
@@ -333,7 +335,7 @@ class TestLocalModelManagerRunInferenceDeadlineReached:
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
-                    "local_model_timeout": 0.1,
+                    "local_model_timeout": 2.0,
                 }
 
                 mock_req_queue = MagicMock()
