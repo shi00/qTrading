@@ -61,9 +61,10 @@ class TestTaskManagerInit:
 
 
 class TestTaskManagerGetSemaphore:
+    @pytest.mark.asyncio
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
-    def test_creates_semaphore(self, mock_i18n, mock_tp):
+    async def test_creates_semaphore(self, mock_i18n, mock_tp):
         with patch("services.task_manager.ConfigHandler") as mock_ch:
             mock_ch.get_max_concurrent_tasks.return_value = 3
             mgr = TaskManager()
@@ -71,9 +72,10 @@ class TestTaskManagerGetSemaphore:
             assert sem is not None
             assert sem._value == 3
 
+    @pytest.mark.asyncio
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
-    def test_semaphore_cached(self, mock_i18n, mock_tp):
+    async def test_semaphore_cached_per_loop(self, mock_i18n, mock_tp):
         with patch("services.task_manager.ConfigHandler") as mock_ch:
             mock_ch.get_max_concurrent_tasks.return_value = 3
             mgr = TaskManager()
@@ -81,17 +83,70 @@ class TestTaskManagerGetSemaphore:
             sem2 = mgr._get_semaphore()
             assert sem1 is sem2
 
-
-class TestTaskManagerReloadConfig:
+    @pytest.mark.asyncio
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
-    def test_resets_semaphore(self, mock_i18n, mock_tp):
+    async def test_semaphore_uses_loop_local(self, mock_i18n, mock_tp):
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 5
+            mgr = TaskManager()
+            sem = mgr._get_semaphore()
+            from utils.loop_local import get_loop_local
+
+            loop_sem = get_loop_local("task_manager_semaphore", lambda: None)
+            assert sem is loop_sem
+
+
+class TestTaskManagerReloadConfig:
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_resets_semaphore(self, mock_i18n, mock_tp):
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 3
+            mgr = TaskManager()
+            sem_before = mgr._get_semaphore()
+            mgr.reload_config()
+            sem_after = mgr._get_semaphore()
+            assert sem_before is not sem_after
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_reload_creates_new_semaphore_with_new_config(self, mock_i18n, mock_tp):
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 3
+            mgr = TaskManager()
+            sem1 = mgr._get_semaphore()
+            assert sem1._value == 3
+            mgr.reload_config()
+            mock_ch.get_max_concurrent_tasks.return_value = 7
+            sem2 = mgr._get_semaphore()
+            assert sem2._value == 7
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_reload_uses_call_soon_threadsafe_when_loop_running(self, mock_i18n, mock_tp):
         with patch("services.task_manager.ConfigHandler") as mock_ch:
             mock_ch.get_max_concurrent_tasks.return_value = 3
             mgr = TaskManager()
             mgr._get_semaphore()
+            mgr._loop = MagicMock()
+            mgr._loop.is_running.return_value = True
             mgr.reload_config()
-            assert mgr._semaphore_instance is None
+            mgr._loop.call_soon_threadsafe.assert_called_once()
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_reload_without_loop_uses_del_loop_local_directly(self, mock_i18n, mock_tp):
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 3
+            mgr = TaskManager()
+            mgr._loop = None
+            with patch("services.task_manager.del_loop_local") as mock_del:
+                mgr.reload_config()
+                mock_del.assert_called_once_with("task_manager_semaphore")
 
 
 class TestTaskManagerSubscribe:

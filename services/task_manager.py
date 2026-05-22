@@ -17,6 +17,7 @@ from typing import Any
 from core.i18n import I18n
 from utils.error_classifier import classify_error, classify_severity
 from utils.config_handler import ConfigHandler
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.thread_pool import ThreadPoolManager
 from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
 
@@ -114,10 +115,6 @@ class TaskManager:
             self._MAX_SUBSCRIBER_ERRORS: int = 3
             self._background_tasks = set()  # Strong references to prevent GC
 
-            # Semaphore is created lazily inside the event loop to avoid
-            # DeprecationWarning on Python 3.10+ when no loop is running.
-            self._semaphore_instance: asyncio.Semaphore | None = None
-
             # Throttle for update_progress notifications (seconds)
             self._last_notify_time: float = 0.0
             self._NOTIFY_THROTTLE_S: float = _NOTIFY_THROTTLE_S
@@ -136,18 +133,20 @@ class TaskManager:
         """Lazily create semaphore bound to the current event loop.
         Concurrency limit follows ThreadPoolManager's CPU pool capacity,
         since most tasks offload heavy work there via run_async."""
-        if self._semaphore_instance is None:
-            # Priority: explicit config > CPU pool max_workers > fallback 5
-            limit = ConfigHandler.get_max_concurrent_tasks()
-            if limit <= 0:
-                try:
-                    limit = ThreadPoolManager().cpu_pool._max_workers
-                except Exception as e:
-                    logger.debug(f"[TaskManager] Failed to read cpu_pool max_workers, using default: {e}")
-                    limit = 5
-            self._semaphore_instance = asyncio.Semaphore(limit)
+        limit = ConfigHandler.get_max_concurrent_tasks()
+        if limit <= 0:
+            try:
+                limit = ThreadPoolManager().cpu_pool._max_workers
+            except Exception as e:
+                logger.debug(f"[TaskManager] Failed to read cpu_pool max_workers, using default: {e}")
+                limit = 5
+
+        def _factory():
+            sem = asyncio.Semaphore(limit)
             logger.info(f"[TaskManager] Concurrency semaphore initialized: max={limit}")
-        return self._semaphore_instance
+            return sem
+
+        return get_loop_local("task_manager_semaphore", _factory)
 
     def subscribe(self, callback: Callable[[list[AppTask]], None]):
         """Register a UI callback to be notified when any task updates."""
@@ -167,7 +166,10 @@ class TaskManager:
 
     def reload_config(self):
         """S1-1 fix: Reset semaphore so new concurrency limit takes effect on next _get_semaphore call."""
-        self._semaphore_instance = None
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(lambda: del_loop_local("task_manager_semaphore"))
+        else:
+            del_loop_local("task_manager_semaphore")
         logger.info("[TaskManager] Semaphore reset, will reinitialize with new config on next task")
 
     def _notify_subscribers(self):
