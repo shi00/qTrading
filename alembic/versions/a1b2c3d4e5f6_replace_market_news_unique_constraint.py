@@ -1,4 +1,5 @@
 """replace single-column uq_market_news_hash with composite uq_market_news_hash_time
+and set publish_time NOT NULL
 
 Revision ID: a1b2c3d4e5f6
 Revises: f6586a3fccba
@@ -16,9 +17,13 @@ depends_on = None
 
 def upgrade() -> None:
     op.drop_constraint("uq_market_news_hash", "market_news", type_="unique")
+    op.execute("UPDATE market_news SET publish_time = CURRENT_TIMESTAMP WHERE publish_time IS NULL")
+    op.alter_column("market_news", "publish_time", nullable=False)
     op.create_unique_constraint("uq_market_news_hash_time", "market_news", ["content_hash", "publish_time"])
 
 
 def downgrade() -> None:
     op.drop_constraint("uq_market_news_hash_time", "market_news", type_="unique")
+    op.alter_column("market_news", "publish_time", nullable=True)
+    op.execute("DELETE FROM market_news a USING market_news b WHERE a.id > b.id AND a.content_hash = b.content_hash")
     op.create_unique_constraint("uq_market_news_hash", "market_news", ["content_hash"])

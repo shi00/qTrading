@@ -60,3 +60,7 @@ class TestMarketNewsUniqueConstraint:
             f"with composite UniqueConstraint(content_hash, publish_time). "
             f"Found: {constraint_col_sets}"
         )
+
+    def test_publish_time_is_not_nullable(self):
+        col = MarketNews.__table__.c.publish_time
+        assert col.nullable is False, "publish_time must be NOT NULL for composite unique constraint to work correctly"

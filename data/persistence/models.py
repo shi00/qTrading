@@ -284,7 +284,7 @@ class MarketNews(Base):
     content = Column(String)
     content_hash = Column(String(64), nullable=False)
     tags = Column(String)
-    publish_time = Column(DateTime(timezone=False))
+    publish_time = Column(DateTime(timezone=False), nullable=False)
     source = Column(String)
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
