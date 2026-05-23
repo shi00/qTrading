@@ -180,6 +180,10 @@ class ShutdownCoordinator:
                 failed_names = ", ".join(r.name for r in critical_failures)
                 logger.error(f"[Shutdown] Shutdown completed with CRITICAL step failures: {failed_names}")
             return self._cleanup_success
+        except asyncio.CancelledError:
+            self._cleanup_success = False
+            logger.warning("[Shutdown] Cleanup was cancelled externally.")
+            return False
         except TimeoutError:
             self._cleanup_success = False
             logger.error(f"[Shutdown] Cleanup timed out after {timeout_s:.1f}s.")
@@ -228,6 +232,17 @@ class ShutdownCoordinator:
                 ok=True,
                 timed_out=False,
                 elapsed_ms=elapsed_ms,
+            )
+        except asyncio.CancelledError:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.warning(f"[Shutdown] {name} cancelled, continuing with remaining steps")
+            return StepResult(
+                name=name,
+                critical=critical,
+                ok=False,
+                timed_out=False,
+                elapsed_ms=elapsed_ms,
+                error="cancelled",
             )
         except TimeoutError as ex:
             elapsed_ms = (time.perf_counter() - start) * 1000

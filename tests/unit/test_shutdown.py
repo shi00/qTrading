@@ -124,6 +124,19 @@ class TestShutdownCoordinatorRunAsyncStep:
         assert result.critical is False
         assert result.ok is False
 
+    @pytest.mark.asyncio
+    async def test_cancelled_step_returns_failed_result(self):
+        coord = ShutdownCoordinator()
+        result = await coord._run_async_step(
+            name="test",
+            step=AsyncMock(side_effect=asyncio.CancelledError()),
+            step_timeout_s=5.0,
+            critical=True,
+        )
+        assert result.ok is False
+        assert result.error == "cancelled"
+        assert result.timed_out is False
+
 
 class TestShutdownCoordinatorCleanupSteps:
     @pytest.mark.asyncio
@@ -400,6 +413,14 @@ class TestShutdownCoordinatorExecuteCleanup:
     async def test_exception(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
         coord._run_cleanup_steps = AsyncMock(side_effect=RuntimeError("unexpected"))
+        result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+        assert result is False
+        assert coord.cleanup_done is True
+
+    @pytest.mark.asyncio
+    async def test_cancelled(self):
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(side_effect=asyncio.CancelledError())
         result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
         assert result is False
         assert coord.cleanup_done is True
