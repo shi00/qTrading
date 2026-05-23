@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import logging
@@ -61,6 +62,33 @@ class ReviewManager:
 
         index_code = ConfigHandler.get_config("benchmark_index", "000001.SH")
         index_cache: dict[str, float | None] = {}
+
+        try:
+            max_quote_date = str(bulk_quotes["trade_date"].max())
+            df_index_bulk = await self.cache.get_index_daily_range(
+                ts_code_list=[index_code],
+                start_date=min_pred_date,
+                end_date=max_quote_date,
+            )
+            if df_index_bulk is not None and not df_index_bulk.empty:
+                for _, i_row in df_index_bulk.iterrows():
+                    dt_val = i_row["trade_date"]
+                    if hasattr(dt_val, "strftime"):
+                        dt_str = dt_val.strftime("%Y%m%d")
+                    else:
+                        dt_str = str(dt_val).replace("-", "")[:8]
+                    raw_pct = i_row.get("pct_chg")
+                    index_cache[dt_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                logger.info(
+                    "[Review] Bulk loaded %d days of index data for %s.",
+                    len(df_index_bulk),
+                    index_code,
+                )
+        except asyncio.CancelledError:
+            logger.warning("[Review] Cancelled during index bulk pre-fetch.")
+            raise
+        except Exception as exc:
+            logger.warning("[Review] Failed to bulk pre-fetch index quotes: %s", exc)
 
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
