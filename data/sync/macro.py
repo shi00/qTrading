@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import typing
@@ -89,6 +90,9 @@ class MacroSyncStrategy(ISyncStrategy):
             if self._check_cancelled(result):
                 return result
             await self._sync_index_weights(result)
+        except asyncio.CancelledError:
+            result.status = "cancelled"
+            raise
         except EngineDisposedError:
             logger.warning("[MacroSync] Run | Engine disposed, stopping sync.")
             result.status = "failed"

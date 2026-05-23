@@ -39,24 +39,24 @@ class TestTaskHistoryIndexes:
 
 
 class TestMarketNewsUniqueConstraint:
-    """DB-P1-8: Verify market_news content_hash unique constraint is single-column."""
+    """Verify market_news has composite unique constraint on (content_hash, publish_time)."""
 
-    def test_content_hash_unique_constraint_is_single_column(self):
+    def test_content_hash_publish_time_composite_unique_constraint(self):
         constraint_col_sets = []
         for constraint in MarketNews.__table__.constraints:
             if isinstance(constraint, sa.UniqueConstraint):
                 col_names = tuple(c.name for c in constraint.columns)
                 constraint_col_sets.append(col_names)
 
+        has_composite = any(cols == ("content_hash", "publish_time") for cols in constraint_col_sets)
         has_single_hash = any(cols == ("content_hash",) for cols in constraint_col_sets)
-        has_composite = any("content_hash" in cols and "publish_time" in cols for cols in constraint_col_sets)
 
-        assert has_single_hash, (
-            f"Expected single-column UniqueConstraint on content_hash. "
+        assert has_composite, (
+            f"Expected composite UniqueConstraint on (content_hash, publish_time). "
             f"Found constraint column sets: {constraint_col_sets}"
         )
-        assert not has_composite, (
-            f"Composite UniqueConstraint(content_hash, publish_time) should be replaced "
-            f"with single-column UniqueConstraint(content_hash). "
+        assert not has_single_hash, (
+            f"Single-column UniqueConstraint(content_hash) should be replaced "
+            f"with composite UniqueConstraint(content_hash, publish_time). "
             f"Found: {constraint_col_sets}"
         )

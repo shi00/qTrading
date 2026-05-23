@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import typing
@@ -136,6 +137,9 @@ class HolderSyncStrategy(ISyncStrategy):
                     f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}",
                 )
 
+        except asyncio.CancelledError:
+            result.status = "cancelled"
+            raise
         except EngineDisposedError:
             logger.warning("[HolderSync] Run | Engine disposed, stopping sync.")
             result.status = "failed"
