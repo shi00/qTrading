@@ -234,7 +234,7 @@ class TestGetTypedSetTyped:
             result = ConfigHandler.set_typed("ai_api_key", secret_value, validator=lambda v: False)
         assert result is False
         assert secret_value not in caplog.text
-        assert "sk_***1234" in caplog.text or "sk_***" in caplog.text
+        assert "sk_***2345" in caplog.text
 
     def test_set_typed_sanitizes_db_password_encrypted(self, monkeypatch, tmp_path, caplog):
         config_file = str(tmp_path / "test_settings.json")

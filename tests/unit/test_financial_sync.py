@@ -413,7 +413,7 @@ class TestFinancialSyncCancelActiveTasks:
 
 class TestFinancialSyncCancelledError:
     @pytest.mark.asyncio
-    async def test_cancelled_error_sets_status_and_reraises(self):
+    async def test_cancelled_error_reraises(self):
         ctx = make_ctx()
         ctx.cache.get_stock_basic = AsyncMock(side_effect=asyncio.CancelledError())
         strategy = FinancialSyncStrategy(ctx)
