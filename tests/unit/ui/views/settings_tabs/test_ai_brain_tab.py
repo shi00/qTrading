@@ -47,6 +47,32 @@ class TestAIBrainTabEventHandlers:
         tab._on_local_model_saved()
         tab.show_snack.assert_called_once()
 
+    def test_reset_news_prompt(self):
+        from utils.config_models import DEFAULT_NEWS_PROMPT
+
+        tab = self._make_tab()
+        tab.show_snack = MagicMock()
+        tab.ai_news_prompt_input = MagicMock()
+        tab._safe_update = MagicMock()
+
+        tab._reset_news_prompt(None)
+        tab.show_snack.assert_called_once()
+        tab._safe_update.assert_called_once()
+        assert tab.ai_news_prompt_input.value == DEFAULT_NEWS_PROMPT
+
+    def test_reset_ai_prompt(self):
+        from utils.config_models import DEFAULT_AI_PROMPT
+
+        tab = self._make_tab()
+        tab.show_snack = MagicMock()
+        tab.ai_prompt_input = MagicMock()
+        tab._safe_update = MagicMock()
+
+        tab._reset_ai_prompt(None)
+        tab.show_snack.assert_called_once()
+        tab._safe_update.assert_called_once()
+        assert tab.ai_prompt_input.value == DEFAULT_AI_PROMPT
+
     @pytest.mark.asyncio
     async def test_on_llm_test_connection(self):
         with patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai:
