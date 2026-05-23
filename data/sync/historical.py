@@ -143,6 +143,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         except asyncio.CancelledError:
             result.status = "cancelled"
+            raise
         except EngineDisposedError:
             logger.warning("[HistoricalSync] Run | Engine disposed, stopping sync.")
             result.status = "failed"

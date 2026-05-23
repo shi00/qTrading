@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 import datetime
 from unittest.mock import MagicMock, AsyncMock, PropertyMock, patch
@@ -259,6 +261,14 @@ class TestHistoricalSyncRunExtended:
         strategy._shutdown_event.set()
         result = await strategy.run(days=5)
         assert result.status in ("cancelled", "success")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_reraises(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=asyncio.CancelledError())
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(asyncio.CancelledError):
+            await strategy.run(days=5)
 
     @pytest.mark.asyncio
     async def test_run_with_cached_dates(self):

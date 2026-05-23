@@ -172,6 +172,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
         except asyncio.CancelledError:
             logger.debug("[FinancialSync] Stop | Operation cancelled.")
             result.status = "cancelled"
+            raise
         except EngineDisposedError:
             logger.warning("[FinancialSync] Run | Engine disposed, stopping sync.")
             result.status = "failed"
