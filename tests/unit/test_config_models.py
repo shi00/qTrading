@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 from pydantic import ValidationError
@@ -223,6 +224,26 @@ class TestGetTypedSetTyped:
         ConfigHandler._config_cache = None
         result = ConfigHandler.set_typed("db_port", 0, validator=lambda v: 1 <= v <= 65535)
         assert result is False
+
+    def test_set_typed_sanitizes_sensitive_key_in_log(self, monkeypatch, tmp_path, caplog):
+        config_file = str(tmp_path / "test_settings.json")
+        monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
+        ConfigHandler._config_cache = None
+        secret_value = "sk_super_secret_api_key_12345"
+        with caplog.at_level(logging.WARNING):
+            result = ConfigHandler.set_typed("ai_api_key", secret_value, validator=lambda v: False)
+        assert result is False
+        assert secret_value not in caplog.text
+        assert "sk_***1234" in caplog.text or "sk_***" in caplog.text
+
+    def test_set_typed_non_sensitive_key_logged_as_is(self, monkeypatch, tmp_path, caplog):
+        config_file = str(tmp_path / "test_settings.json")
+        monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
+        ConfigHandler._config_cache = None
+        with caplog.at_level(logging.WARNING):
+            result = ConfigHandler.set_typed("log_level", "INVALID", validator=lambda v: False)
+        assert result is False
+        assert "INVALID" in caplog.text
 
 
 class TestLoadConfigWithValidation:

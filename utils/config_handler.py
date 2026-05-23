@@ -20,12 +20,15 @@ from utils.config_models import (
     get_default_config,
 )
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+from utils.sanitizers import DataSanitizer
 from utils.security_utils import DecryptionError, SecurityManager
 
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
+
+SENSITIVE_KEYS = frozenset({"ts_token", "db_password", "ai_api_key", "doubao_api_key"})
 
 
 class ConfigHandler:
@@ -51,9 +54,9 @@ class ConfigHandler:
 
     @staticmethod
     def set_typed(key: str, value: object, validator: Callable[..., bool] | None = None) -> bool:
-        """类型安全的通用 setter"""
         if validator and not validator(value):
-            logger.warning(f"[ConfigHandler] Validation failed for {key}: {value}")
+            display_value = DataSanitizer.sanitize_token(str(value)) if key in SENSITIVE_KEYS else value
+            logger.warning("[ConfigHandler] Validation failed for %s: %s", key, display_value)
             return False
         return ConfigHandler.save_config({key: value})
 
