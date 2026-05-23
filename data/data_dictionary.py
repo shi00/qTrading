@@ -323,7 +323,7 @@ TABLE_DEFINITIONS = {
         "alias": "tab_margin_daily",
         "desc": "融资融券",
         "quality_config": {"tier": 1, "monitor": True},
-        "type": "global",
+        "type": "stock",
         "columns": {
             "ts_code": "col_ts_code",
             "trade_date": "col_trade_date",
@@ -399,7 +399,7 @@ TABLE_DEFINITIONS = {
         "alias": "tab_suspend_d",
         "desc": "停复牌信息",
         "quality_config": {"tier": 1, "monitor": True},
-        "type": "global",
+        "type": "stock",
         "columns": {
             "ts_code": "col_ts_code",
             "trade_date": "col_trade_date",
