@@ -23,7 +23,12 @@ class MarketDao(BaseDao):
 
     # --- Market News ---
     async def save_market_news(self, news_item: dict, wait: bool = False):
-        """Save a single market news item."""
+        """Save a single market news item.
+
+        Uses raw SQL because MarketNews has an auto-increment PK (id),
+        but the UPSERT conflict key is (content_hash, publish_time).
+        _save_upsert only supports PK-based conflict resolution.
+        """
         content = news_item.get("content", "") or ""
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -31,7 +36,9 @@ class MarketDao(BaseDao):
               INSERT INTO market_news ("content","content_hash","tags","publish_time","source","created_at")
               VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
               ON CONFLICT("content_hash","publish_time") DO
-              UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags")
+              UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
+                         "content" = excluded."content",
+                         "source" = excluded."source"
               """
         params = (
             content,

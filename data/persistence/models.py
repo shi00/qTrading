@@ -289,7 +289,7 @@ class MarketNews(Base):
     created_at = Column(DateTime(timezone=False), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("content_hash", name="uq_market_news_hash"),
+        UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_time"),
         Index("ix_market_news_source", "source"),
         Index("idx_market_news_pub_source", "publish_time", "source"),
     )

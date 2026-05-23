@@ -28,6 +28,39 @@ class TestMarketDaoSaveMarketNews:
         result = await dao.save_market_news({"content": ""})
         assert result == 1
 
+    @pytest.mark.asyncio
+    async def test_sql_uses_composite_conflict_key(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(
+            {
+                "content": "Test",
+                "tags": None,
+                "publish_time": "2024-06-15 10:00:00",
+                "source": "Sina",
+            }
+        )
+        call_args = dao._write_db.call_args
+        sql = call_args[0][0]
+        assert 'ON CONFLICT("content_hash","publish_time")' in sql
+
+    @pytest.mark.asyncio
+    async def test_sql_updates_content_and_source_on_conflict(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(
+            {
+                "content": "Updated news",
+                "tags": None,
+                "publish_time": "2024-06-15 10:00:00",
+                "source": "CLS",
+            }
+        )
+        call_args = dao._write_db.call_args
+        sql = call_args[0][0]
+        assert '"content" = excluded."content"' in sql
+        assert '"source" = excluded."source"' in sql
+
 
 class TestMarketDaoGetMarketNews:
     @pytest.mark.asyncio
