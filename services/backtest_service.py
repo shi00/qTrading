@@ -129,7 +129,9 @@ class BacktestService:
             return None
 
         try:
-            return strategy_class()
+            instance = strategy_class()
+            instance.key = strategy_key
+            return instance
         except Exception as e:
             logger.error(
                 "[BacktestService] Failed to instantiate strategy %s: %s",

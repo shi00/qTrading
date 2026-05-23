@@ -222,3 +222,26 @@ class TestBacktestService:
 
         assert success is True
         mock_cache.backtest_dao.delete_result.assert_called_once_with("test123")
+
+    def test_get_strategy_sets_key_attribute(self):
+        """_get_strategy 应设置 instance.key = strategy_key"""
+        with patch(
+            "services.backtest_service.get_strategy_registry",
+            return_value={"mock_strategy": MockStrategy},
+        ):
+            service = BacktestService(cache=MagicMock())
+            strategy = service._get_strategy("mock_strategy")
+
+            assert strategy is not None
+            assert strategy.key == "mock_strategy"
+
+    def test_get_strategy_returns_none_for_unknown(self):
+        """_get_strategy 对未知策略返回 None"""
+        with patch(
+            "services.backtest_service.get_strategy_registry",
+            return_value={},
+        ):
+            service = BacktestService(cache=MagicMock())
+            strategy = service._get_strategy("nonexistent")
+
+            assert strategy is None
