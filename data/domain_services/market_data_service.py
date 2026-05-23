@@ -89,9 +89,11 @@ class MarketDataService:
         except KeyError:
             pass
 
-    def start(self):
+    async def start(self):
         """
         启动服务。
+
+        Must be called within a running event loop (e.g. from async context).
         """
         if self._running:
             return

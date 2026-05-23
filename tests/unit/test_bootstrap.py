@@ -76,9 +76,11 @@ class TestInitializeServices:
             mock_ss.return_value = mock_ss_instance
 
             mock_ns_instance = MagicMock()
+            mock_ns_instance.start = AsyncMock()
             mock_ns.return_value = mock_ns_instance
 
             mock_mds_instance = MagicMock()
+            mock_mds_instance.start = AsyncMock()
             mock_mds.return_value = mock_mds_instance
 
             result = await initialize_services(mock_cm)
@@ -88,8 +90,8 @@ class TestInitializeServices:
         mock_md.preload_aliases.assert_called_once()
         mock_tm_instance.init_db.assert_awaited_once()
         mock_ss_instance.start.assert_called_once()
-        mock_ns_instance.start.assert_called_once()
-        mock_mds_instance.start.assert_called_once()
+        mock_ns_instance.start.assert_awaited_once()
+        mock_mds_instance.start.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_db_init_failed(self):

@@ -164,28 +164,24 @@ class NewsSubscriptionService:
 
         logger.info("[NewsService] Stopped news polling service (async graceful)")
 
-    def start(self):
+    async def start(self):
         """
         Start the subscription service.
+
+        Must be called within a running event loop (e.g. from async context).
         """
         if self._running:
             return
 
-        # 始终启动服务进行数据同步（enable_news_alerts 只控制弹窗推送）
         self._running = True
 
-        # BUG-05 fix: Create Queue lazily here (within the running event loop)
-        # to avoid binding to the wrong loop when singleton is created before loop starts.
-        # S1-2 fix: Add maxsize to prevent unbounded memory growth
         self.processing_queue = asyncio.Queue(maxsize=500)
         self._queue_put_lock = asyncio.Lock()
 
-        # Keep strong references to background tasks to prevent GC
         poll_task = asyncio.create_task(self._poll_loop())
         self._background_tasks.add(poll_task)
         poll_task.add_done_callback(self._background_tasks.discard)
 
-        # Start background processing loop
         self._processing_task = asyncio.create_task(self._processing_loop())
         self._background_tasks.add(self._processing_task)
         self._processing_task.add_done_callback(self._background_tasks.discard)

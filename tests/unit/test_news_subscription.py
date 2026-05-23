@@ -118,16 +118,17 @@ class TestNewsSubscriptionServiceStart:
     @patch("data.external.news_subscription.CacheManager")
     async def test_start_sets_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
-        svc.start()
+        await svc.start()
         assert svc._running is True
         svc._running = False
 
+    @pytest.mark.asyncio
     @patch("data.external.news_subscription.AIService")
     @patch("data.external.news_subscription.CacheManager")
-    def test_start_already_running(self, mock_cache, mock_ai):
+    async def test_start_already_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
-        svc.start()
+        await svc.start()
         assert svc.processing_queue is None
 
 

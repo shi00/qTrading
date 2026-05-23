@@ -60,8 +60,8 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         }
 
     SchedulerService().start()
-    NewsSubscriptionService().start()
-    MarketDataService().start()
+    await NewsSubscriptionService().start()
+    await MarketDataService().start()
 
     return {"success": True, "error": None, "detail": None, "current_rev": None, "head_rev": None}
 
