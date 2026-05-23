@@ -507,7 +507,7 @@ def _create_all_tables_fresh() -> None:
         sa.Column("content", sa.String(), nullable=True),
         sa.Column("content_hash", sa.String(length=64), nullable=False),
         sa.Column("tags", sa.String(), nullable=True),
-        sa.Column("publish_time", sa.DateTime(), nullable=True),
+        sa.Column("publish_time", sa.DateTime(), nullable=False),
         sa.Column("source", sa.String(), nullable=True),
         sa.Column(
             "created_at",
@@ -516,7 +516,7 @@ def _create_all_tables_fresh() -> None:
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
-        sa.UniqueConstraint("content_hash", name="uq_market_news_hash"),
+        sa.UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_time"),
     )
     op.create_index(op.f("ix_market_news_source"), "market_news", ["source"], unique=False)
     op.create_index("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
@@ -1281,14 +1281,18 @@ def upgrade() -> None:
 
     _create_table_screening_thinking()
 
-    # Handle market_news constraint migration (legacy → single-column unique on content_hash)
+    # Handle market_news constraint migration (legacy → composite unique on content_hash + publish_time)
     if _table_exists("market_news"):
         schema = _target_schema()
         uq_names = {c["name"] for c in insp.get_unique_constraints("market_news", schema=schema)}
+        if "uq_market_news_hash" in uq_names:
+            op.drop_constraint("uq_market_news_hash", "market_news", type_="unique")
         if "uq_market_news_hash_pub" in uq_names:
             op.drop_constraint("uq_market_news_hash_pub", "market_news", type_="unique")
-        if "uq_market_news_hash" not in uq_names:
-            op.create_unique_constraint("uq_market_news_hash", "market_news", ["content_hash"])
+        if "uq_market_news_hash_time" not in uq_names:
+            op.execute("UPDATE market_news SET publish_time = CURRENT_TIMESTAMP WHERE publish_time IS NULL")
+            op.alter_column("market_news", "publish_time", nullable=False)
+            op.create_unique_constraint("uq_market_news_hash_time", "market_news", ["content_hash", "publish_time"])
         if not _index_exists("market_news", "idx_market_news_pub_source"):
             op.create_index("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
 
