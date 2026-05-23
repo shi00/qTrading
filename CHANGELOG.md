@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.1.1](https://github.com/shi00/qTrading/compare/v0.1.0...v0.1.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* **async:** re-raise CancelledError instead of swallowing it ([3e8ff96](https://github.com/shi00/qTrading/commit/3e8ff96466eb3d2d32290d8f541723984e9119fd))
+* **config:** unify DEFAULT_AI_PROMPT/DEFAULT_NEWS_PROMPT to config_models.py single source ([4c84250](https://github.com/shi00/qTrading/commit/4c842503134fb8b083ebfce2fe332142d6e84981))
+* **core:** resolve cache initialization and task manager state leak in tests ([1beef3e](https://github.com/shi00/qTrading/commit/1beef3e726968d6afc5f0cc362778356d2ce3d07))
+* **dao:** align MarketNews unique constraint with UPSERT conflict key and update columns on conflict ([552ff3c](https://github.com/shi00/qTrading/commit/552ff3ccfd4755ee86f6c4c83b083bda24dddebe))
+* **dao:** change null_protected default from True to False in _save_upsert ([2be83d6](https://github.com/shi00/qTrading/commit/2be83d6434221d0be42e7f9ab1b9668ec191ddfd))
+* **dao:** set MarketNews.publish_time NOT NULL and harden Alembic downgrade ([e0f9e95](https://github.com/shi00/qTrading/commit/e0f9e95598a8aafe58e56f0ae45c5fadf412c67f))
+* **data-safety:** raise EngineDisposedError instead of returning 0 on shutdown writes ([b7db669](https://github.com/shi00/qTrading/commit/b7db669bc07aab27dc27230a1112e40541a0766c))
+* is_transient NameError, DataFrame cache pollution, engine=None after close ([3a308ca](https://github.com/shi00/qTrading/commit/3a308ca4893919d8c4823560236c3e75e67c6792))
+* **lifecycle:** _initialized after engine creation, shutdown checks _instance ([0ec2482](https://github.com/shi00/qTrading/commit/0ec2482b2a699cc2dc50b96cee62e9a9f6b5c6c0))
+* **security:** add _hide_file_windows after _copy_file in get_key() and fix raise e to bare raise ([b9d78c2](https://github.com/shi00/qTrading/commit/b9d78c2a09699880de85918fb48ff67f4c7eb066))
+* **security:** replace AUTOCOMMIT with READ ONLY transaction in SQL Console ([5e63823](https://github.com/shi00/qTrading/commit/5e6382343bb1658692c2999f5b7d0c2204dbeab9))
+* **security:** replace dead doubao_api_key with db_password_encrypted in SENSITIVE_KEYS ([9409117](https://github.com/shi00/qTrading/commit/9409117e5ff89f7857691e062750036a623323dd))
+* **security:** sanitize sensitive values in set_typed validation log ([ec28ed7](https://github.com/shi00/qTrading/commit/ec28ed757d1affee24395b5f005feedd464c8cc4))
+* **security:** sanitize ValidationError logs to prevent sensitive value leakage ([40c94ac](https://github.com/shi00/qTrading/commit/40c94acd24c27626abc8c88a4247906a47995cc3))
+* **security:** set owner-only permissions on secret files for Linux/macOS ([ecc9ad5](https://github.com/shi00/qTrading/commit/ecc9ad5f016b2405350456370b1169bb7868ee13))
+* **security:** use regex word-boundary matching for SQL keyword blacklist ([a278554](https://github.com/shi00/qTrading/commit/a2785546ddc9cd4152ae5fa4f5be59586676d323))
+* **shutdown:** add EngineDisposedError handling to all sync strategies and news service ([8ecf56f](https://github.com/shi00/qTrading/commit/8ecf56f657d9fa5dbc06e8cbfa1c0c454b6828a7))
+* **shutdown:** handle CancelledError in ShutdownCoordinator to prevent cleanup interruption ([4e4c35f](https://github.com/shi00/qTrading/commit/4e4c35f0620bc076e44cddb0a7c9e53babe19a39))
+* **sync:** add CancelledError re-raise to holder and macro sync strategies; update test_model_indexes for composite constraint ([703e9a1](https://github.com/shi00/qTrading/commit/703e9a1a9be148a04ca2f40293fa788ecdb39672))
+* **sync:** re-raise CancelledError in historical and financial sync strategies ([247fd01](https://github.com/shi00/qTrading/commit/247fd01bb5e50cfbf79de72ec1b6190f20b6c855))
+* **task_manager:** use get_loop_local for Semaphore to prevent cross-loop issues ([c783089](https://github.com/shi00/qTrading/commit/c783089eab32d0ac0514e3140e2702b9bdbad4ec))
+* **test:** correct sanitize assertion value and rename financial sync test ([fe54eaf](https://github.com/shi00/qTrading/commit/fe54eafcc7e61079d0d42f0726e101f2d9f2007f))
+* **ui/cache:** handle CancelledError in tab switch test & clean lazy loaders in CacheManager ([e638b38](https://github.com/shi00/qTrading/commit/e638b38f970cbd9bc66af936ea6351ce773a72f5))
+
+
+### Performance Improvements
+
+* **review_manager:** fix N+1 query for benchmark index pre-fetch ([d2729d4](https://github.com/shi00/qTrading/commit/d2729d4c51025d5fc39b7a14dafa546b46f0bf76))
+
 ## 0.1.0 (2026-05-22)
 
 
