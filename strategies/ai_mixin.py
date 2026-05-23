@@ -561,7 +561,8 @@ class AIStrategyMixin:
                     )
 
             except asyncio.CancelledError:
-                logger.info("[AIStrategyMixin] Task cancelled")
+                logger.info("[AIStrategyMixin] Task cancelled, cleaning up news tasks")
+                self._cancel_orphan_news_tasks(prefetched)
                 raise
             except Exception as e:
                 logger.error(
@@ -578,10 +579,7 @@ class AIStrategyMixin:
             f"[AIStrategyMixin] Complete. {completed_count}/{total_tasks} processed, {len(final_rows)} valid results",
         )
 
-        # Cleanup: Cancel any orphan news tasks that were never awaited (e.g. user cancelled early)
-        for _code, task in prefetched.news_tasks.items():
-            if not task.done():
-                task.cancel()
+        self._cancel_orphan_news_tasks(prefetched)
 
         if not final_rows:
             return candidates_df  # Fallback: return math-only results
@@ -597,6 +595,13 @@ class AIStrategyMixin:
             )
 
         return result_df.sort_values("ai_score", ascending=False)
+
+    @staticmethod
+    def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:
+        """Cancel any orphan news fetch tasks that were never awaited."""
+        for _code, task in prefetched.news_tasks.items():
+            if not task.done():
+                task.cancel()
 
     async def _mixin_analyze_single(
         self,

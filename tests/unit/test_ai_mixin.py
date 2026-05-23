@@ -507,6 +507,26 @@ class TestRunAiAnalysis:
                     assert len(result) <= 2
 
 
+class TestCancelOrphanNewsTasks:
+    def test_cancels_undone_tasks(self):
+        """_cancel_orphan_news_tasks should cancel tasks that are not done"""
+        task1 = MagicMock()
+        task1.done.return_value = False
+        task2 = MagicMock()
+        task2.done.return_value = True
+        prefetched = PreFetchedContext(news_tasks={"A": task1, "B": task2})
+
+        AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+
+        task1.cancel.assert_called_once()
+        task2.cancel.assert_not_called()
+
+    def test_empty_news_tasks(self):
+        """_cancel_orphan_news_tasks should handle empty news_tasks"""
+        prefetched = PreFetchedContext(news_tasks={})
+        AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+
+
 class TestAIStrategyMixinAnalyzeSingle:
     @pytest.fixture
     def mock_strategy(self):
