@@ -25,7 +25,6 @@ _STRATEGY_NAME_MAP = {
     "Value Investing": "strategy_value_name",
     "高成长策略": "strategy_growth_name",
     "高股息策略": "strategy_dividend_name",
-    "技术突破": "strategy_tech_breakout_name",
     "北向持股": "strategy_northbound_holding_name",
     "北向净流入": "strategy_northbound_flow_name",
     "超跌反弹": "strategy_oversold_name",
