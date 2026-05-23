@@ -22,7 +22,7 @@ async def test_config_and_calendar():
     # Test slicing
     years = ConfigHandler.get_init_history_years()
     rough_start = (get_now() - datetime.timedelta(days=int(250 * years * 1.5))).strftime("%Y%m%d")
-    all_dates = await dp.get_trade_dates(start_date=rough_start, end_date=end_date)
+    all_dates = await dp.trade_calendar.get_trade_dates(start_date=rough_start, end_date=end_date)
 
     if all_dates:
         start_date = all_dates[-(250 * years)] if len(all_dates) >= (250 * years) else all_dates[0]

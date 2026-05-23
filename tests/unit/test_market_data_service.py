@@ -479,10 +479,12 @@ class TestMarketDataServiceStartStop:
     @patch("data.domain_services.market_data_service.TradeCalendarService")
     async def test_start_sets_running(self, mock_tc, mock_cache, mock_api):
         svc = MarketDataService()
-        with patch("data.domain_services.market_data_service.asyncio.create_task"):
+        with patch("data.domain_services.market_data_service.asyncio.create_task") as mock_ct:
             svc.start()
             assert svc._running is True
             svc.stop()
+            for call in mock_ct.call_args_list:
+                call.args[0].close()
 
     @pytest.mark.asyncio
     @patch("data.domain_services.market_data_service.TushareClient")
@@ -490,12 +492,14 @@ class TestMarketDataServiceStartStop:
     @patch("data.domain_services.market_data_service.TradeCalendarService")
     async def test_start_idempotent(self, mock_tc, mock_cache, mock_api):
         svc = MarketDataService()
-        with patch("data.domain_services.market_data_service.asyncio.create_task"):
+        with patch("data.domain_services.market_data_service.asyncio.create_task") as mock_ct:
             svc.start()
             assert svc._running is True
             svc.start()
             assert svc._running is True
             svc.stop()
+            for call in mock_ct.call_args_list:
+                call.args[0].close()
 
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")

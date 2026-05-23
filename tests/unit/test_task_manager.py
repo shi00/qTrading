@@ -11,6 +11,11 @@ from utils.time_utils import get_now
 def reset_singleton():
     TaskManager._reset_singleton()
     yield
+    mgr = TaskManager._instance
+    if mgr and hasattr(mgr, "_loop") and isinstance(mgr._loop, MagicMock):
+        for call in mgr._loop.call_soon_threadsafe.call_args_list:
+            if call.args and len(call.args) > 1 and asyncio.iscoroutine(call.args[1]):
+                call.args[1].close()
     TaskManager._reset_singleton()
 
 
@@ -586,7 +591,13 @@ class TestTaskManagerScheduleCoro:
     def test_no_loop(self, mock_i18n, mock_tp):
         mgr = TaskManager()
         mgr._loop = None
-        result = mgr._schedule_coro(AsyncMock())
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        result = mgr._schedule_coro(coro)
+        coro.close()
         assert result is False
 
     @patch("services.task_manager.ThreadPoolManager")
@@ -595,7 +606,13 @@ class TestTaskManagerScheduleCoro:
         mgr = TaskManager()
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
-        result = mgr._schedule_coro(AsyncMock())
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        result = mgr._schedule_coro(coro)
+        coro.close()
         assert result is True
 
 
@@ -849,7 +866,10 @@ class TestTaskManagerRegisterAndRun:
         t = AppTask(name="test", cancellable=True)
         t._coroutine_gen = lambda t=t: asyncio.sleep(0)
         mgr._tasks[t.id] = t
-        with patch.object(mgr, "_notify_subscribers"), patch("asyncio.create_task"):
+        with (
+            patch.object(mgr, "_notify_subscribers"),
+            patch("asyncio.create_task", side_effect=lambda c, *args, **kwargs: [c.close(), MagicMock()][1]),
+        ):
             mgr._register_and_run(t)
         assert t._cancel_event is not None
 

@@ -48,6 +48,7 @@ class CacheManager:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
+                    cls._instance._disposed = False
         return cls._instance
 
     @classmethod

@@ -497,11 +497,14 @@ class NewsSubscriptionService:
                             loop = asyncio.get_running_loop()
                             for listener in list(self._alert_listeners):
                                 try:
-                                    _l, _msg = listener, display_msg
-                                    await asyncio.wait_for(
-                                        loop.run_in_executor(None, lambda _l=_l, _msg=_msg: _l(_msg)),
-                                        timeout=3.0,
-                                    )
+                                    if inspect.iscoroutinefunction(listener) or getattr(listener, "is_async", False):
+                                        await asyncio.wait_for(listener(display_msg), timeout=3.0)
+                                    else:
+                                        _l, _msg = listener, display_msg
+                                        await asyncio.wait_for(
+                                            loop.run_in_executor(None, lambda _l=_l, _msg=_msg: _l(_msg)),
+                                            timeout=3.0,
+                                        )
                                 except TimeoutError:
                                     logger.warning(f"[NewsService] Alert listener {listener} timed out (3s)")
                                 except Exception as e:

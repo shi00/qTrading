@@ -185,7 +185,7 @@ class BaseDao:
 
         from data.cache.cache_manager import CacheManager
 
-        if CacheManager._instance is not None and CacheManager._instance._disposed:
+        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed, write rejected. "
                 f"Call CacheManager.init_db() to reinitialize."
@@ -305,7 +305,7 @@ class BaseDao:
 
         from data.cache.cache_manager import CacheManager
 
-        if CacheManager._instance is not None and CacheManager._instance._disposed:
+        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed, upsert rejected. "
                 f"Call CacheManager.init_db() to reinitialize."
@@ -525,7 +525,7 @@ class BaseDao:
 
         from data.cache.cache_manager import CacheManager
 
-        if CacheManager._instance is not None and CacheManager._instance._disposed:
+        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed, read rejected. "
                 f"Call CacheManager.init_db() to reinitialize."
@@ -625,7 +625,7 @@ class BaseDao:
 
         from data.cache.cache_manager import CacheManager
 
-        if CacheManager._instance is not None and CacheManager._instance._disposed:
+        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed, read rejected. "
                 f"Call CacheManager.init_db() to reinitialize."

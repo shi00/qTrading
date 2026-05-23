@@ -145,7 +145,8 @@ class TestBaseDaoWriteDb:
     @pytest.mark.asyncio
     async def test_is_many_no_params(self):
         dao = BaseDao(MagicMock())
-        result = await dao._write_db("INSERT", is_many=True, params=None)
+        with pytest.warns(DeprecationWarning):
+            result = await dao._write_db("INSERT", is_many=True, params=None)
         assert result == 0
 
 
@@ -563,7 +564,10 @@ class TestBaseDaoWriteDbExtended:
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
             params = [(1, "a"), (2, "b")]
-            result = await dao._write_db("INSERT INTO t VALUES ($1, $2)", params=params, is_many=True, conn=mock_conn)
+            with pytest.warns(DeprecationWarning):
+                result = await dao._write_db(
+                    "INSERT INTO t VALUES ($1, $2)", params=params, is_many=True, conn=mock_conn
+                )
             assert result == 2
 
     @pytest.mark.asyncio

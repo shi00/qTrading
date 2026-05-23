@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -81,7 +79,9 @@ class TestGetStockNews:
         ]
         mock_tpm_instance.run_async = AsyncMock(return_value=future)
 
-        with patch("data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+        ) as mock_wait:
             mock_wait.return_value = [
                 {"title": "2024年半年度报告", "publish_time": "2024-08-30 00:00:00", "source": "巨潮公告"}
             ]
@@ -95,7 +95,10 @@ class TestGetStockNews:
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
 
-        with patch("data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock, side_effect=TimeoutError):
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+        ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
 
@@ -107,7 +110,8 @@ class TestGetStockNews:
         mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
 
         with patch(
-            "data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
         ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
@@ -121,8 +125,7 @@ class TestGetStockNews:
 
         with patch(
             "data.external.news_fetcher.asyncio.wait_for",
-            new_callable=AsyncMock,
-            side_effect=Exception("dispatch error"),
+            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(Exception("dispatch error"))][1],
         ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
@@ -146,7 +149,9 @@ class TestGetStockNews:
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
 
-        with patch("data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+        ) as mock_wait:
             mock_wait.return_value = [
                 {"title": "银行股上涨", "publish_time": "2024-06-14 10:00:00", "source": "东财新闻"}
             ]
@@ -164,7 +169,9 @@ class TestGetStockNews:
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
 
-        with patch("data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+        ) as mock_wait:
             mock_wait.return_value = []
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
@@ -177,7 +184,9 @@ class TestGetStockNews:
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
 
-        with patch("data.external.news_fetcher.asyncio.wait_for", new_callable=AsyncMock) as mock_wait:
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+        ) as mock_wait:
             mock_wait.return_value = []
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []

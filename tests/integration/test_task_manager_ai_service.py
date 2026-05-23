@@ -26,7 +26,7 @@ def task_manager():
 
 
 @pytest.fixture
-def semaphore(task_manager):
+async def semaphore(task_manager):
     return task_manager._get_semaphore()
 
 

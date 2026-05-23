@@ -102,6 +102,9 @@ class TaskManager:
         with cls._lock:
             cls._instance = None
             cls._initialized = False
+        from utils.loop_local import del_loop_local
+
+        del_loop_local("task_manager_semaphore")
 
     def __init__(self):
         with self._lock:

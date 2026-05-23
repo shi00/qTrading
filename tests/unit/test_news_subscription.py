@@ -184,7 +184,10 @@ class TestNewsSubscriptionServiceNotifyListeners:
 
         cb = slow_listener
         svc._listeners.add(cb)
-        with patch("data.external.news_subscription.asyncio.wait_for", side_effect=TimeoutError):
+        with patch(
+            "data.external.news_subscription.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+        ):
             await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM)
 
 
@@ -479,7 +482,10 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
             patch("data.external.news_subscription.ConfigHandler") as mock_ch,
-            patch("data.external.news_subscription.asyncio.wait_for", side_effect=TimeoutError),
+            patch(
+                "data.external.news_subscription.asyncio.wait_for",
+                side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+            ),
         ):
             mock_ch.get_config.return_value = True
             mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
@@ -616,7 +622,10 @@ class TestNewsSubscriptionServiceNotifyListenerErrors:
             await asyncio.sleep(60)
 
         svc._listeners.add(slow_cb)
-        with patch("data.external.news_subscription.asyncio.wait_for", side_effect=TimeoutError):
+        with patch(
+            "data.external.news_subscription.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+        ):
             await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM)
 
 
