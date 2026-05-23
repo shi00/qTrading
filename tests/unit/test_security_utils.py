@@ -42,8 +42,19 @@ class TestDeriveKeyFromMachine:
 
 
 class TestHideFileWindows:
-    def test_non_windows_noop(self):
-        with patch("utils.security_utils.os.name", "posix"):
+    def test_non_windows_sets_permissions(self):
+        with (
+            patch("utils.security_utils.os.name", "posix"),
+            patch("utils.security_utils.os.chmod") as mock_chmod,
+        ):
+            _hide_file_windows("/some/path")
+            mock_chmod.assert_called_once_with("/some/path", 0o600)
+
+    def test_non_windows_chmod_error_handled(self):
+        with (
+            patch("utils.security_utils.os.name", "posix"),
+            patch("utils.security_utils.os.chmod", side_effect=OSError("permission denied")),
+        ):
             _hide_file_windows("/some/path")
 
     def test_windows_ctypes_call(self):
@@ -55,7 +66,6 @@ class TestHideFileWindows:
                 _hide_file_windows("C:\\test\\file.key")
 
     def test_no_subprocess_run_usage(self):
-        """S-P1-6: _hide_file_windows must use ctypes, not subprocess.run."""
         import utils.security_utils as sec_mod
 
         assert not hasattr(sec_mod, "subprocess"), (

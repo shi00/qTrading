@@ -35,21 +35,25 @@ def _derive_key_from_machine(salt: bytes) -> bytes:
 
 
 def _hide_file_windows(filepath):
-    """Set hidden attribute on Windows using native API, avoiding PATH lookup."""
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
+    """Set hidden attribute on Windows, or owner-only permissions on Linux/macOS."""
+    if os.name == "nt":
+        try:
+            import ctypes
 
-        kernel32 = ctypes.windll.kernel32
-        kernel32.SetFileAttributesW.restype = ctypes.c_bool
-        kernel32.SetFileAttributesW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
-        FILE_ATTRIBUTE_HIDDEN = 0x2
-        result = kernel32.SetFileAttributesW(filepath, FILE_ATTRIBUTE_HIDDEN)
-        if not result:
-            logger.debug(f"SetFileAttributesW returned False for {filepath}")
-    except Exception as e:
-        logger.debug(f"Failed to hide file via Win32 API: {e}")
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetFileAttributesW.restype = ctypes.c_bool
+            kernel32.SetFileAttributesW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+            FILE_ATTRIBUTE_HIDDEN = 0x2
+            result = kernel32.SetFileAttributesW(filepath, FILE_ATTRIBUTE_HIDDEN)
+            if not result:
+                logger.debug(f"SetFileAttributesW returned False for {filepath}")
+        except Exception as e:
+            logger.debug(f"Failed to hide file via Win32 API: {e}")
+    else:
+        try:
+            os.chmod(filepath, 0o600)
+        except OSError as e:
+            logger.debug(f"Failed to set permissions on {filepath}: {e}")
 
 
 class DecryptionError(Exception):
