@@ -93,6 +93,7 @@ class SecurityManager:
                 cls._key = cls._load_key_file(cls.KEY_FILE)
                 if not os.path.exists(cls.KEY_FILE_BAK):
                     cls._copy_file(cls.KEY_FILE, cls.KEY_FILE_BAK)
+                    _hide_file_windows(cls.KEY_FILE_BAK)
                 cls._ensure_legacy_marker()
                 return cls._key
             except Exception as e:
@@ -104,6 +105,7 @@ class SecurityManager:
             try:
                 cls._key = cls._load_key_file(cls.KEY_FILE_BAK)
                 cls._copy_file(cls.KEY_FILE_BAK, cls.KEY_FILE)
+                _hide_file_windows(cls.KEY_FILE)
                 logger.info("Key successfully recovered from backup.")
                 cls._ensure_legacy_marker()
                 return cls._key
@@ -266,7 +268,7 @@ class SecurityManager:
             if os.path.exists(tmp_file):
                 with contextlib.suppress(OSError):
                     os.remove(tmp_file)
-            raise e
+            raise
 
     @staticmethod
     def _copy_file(src, dst):
