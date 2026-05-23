@@ -421,8 +421,8 @@ class TestShutdownCoordinatorExecuteCleanup:
     async def test_cancelled(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
         coord._run_cleanup_steps = AsyncMock(side_effect=asyncio.CancelledError())
-        result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
-        assert result is False
+        with pytest.raises(asyncio.CancelledError):
+            await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
         assert coord.cleanup_done is True
 
     @pytest.mark.asyncio

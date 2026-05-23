@@ -231,7 +231,7 @@ class HomeView(ft.Container):
                 return
             await self._load_data()
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as e:
             logger.error(f"[HomeView] Init | ❌ Failed: {e}", exc_info=True)
 

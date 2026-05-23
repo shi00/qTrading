@@ -236,7 +236,7 @@ class NewsSubscriptionService:
             try:
                 await asyncio.sleep(base_interval)  # type: ignore[arg-type]
             except asyncio.CancelledError:
-                break
+                raise
 
     async def _safe_fetch_task(self):
         """Wrapper to handle errors within the independent task"""
@@ -330,7 +330,7 @@ class NewsSubscriptionService:
                 await asyncio.sleep(0)
 
             except asyncio.CancelledError:
-                break
+                raise
             except EngineDisposedError:
                 logger.warning("[NewsService] Engine disposed during processing, stopping loop.")
                 break
