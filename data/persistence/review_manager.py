@@ -78,7 +78,7 @@ class ReviewManager:
                     else:
                         dt_str = str(dt_val).replace("-", "")[:8]
                     raw_pct = i_row.get("pct_chg")
-                    index_cache[dt_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                    index_cache[dt_str] = float(raw_pct) if pd.notna(raw_pct) is True else None
                 logger.info(
                     "[Review] Bulk loaded %d days of index data for %s.",
                     len(df_index_bulk),
@@ -140,7 +140,7 @@ class ReviewManager:
                             df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=t1_date_obj)
                             if df_idx is not None and not df_idx.empty:
                                 raw_pct = df_idx.iloc[0]["pct_chg"]
-                                index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                                index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) is True else None
                             else:
                                 try:
                                     df_idx_api = await self.api.get_index_daily(
@@ -150,7 +150,9 @@ class ReviewManager:
                                     )
                                     if df_idx_api is not None and not df_idx_api.empty:
                                         raw_pct = df_idx_api.iloc[0]["pct_chg"]
-                                        index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) else None
+                                        index_cache[trade_date_str] = (
+                                            float(raw_pct) if pd.notna(raw_pct) is True else None
+                                        )
                                     else:
                                         index_cache[trade_date_str] = None
                                 except (ValueError, TypeError, KeyError):

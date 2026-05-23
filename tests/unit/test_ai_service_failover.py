@@ -300,3 +300,210 @@ class TestFailoverModelPropagation:
 
         params = AIService._build_litellm_params(llm_config, messages, model_override="")
         assert params["model"] == "deepseek/deepseek-v4-flash"
+
+
+class TestFailoverCancelledError:
+    """测试 _chat_completion_with_failover 正确传播 CancelledError"""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_not_swallowed(self):
+        """CancelledError 应被立即 re-raise，不触发 fallback"""
+        import asyncio
+
+        service = AIService()
+
+        async def mock_completion(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
+            mock_completion_patch.side_effect = mock_completion
+
+            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
+                mock_config.return_value = {
+                    "primary": "deepseek/deepseek-v4-flash",
+                    "fallbacks": ["qwen/qwen-max"],
+                }
+
+                with pytest.raises(asyncio.CancelledError):
+                    await service._chat_completion_with_failover(
+                        messages=[{"role": "user", "content": "test"}],
+                    )
+
+                mock_completion_patch.assert_called_once()
+
+
+class TestReasoningCheckWithModelOverride:
+    """测试 _chat_completion_litellm 中 reasoning 检查跟随 model_override"""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_check_uses_model_override(self):
+        """model_override 时应使用 override 的模型检查 reasoning 支持"""
+        from unittest.mock import MagicMock, patch
+
+        service = AIService()
+        service._is_cloud_configured = True
+        service._litellm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+        }
+
+        checked_models = []
+
+        def mock_check_reasoning(model: str) -> bool:
+            checked_models.append(model)
+            return "opus" in model.lower()
+
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        delta1 = MagicMock()
+        delta1.content = "test response"
+        chunk1.choices[0].delta = delta1
+
+        async def mock_stream(**kwargs):
+            yield chunk1
+
+        with (
+            patch("services.ai_service._check_reasoning_support", side_effect=mock_check_reasoning),
+            patch("services.ai_service.acompletion", return_value=mock_stream()),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            await service._chat_completion_litellm(
+                messages=[{"role": "user", "content": "test"}],
+                model_override="anthropic/claude-opus-4-7",
+                on_chunk=MagicMock(),
+            )
+
+        assert len(checked_models) == 1
+        assert checked_models[0] == "anthropic/claude-opus-4-7"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_check_uses_config_without_override(self):
+        """无 model_override 时应使用主配置的模型检查 reasoning 支持"""
+        from unittest.mock import MagicMock, patch
+
+        service = AIService()
+        service._is_cloud_configured = True
+        service._litellm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+        }
+
+        checked_models = []
+
+        def mock_check_reasoning(model: str) -> bool:
+            checked_models.append(model)
+            return False
+
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        delta1 = MagicMock()
+        delta1.content = "test response"
+        chunk1.choices[0].delta = delta1
+
+        async def mock_stream(**kwargs):
+            yield chunk1
+
+        with (
+            patch("services.ai_service._check_reasoning_support", side_effect=mock_check_reasoning),
+            patch("services.ai_service.acompletion", return_value=mock_stream()),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            await service._chat_completion_litellm(
+                messages=[{"role": "user", "content": "test"}],
+                on_chunk=MagicMock(),
+            )
+
+        assert len(checked_models) == 1
+        assert checked_models[0] == "deepseek/deepseek-v4-flash"
+
+
+class TestCrossProviderFailoverCredentials:
+    """测试跨供应商 failover 时 api_key/api_base 的正确切换"""
+
+    def test_same_provider_uses_primary_api_key(self):
+        """同供应商 failover 使用主配置的 api_key"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-primary-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages, model_override="deepseek/deepseek-v4-pro")
+        assert params["api_key"] == "sk-primary-key"
+        assert params["model"] == "deepseek/deepseek-v4-pro"
+
+    def test_cross_provider_with_custom_models_config(self):
+        """跨供应商 failover 时从 custom_models 查找备用供应商的 api_key"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+            "custom_models": {
+                "qwen": {
+                    "api_key": "sk-qwen-key",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                },
+            },
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
+        assert params["model"] == "qwen/qwen-max"
+        assert params["api_key"] == "sk-qwen-key"
+        assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def test_cross_provider_without_custom_models_omits_api_key(self):
+        """跨供应商 failover 且无 custom_models 配置时不设置 api_key，让 LiteLLM 从环境变量查找"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        assert params["model"] == "openai/gpt-4o"
+        assert "api_key" not in params
+        assert "api_base" not in params
+
+    def test_cross_provider_custom_models_without_api_key_omits_key(self):
+        """custom_models 中有供应商配置但无 api_key 时不设置 api_key"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+            "custom_models": {
+                "openai": {
+                    "base_url": "https://api.openai.com",
+                },
+            },
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        assert params["model"] == "openai/gpt-4o"
+        assert "api_key" not in params
+        assert params["api_base"] == "https://api.openai.com"
+
+    def test_no_override_uses_primary_config(self):
+        """无 model_override 时使用主配置的 api_key"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-primary-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages)
+        assert params["api_key"] == "sk-primary-key"
+        assert params["model"] == "deepseek/deepseek-v4-flash"

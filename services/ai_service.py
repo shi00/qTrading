@@ -282,15 +282,17 @@ class AIService:
         if not model:
             raise ValueError("Model ID is required but empty")
 
-        request_params = {
+        request_params: dict = {
             "messages": messages,
-            "api_key": llm_config.get("api_key"),
         }
 
         model_has_prefix = "/" in model
+        override_provider_prefix = model.split("/")[0] if model_has_prefix else None
+        is_cross_provider = model_has_prefix and model_override is not None and override_provider_prefix != provider
 
         if provider == "azure" and not model_has_prefix:
             request_params["model"] = f"azure/{model}"
+            request_params["api_key"] = llm_config.get("api_key")
             azure_resource_name = llm_config.get("azure_resource_name", "")
             if azure_resource_name:
                 request_params["api_base"] = f"https://{azure_resource_name}.openai.azure.com"
@@ -301,7 +303,17 @@ class AIService:
             request_params["api_version"] = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
         elif model_has_prefix:
             request_params["model"] = model
-            request_params["api_base"] = llm_config.get("base_url", "")
+            if is_cross_provider:
+                override_provider = model.split("/")[0]
+                custom_models = llm_config.get("custom_models", {})
+                override_config = custom_models.get(override_provider, {})
+                if override_config.get("api_key"):
+                    request_params["api_key"] = override_config["api_key"]
+                if override_config.get("base_url"):
+                    request_params["api_base"] = override_config["base_url"]
+            else:
+                request_params["api_key"] = llm_config.get("api_key")
+                request_params["api_base"] = llm_config.get("base_url", "")
         else:
             prefix_map = {
                 "openai": "openai",
@@ -317,6 +329,7 @@ class AIService:
             }
             prefix = prefix_map.get(provider, "openai")
             request_params["model"] = f"{prefix}/{model}"
+            request_params["api_key"] = llm_config.get("api_key")
             request_params["api_base"] = llm_config.get("base_url", "")
 
         if "temperature" in kwargs:
@@ -388,10 +401,13 @@ class AIService:
             )
 
         # S1-4 fix: Real-time reasoning support check for model switching
-        model_id = llm_config.get("model", "")
-        provider = llm_config.get("provider", "")
-        litellm_model = f"{provider}/{model_id}" if provider else model_id
-        supports_reasoning = _check_reasoning_support(litellm_model)
+        if model_override:
+            effective_model = model_override
+        else:
+            _provider = llm_config.get("provider", "")
+            _model_id = llm_config.get("model", "")
+            effective_model = f"{_provider}/{_model_id}" if _provider else _model_id
+        supports_reasoning = _check_reasoning_support(effective_model)
 
         from utils.proxy_manager import ProxyManager
 
@@ -658,6 +674,9 @@ class AIService:
 
                 return result
 
+            except asyncio.CancelledError:
+                logger.debug("[AIService] Failover | Cancelled during attempt %d/%d", i + 1, len(models_to_try))
+                raise
             except Exception as e:
                 last_error = e
                 error_type = type(e).__name__

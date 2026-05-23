@@ -480,7 +480,7 @@ class TestMarketDataServiceStartStop:
     async def test_start_sets_running(self, mock_tc, mock_cache, mock_api):
         svc = MarketDataService()
         with patch("data.domain_services.market_data_service.asyncio.create_task") as mock_ct:
-            svc.start()
+            await svc.start()
             assert svc._running is True
             svc.stop()
             for call in mock_ct.call_args_list:
@@ -493,9 +493,9 @@ class TestMarketDataServiceStartStop:
     async def test_start_idempotent(self, mock_tc, mock_cache, mock_api):
         svc = MarketDataService()
         with patch("data.domain_services.market_data_service.asyncio.create_task") as mock_ct:
-            svc.start()
+            await svc.start()
             assert svc._running is True
-            svc.start()
+            await svc.start()
             assert svc._running is True
             svc.stop()
             for call in mock_ct.call_args_list:
