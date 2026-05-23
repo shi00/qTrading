@@ -21,6 +21,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+
+def enable_flet_accessibility(page):
+    page.keyboard.press("Tab")
+    page.wait_for_timeout(500)
+    enable_btn = page.locator('button[aria-label="Enable accessibility"], [aria-label="Enable accessibility"]')
+    if enable_btn.count() > 0:
+        enable_btn.first.evaluate("el => el.click()")
+        page.wait_for_timeout(1000)
+
+
 if TYPE_CHECKING:
     pass
 
@@ -95,6 +105,7 @@ class TestOnboardingWizardSmoke:
     @skip_if_no_server
     def test_app_loads_and_shows_welcome(self, page):
         page.goto("http://localhost:8550", timeout=10000)
+        enable_flet_accessibility(page)
         welcome_visible = page.locator("text=欢迎使用").or_(page.locator("text=Welcome"))
         welcome_visible.wait_for(timeout=10000)
         assert welcome_visible.is_visible()
@@ -103,10 +114,11 @@ class TestOnboardingWizardSmoke:
     @skip_if_no_server
     def test_wizard_first_step_renders(self, page):
         page.goto("http://localhost:8550", timeout=10000)
+        enable_flet_accessibility(page)
         start_button = page.locator("button:has-text('开始使用')").or_(page.locator("button:has-text('Get Started')"))
         start_button.wait_for(timeout=10000)
         assert start_button.is_visible()
-        start_button.click()
+        start_button.click(force=True)
         db_config = page.locator("text=数据库配置").or_(page.locator("text=Database Configuration"))
         db_config.wait_for(timeout=5000)
         assert db_config.is_visible()
@@ -120,27 +132,28 @@ class TestOnboardingWizardE2E:
     @skip_if_no_test_db
     def test_wizard_navigation_flow(self, page):
         page.goto("http://localhost:8550")
+        enable_flet_accessibility(page)
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
 
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
         page.wait_for_selector("text=数据库配置", timeout=5000)
 
-        page.fill("input[placeholder*='主机']", "localhost")
-        page.fill("input[placeholder*='端口']", "5432")
-        page.fill("input[placeholder*='用户']", "postgres")
-        page.fill("input[placeholder*='密码']", "password")
-        page.fill("input[placeholder*='数据库']", "testdb")
+        page.fill("input[aria-label*='主机']", "localhost")
+        page.fill("input[aria-label*='端口']", "5432")
+        page.fill("input[aria-label*='用户']", "postgres")
+        page.fill("input[aria-label*='密码']", "password")
+        page.fill("input[aria-label*='数据库']", "testdb")
 
-        page.click("button:has-text('验证并继续')")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=Token", timeout=5000)
 
-        page.click("button:has-text('上一步')")
+        page.locator("text=上一步").click(force=True)
 
         page.wait_for_selector("text=数据库配置", timeout=5000)
 
-        host_value = page.input_value("input[placeholder*='主机']")
+        host_value = page.input_value("input[aria-label*='主机']")
         assert host_value == "localhost"
 
     @skip_if_no_playwright
@@ -148,14 +161,15 @@ class TestOnboardingWizardE2E:
     @skip_if_no_test_db
     def test_required_step_validation(self, page):
         page.goto("http://localhost:8550")
+        enable_flet_accessibility(page)
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
 
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
 
         page.wait_for_selector("text=数据库配置", timeout=5000)
 
-        page.click("button:has-text('验证并继续')")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=请填写", timeout=3000)
 
@@ -164,29 +178,30 @@ class TestOnboardingWizardE2E:
     @skip_if_no_test_db
     def test_skip_optional_step(self, page):
         page.goto("http://localhost:8550")
+        enable_flet_accessibility(page)
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
 
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
         page.wait_for_selector("text=数据库配置", timeout=5000)
 
-        page.fill("input[placeholder*='主机']", "localhost")
-        page.fill("input[placeholder*='端口']", "5432")
-        page.fill("input[placeholder*='用户']", "postgres")
-        page.fill("input[placeholder*='密码']", "password")
-        page.fill("input[placeholder*='数据库']", "testdb")
-        page.click("button:has-text('验证并继续')")
+        page.fill("input[aria-label*='主机']", "localhost")
+        page.fill("input[aria-label*='端口']", "5432")
+        page.fill("input[aria-label*='用户']", "postgres")
+        page.fill("input[aria-label*='密码']", "password")
+        page.fill("input[aria-label*='数据库']", "testdb")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=Token", timeout=5000)
-        page.fill("input[placeholder*='Token']", "test_token_12345")
-        page.click("button:has-text('验证并继续')")
+        page.fill("input[aria-label*='Token']", "test_token_12345")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=云端 AI", timeout=5000)
-        page.click("button:has-text('验证并继续')")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=本地模型", timeout=5000)
 
-        page.click("button:has-text('跳过')")
+        page.locator("text=跳过").click(force=True)
 
         page.wait_for_selector("text=数据同步", timeout=5000)
 
@@ -195,37 +210,38 @@ class TestOnboardingWizardE2E:
     @skip_if_no_test_db
     def test_complete_wizard_flow(self, page):
         page.goto("http://localhost:8550")
+        enable_flet_accessibility(page)
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
 
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
 
         page.wait_for_selector("text=数据库配置", timeout=5000)
-        page.fill("input[placeholder*='主机']", "localhost")
-        page.fill("input[placeholder*='端口']", "5432")
-        page.fill("input[placeholder*='用户']", "postgres")
-        page.fill("input[placeholder*='密码']", "password")
-        page.fill("input[placeholder*='数据库']", "testdb")
-        page.click("button:has-text('验证并继续')")
+        page.fill("input[aria-label*='主机']", "localhost")
+        page.fill("input[aria-label*='端口']", "5432")
+        page.fill("input[aria-label*='用户']", "postgres")
+        page.fill("input[aria-label*='密码']", "password")
+        page.fill("input[aria-label*='数据库']", "testdb")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=Token", timeout=5000)
-        page.fill("input[placeholder*='Token']", "test_token_12345")
-        page.click("button:has-text('验证并继续')")
+        page.fill("input[aria-label*='Token']", "test_token_12345")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=云端 AI", timeout=5000)
-        page.click("button:has-text('验证并继续')")
+        page.locator("text=验证并继续").click(force=True)
 
         page.wait_for_selector("text=本地模型", timeout=5000)
-        page.click("button:has-text('跳过')")
+        page.locator("text=跳过").click(force=True)
 
         page.wait_for_selector("text=数据同步", timeout=5000)
-        page.click("button:has-text('下一步')")
+        page.locator("text=下一步").click(force=True)
 
         page.wait_for_selector("text=定时任务", timeout=5000)
-        page.click("button:has-text('下一步')")
+        page.locator("text=下一步").click(force=True)
 
         page.wait_for_selector("text=配置完成", timeout=5000)
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
 
         page.wait_for_url("**/home**", timeout=5000)
 
@@ -238,23 +254,24 @@ class TestOnboardingWizardE2EShortcuts:
     @skip_if_no_test_db
     def test_back_navigation_preserves_input(self, page):
         page.goto("http://localhost:8550")
+        enable_flet_accessibility(page)
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
 
         page.wait_for_selector("text=数据库配置", timeout=5000)
-        page.fill("input[placeholder*='主机']", "myhost")
-        page.fill("input[placeholder*='端口']", "9999")
+        page.fill("input[aria-label*='主机']", "myhost")
+        page.fill("input[aria-label*='端口']", "9999")
 
-        page.click("button:has-text('上一步')")
+        page.locator("text=上一步").click(force=True)
 
         page.wait_for_selector("text=欢迎使用", timeout=5000)
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
 
         page.wait_for_selector("text=数据库配置", timeout=5000)
 
-        host_value = page.input_value("input[placeholder*='主机']")
-        port_value = page.input_value("input[placeholder*='端口']")
+        host_value = page.input_value("input[aria-label*='主机']")
+        port_value = page.input_value("input[aria-label*='端口']")
 
         assert host_value == "myhost"
         assert port_value == "9999"
@@ -264,17 +281,18 @@ class TestOnboardingWizardE2EShortcuts:
     @skip_if_no_test_db
     def test_language_switch_preserves_state(self, page):
         page.goto("http://localhost:8550")
+        enable_flet_accessibility(page)
 
         page.wait_for_selector("text=欢迎使用", timeout=10000)
-        page.click("button:has-text('开始使用')")
+        page.locator("text=开始使用").click(force=True)
 
         page.wait_for_selector("text=数据库配置", timeout=5000)
-        page.fill("input[placeholder*='主机']", "testhost")
+        page.fill("input[aria-label*='主机']", "testhost")
 
-        page.click("[data-testid='language-switch']")
-        page.click("text=English")
+        page.locator("[data-testid='language-switch']").click(force=True)
+        page.locator("text=English").click(force=True)
 
         page.wait_for_selector("text=Database Configuration", timeout=5000)
 
-        host_value = page.input_value("input[placeholder*='Host']")
+        host_value = page.input_value("input[aria-label*='Host']")
         assert host_value == "testhost"
