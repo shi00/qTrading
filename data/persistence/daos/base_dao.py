@@ -388,7 +388,7 @@ class BaseDao:
         if not update_cols:
             stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
         else:
-            null_protected = {c.name for c in table.columns if c.info.get("null_protected", True)}
+            null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
             update_dict = {}
             for c in update_cols:
                 excluded_val = getattr(stmt.excluded, c)

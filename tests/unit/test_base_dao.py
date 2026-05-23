@@ -268,11 +268,12 @@ class TestSlowQueryThresholdConstants:
         assert "if elapsed > 500" not in source
 
 
-class TestNullProtectedDefaultsTrue:
-    """B-P1-8/DB-P1-1: Verify null_protected defaults to True and COALESCE is applied."""
+class TestNullProtectedDefaultsFalse:
+    """P0-1: Verify null_protected defaults to False — columns without explicit
+    null_protected=True should use direct assignment, not COALESCE."""
 
     @pytest.mark.asyncio
-    async def test_null_protected_default_true_uses_coalesce(self):
+    async def test_null_protected_default_false_uses_direct_assignment(self):
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
         mock_table = MagicMock()
@@ -311,10 +312,10 @@ class TestNullProtectedDefaultsTrue:
             call_args = mock_stmt.on_conflict_do_update.call_args
             set_dict = call_args[1]["set_"]
             assert "col_a" in set_dict
-            assert str(set_dict["col_a"]).startswith("coalesce(")
+            assert "coalesce" not in str(set_dict["col_a"]).lower()
 
     @pytest.mark.asyncio
-    async def test_null_protected_false_uses_direct_assignment(self):
+    async def test_null_protected_true_uses_coalesce(self):
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
         mock_table = MagicMock()
@@ -323,7 +324,7 @@ class TestNullProtectedDefaultsTrue:
         mock_col_pk.info = {}
         mock_col_b = MagicMock()
         mock_col_b.name = "col_b"
-        mock_col_b.info = {"null_protected": False}
+        mock_col_b.info = {"null_protected": True}
         mock_table.columns = [mock_col_pk, mock_col_b]
         mock_table.c = {"id": mock_col_pk, "col_b": mock_col_b}
         dao = BaseDao(mock_engine)
@@ -353,7 +354,7 @@ class TestNullProtectedDefaultsTrue:
             call_args = mock_stmt.on_conflict_do_update.call_args
             set_dict = call_args[1]["set_"]
             assert "col_b" in set_dict
-            assert "coalesce" not in str(set_dict["col_b"]).lower()
+            assert str(set_dict["col_b"]).startswith("coalesce(")
 
 
 class TestExceptExceptionNarrowedEP11:
@@ -703,7 +704,7 @@ class TestNullProtectedFromMetadata:
     def test_financial_reports_null_protected_columns(self):
         from data.persistence.models import FinancialReports
 
-        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", True)}
+        null_protected = {c.name for c in FinancialReports.__table__.columns if c.info.get("null_protected", False)}
         expected_subset = {
             "roe",
             "roe_dt",
@@ -731,31 +732,42 @@ class TestNullProtectedFromMetadata:
         pk_columns = {"ts_code", "end_date"}
         update_cols = [c.name for c in table.columns if c.name not in pk_columns]
         null_protected_update = {
-            c.name for c in table.columns if c.name in update_cols and c.info.get("null_protected", True)
+            c.name for c in table.columns if c.name in update_cols and c.info.get("null_protected", False)
         }
         assert len(null_protected_update) > 0
         for col_name in pk_columns:
             col = table.c[col_name]
-            assert col.info.get("null_protected", True) is True
+            assert col.info.get("null_protected", False) is False
 
-    def test_default_null_protected_is_true(self):
+    def test_default_null_protected_is_false(self):
         from data.persistence.models import FinancialReports
 
         table = FinancialReports.__table__
+        non_financial_cols = {
+            "ts_code",
+            "end_date",
+            "ann_date",
+            "report_type",
+            "audit_result",
+            "updated_at",
+            "created_at",
+        }
         for c in table.columns:
-            if c.name not in ("ts_code", "end_date", "ann_date", "report_type", "audit_result"):
-                assert c.info.get("null_protected", True) is True
+            if c.name not in non_financial_cols:
+                assert c.info.get("null_protected", False) is True
+            else:
+                assert c.info.get("null_protected", False) is False
 
     def test_save_upsert_uses_metadata_null_protected(self):
         from data.persistence.models import FinancialReports
 
         table = FinancialReports.__table__
-        null_protected = {c.name for c in table.columns if c.info.get("null_protected", True)}
+        null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
         update_cols = [c.name for c in table.columns if c.name not in ("ts_code", "end_date")]
         for c in update_cols:
             if c in null_protected:
                 col = table.c[c]
-                assert col.info.get("null_protected", True) is True
+                assert col.info.get("null_protected", False) is True
 
 
 class TestAiScoreColumnType:
