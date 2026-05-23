@@ -92,8 +92,8 @@ class TestRunDeepBranches:
         ctx = make_ctx()
         strategy = HistoricalSyncStrategy(ctx)
         with patch.object(strategy, "_run_historical_sync", side_effect=asyncio.CancelledError()):
-            result = await strategy.run(days=5)
-            assert result.status == "cancelled"
+            with pytest.raises(asyncio.CancelledError):
+                await strategy.run(days=5)
 
     @pytest.mark.asyncio
     async def test_run_top_level_exception(self):
