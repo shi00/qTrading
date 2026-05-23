@@ -236,6 +236,16 @@ class TestGetTypedSetTyped:
         assert secret_value not in caplog.text
         assert "sk_***1234" in caplog.text or "sk_***" in caplog.text
 
+    def test_set_typed_sanitizes_db_password_encrypted(self, monkeypatch, tmp_path, caplog):
+        config_file = str(tmp_path / "test_settings.json")
+        monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
+        ConfigHandler._config_cache = None
+        encrypted_value = "AESGCM_encrypted_password_data_abc123"
+        with caplog.at_level(logging.WARNING):
+            result = ConfigHandler.set_typed("db_password_encrypted", encrypted_value, validator=lambda v: False)
+        assert result is False
+        assert encrypted_value not in caplog.text
+
     def test_set_typed_non_sensitive_key_logged_as_is(self, monkeypatch, tmp_path, caplog):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)

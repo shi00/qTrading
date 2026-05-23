@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
 
-SENSITIVE_KEYS = frozenset({"ts_token", "db_password", "ai_api_key", "doubao_api_key"})
+SENSITIVE_KEYS = frozenset({"ts_token", "db_password", "db_password_encrypted", "ai_api_key"})
 
 
 class ConfigHandler:
