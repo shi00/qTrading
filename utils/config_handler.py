@@ -194,7 +194,7 @@ class ConfigHandler:
                         ConfigHandler._config_cache = validated.model_dump()
                         return ConfigHandler._config_cache.copy()
                 except ValidationError as e:
-                    logger.warning(f"[ConfigHandler] Config validation failed: {e}")
+                    logger.warning("[ConfigHandler] Config validation failed: %s", DataSanitizer.sanitize_error(e))
                     ConfigHandler._config_cache = get_default_config()
                     return ConfigHandler._config_cache.copy()
                 except Exception as e:
@@ -218,7 +218,12 @@ class ConfigHandler:
                             used_defaults=False,
                         )
                 except ValidationError as e:
-                    errors = [str(err) for err in e.errors()]
+                    errors = []
+                    for err in e.errors():
+                        err_str = str(err)
+                        if err.get("input") is not None and err.get("loc") and err["loc"][-1] in SENSITIVE_KEYS:
+                            err_str = err_str.replace(str(err["input"]), "***")
+                        errors.append(err_str)
                     return ConfigValidationResult(
                         is_valid=False,
                         config=get_default_config(),
@@ -266,7 +271,7 @@ class ConfigHandler:
                     validated = AppConfig.model_validate(current_config)
                     current_config = validated.model_dump()
                 except ValidationError as e:
-                    logger.error(f"[ConfigHandler] Invalid config data: {e}")
+                    logger.error("[ConfigHandler] Invalid config data: %s", DataSanitizer.sanitize_error(e))
                     return False
 
                 success = ConfigHandler._save_json_atomically(
