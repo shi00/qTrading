@@ -198,3 +198,105 @@ class TestAIServiceUnavailableError:
         error.__cause__ = cause
 
         assert error.__cause__ is cause
+
+
+class TestFailoverModelPropagation:
+    """测试 failover 时 model 参数正确传递到 _chat_completion"""
+
+    @pytest.mark.asyncio
+    async def test_primary_model_passed_to_chat_completion(self):
+        """主供应商的 model 应传递给 _chat_completion"""
+        service = AIService()
+
+        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = {"score": 85}
+
+            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
+                mock_config.return_value = {
+                    "primary": "deepseek/deepseek-v4-flash",
+                    "fallbacks": ["qwen/qwen-max"],
+                }
+
+                await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+
+                mock_completion.assert_called_once()
+                call_kwargs = mock_completion.call_args
+                assert call_kwargs.kwargs.get("model") == "deepseek/deepseek-v4-flash" or (
+                    len(call_kwargs.args) > 1 and "deepseek" in str(call_kwargs)
+                )
+
+    @pytest.mark.asyncio
+    async def test_fallback_model_passed_on_primary_failure(self):
+        """主供应商失败时，fallback model 应传递给 _chat_completion"""
+        service = AIService()
+
+        call_models = []
+
+        async def mock_completion(*args, **kwargs):
+            call_models.append(kwargs.get("model"))
+            if len(call_models) == 1:
+                raise TimeoutError("Primary timed out")
+            return {"score": 75}
+
+        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
+            mock_completion_patch.side_effect = mock_completion
+
+            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
+                mock_config.return_value = {
+                    "primary": "deepseek/deepseek-v4-flash",
+                    "fallbacks": ["qwen/qwen-max"],
+                }
+
+                result = await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+
+                assert result["score"] == 75
+                assert call_models == ["deepseek/deepseek-v4-flash", "qwen/qwen-max"]
+
+    @pytest.mark.asyncio
+    async def test_model_override_propagates_to_litellm(self):
+        """model_override 包含 / 时直接作为 litellm model 使用"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params_default = AIService._build_litellm_params(llm_config, messages)
+        assert params_default["model"] == "deepseek/deepseek-v4-flash"
+
+        params_override = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
+        assert params_override["model"] == "qwen/qwen-max"
+
+    @pytest.mark.asyncio
+    async def test_model_override_none_uses_config_default(self):
+        """model_override=None 时应使用配置中的默认 model"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages, model_override=None)
+        assert params["model"] == "deepseek/deepseek-v4-flash"
+
+    @pytest.mark.asyncio
+    async def test_model_override_empty_string_uses_config_default(self):
+        """model_override='' 时应使用配置中的默认 model"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        params = AIService._build_litellm_params(llm_config, messages, model_override="")
+        assert params["model"] == "deepseek/deepseek-v4-flash"

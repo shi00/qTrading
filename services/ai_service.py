@@ -261,9 +261,15 @@ class AIService:
         return self._is_cloud_configured and bool(self._litellm_config.get("api_key"))
 
     @staticmethod
-    def _build_litellm_params(llm_config: dict, messages: list, **kwargs) -> dict:
+    def _build_litellm_params(llm_config: dict, messages: list, model_override: str | None = None, **kwargs) -> dict:
         """
         构建 LiteLLM 请求参数 (静态方法，供 test_connection 复用)
+
+        Args:
+            llm_config: LLM 配置字典
+            messages: 消息列表
+            model_override: 覆盖 llm_config 中的 model 字段（用于 failover 切换供应商）
+            **kwargs: 其他参数
 
         Azure 特殊处理:
         - base_url: https://{resource_name}.openai.azure.com (不含 deployments 路径)
@@ -271,7 +277,7 @@ class AIService:
         - api_version: 作为独立参数传递
         """
         provider = llm_config.get("provider", "custom")
-        model = llm_config.get("model", "")
+        model = model_override or llm_config.get("model", "")
 
         if not model:
             raise ValueError("Model ID is required but empty")
@@ -281,7 +287,9 @@ class AIService:
             "api_key": llm_config.get("api_key"),
         }
 
-        if provider == "azure":
+        model_has_prefix = "/" in model
+
+        if provider == "azure" and not model_has_prefix:
             request_params["model"] = f"azure/{model}"
             azure_resource_name = llm_config.get("azure_resource_name", "")
             if azure_resource_name:
@@ -291,6 +299,9 @@ class AIService:
             from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
             request_params["api_version"] = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
+        elif model_has_prefix:
+            request_params["model"] = model
+            request_params["api_base"] = llm_config.get("base_url", "")
         else:
             prefix_map = {
                 "openai": "openai",
@@ -351,6 +362,7 @@ class AIService:
         self,
         messages: list,
         on_chunk=None,
+        model_override: str | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -359,13 +371,14 @@ class AIService:
         Args:
             messages: 消息列表
             on_chunk: 流式回调函数 (content, is_reasoning)
+            model_override: 覆盖配置中的 model（用于 failover 切换供应商）
             **kwargs: 其他参数
 
         Returns:
             {"content": str, "usage": dict, "reasoning_content": str}
         """
         llm_config = self._litellm_config
-        request_params = self._build_litellm_params(llm_config, messages, **kwargs)
+        request_params = self._build_litellm_params(llm_config, messages, model_override=model_override, **kwargs)
 
         total_chars = sum(len(m.get("content", "")) for m in messages)
         estimated_tokens = total_chars // 3
@@ -548,6 +561,7 @@ class AIService:
                 result = await self._chat_completion_litellm(
                     messages,
                     on_chunk=on_chunk,
+                    model_override=model,
                     temperature=temperature,
                     timeout=timeout,
                     response_format={"type": "json_object"} if json_mode else None,
@@ -630,6 +644,7 @@ class AIService:
                 result = await self._chat_completion(
                     messages,
                     provider="cloud",
+                    model=model,
                     timeout=timeout,
                     json_mode=json_mode,
                     on_chunk=on_chunk,
