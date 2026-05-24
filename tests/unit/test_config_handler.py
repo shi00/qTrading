@@ -50,10 +50,11 @@ class TestConfigHandlerTryDecrypt:
 
 
 class TestConfigHandlerGetToken:
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
     @patch("utils.config_handler.ConfigHandler.load_config")
     @patch("utils.config_handler.ConfigHandler._try_decrypt")
-    def test_get_token(self, mock_decrypt, mock_load):
-        mock_load.return_value = {"tushare_token": "encrypted"}
+    def test_get_token(self, mock_decrypt, mock_load, mock_kr):
+        mock_load.return_value = {"ts_token": "encrypted"}
         mock_decrypt.return_value = "decrypted_token"
         result = ConfigHandler.get_token()
         assert result == "decrypted_token"
