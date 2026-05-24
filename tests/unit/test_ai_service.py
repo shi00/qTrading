@@ -13,13 +13,6 @@ from services.ai_service import (
 )
 
 
-@pytest.fixture(autouse=True)
-def reset_ai_singleton():
-    AIService._reset_singleton()
-    yield
-    AIService._reset_singleton()
-
-
 class TestAIServiceInit:
     @patch("services.ai_service.ConfigHandler")
     def test_init(self, mock_ch):

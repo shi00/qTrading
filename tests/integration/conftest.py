@@ -89,24 +89,8 @@ async def _ensure_test_db():
         timeout=5.0,
     )
     try:
-        existing = await conn.fetchval(
-            "SELECT 1 FROM pg_database WHERE datname = $1",
-            TEST_DB_NAME,
-        )
-        if existing:
-            await conn.execute(
-                """
-                SELECT pg_terminate_backend(pid)
-                FROM pg_stat_activity
-                WHERE datname = $1
-                  AND pid <> pg_backend_pid();
-                """,
-                TEST_DB_NAME,
-            )
-            db_name_sql = TEST_DB_NAME.replace('"', '""')
-            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
-
         db_name_sql = TEST_DB_NAME.replace('"', '""')
+        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
         await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
         _test_db_initialized = True
     finally:
@@ -146,17 +130,8 @@ async def test_engine():
                 timeout=5.0,
             )
             try:
-                await conn.execute(
-                    """
-                    SELECT pg_terminate_backend(pid)
-                    FROM pg_stat_activity
-                    WHERE datname = $1
-                      AND pid <> pg_backend_pid();
-                    """,
-                    TEST_DB_NAME,
-                )
                 db_name_sql = TEST_DB_NAME.replace('"', '""')
-                await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}"')
+                await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
             finally:
                 await conn.close()
         except (OSError, asyncpg.PostgresError):

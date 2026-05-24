@@ -8,13 +8,6 @@ from services.ai_service import (
 )
 
 
-@pytest.fixture(autouse=True)
-def reset_ai_singleton():
-    AIService._reset_singleton()
-    yield
-    AIService._reset_singleton()
-
-
 def _make_svc_with_cloud():
     with patch("services.ai_service.ConfigHandler") as mock_ch:
         mock_ch.get_llm_config.return_value = {
