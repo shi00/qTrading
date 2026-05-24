@@ -72,7 +72,7 @@ class ThreadPoolManager:
         """C-P2-3: Centralized atexit cleanup via singleton_registry."""
         if cls._instance is not None:
             try:
-                cls._instance.shutdown(wait=False)
+                cls._instance.shutdown(wait=False, _quiet=True)
             except (ValueError, RuntimeError, OSError):
                 pass
 
@@ -195,7 +195,7 @@ class ThreadPoolManager:
 
         return await loop.run_in_executor(executor, func, *args)
 
-    def shutdown(self, wait=True):
+    def shutdown(self, wait=True, *, _quiet=False):
         """
         Gracefully shutdown pools.
         Note: wait=True can block if tasks are stuck.
@@ -209,28 +209,21 @@ class ThreadPoolManager:
 
         shutdown_performed = False
         if hasattr(self, "_io_pool") and self._io_pool:
-            try:
+            if not _quiet:
                 logger.info("Shutting down IO Pool...")
-            except (ValueError, OSError):
-                pass
             self._io_pool.shutdown(wait=wait, cancel_futures=True)
             self._io_pool = None
             shutdown_performed = True
 
         if hasattr(self, "_cpu_pool") and self._cpu_pool:
-            try:
+            if not _quiet:
                 logger.info("Shutting down CPU Pool...")
-            except (ValueError, OSError):
-                pass
             self._cpu_pool.shutdown(wait=wait, cancel_futures=True)
             self._cpu_pool = None
             shutdown_performed = True
 
-        if shutdown_performed:
-            try:
-                logger.info("Thread Pools shut down.")
-            except (ValueError, OSError):
-                pass
+        if shutdown_performed and not _quiet:
+            logger.info("Thread Pools shut down.")
 
 
 # Global Accessor

@@ -289,7 +289,11 @@ class ConfigHandler:
 
     @staticmethod
     def get_token():
-        kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
+        kr_token = None
+        try:
+            kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
+        except Exception as e:
+            logger.debug(f"Keyring get_password for ts_token failed: {e}")
         if kr_token:
             return kr_token
 
@@ -670,7 +674,11 @@ class ConfigHandler:
         """
         config = ConfigHandler.load_config()
 
-        api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+        api_key = None
+        try:
+            api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+        except Exception as exc:
+            logger.debug(f"Keyring get_password for ai_api_key failed: {exc}")
         if not api_key:
             encrypted = config.get("ai_api_key", "")
             api_key = ConfigHandler._try_decrypt(encrypted)
