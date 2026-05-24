@@ -109,11 +109,11 @@ class TestAIServiceReasoningSupport:
     """S3-4: AIService must detect reasoning model support"""
 
     @pytest.mark.parametrize(
-        "model,provider,base_url,expected",
+        "model,provider,api_url,expected",
         _REASONING_MODEL_CASES,
         ids=[c[0] for c in _REASONING_MODEL_CASES],
     )
-    def test_reasoning_detection(self, model, provider, base_url, expected):
+    def test_reasoning_detection(self, model, provider, api_url, expected):
         from services.ai_service import AIService
 
         with reset_singleton(AIService, extra_attrs=["_initialized"]):
@@ -122,7 +122,7 @@ class TestAIServiceReasoningSupport:
                     "api_key": "test-key",
                     "provider": provider,
                     "model": model,
-                    "base_url": base_url,
+                    "base_url": api_url,
                 }
                 mock_ch.get_setting.return_value = False
                 svc = AIService()
