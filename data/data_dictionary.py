@@ -231,6 +231,7 @@ TABLE_DEFINITIONS = {
         "columns": {
             "ts_code": "col_ts_code",
             "end_date": "col_end_date",
+            "ann_date": "col_ann_date",
             "bz_item": "col_bz_item",
             "bz_sales": "col_bz_sales",
             "bz_profit": "col_bz_profit",

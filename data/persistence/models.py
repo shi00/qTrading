@@ -433,6 +433,7 @@ class FinaMainbz(Base):
     __tablename__ = "fina_mainbz"
     ts_code = Column(String, primary_key=True)
     end_date = Column(Date, primary_key=True, index=True)
+    ann_date = Column(Date)
     bz_item = Column(String, primary_key=True)
     bz_sales = Column(Numeric(20, 4))
     bz_profit = Column(Numeric(20, 4))

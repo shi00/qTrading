@@ -274,6 +274,7 @@ def _create_all_tables_fresh() -> None:
         "fina_mainbz",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
+        sa.Column("ann_date", sa.Date(), nullable=True),
         sa.Column("bz_item", sa.String(), nullable=False),
         sa.Column("bz_sales", sa.Numeric(20, 4), nullable=True),
         sa.Column("bz_profit", sa.Numeric(20, 4), nullable=True),

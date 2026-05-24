@@ -562,7 +562,7 @@ class TestGetFinaMainbz:
         result = await dao.get_fina_mainbz("000001.SZ", as_of_date="2024-07-01")
         assert not result.empty
         sql = dao._read_db.call_args[0][0]
-        assert "end_date <=" in sql
+        assert "ann_date <=" in sql
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
@@ -578,7 +578,7 @@ class TestGetFinaMainbz:
         result = await dao.get_fina_mainbz("000001.SZ", as_of_date=None)
         assert not result.empty
         sql = dao._read_db.call_args[0][0]
-        assert "end_date <=" not in sql
+        assert "ann_date <=" not in sql
 
 
 class TestGetFinaMainbzBatch:
@@ -632,7 +632,7 @@ class TestGetFinaMainbzBatch:
         result = await dao.get_fina_mainbz_batch(["000001.SZ"], as_of_date="2024-07-01")
         assert "dr" not in result.columns
         sql = dao._read_db.call_args[0][0]
-        assert "end_date <=" in sql
+        assert "ann_date <=" in sql
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
@@ -649,7 +649,7 @@ class TestGetFinaMainbzBatch:
         result = await dao.get_fina_mainbz_batch(["000001.SZ"], as_of_date=None)
         assert "dr" not in result.columns
         sql = dao._read_db.call_args[0][0]
-        assert "end_date <=" not in sql
+        assert "ann_date <=" not in sql
 
 
 class TestVerifyStockFinancialIntegrity:

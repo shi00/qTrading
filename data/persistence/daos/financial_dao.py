@@ -405,9 +405,9 @@ class FinancialDao(BaseDao):
             if as_of_date is not None:
                 df = await self._read_db(
                     """
-                    SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                    SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                     FROM fina_mainbz
-                    WHERE ts_code = $1 AND end_date <= $2
+                    WHERE ts_code = $1 AND ann_date <= $2
                     ORDER BY end_date DESC, bz_sales DESC
                     LIMIT 10
                     """,
@@ -416,7 +416,7 @@ class FinancialDao(BaseDao):
             else:
                 df = await self._read_db(
                     """
-                    SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                    SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                     FROM fina_mainbz
                     WHERE ts_code = $1
                     ORDER BY end_date DESC, bz_sales DESC
@@ -439,13 +439,13 @@ class FinancialDao(BaseDao):
                 chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
                 placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
                 if as_of_date is not None:
-                    end_date_param = len(chunk) + 1
+                    ann_date_param = len(chunk) + 1
                     sql = f"""
-                        SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                        SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                         FROM (
                             SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
                             FROM fina_mainbz
-                            WHERE ts_code IN ({placeholders}) AND end_date <= ${end_date_param}
+                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
                         ) sub
                         WHERE dr = 1
                         ORDER BY ts_code, bz_sales DESC
@@ -453,7 +453,7 @@ class FinancialDao(BaseDao):
                     df = await self._read_db(sql, chunk + [as_of_date])
                 else:
                     sql = f"""
-                        SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                        SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                         FROM (
                             SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
                             FROM fina_mainbz
