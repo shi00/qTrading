@@ -92,81 +92,110 @@ class HolderDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def get_top10_holders(self, ts_code: str) -> pd.DataFrame:
-        """
-        获取前十大股东。
-
-        Args:
-            ts_code: 股票代码
-
-        Returns:
-            DataFrame with top 10 holders
-        """
+    async def get_top10_holders(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         try:
-            df = await self._read_db(
-                """
-                SELECT ts_code, end_date, ann_date, holder_name, hold_amount,
-                       hold_ratio, hold_float_ratio, hold_change, holder_type
-                FROM top10_holders
-                WHERE ts_code = $1
-                ORDER BY end_date DESC, hold_ratio DESC
-                LIMIT 20
-                """,
-                (ts_code,),
-            )
+            if as_of_date is not None:
+                df = await self._read_db(
+                    """
+                    SELECT ts_code, end_date, ann_date, holder_name, hold_amount,
+                           hold_ratio, hold_float_ratio, hold_change, holder_type
+                    FROM top10_holders
+                    WHERE ts_code = $1 AND ann_date <= $2
+                    ORDER BY end_date DESC, hold_ratio DESC
+                    LIMIT 20
+                    """,
+                    (ts_code, as_of_date),
+                )
+            else:
+                df = await self._read_db(
+                    """
+                    SELECT ts_code, end_date, ann_date, holder_name, hold_amount,
+                           hold_ratio, hold_float_ratio, hold_change, holder_type
+                    FROM top10_holders
+                    WHERE ts_code = $1
+                    ORDER BY end_date DESC, hold_ratio DESC
+                    LIMIT 20
+                    """,
+                    (ts_code,),
+                )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to get top10 holders for {ts_code}: {e}")
             return pd.DataFrame()
 
-    async def get_stk_holdernumber(self, ts_code: str) -> pd.DataFrame:
-        """
-        获取股东人数变化。
-
-        Args:
-            ts_code: 股票代码
-
-        Returns:
-            DataFrame with shareholder numbers
-        """
+    async def get_stk_holdernumber(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         try:
-            df = await self._read_db(
-                """
-                SELECT ts_code, end_date, ann_date, holder_num,
-                       holder_num_change, holder_num_ratio
-                FROM stk_holdernumber
-                WHERE ts_code = $1
-                ORDER BY end_date DESC
-                LIMIT 5
-                """,
-                (ts_code,),
-            )
+            if as_of_date is not None:
+                df = await self._read_db(
+                    """
+                    SELECT ts_code, end_date, ann_date, holder_num,
+                           holder_num_change, holder_num_ratio
+                    FROM stk_holdernumber
+                    WHERE ts_code = $1 AND ann_date <= $2
+                    ORDER BY end_date DESC
+                    LIMIT 5
+                    """,
+                    (ts_code, as_of_date),
+                )
+            else:
+                df = await self._read_db(
+                    """
+                    SELECT ts_code, end_date, ann_date, holder_num,
+                           holder_num_change, holder_num_ratio
+                    FROM stk_holdernumber
+                    WHERE ts_code = $1
+                    ORDER BY end_date DESC
+                    LIMIT 5
+                    """,
+                    (ts_code,),
+                )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to get holder number for {ts_code}: {e}")
             return pd.DataFrame()
 
-    async def get_top10_holders_batch(self, ts_codes: list[str]) -> pd.DataFrame:
+    async def get_top10_holders_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            return await _chunked_in_query(
-                self._read_db,
-                """
-                SELECT DISTINCT ON (ts_code, end_date)
-                    ts_code, end_date, holder_name, hold_ratio
-                FROM top10_holders
-                WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, end_date DESC, hold_ratio DESC
-                """,
-                ts_codes,
-            )
+            if as_of_date is not None:
+                all_results = []
+                for i in range(0, len(ts_codes), 500):
+                    chunk = ts_codes[i : i + 500]
+                    placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
+                    ann_date_param = len(chunk) + 1
+                    sql = f"""
+                        SELECT DISTINCT ON (ts_code, end_date)
+                            ts_code, end_date, ann_date, holder_name, hold_ratio
+                        FROM top10_holders
+                        WHERE ts_code IN ({placeholders})
+                          AND ann_date <= ${ann_date_param}
+                        ORDER BY ts_code, end_date DESC, hold_ratio DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date])
+                    if df is not None and not df.empty:
+                        all_results.append(df)
+                if all_results:
+                    return pd.concat(all_results, ignore_index=True)
+                return pd.DataFrame()
+            else:
+                return await _chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT DISTINCT ON (ts_code, end_date)
+                        ts_code, end_date, ann_date, holder_name, hold_ratio
+                    FROM top10_holders
+                    WHERE ts_code IN ({placeholders})
+                    ORDER BY ts_code, end_date DESC, hold_ratio DESC
+                    """,
+                    ts_codes,
+                )
         except Exception as e:
             logger.warning(f"[HolderDao] Failed to get top10 holders batch: {e}")
             return pd.DataFrame()
 
-    async def get_stk_holdernumber_batch(self, ts_codes: list[str]) -> pd.DataFrame:
+    async def get_stk_holdernumber_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
@@ -175,19 +204,35 @@ class HolderDao(BaseDao):
             for i in range(0, len(ts_codes), 500):
                 chunk = ts_codes[i : i + 500]
                 placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-                sql = f"""
-                    SELECT ts_code, end_date, ann_date, holder_num,
-                           holder_num_change, holder_num_ratio
-                    FROM (
-                        SELECT *,
-                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                        FROM stk_holdernumber
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
-                    WHERE rn <= 5
-                    ORDER BY ts_code, end_date DESC
-                """
-                df = await self._read_db(sql, chunk)
+                if as_of_date is not None:
+                    ann_date_param = len(chunk) + 1
+                    sql = f"""
+                        SELECT ts_code, end_date, ann_date, holder_num,
+                               holder_num_change, holder_num_ratio
+                        FROM (
+                            SELECT *,
+                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                            FROM stk_holdernumber
+                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
+                        ) sub
+                        WHERE rn <= 5
+                        ORDER BY ts_code, end_date DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date])
+                else:
+                    sql = f"""
+                        SELECT ts_code, end_date, ann_date, holder_num,
+                               holder_num_change, holder_num_ratio
+                        FROM (
+                            SELECT *,
+                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                            FROM stk_holdernumber
+                            WHERE ts_code IN ({placeholders})
+                        ) sub
+                        WHERE rn <= 5
+                        ORDER BY ts_code, end_date DESC
+                    """
+                    df = await self._read_db(sql, chunk)
                 if df is not None and not df.empty:
                     if "rn" in df.columns:
                         df = df.drop(columns=["rn"])

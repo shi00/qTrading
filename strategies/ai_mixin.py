@@ -415,7 +415,7 @@ class AIStrategyMixin:
         # --- Pre-fetch Auxiliary Data (Audit, Dividend, Pledge, Holders) ---
         auxiliary_data = {}
         try:
-            auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes)
+            auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes, as_of_date=trade_date)
             logger.info("[AIStrategyMixin] Pre-fetched auxiliary data for %d stocks", len(auxiliary_data))
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s", e)
@@ -703,10 +703,14 @@ class AIStrategyMixin:
             base_financials = self._build_financials_text(row)
 
             # 7a. Multi-Period Financial Trends (Phase 1.2)
-            multi_period_text = await self._build_multi_period_financials(ts_code, dp.cache, prefetched.auxiliary_data)
+            multi_period_text = await self._build_multi_period_financials(
+                ts_code, dp.cache, prefetched.auxiliary_data, as_of_date=prefetched.trade_date
+            )
 
             # 7b. Auxiliary Data (Phase 1.2)
-            auxiliary_text = await self._build_auxiliary_data_text(ts_code, dp.cache, prefetched.auxiliary_data)
+            auxiliary_text = await self._build_auxiliary_data_text(
+                ts_code, dp.cache, prefetched.auxiliary_data, as_of_date=prefetched.trade_date
+            )
 
             # 7c. Macro Context (Phase 1.3) - build once per batch
             if not prefetched.macro_context:
@@ -1135,7 +1139,7 @@ class AIStrategyMixin:
         return "\n".join(parts)
 
     async def _build_multi_period_financials(
-        self, ts_code: str, cache: typing.Any, prefetched: dict | None = None
+        self, ts_code: str, cache: typing.Any, prefetched: dict | None = None, as_of_date=None
     ) -> str:
         """
         构建多期财务趋势数据。
@@ -1146,6 +1150,7 @@ class AIStrategyMixin:
             ts_code: 股票代码
             cache: 数据缓存实例
             prefetched: 预取的辅助数据
+            as_of_date: 截止日期（含），None 表示不限制，防止前视偏差
 
         Returns:
             财务趋势文本
@@ -1155,7 +1160,7 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "financial_history" in prefetched[ts_code]:
                 df = prefetched[ts_code]["financial_history"]
             else:
-                df = await cache.get_financial_reports_history(ts_code, periods=8)
+                df = await cache.get_financial_reports_history(ts_code, periods=8, as_of_date=as_of_date)
 
             if df is None or df.empty:
                 return I18n.get("ai_financial_insufficient")
@@ -1215,6 +1220,7 @@ class AIStrategyMixin:
         ts_code: str,
         cache: typing.Any,
         prefetched: dict | None = None,
+        as_of_date=None,
     ) -> str:
         """
         构建辅助数据文本。
@@ -1225,6 +1231,7 @@ class AIStrategyMixin:
             ts_code: 股票代码
             cache: 数据缓存实例
             prefetched: 预取的辅助数据（避免 N+1 查询）
+            as_of_date: 截止日期（含），None 表示不限制，防止前视偏差
 
         Returns:
             辅助数据文本
@@ -1238,7 +1245,7 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "audit" in prefetched[ts_code]:
                 audit_df = prefetched[ts_code]["audit"]
             else:
-                audit_df = await cache.get_fina_audit(ts_code)
+                audit_df = await cache.get_fina_audit(ts_code, as_of_date=as_of_date)
 
             if audit_df is not None and not audit_df.empty:
                 latest_audit = audit_df.iloc[0]
@@ -1250,7 +1257,7 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "mainbz" in prefetched[ts_code]:
                 top_business = prefetched[ts_code]["mainbz"]
             else:
-                top_business = await cache.get_fina_mainbz(ts_code)
+                top_business = await cache.get_fina_mainbz(ts_code, as_of_date=as_of_date)
             if top_business is not None and not top_business.empty:
                 total_sales = top_business["bz_sales"].sum()
                 if total_sales > 0:
@@ -1267,7 +1274,7 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "dividend" in prefetched[ts_code]:
                 dividend_df = prefetched[ts_code]["dividend"]
             else:
-                dividend_df = await cache.get_dividend(ts_code)
+                dividend_df = await cache.get_dividend(ts_code, as_of_date=as_of_date)
 
             if dividend_df is not None and not dividend_df.empty:
                 recent_div = dividend_df.head(3)
@@ -1283,7 +1290,7 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "pledge" in prefetched[ts_code]:
                 pledge_df = prefetched[ts_code]["pledge"]
             else:
-                pledge_df = await cache.get_pledge_stat(ts_code)
+                pledge_df = await cache.get_pledge_stat(ts_code, as_of_date=as_of_date)
 
             if pledge_df is not None and not pledge_df.empty:
                 latest_pledge = pledge_df.iloc[0]
@@ -1297,10 +1304,13 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]
             else:
-                holders_df = await cache.get_top10_holders(ts_code)
+                holders_df = await cache.get_top10_holders(ts_code, as_of_date=as_of_date)
 
             if holders_df is not None and not holders_df.empty:
-                latest_holders = holders_df[holders_df["end_date"] == holders_df["end_date"].max()]
+                if "ann_date" in holders_df.columns and holders_df["ann_date"].notna().any():
+                    latest_holders = holders_df[holders_df["ann_date"] == holders_df["ann_date"].max()]
+                else:
+                    latest_holders = holders_df[holders_df["end_date"] == holders_df["end_date"].max()]
                 if not latest_holders.empty:
                     top_holder = latest_holders.iloc[0].get("holder_name", I18n.get("ai_unknown"))
                     top_ratio = latest_holders.iloc[0].get("hold_ratio", 0)
@@ -1313,9 +1323,13 @@ class AIStrategyMixin:
             if prefetched and ts_code in prefetched and "holdernumber" in prefetched[ts_code]:
                 holder_num = prefetched[ts_code]["holdernumber"]
             else:
-                holder_num = await cache.get_stk_holdernumber(ts_code)
+                holder_num = await cache.get_stk_holdernumber(ts_code, as_of_date=as_of_date)
             if holder_num is not None and not holder_num.empty:
-                latest = holder_num.iloc[0]
+                if "ann_date" in holder_num.columns and holder_num["ann_date"].notna().any():
+                    latest_holder_num = holder_num[holder_num["ann_date"] == holder_num["ann_date"].max()]
+                    latest = latest_holder_num.iloc[0] if not latest_holder_num.empty else holder_num.iloc[0]
+                else:
+                    latest = holder_num.iloc[0]
                 curr_num = latest.get("holder_num", 0)
                 change_pct = latest.get("holder_num_ratio")
                 if curr_num:

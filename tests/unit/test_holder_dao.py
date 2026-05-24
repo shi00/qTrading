@@ -94,6 +94,24 @@ class TestGetTop10Holders:
         result = await dao.get_top10_holders("000001.SZ")
         assert result.empty
 
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_top10_holders("000001.SZ", as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_top10_holders("000001.SZ", as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
+
 
 class TestGetStkHoldernumber:
     @pytest.mark.asyncio
@@ -123,6 +141,38 @@ class TestGetStkHoldernumber:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_stk_holdernumber("000001.SZ")
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_num": [100],
+                }
+            )
+        )
+        result = await dao.get_stk_holdernumber("000001.SZ", as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_num": [100],
+                }
+            )
+        )
+        result = await dao.get_stk_holdernumber("000001.SZ", as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
 
 
 class TestGetTop10HoldersBatch:
@@ -160,6 +210,38 @@ class TestGetTop10HoldersBatch:
         result = await dao.get_top10_holders_batch(["000001.SZ"])
         assert result.empty
 
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_name": ["股东1"],
+                }
+            )
+        )
+        result = await dao.get_top10_holders_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_name": ["股东1"],
+                }
+            )
+        )
+        result = await dao.get_top10_holders_batch(["000001.SZ"], as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
+
 
 class TestGetStkHoldernumberBatch:
     @pytest.mark.asyncio
@@ -196,6 +278,40 @@ class TestGetStkHoldernumberBatch:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_stk_holdernumber_batch(["000001.SZ"])
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_num": [100],
+                    "rn": [1],
+                }
+            )
+        )
+        result = await dao.get_stk_holdernumber_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert "rn" not in result.columns
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_num": [100],
+                    "rn": [1],
+                }
+            )
+        )
+        result = await dao.get_stk_holdernumber_batch(["000001.SZ"], as_of_date=None)
+        assert "rn" not in result.columns
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
 
 
 class TestGetExistingTop10TsCodes:

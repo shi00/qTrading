@@ -758,6 +758,58 @@ class TestCacheManagerPrefetchAuxiliaryData:
         assert "000001.SZ" in result
         assert "audit" not in result["000001.SZ"]
 
+    @pytest.mark.asyncio
+    async def test_prefetch_with_as_of_date(self):
+        mgr = _make_mgr()
+        mgr.financial_dao.get_fina_audit_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "audit": ["clean"]})
+        )
+        mgr.financial_dao.get_dividend_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "dividend": ["1.0"]})
+        )
+        mgr.financial_dao.get_pledge_stat_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "pledge": ["5.0"]})
+        )
+        mgr.holder_dao.get_top10_holders_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder": ["张三"]})
+        )
+        mgr.financial_dao.get_fina_mainbz_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "mainbz": ["银行"]})
+        )
+        mgr.financial_dao.get_financial_reports_history_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "revenue": [100]})
+        )
+        mgr.holder_dao.get_stk_holdernumber_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holdernumber": [50000]})
+        )
+
+        result = await mgr.prefetch_auxiliary_data(["000001.SZ"], as_of_date="2024-07-01")
+        assert "000001.SZ" in result
+        mgr.financial_dao.get_fina_audit_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.financial_dao.get_dividend_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.financial_dao.get_pledge_stat_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.holder_dao.get_top10_holders_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.financial_dao.get_fina_mainbz_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.financial_dao.get_financial_reports_history_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.holder_dao.get_stk_holdernumber_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+
+    @pytest.mark.asyncio
+    async def test_prefetch_without_as_of_date(self):
+        mgr = _make_mgr()
+        mgr.financial_dao.get_fina_audit_batch = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "audit": ["clean"]})
+        )
+        mgr.financial_dao.get_dividend_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.financial_dao.get_pledge_stat_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.holder_dao.get_top10_holders_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.financial_dao.get_fina_mainbz_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.financial_dao.get_financial_reports_history_batch = AsyncMock(return_value=pd.DataFrame())
+        mgr.holder_dao.get_stk_holdernumber_batch = AsyncMock(return_value=pd.DataFrame())
+
+        result = await mgr.prefetch_auxiliary_data(["000001.SZ"], as_of_date=None)
+        assert "000001.SZ" in result
+        mgr.financial_dao.get_fina_audit_batch.assert_called_with(["000001.SZ"], as_of_date=None)
+
 
 class TestCacheManagerMaintenanceEvent:
     def test_maintenance_event_property(self):
@@ -1371,7 +1423,15 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_financial_reports_history("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_financial_reports_history.assert_called_once_with("000001.SZ", 8)
+        mgr.financial_dao.get_financial_reports_history.assert_called_once_with("000001.SZ", 8, as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.financial_dao.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_financial_reports_history("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.financial_dao.get_financial_reports_history.assert_called_once_with("000001.SZ", 8, as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_fina_audit(self):
@@ -1379,7 +1439,15 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_fina_audit_batch = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_fina_audit("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_fina_audit_batch.assert_called_once_with(["000001.SZ"])
+        mgr.financial_dao.get_fina_audit_batch.assert_called_once_with(["000001.SZ"], as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_fina_audit_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.financial_dao.get_fina_audit_batch = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_fina_audit("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.financial_dao.get_fina_audit_batch.assert_called_once_with(["000001.SZ"], as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_fina_mainbz(self):
@@ -1387,7 +1455,15 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_fina_mainbz("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_fina_mainbz.assert_called_once_with("000001.SZ")
+        mgr.financial_dao.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.financial_dao.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_fina_mainbz("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.financial_dao.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_dividend(self):
@@ -1395,7 +1471,15 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_dividend_batch = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_dividend("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_dividend_batch.assert_called_once_with(["000001.SZ"])
+        mgr.financial_dao.get_dividend_batch.assert_called_once_with(["000001.SZ"], as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_dividend_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.financial_dao.get_dividend_batch = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_dividend("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.financial_dao.get_dividend_batch.assert_called_once_with(["000001.SZ"], as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_pledge_stat(self):
@@ -1403,7 +1487,15 @@ class TestCacheManagerDelegations:
         mgr.financial_dao.get_pledge_stat_batch = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_pledge_stat("000001.SZ")
         assert result is not None
-        mgr.financial_dao.get_pledge_stat_batch.assert_called_once_with(["000001.SZ"])
+        mgr.financial_dao.get_pledge_stat_batch.assert_called_once_with(["000001.SZ"], as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_pledge_stat_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.financial_dao.get_pledge_stat_batch = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_pledge_stat("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.financial_dao.get_pledge_stat_batch.assert_called_once_with(["000001.SZ"], as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_top10_holders(self):
@@ -1411,7 +1503,15 @@ class TestCacheManagerDelegations:
         mgr.holder_dao.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_top10_holders("000001.SZ")
         assert result is not None
-        mgr.holder_dao.get_top10_holders.assert_called_once_with("000001.SZ")
+        mgr.holder_dao.get_top10_holders.assert_called_once_with("000001.SZ", as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_top10_holders_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.holder_dao.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_top10_holders("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.holder_dao.get_top10_holders.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_stk_holdernumber(self):
@@ -1419,7 +1519,15 @@ class TestCacheManagerDelegations:
         mgr.holder_dao.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
         result = await mgr.get_stk_holdernumber("000001.SZ")
         assert result is not None
-        mgr.holder_dao.get_stk_holdernumber.assert_called_once_with("000001.SZ")
+        mgr.holder_dao.get_stk_holdernumber.assert_called_once_with("000001.SZ", as_of_date=None)
+
+    @pytest.mark.asyncio
+    async def test_get_stk_holdernumber_with_as_of_date(self):
+        mgr = self._make_mgr()
+        mgr.holder_dao.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
+        result = await mgr.get_stk_holdernumber("000001.SZ", as_of_date="2024-07-01")
+        assert result is not None
+        mgr.holder_dao.get_stk_holdernumber.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
 
     @pytest.mark.asyncio
     async def test_get_existing_top10_ts_codes(self):

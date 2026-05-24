@@ -887,34 +887,34 @@ class CacheManager:
     # === Phase 1.5: Cache 层新增方法（AI Prompt 数据注入）===
 
     # --- 财务数据方法 ---
-    async def get_financial_reports_history(self, ts_code: str, periods: int = 8) -> pd.DataFrame:
+    async def get_financial_reports_history(self, ts_code: str, periods: int = 8, as_of_date=None) -> pd.DataFrame:
         """获取多期财务报告历史"""
-        return await self.financial_dao.get_financial_reports_history(ts_code, periods)
+        return await self.financial_dao.get_financial_reports_history(ts_code, periods, as_of_date=as_of_date)
 
-    async def get_fina_audit(self, ts_code: str) -> pd.DataFrame:
+    async def get_fina_audit(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取审计意见"""
-        return await self.financial_dao.get_fina_audit_batch([ts_code])
+        return await self.financial_dao.get_fina_audit_batch([ts_code], as_of_date=as_of_date)
 
-    async def get_fina_mainbz(self, ts_code: str) -> pd.DataFrame:
+    async def get_fina_mainbz(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取主营业务构成"""
-        return await self.financial_dao.get_fina_mainbz(ts_code)
+        return await self.financial_dao.get_fina_mainbz(ts_code, as_of_date=as_of_date)
 
-    async def get_dividend(self, ts_code: str) -> pd.DataFrame:
+    async def get_dividend(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取分红记录"""
-        return await self.financial_dao.get_dividend_batch([ts_code])
+        return await self.financial_dao.get_dividend_batch([ts_code], as_of_date=as_of_date)
 
-    async def get_pledge_stat(self, ts_code: str) -> pd.DataFrame:
+    async def get_pledge_stat(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取股权质押统计"""
-        return await self.financial_dao.get_pledge_stat_batch([ts_code])
+        return await self.financial_dao.get_pledge_stat_batch([ts_code], as_of_date=as_of_date)
 
     # --- 股东数据方法 ---
-    async def get_top10_holders(self, ts_code: str) -> pd.DataFrame:
+    async def get_top10_holders(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取前十大股东"""
-        return await self.holder_dao.get_top10_holders(ts_code)
+        return await self.holder_dao.get_top10_holders(ts_code, as_of_date=as_of_date)
 
-    async def get_stk_holdernumber(self, ts_code: str) -> pd.DataFrame:
+    async def get_stk_holdernumber(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取股东人数"""
-        return await self.holder_dao.get_stk_holdernumber(ts_code)
+        return await self.holder_dao.get_stk_holdernumber(ts_code, as_of_date=as_of_date)
 
     async def get_existing_top10_ts_codes(self, period: str) -> set[str]:
         """获取指定报告期已有 top10_holders 数据的股票代码集合"""
@@ -972,7 +972,7 @@ class CacheManager:
 
     # === L2 批量预取方法（避免 N+1 查询）===
 
-    async def prefetch_auxiliary_data(self, ts_codes: list[str]) -> dict:
+    async def prefetch_auxiliary_data(self, ts_codes: list[str], as_of_date=None) -> dict:
         """
         批量预取辅助数据，避免在分析循环中逐只股票查询。
 
@@ -981,6 +981,7 @@ class CacheManager:
 
         Args:
             ts_codes: 股票代码列表
+            as_of_date: 截止日期（含），None 表示不限制，防止前视偏差
 
         Returns:
             {ts_code: {"audit": df, "dividend": df, ...}} 结构
@@ -988,13 +989,13 @@ class CacheManager:
         result = {code: {} for code in ts_codes}
 
         gather_results = await asyncio.gather(
-            self.financial_dao.get_fina_audit_batch(ts_codes),
-            self.financial_dao.get_dividend_batch(ts_codes),
-            self.financial_dao.get_pledge_stat_batch(ts_codes),
-            self.holder_dao.get_top10_holders_batch(ts_codes),
-            self.financial_dao.get_fina_mainbz_batch(ts_codes),
-            self.financial_dao.get_financial_reports_history_batch(ts_codes),
-            self.holder_dao.get_stk_holdernumber_batch(ts_codes),
+            self.financial_dao.get_fina_audit_batch(ts_codes, as_of_date=as_of_date),
+            self.financial_dao.get_dividend_batch(ts_codes, as_of_date=as_of_date),
+            self.financial_dao.get_pledge_stat_batch(ts_codes, as_of_date=as_of_date),
+            self.holder_dao.get_top10_holders_batch(ts_codes, as_of_date=as_of_date),
+            self.financial_dao.get_fina_mainbz_batch(ts_codes, as_of_date=as_of_date),
+            self.financial_dao.get_financial_reports_history_batch(ts_codes, as_of_date=as_of_date),
+            self.holder_dao.get_stk_holdernumber_batch(ts_codes, as_of_date=as_of_date),
             return_exceptions=True,
         )
 

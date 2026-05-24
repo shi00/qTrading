@@ -171,51 +171,51 @@ class FinancialDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def get_financial_reports_history(self, ts_code: str, periods: int = 8) -> pd.DataFrame:
-        """
-        获取多期财务报告历史。
-
-        Args:
-            ts_code: 股票代码
-            periods: 获取的期数（默认8个季度）
-
-        Returns:
-            DataFrame with financial reports history
-        """
+    async def get_financial_reports_history(self, ts_code: str, periods: int = 8, as_of_date=None) -> pd.DataFrame:
         try:
-            df = await self._read_db(
-                """
-                SELECT
-                    ts_code, end_date, ann_date, report_type,
-                    total_revenue, revenue, n_income, n_income_attr_p,
-                    total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                    roe, roe_dt, grossprofit_margin, netprofit_margin,
-                    debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                    audit_result, n_cashflow_act
-                FROM financial_reports
-                WHERE ts_code = $1
-                ORDER BY end_date DESC
-                LIMIT $2
-                """,
-                (ts_code, periods),
-            )
+            if as_of_date is not None:
+                df = await self._read_db(
+                    """
+                    SELECT
+                        ts_code, end_date, ann_date, report_type,
+                        total_revenue, revenue, n_income, n_income_attr_p,
+                        total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                        roe, roe_dt, grossprofit_margin, netprofit_margin,
+                        debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                        audit_result, n_cashflow_act
+                    FROM financial_reports
+                    WHERE ts_code = $1 AND ann_date <= $2
+                    ORDER BY end_date DESC
+                    LIMIT $3
+                    """,
+                    (ts_code, as_of_date, periods),
+                )
+            else:
+                df = await self._read_db(
+                    """
+                    SELECT
+                        ts_code, end_date, ann_date, report_type,
+                        total_revenue, revenue, n_income, n_income_attr_p,
+                        total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                        roe, roe_dt, grossprofit_margin, netprofit_margin,
+                        debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                        audit_result, n_cashflow_act
+                    FROM financial_reports
+                    WHERE ts_code = $1
+                    ORDER BY end_date DESC
+                    LIMIT $2
+                    """,
+                    (ts_code, periods),
+                )
 
             return df if df is not None else pd.DataFrame()
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get financial history for {ts_code}: {e}")
             return pd.DataFrame()
 
-    async def get_financial_reports_history_batch(self, ts_codes: list[str], periods: int = 8) -> pd.DataFrame:
-        """
-        批量获取多只股票的财务报告历史。
-
-        Args:
-            ts_codes: 股票代码列表
-            periods: 每只股票获取的期数（默认8个季度）
-
-        Returns:
-            DataFrame with financial reports history for all stocks
-        """
+    async def get_financial_reports_history_batch(
+        self, ts_codes: list[str], periods: int = 8, as_of_date=None
+    ) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
@@ -224,23 +224,44 @@ class FinancialDao(BaseDao):
             for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
                 chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
                 placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                sql = f"""
-                    SELECT * FROM (
-                        SELECT
-                            ts_code, end_date, ann_date, report_type,
-                            total_revenue, revenue, n_income, n_income_attr_p,
-                            total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                            roe, roe_dt, grossprofit_margin, netprofit_margin,
-                            debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                            audit_result, n_cashflow_act,
-                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                        FROM financial_reports
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
-                    WHERE rn <= ${len(chunk) + 1}
-                    ORDER BY ts_code, end_date DESC
-                """
-                df = await self._read_db(sql, chunk + [periods])
+                if as_of_date is not None:
+                    ann_date_param = len(chunk) + 1
+                    limit_param = len(chunk) + 2
+                    sql = f"""
+                        SELECT * FROM (
+                            SELECT
+                                ts_code, end_date, ann_date, report_type,
+                                total_revenue, revenue, n_income, n_income_attr_p,
+                                total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                                roe, roe_dt, grossprofit_margin, netprofit_margin,
+                                debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                                audit_result, n_cashflow_act,
+                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                            FROM financial_reports
+                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
+                        ) sub
+                        WHERE rn <= ${limit_param}
+                        ORDER BY ts_code, end_date DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date, periods])
+                else:
+                    sql = f"""
+                        SELECT * FROM (
+                            SELECT
+                                ts_code, end_date, ann_date, report_type,
+                                total_revenue, revenue, n_income, n_income_attr_p,
+                                total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                                roe, roe_dt, grossprofit_margin, netprofit_margin,
+                                debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                                audit_result, n_cashflow_act,
+                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                            FROM financial_reports
+                            WHERE ts_code IN ({placeholders})
+                        ) sub
+                        WHERE rn <= ${len(chunk) + 1}
+                        ORDER BY ts_code, end_date DESC
+                    """
+                    df = await self._read_db(sql, chunk + [periods])
                 if df is not None and not df.empty:
                     all_results.append(df)
 
@@ -256,93 +277,159 @@ class FinancialDao(BaseDao):
             logger.warning(f"[FinancialDao] Failed to get financial history batch: {e}")
             return pd.DataFrame()
 
-    async def get_fina_audit_batch(self, ts_codes: list[str]) -> pd.DataFrame:
+    async def get_fina_audit_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            return await _chunked_in_query(
-                self._read_db,
-                """
-                SELECT DISTINCT ON (ts_code)
-                    ts_code, end_date, audit_result, audit_sign, audit_fees, audit_agency
-                FROM fina_audit
-                WHERE ts_code IN ({placeholders})
-                  AND audit_result IS NOT NULL
-                ORDER BY ts_code, end_date DESC
-                """,
-                ts_codes,
-            )
+            if as_of_date is not None:
+                all_results = []
+                for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
+                    chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
+                    placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
+                    ann_date_param = len(chunk) + 1
+                    sql = f"""
+                        SELECT DISTINCT ON (ts_code)
+                            ts_code, end_date, ann_date, audit_result, audit_sign, audit_fees, audit_agency
+                        FROM fina_audit
+                        WHERE ts_code IN ({placeholders})
+                          AND audit_result IS NOT NULL
+                          AND ann_date <= ${ann_date_param}
+                        ORDER BY ts_code, end_date DESC, ann_date DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date])
+                    if df is not None and not df.empty:
+                        all_results.append(df)
+                if all_results:
+                    return pd.concat(all_results, ignore_index=True)
+                return pd.DataFrame()
+            else:
+                return await _chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT DISTINCT ON (ts_code)
+                        ts_code, end_date, ann_date, audit_result, audit_sign, audit_fees, audit_agency
+                    FROM fina_audit
+                    WHERE ts_code IN ({placeholders})
+                      AND audit_result IS NOT NULL
+                    ORDER BY ts_code, end_date DESC, ann_date DESC
+                    """,
+                    ts_codes,
+                )
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get audit batch: {e}")
             return pd.DataFrame()
 
-    async def get_dividend_batch(self, ts_codes: list[str]) -> pd.DataFrame:
+    async def get_dividend_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            return await _chunked_in_query(
-                self._read_db,
-                """
-                SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
-                FROM dividend
-                WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, end_date DESC
-                """,
-                ts_codes,
-            )
+            if as_of_date is not None:
+                all_results = []
+                for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
+                    chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
+                    placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
+                    ann_date_param = len(chunk) + 1
+                    sql = f"""
+                        SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
+                        FROM dividend
+                        WHERE ts_code IN ({placeholders})
+                          AND ann_date <= ${ann_date_param}
+                        ORDER BY ts_code, end_date DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date])
+                    if df is not None and not df.empty:
+                        all_results.append(df)
+                if all_results:
+                    return pd.concat(all_results, ignore_index=True)
+                return pd.DataFrame()
+            else:
+                return await _chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
+                    FROM dividend
+                    WHERE ts_code IN ({placeholders})
+                    ORDER BY ts_code, end_date DESC
+                    """,
+                    ts_codes,
+                )
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get dividend batch: {e}")
             return pd.DataFrame()
 
-    async def get_pledge_stat_batch(self, ts_codes: list[str]) -> pd.DataFrame:
+    async def get_pledge_stat_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
         try:
-            return await _chunked_in_query(
-                self._read_db,
-                """
-                SELECT DISTINCT ON (ts_code)
-                    ts_code, end_date, pledge_count, pledge_ratio
-                FROM pledge_stat
-                WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, end_date DESC
-                """,
-                ts_codes,
-            )
+            if as_of_date is not None:
+                all_results = []
+                for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
+                    chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
+                    placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
+                    end_date_param = len(chunk) + 1
+                    sql = f"""
+                        SELECT DISTINCT ON (ts_code)
+                            ts_code, end_date, pledge_count, pledge_ratio
+                        FROM pledge_stat
+                        WHERE ts_code IN ({placeholders})
+                          AND end_date <= ${end_date_param}
+                        ORDER BY ts_code, end_date DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date])
+                    if df is not None and not df.empty:
+                        all_results.append(df)
+                if all_results:
+                    return pd.concat(all_results, ignore_index=True)
+                return pd.DataFrame()
+            else:
+                return await _chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT DISTINCT ON (ts_code)
+                        ts_code, end_date, pledge_count, pledge_ratio
+                    FROM pledge_stat
+                    WHERE ts_code IN ({placeholders})
+                    ORDER BY ts_code, end_date DESC
+                    """,
+                    ts_codes,
+                )
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get pledge batch: {e}")
             return pd.DataFrame()
 
-    async def get_fina_mainbz(self, ts_code: str) -> pd.DataFrame:
-        """
-        获取主营业务构成。
-
-        Args:
-            ts_code: 股票代码
-
-        Returns:
-            DataFrame with main business composition
-        """
+    async def get_fina_mainbz(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         try:
-            df = await self._read_db(
-                """
-                SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                FROM fina_mainbz
-                WHERE ts_code = $1
-                ORDER BY end_date DESC, bz_sales DESC
-                LIMIT 10
-                """,
-                (ts_code,),
-            )
+            if as_of_date is not None:
+                df = await self._read_db(
+                    """
+                    SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                    FROM fina_mainbz
+                    WHERE ts_code = $1 AND end_date <= $2
+                    ORDER BY end_date DESC, bz_sales DESC
+                    LIMIT 10
+                    """,
+                    (ts_code, as_of_date),
+                )
+            else:
+                df = await self._read_db(
+                    """
+                    SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                    FROM fina_mainbz
+                    WHERE ts_code = $1
+                    ORDER BY end_date DESC, bz_sales DESC
+                    LIMIT 10
+                    """,
+                    (ts_code,),
+                )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
             logger.warning(f"[FinancialDao] Failed to get fina_mainbz for {ts_code}: {e}")
             return pd.DataFrame()
 
-    async def get_fina_mainbz_batch(self, ts_codes: list[str]) -> pd.DataFrame:
+    async def get_fina_mainbz_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
@@ -351,17 +438,31 @@ class FinancialDao(BaseDao):
             for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
                 chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
                 placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                sql = f"""
-                    SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                    FROM (
-                        SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
-                        FROM fina_mainbz
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
-                    WHERE dr = 1
-                    ORDER BY ts_code, bz_sales DESC
-                """
-                df = await self._read_db(sql, chunk)
+                if as_of_date is not None:
+                    end_date_param = len(chunk) + 1
+                    sql = f"""
+                        SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                        FROM (
+                            SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                            FROM fina_mainbz
+                            WHERE ts_code IN ({placeholders}) AND end_date <= ${end_date_param}
+                        ) sub
+                        WHERE dr = 1
+                        ORDER BY ts_code, bz_sales DESC
+                    """
+                    df = await self._read_db(sql, chunk + [as_of_date])
+                else:
+                    sql = f"""
+                        SELECT ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                        FROM (
+                            SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                            FROM fina_mainbz
+                            WHERE ts_code IN ({placeholders})
+                        ) sub
+                        WHERE dr = 1
+                        ORDER BY ts_code, bz_sales DESC
+                    """
+                    df = await self._read_db(sql, chunk)
                 if df is not None and not df.empty:
                     if "dr" in df.columns:
                         df = df.drop(columns=["dr"])

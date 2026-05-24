@@ -209,6 +209,40 @@ class TestGetFinancialReportsHistory:
         result = await dao.get_financial_reports_history("000001.SZ")
         assert result.empty
 
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240630"],
+                }
+            )
+        )
+        result = await dao.get_financial_reports_history("000001.SZ", as_of_date="2024-07-01")
+        assert not result.empty
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "ann_date <=" in sql
+        assert call_args[0][1] == ("000001.SZ", "2024-07-01", 8)
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240630"],
+                }
+            )
+        )
+        result = await dao.get_financial_reports_history("000001.SZ", as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
+
 
 class TestGetFinancialReportsHistoryBatch:
     @pytest.mark.asyncio
@@ -246,6 +280,40 @@ class TestGetFinancialReportsHistoryBatch:
         result = await dao.get_financial_reports_history_batch(["000001.SZ"])
         assert result.empty
 
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240630"],
+                    "rn": [1],
+                }
+            )
+        )
+        result = await dao.get_financial_reports_history_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240630"],
+                    "rn": [1],
+                }
+            )
+        )
+        result = await dao.get_financial_reports_history_batch(["000001.SZ"], as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
+
 
 class TestGetFinaAuditBatch:
     @pytest.mark.asyncio
@@ -281,6 +349,38 @@ class TestGetFinaAuditBatch:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_fina_audit_batch(["000001.SZ"])
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "audit_result": ["标准无保留意见"],
+                }
+            )
+        )
+        result = await dao.get_fina_audit_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "audit_result": ["标准无保留意见"],
+                }
+            )
+        )
+        result = await dao.get_fina_audit_batch(["000001.SZ"], as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
 
 
 class TestGetDividendBatch:
@@ -318,6 +418,38 @@ class TestGetDividendBatch:
         result = await dao.get_dividend_batch(["000001.SZ"])
         assert result.empty
 
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "cash_div": [0.5],
+                }
+            )
+        )
+        result = await dao.get_dividend_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "cash_div": [0.5],
+                }
+            )
+        )
+        result = await dao.get_dividend_batch(["000001.SZ"], as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date <=" not in sql
+
 
 class TestGetPledgeStatBatch:
     @pytest.mark.asyncio
@@ -354,6 +486,38 @@ class TestGetPledgeStatBatch:
         result = await dao.get_pledge_stat_batch(["000001.SZ"])
         assert result.empty
 
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "pledge_ratio": [10.5],
+                }
+            )
+        )
+        result = await dao.get_pledge_stat_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "end_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "pledge_ratio": [10.5],
+                }
+            )
+        )
+        result = await dao.get_pledge_stat_batch(["000001.SZ"], as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "end_date <=" not in sql
+
 
 class TestGetFinaMainbz:
     @pytest.mark.asyncio
@@ -383,6 +547,38 @@ class TestGetFinaMainbz:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_fina_mainbz("000001.SZ")
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "bz_item": ["主营业务"],
+                }
+            )
+        )
+        result = await dao.get_fina_mainbz("000001.SZ", as_of_date="2024-07-01")
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "end_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "bz_item": ["主营业务"],
+                }
+            )
+        )
+        result = await dao.get_fina_mainbz("000001.SZ", as_of_date=None)
+        assert not result.empty
+        sql = dao._read_db.call_args[0][0]
+        assert "end_date <=" not in sql
 
 
 class TestGetFinaMainbzBatch:
@@ -420,6 +616,40 @@ class TestGetFinaMainbzBatch:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_fina_mainbz_batch(["000001.SZ"])
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_with_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "bz_item": ["主营业务"],
+                    "dr": [1],
+                }
+            )
+        )
+        result = await dao.get_fina_mainbz_batch(["000001.SZ"], as_of_date="2024-07-01")
+        assert "dr" not in result.columns
+        sql = dao._read_db.call_args[0][0]
+        assert "end_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_without_as_of_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "bz_item": ["主营业务"],
+                    "dr": [1],
+                }
+            )
+        )
+        result = await dao.get_fina_mainbz_batch(["000001.SZ"], as_of_date=None)
+        assert "dr" not in result.columns
+        sql = dao._read_db.call_args[0][0]
+        assert "end_date <=" not in sql
 
 
 class TestVerifyStockFinancialIntegrity:
