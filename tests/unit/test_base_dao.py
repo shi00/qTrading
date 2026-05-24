@@ -1226,9 +1226,8 @@ class TestBaseDaoReadDbExtended:
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            result = await dao._read_db("SELECT 1")
-            assert isinstance(result, pd.DataFrame)
-            assert result.empty
+            with pytest.raises(EngineDisposedError):
+                await dao._read_db("SELECT 1")
 
     @pytest.mark.asyncio
     async def test_read_params_as_list(self):

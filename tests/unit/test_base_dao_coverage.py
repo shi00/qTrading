@@ -88,7 +88,7 @@ class TestBaseDaoReadDbSelect:
                 await dao._read_db_select(sa.select(1))
 
     @pytest.mark.asyncio
-    async def test_connection_error_returns_empty_df(self):
+    async def test_connection_error_raises_engine_disposed(self):
         mock_conn = AsyncMock()
         mock_conn.execute.side_effect = Exception("no active connection")
         mock_engine = _setup_mock_engine_connect(mock_conn)
@@ -101,8 +101,8 @@ class TestBaseDaoReadDbSelect:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = False
 
-            result = await dao._read_db_select(sa.select(1), suppress_errors=True)
-            assert result.empty
+            with pytest.raises(EngineDisposedError):
+                await dao._read_db_select(sa.select(1), suppress_errors=True)
 
     @pytest.mark.asyncio
     async def test_error_suppressed_returns_empty_df(self):
@@ -513,7 +513,7 @@ class TestBaseDaoReadDb:
                 await dao._read_db("SELECT 1")
 
     @pytest.mark.asyncio
-    async def test_connection_error_returns_empty_df(self):
+    async def test_connection_error_raises_engine_disposed(self):
         mock_conn = AsyncMock()
         mock_conn.exec_driver_sql.side_effect = Exception("no active connection")
         mock_engine = _setup_mock_engine_connect(mock_conn)
@@ -526,8 +526,8 @@ class TestBaseDaoReadDb:
             mock_cm._instance = MagicMock()
             mock_cm._instance._disposed = False
 
-            result = await dao._read_db("SELECT 1")
-            assert result.empty
+            with pytest.raises(EngineDisposedError):
+                await dao._read_db("SELECT 1")
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self):

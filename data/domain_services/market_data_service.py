@@ -167,7 +167,8 @@ class MarketDataService:
                 if self._running:
                     await self._safe_fetch()
             except asyncio.CancelledError:
-                break
+                logger.warning("[MarketDataService] Poll loop cancelled during shutdown.")
+                raise
 
     async def _safe_fetch(self):
         """安全获取数据（带异常处理）"""

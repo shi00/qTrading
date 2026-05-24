@@ -597,7 +597,7 @@ class BaseDao:
                 logger.warning(
                     f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}",
                 )
-                return pd.DataFrame()
+                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
 
             logger.warning(
                 f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
@@ -678,7 +678,7 @@ class BaseDao:
                 logger.warning(
                     f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}",
                 )
-                return pd.DataFrame()
+                raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
 
             logger.warning(
                 f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",

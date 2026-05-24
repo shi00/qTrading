@@ -46,7 +46,7 @@ class ReviewManager:
             logger.info("[Review] No pending predictions to review.")
             return
 
-        updated_count = 0
+        updates: list[dict] = []
 
         all_codes = pending_df["ts_code"].unique().tolist()
         min_pred_date = str(pending_df["trade_date"].min())
@@ -179,17 +179,18 @@ class ReviewManager:
                     elif alpha < -0.5:
                         label = "LOSS"
 
-                    await self._update_result(
-                        row["id"],
-                        t1_pct,
-                        label,
-                        index_pct=index_pct,
-                        t1_price=t1_price,
-                        t5_pct=t5_pct,
-                        t5_price=t5_price,
-                        alpha=alpha,
+                    updates.append(
+                        {
+                            "record_id": row["id"],
+                            "pct": t1_pct,
+                            "label": label,
+                            "index_pct": index_pct,
+                            "t1_price": t1_price,
+                            "t5_pct": t5_pct,
+                            "t5_price": t5_price,
+                            "alpha": alpha,
+                        }
                     )
-                    updated_count += 1
                     logger.info(
                         f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}"
                         f", T+5={t5_pct if t5_pct is not None else 'N/A'}",
@@ -198,7 +199,10 @@ class ReviewManager:
             except Exception as e:
                 logger.error(f"[Review] Error reviewing {ts_code}: {e}")
 
-        logger.info(f"[Review] Completed. Updated {updated_count} records.")
+        if updates:
+            await self._batch_update_results(updates)
+
+        logger.info(f"[Review] Completed. Updated {len(updates)} records.")
 
     async def _get_pending_predictions(self):
         """
@@ -320,6 +324,45 @@ class ReviewManager:
 
         xml += "</history_context>"
         return xml
+
+    async def _batch_update_results(self, updates: list[dict]):
+        """Update all review results within a single transaction."""
+        dao = self.cache.screener_dao
+        engine = self.cache.engine
+        if engine is None:
+            logger.error("[Review] Engine not available for batch update.")
+            return
+
+        try:
+            async with engine.begin() as conn:
+                for u in updates:
+                    await dao.update_prediction_result(
+                        u["record_id"],
+                        u["pct"],
+                        u["label"],
+                        t1_price=u["t1_price"],
+                        t5_pct=u["t5_pct"],
+                        t5_price=u["t5_price"],
+                        index_pct=u["index_pct"],
+                        alpha=u["alpha"],
+                        conn=conn,
+                    )
+        except Exception as e:
+            logger.error("[Review] Batch update failed, falling back to individual updates: %s", e)
+            for u in updates:
+                try:
+                    await self._update_result(
+                        u["record_id"],
+                        u["pct"],
+                        u["label"],
+                        index_pct=u["index_pct"],
+                        t1_price=u["t1_price"],
+                        t5_pct=u["t5_pct"],
+                        t5_price=u["t5_price"],
+                        alpha=u["alpha"],
+                    )
+                except Exception as inner_e:
+                    logger.error("[Review] Individual update also failed for record %s: %s", u["record_id"], inner_e)
 
     async def _update_result(
         self,

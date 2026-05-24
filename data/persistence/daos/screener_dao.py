@@ -1,6 +1,7 @@
 import datetime
 import functools
 import logging
+import typing
 from decimal import Decimal
 
 import pandas as pd
@@ -250,6 +251,7 @@ class ScreenerDao(BaseDao):
         index_pct: float | None = None,
         alpha: float | None = None,
         review_status: str | None = None,
+        conn: typing.Any = None,
     ):
         """Update review metrics and advance review_status according to available horizons."""
         effective_status = review_status
@@ -280,8 +282,11 @@ class ScreenerDao(BaseDao):
             raise RuntimeError("[ScreenerDao] Engine not initialized. Call CacheManager.init_db() first.")
 
         await self._get_maintenance_event().wait()
-        async with self.engine.begin() as conn:
+        if conn is not None:
             await conn.execute(stmt)
+        else:
+            async with self.engine.begin() as conn:
+                await conn.execute(stmt)
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:
