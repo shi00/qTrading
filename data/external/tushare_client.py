@@ -919,7 +919,7 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             type="P",
-            fields="ts_code,end_date,bz_item,bz_sales,bz_profit,bz_cost,curr_type,update_flag",
+            fields="ts_code,end_date,ann_date,bz_item,bz_sales,bz_profit,bz_cost,curr_type,update_flag",
         )
 
     async def get_pledge_stat(self, ts_code: str | None = None, end_date: str | None = None):
