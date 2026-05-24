@@ -83,8 +83,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      pull-requests: write
-    
+
     services:
       postgres:
         image: postgres:16
@@ -114,9 +113,11 @@ jobs:
             requirements-optional.txt
             requirements-dev.txt
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip uv
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           uv pip install --system -r requirements-dev.txt
@@ -127,9 +128,6 @@ jobs:
         run: |
           echo "::warning::Optional dependencies failed to install. Some tests may be skipped."
           cat optional-deps.log
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
 
       - name: Install pre-commit
         run: pip install pre-commit
@@ -206,104 +204,6 @@ jobs:
           fail_ci_if_error: false
           verbose: true
 
-      - name: Extract Coverage Percentage
-        if: always() && github.event_name == 'pull_request'
-        run: |
-          python - <<'PY'
-          import tomllib
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-          
-          try:
-              root = ET.parse("coverage.xml").getroot()
-              line_rate = float(root.attrib.get("line-rate", "0"))
-              percent = line_rate * 100
-          except Exception:
-              percent = 0.0
-          
-          with open("coverage_percent.txt", "w", encoding="utf-8") as f:
-              f.write(f"{percent:.2f}\n")
-          
-          try:
-              pyproject = Path("pyproject.toml")
-              with open(pyproject, "rb") as f:
-                  cfg = tomllib.load(f)
-              report = cfg.get("tool", {}).get("coverage", {}).get("report", {})
-              fail_under = report.get("fail_under", 85)
-              per_file_minimum = report.get("per_file_minimum", 80)
-          except Exception:
-              fail_under = 85
-              per_file_minimum = 80
-          
-          with open("coverage_thresholds.txt", "w", encoding="utf-8") as f:
-              f.write(f"{fail_under}\n{per_file_minimum}\n")
-          PY
-          echo "COVERAGE_PERCENT=$(cat coverage_percent.txt)" >> "$GITHUB_ENV"
-          {
-            echo 'COVERAGE_THRESHOLDS<<EOF'
-            cat coverage_thresholds.txt
-            echo 'EOF'
-          } >> "$GITHUB_ENV"
-
-      - name: Comment Coverage On PR
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
-        env:
-          COVERAGE_PERCENT: ${{ env.COVERAGE_PERCENT }}
-          COVERAGE_THRESHOLDS: ${{ env.COVERAGE_THRESHOLDS }}
-        with:
-          script: |
-            const marker = '<!-- coverage-report -->';
-            const coverage = Number(process.env.COVERAGE_PERCENT || '0');
-            const thresholds = (process.env.COVERAGE_THRESHOLDS || '85\n80').split('\n');
-            const hardGate = Number(thresholds[0] || 85);
-            const perFileGate = Number(thresholds[1] || 80);
-            const passed = coverage >= hardGate;
-            
-            let statusIcon = passed ? '✅' : '⚠️';
-            let statusText = passed ? 'PASS' : 'BELOW TARGET';
-            
-            const body = `${marker}
-            ### Coverage Report
-            - **Total Coverage**: ${coverage.toFixed(2)}%
-            - **Hard Gate**: ${hardGate}% (must pass)
-            - **Per-File Gate**: ${perFileGate}% (each file must pass)
-            - **Status**: ${statusIcon} ${statusText}
-            
-            | Gate | Threshold | Status |
-            |------|-----------|--------|
-            | Overall | ${hardGate}% | ${coverage >= hardGate ? '✅ PASS' : '❌ FAIL'} |
-            | Per-File | ${perFileGate}% | See check_per_file_coverage step |
-            `;
-
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.rest.issues.listComments({
-              owner,
-              repo,
-              issue_number,
-              per_page: 100,
-            });
-            const existing = comments.data.find(c =>
-              c.user?.type === 'Bot' && c.body?.includes(marker)
-            );
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner,
-                repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number,
-                body,
-              });
-            }
-
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -352,12 +252,14 @@ jobs:
             requirements-optional.txt
             requirements-dev.txt
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install --prefer-binary -r requirements.txt
-          pip install --prefer-binary -r requirements-optional.txt || echo "Optional deps failed"
-          pip install --prefer-binary -r requirements-dev.txt
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt || echo "Optional deps failed"
+          uv pip install --system -r requirements-dev.txt
           pip install playwright pytest-playwright
           playwright install chromium
 
@@ -420,10 +322,12 @@ jobs:
             requirements-optional.txt
             requirements-dev.txt
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
       - name: Install dependencies
         shell: bash
         run: |
-          python -m pip install --upgrade pip uv
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           uv pip install --system -r requirements-dev.txt
@@ -434,9 +338,6 @@ jobs:
         run: |
           echo "::warning::Optional dependencies failed to install. Some tests may be skipped."
           cat optional-deps.log
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
 
       - name: Install pre-commit
         run: pip install pre-commit
@@ -579,12 +480,14 @@ jobs:
             requirements-optional.txt
             requirements-dev.txt
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install --prefer-binary llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
-          pip install --prefer-binary -r requirements.txt
-          pip install --prefer-binary -r requirements-optional.txt || echo "Optional deps failed, continuing..."
+          uv pip install --system llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt || echo "Optional deps failed, continuing..."
           pip install pyinstaller
 
       - name: Install UPX
@@ -604,6 +507,19 @@ jobs:
             if (-not $proc.HasExited) {
               Write-Host "EXE started successfully (process running)"
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            } else {
+              $exitCode = $proc.ExitCode
+              if ($exitCode -ne 0) {
+                Write-Error "EXE exited with non-zero code: $exitCode"
+                if (Test-Path "smoke-err.txt") {
+                  $errOutput = Get-Content "smoke-err.txt" -Raw
+                  if ($errOutput.Length -gt 0) {
+                    Write-Host "=== STDERR ==="
+                    Write-Host $errOutput.Substring(0, [Math]::Min(2000, $errOutput.Length))
+                  }
+                }
+                exit 1
+              }
             }
             if (Test-Path "smoke-out.txt") {
               $output = Get-Content "smoke-out.txt" -Raw
@@ -614,9 +530,10 @@ jobs:
             }
             Write-Host "Smoke test completed successfully."
           } else {
-            Write-Warning "EXE not found at $exePath, skipping smoke test"
+            Write-Error "EXE not found at $exePath"
+            exit 1
           }
-        continue-on-error: true
+        continue-on-error: ${{ matrix.variant == 'cpu' }}
 
       - name: Compile Installer with Inno Setup
         uses: Minionguyjpro/Inno-Setup-Action@202dd0c4950ef315b6ba13359998fe120179b147  # v1.2.8
