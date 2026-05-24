@@ -160,6 +160,13 @@ class LocalModelManager:
                 cls._instance._shutdown_worker()
             cls._instance = None
             cls._initialized = False
+            cls._model_path = ""
+            cls._model_md5 = ""
+            cls._model_stat = (0, 0)
+            cls._last_config = {}
+            cls._is_loading = False
+            cls._cancel_event = threading.Event()
+            cls._worker_ready = False
 
     @classmethod
     def _get_load_lock(cls):
@@ -223,10 +230,11 @@ class LocalModelManager:
             logger.info("[LocalModel] Persistent worker shut down.")
 
     def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
-        """Ensure a persistent worker subprocess is running with the given model.
+        """Start a persistent worker subprocess with the given model.
 
-        Returns True if worker is ready, False on failure.
+        Returns True if worker process was started, False on failure.
         Thread-safe: protected by _worker_lock.
+        Call _await_worker_ready() after this to wait for model loading.
         """
         with self._worker_lock:
             if (
@@ -249,22 +257,26 @@ class LocalModelManager:
             )
             proc.start()
             self._worker_proc = proc
+            return True
 
-            try:
-                status, payload = self._result_queue.get(timeout=180)
-            except (queue.Empty, TimeoutError, OSError) as e:
-                logger.error(f"[LocalModel] Persistent worker failed to become ready within 180s: {e}")
-                self._shutdown_worker()
-                return False
+    async def _await_worker_ready(self, timeout: float = 180.0) -> bool:
+        """Wait for the persistent worker to become ready without blocking the event loop."""
+        loop = asyncio.get_running_loop()
+        try:
+            status, payload = await loop.run_in_executor(None, self._result_queue.get, timeout)
+        except (queue.Empty, TimeoutError, OSError) as e:
+            logger.error(f"[LocalModel] Persistent worker failed to become ready within {timeout}s: {e}")
+            self._shutdown_worker()
+            return False
 
-            if status == "ready":
-                self._worker_ready = True
-                logger.info(f"[LocalModel] Persistent worker ready with model: {payload}")
-                return True
-            else:
-                logger.error(f"[LocalModel] Persistent worker failed: {payload}")
-                self._shutdown_worker()
-                return False
+        if status == "ready":
+            self._worker_ready = True
+            logger.info(f"[LocalModel] Persistent worker ready with model: {payload}")
+            return True
+        else:
+            logger.error(f"[LocalModel] Persistent worker failed: {payload}")
+            self._shutdown_worker()
+            return False
 
     def get_loaded_model_path(self) -> str:
         """Return the path of the currently loaded model, or empty string if none."""
@@ -350,6 +362,8 @@ class LocalModelManager:
                 logger.info("[LocalModel] Starting persistent subprocess worker...")
                 if not self._ensure_worker(model_path, core_config):
                     return False
+                if not await self._await_worker_ready():
+                    return False
 
                 self._model_path = model_path
                 self._model_md5 = target_md5
@@ -410,6 +424,10 @@ class LocalModelManager:
         if not self._ensure_worker(path, core_config):
             raise RuntimeError("Persistent worker failed to start. Check logs for details.")
 
+        if not self._worker_ready:
+            if not await self._await_worker_ready():
+                raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
+
         timeout_val = config.get("local_model_timeout", 90) or 90
 
         logger.info(
@@ -420,7 +438,11 @@ class LocalModelManager:
         start_time = asyncio.get_running_loop().time()
 
         try:
-            self._request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5)  # type: ignore[union-attr]
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self._request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5),
+            )
         except Exception as e:
             logger.error(f"[LocalModel] Failed to send request to worker: {e}")
             self._worker_ready = False

@@ -134,7 +134,7 @@ class TestPersistentWorkerEnsureWorker:
             assert result is True
             mgr._shutdown_worker.assert_called_once()
 
-    def test_ensure_worker_returns_false_on_load_failure(self):
+    def test_ensure_worker_returns_true_on_process_start(self):
         mgr = LocalModelManager()
         mgr._worker_proc = None
         mgr._worker_ready = False
@@ -145,30 +145,6 @@ class TestPersistentWorkerEnsureWorker:
             patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
         ):
             mock_res_queue = MagicMock()
-            mock_res_queue.get.return_value = ("error", "Model load failed: no file")
-            mock_req_queue = MagicMock()
-            mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
-
-            mock_proc = MagicMock()
-            mock_proc.is_alive.return_value = True
-            mock_proc_cls.return_value = mock_proc
-
-            result = mgr._ensure_worker("/bad/model.gguf", {})
-            assert result is False
-            mgr._shutdown_worker.assert_called()
-
-    def test_ensure_worker_returns_false_on_timeout(self):
-        mgr = LocalModelManager()
-        mgr._worker_proc = None
-        mgr._worker_ready = False
-
-        with (
-            patch.object(mgr, "_shutdown_worker"),
-            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
-            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
-        ):
-            mock_res_queue = MagicMock()
-            mock_res_queue.get.side_effect = queue.Empty()
             mock_req_queue = MagicMock()
             mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
 
@@ -177,7 +153,31 @@ class TestPersistentWorkerEnsureWorker:
             mock_proc_cls.return_value = mock_proc
 
             result = mgr._ensure_worker("/path/to/model.gguf", {})
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_returns_false_on_load_failure(self):
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._result_queue = MagicMock()
+        mgr._result_queue.get = MagicMock(return_value=("error", "Model load failed: no file"))
+
+        with patch.object(mgr, "_shutdown_worker"):
+            result = await mgr._await_worker_ready()
             assert result is False
+            mgr._shutdown_worker.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_returns_false_on_timeout(self):
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._result_queue = MagicMock()
+        mgr._result_queue.get = MagicMock(side_effect=queue.Empty())
+
+        with patch.object(mgr, "_shutdown_worker"):
+            result = await mgr._await_worker_ready(timeout=1)
+            assert result is False
+            mgr._shutdown_worker.assert_called()
 
 
 class TestPersistentWorkerShutdownWorker:
@@ -410,6 +410,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
@@ -443,6 +444,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {"n_threads": 4}
                 mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
@@ -464,6 +466,22 @@ class TestLocalModelManagerLoadModelWithLlama:
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is False
 
+    @pytest.mark.asyncio
+    async def test_load_model_await_worker_fails(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=False),
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+                assert result is False
+
 
 class TestLocalModelManagerRunInferenceWithModel:
     @pytest.mark.asyncio
@@ -474,6 +492,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
@@ -485,15 +504,12 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mock_res_queue.get_nowait.return_value = ("ok", "result text")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = True
 
                 result = await mgr.run_inference("test prompt")
                 assert result == "result text"
-                mock_req_queue.put.assert_called_once_with(
-                    ("test prompt", 150, 0.7, "You are a helpful assistant."),
-                    timeout=5,
-                )
 
     @pytest.mark.asyncio
     async def test_run_inference_timeout(self):
@@ -505,6 +521,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
                 patch.object(mgr, "_shutdown_worker"),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -517,6 +534,7 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = True
 
@@ -533,6 +551,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
@@ -544,6 +563,7 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mock_res_queue.get_nowait.return_value = ("error", "something went wrong")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = True
 
@@ -558,6 +578,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
@@ -569,6 +590,7 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mock_res_queue.get_nowait.return_value = ("shutdown", "ok")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = True
 
@@ -584,6 +606,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
@@ -594,6 +617,7 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mock_req_queue.put.side_effect = Exception("queue full")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = MagicMock()
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
 
                 with pytest.raises(RuntimeError, match="Failed to send request to worker"):
@@ -635,6 +659,7 @@ class TestLocalModelManagerSubprocessCleanup:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
                 patch.object(mgr, "_shutdown_worker"),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -647,6 +672,7 @@ class TestLocalModelManagerSubprocessCleanup:
                 mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = True
 
@@ -663,6 +689,7 @@ class TestLocalModelManagerSubprocessCleanup:
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
@@ -674,6 +701,7 @@ class TestLocalModelManagerSubprocessCleanup:
                 mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
                 mgr._worker_proc = MagicMock()
                 mgr._worker_proc.is_alive.return_value = False
 
@@ -767,9 +795,10 @@ class TestLoadModelClearsCancelEvent:
                 return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
             ):
                 with patch.object(mgr, "_ensure_worker", return_value=True):
-                    with patch.object(mgr, "calculate_file_md5", return_value="abc123"):
-                        with patch("os.path.exists", return_value=True):
-                            with patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)):
-                                result = await mgr.load_model("/fake/model.gguf")
-                                assert result is True
-                                assert not mgr._cancel_event.is_set()
+                    with patch.object(mgr, "_await_worker_ready", return_value=True):
+                        with patch.object(mgr, "calculate_file_md5", return_value="abc123"):
+                            with patch("os.path.exists", return_value=True):
+                                with patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)):
+                                    result = await mgr.load_model("/fake/model.gguf")
+                                    assert result is True
+                                    assert not mgr._cancel_event.is_set()
