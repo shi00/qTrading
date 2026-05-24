@@ -881,8 +881,8 @@ class TestBuildMultiPeriodFinancials:
         df = pd.DataFrame({"roe": [10.0]})
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        await s._build_multi_period_financials("000001.SZ", cache, as_of_date="2024-07-01")
-        cache.get_financial_reports_history.assert_called_once_with("000001.SZ", periods=8, as_of_date="2024-07-01")
+        await s._build_multi_period_financials("000001.SZ", cache, as_of_date="20240701")
+        cache.get_financial_reports_history.assert_called_once_with("000001.SZ", periods=8, as_of_date="20240701")
 
     @pytest.mark.asyncio
     async def test_no_as_of_date_passes_none(self):
@@ -1066,13 +1066,13 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        await s._build_auxiliary_data_text("000001.SZ", cache, as_of_date="2024-07-01")
-        cache.get_fina_audit.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
-        cache.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
-        cache.get_dividend.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
-        cache.get_pledge_stat.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
-        cache.get_top10_holders.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
-        cache.get_stk_holdernumber.assert_called_once_with("000001.SZ", as_of_date="2024-07-01")
+        await s._build_auxiliary_data_text("000001.SZ", cache, as_of_date="20240701")
+        cache.get_fina_audit.assert_called_once_with("000001.SZ", as_of_date="20240701")
+        cache.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date="20240701")
+        cache.get_dividend.assert_called_once_with("000001.SZ", as_of_date="20240701")
+        cache.get_pledge_stat.assert_called_once_with("000001.SZ", as_of_date="20240701")
+        cache.get_top10_holders.assert_called_once_with("000001.SZ", as_of_date="20240701")
+        cache.get_stk_holdernumber.assert_called_once_with("000001.SZ", as_of_date="20240701")
 
     @pytest.mark.asyncio
     async def test_no_as_of_date_passes_none(self):

@@ -369,13 +369,13 @@ class FinancialDao(BaseDao):
                 for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
                     chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
                     placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                    end_date_param = len(chunk) + 1
+                    ann_date_param = len(chunk) + 1
                     sql = f"""
                         SELECT DISTINCT ON (ts_code)
-                            ts_code, end_date, pledge_count, pledge_ratio
+                            ts_code, end_date, ann_date, pledge_count, pledge_ratio
                         FROM pledge_stat
                         WHERE ts_code IN ({placeholders})
-                          AND end_date <= ${end_date_param}
+                          AND ann_date <= ${ann_date_param}
                         ORDER BY ts_code, end_date DESC
                     """
                     df = await self._read_db(sql, chunk + [as_of_date])
@@ -389,7 +389,7 @@ class FinancialDao(BaseDao):
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code)
-                        ts_code, end_date, pledge_count, pledge_ratio
+                        ts_code, end_date, ann_date, pledge_count, pledge_ratio
                     FROM pledge_stat
                     WHERE ts_code IN ({placeholders})
                     ORDER BY ts_code, end_date DESC

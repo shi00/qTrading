@@ -348,6 +348,7 @@ TABLE_DEFINITIONS = {
         "columns": {
             "ts_code": "col_ts_code",
             "end_date": "col_end_date",
+            "ann_date": "col_ann_date",
             "pledge_count": "col_pledge_count",
             "unrest_pledge": "col_unrest_pledge",
             "rest_pledge": "col_rest_pledge",

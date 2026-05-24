@@ -79,6 +79,7 @@ class TestApiFieldsMatchDaoCols:
 
     _COMPUTED_COLS: dict[str, set[str]] = {
         "save_holder_number": {"holder_num_change", "holder_num_ratio"},
+        "save_pledge_stat": {"ann_date"},
     }
 
     API_DAO_MAPPINGS = [

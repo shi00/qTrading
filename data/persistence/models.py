@@ -448,6 +448,7 @@ class PledgeStat(Base):
     __tablename__ = "pledge_stat"
     ts_code = Column(String, primary_key=True)
     end_date = Column(Date, primary_key=True)
+    ann_date = Column(Date)
     pledge_count = Column(Integer)
     unrest_pledge = Column(Numeric(20, 4))
     rest_pledge = Column(Numeric(20, 4))

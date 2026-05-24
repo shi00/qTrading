@@ -244,7 +244,9 @@ class TestHolderSyncPledgeStat:
     async def test_with_data(self):
         ctx = MagicMock()
         ctx.api = MagicMock()
-        ctx.api.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        ctx.api.get_pledge_stat = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": [datetime.date(2024, 6, 14)]})
+        )
         ctx.cache = MagicMock()
         ctx.cache.save_pledge_stat = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
@@ -427,6 +429,7 @@ class TestHolderSyncSyncPledgeStat:
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
+                    "end_date": [datetime.date(2024, 6, 14)],
                 }
             )
         )
@@ -461,6 +464,67 @@ class TestHolderSyncSyncPledgeStat:
         strategy._cancelled = True
         count, date = await strategy._sync_pledge_stat()
         assert count == -1
+
+    @pytest.mark.asyncio
+    async def test_computes_ann_date_from_end_date(self):
+        import datetime as _dt
+
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_pledge_stat = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "end_date": [_dt.date(2024, 6, 14), _dt.date(2024, 6, 7)],
+                    "pledge_ratio": [10.0, 20.0],
+                }
+            )
+        )
+        ctx.cache = MagicMock()
+        saved_df = None
+
+        async def capture_save(df):
+            nonlocal saved_df
+            saved_df = df
+
+        ctx.cache.save_pledge_stat = AsyncMock(side_effect=capture_save)
+        strategy = HolderSyncStrategy(ctx)
+        count, date = await strategy._sync_pledge_stat()
+        assert count == 2
+        assert saved_df is not None
+        assert "ann_date" in saved_df.columns
+        assert saved_df.loc[0, "ann_date"] == _dt.date(2024, 6, 17)
+        assert saved_df.loc[1, "ann_date"] == _dt.date(2024, 6, 10)
+
+    @pytest.mark.asyncio
+    async def test_preserves_existing_ann_date(self):
+        import datetime as _dt
+
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_pledge_stat = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": [_dt.date(2024, 6, 14)],
+                    "ann_date": [_dt.date(2024, 6, 16)],
+                    "pledge_ratio": [10.0],
+                }
+            )
+        )
+        ctx.cache = MagicMock()
+        saved_df = None
+
+        async def capture_save(df):
+            nonlocal saved_df
+            saved_df = df
+
+        ctx.cache.save_pledge_stat = AsyncMock(side_effect=capture_save)
+        strategy = HolderSyncStrategy(ctx)
+        count, date = await strategy._sync_pledge_stat()
+        assert count == 1
+        assert saved_df is not None
+        assert saved_df.loc[0, "ann_date"] == _dt.date(2024, 6, 16)
 
 
 class TestHolderSyncSyncStkHoldernumber:
@@ -826,7 +890,7 @@ class TestHolderSyncPledgeStatErrorPaths:
             call_count += 1
             if call_count <= 2:
                 raise Exception("temporary error")
-            return pd.DataFrame({"ts_code": ["000001.SZ"]})
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": [datetime.date(2024, 6, 14)]})
 
         ctx.api.get_pledge_stat = AsyncMock(side_effect=mock_pledge)
         ctx.cache = MagicMock()

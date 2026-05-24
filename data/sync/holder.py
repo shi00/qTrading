@@ -446,6 +446,9 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
 
             if df is not None and not df.empty:
+                if "ann_date" not in df.columns:
+                    df["ann_date"] = pd.to_datetime(df["end_date"]) + pd.Timedelta(days=3)
+                    df["ann_date"] = df["ann_date"].dt.date
                 await self.context.cache.save_pledge_stat(df)
                 logger.debug(
                     f"[HolderSync] Table | pledge_stat: {len(df)} records",

@@ -783,15 +783,15 @@ class TestCacheManagerPrefetchAuxiliaryData:
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holdernumber": [50000]})
         )
 
-        result = await mgr.prefetch_auxiliary_data(["000001.SZ"], as_of_date="2024-07-01")
+        result = await mgr.prefetch_auxiliary_data(["000001.SZ"], as_of_date="20240701")
         assert "000001.SZ" in result
-        mgr.financial_dao.get_fina_audit_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
-        mgr.financial_dao.get_dividend_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
-        mgr.financial_dao.get_pledge_stat_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
-        mgr.holder_dao.get_top10_holders_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
-        mgr.financial_dao.get_fina_mainbz_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
-        mgr.financial_dao.get_financial_reports_history_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
-        mgr.holder_dao.get_stk_holdernumber_batch.assert_called_with(["000001.SZ"], as_of_date="2024-07-01")
+        mgr.financial_dao.get_fina_audit_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
+        mgr.financial_dao.get_dividend_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
+        mgr.financial_dao.get_pledge_stat_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
+        mgr.holder_dao.get_top10_holders_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
+        mgr.financial_dao.get_fina_mainbz_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
+        mgr.financial_dao.get_financial_reports_history_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
+        mgr.holder_dao.get_stk_holdernumber_batch.assert_called_with(["000001.SZ"], as_of_date="20240701")
 
     @pytest.mark.asyncio
     async def test_prefetch_without_as_of_date(self):

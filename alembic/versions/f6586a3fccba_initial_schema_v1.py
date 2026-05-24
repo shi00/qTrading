@@ -618,6 +618,7 @@ def _create_all_tables_fresh() -> None:
         "pledge_stat",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
+        sa.Column("ann_date", sa.Date(), nullable=True),
         sa.Column("pledge_count", sa.Integer(), nullable=True),
         sa.Column("unrest_pledge", sa.Numeric(20, 4), nullable=True),
         sa.Column("rest_pledge", sa.Numeric(20, 4), nullable=True),
