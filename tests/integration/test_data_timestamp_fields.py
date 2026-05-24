@@ -77,10 +77,13 @@ class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
         self.engine = create_async_engine(self.test_db_url, echo=False)
 
         from data.persistence.models import Base
+        from data.persistence.db_migrator import DatabaseMigrator
+        import sqlalchemy as sa
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+        await DatabaseMigrator.init_db(self.engine, auto_migrate=True)
 
     async def asyncTearDown(self):
         """清理测试数据"""

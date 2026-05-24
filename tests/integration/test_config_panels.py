@@ -611,10 +611,13 @@ class TestDatabaseConfigServiceMigrations:
         """确保每个 DDL 测试后无条件恢复表结构（即使测试断言失败）"""
         yield
         from data.persistence.models import Base
+        from data.persistence.db_migrator import DatabaseMigrator
+        import sqlalchemy as sa
 
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     @pytest.mark.asyncio
     async def test_run_migrations_creates_tables(self, test_engine):
@@ -739,10 +742,13 @@ class TestDatabaseConfigPanelSaveConfig:
         """确保每个 DDL 测试后无条件恢复表结构"""
         yield
         from data.persistence.models import Base
+        from data.persistence.db_migrator import DatabaseMigrator
+        import sqlalchemy as sa
 
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     @pytest.mark.asyncio
     async def test_save_config_calls_ensure_tables_exist(self, mock_page, isolated_config, test_engine):
@@ -874,10 +880,13 @@ class TestOnboardingWizardDatabaseValidation:
         """确保每个 DDL 测试后无条件恢复表结构"""
         yield
         from data.persistence.models import Base
+        from data.persistence.db_migrator import DatabaseMigrator
+        import sqlalchemy as sa
 
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     @pytest.mark.asyncio
     async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, test_engine):

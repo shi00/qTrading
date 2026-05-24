@@ -31,6 +31,10 @@ def get_database_url() -> str:
     if config.DB_URL:
         return config.DB_URL
 
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+
     try:
         from utils.config_handler import ConfigHandler
 
@@ -39,10 +43,6 @@ def get_database_url() -> str:
             return url
     except Exception:
         pass
-
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
 
     raise ValueError(
         "🛑 Database URL is not configured.\n"
