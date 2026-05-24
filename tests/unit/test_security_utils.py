@@ -304,15 +304,16 @@ class TestMigrateToDerivedKey:
 
     @patch("utils.security_utils.os.path.exists")
     @patch("utils.security_utils.os.remove")
-    def test_migration_deletes_key_files(self, mock_remove, mock_exists):
+    def test_migration_saves_new_key_and_cleans_up(self, mock_remove, mock_exists):
         mock_exists.return_value = True
         with (
             patch.object(SecurityManager, "_load_key_file", return_value=b"x" * 32),
             patch.object(SecurityManager, "_get_or_create_salt", return_value=b"s" * 32),
+            patch.object(SecurityManager, "_save_key"),
         ):
             result = SecurityManager.migrate_to_derived_key()
             assert result is True
-            assert mock_remove.call_count == 3
+            assert mock_remove.call_count == 2
 
     @patch("utils.security_utils.os.path.exists")
     def test_migration_fails_if_key_unreadable(self, mock_exists):

@@ -6,6 +6,7 @@ import os
 import platform
 import secrets
 import shutil
+import threading
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -76,6 +77,7 @@ class SecurityManager:
     KEY_FILE = os.path.join(APP_ROOT, ".secret.key")
     KEY_FILE_BAK = os.path.join(APP_ROOT, ".secret.key.bak")
     _key = None
+    _key_lock = threading.Lock()
 
     @classmethod
     def get_key(cls):
@@ -83,10 +85,20 @@ class SecurityManager:
         Load or generate the 256-bit AES key.
         Prioritizes safety: tries to recover from backup if main key is corrupt.
         Fallback: derives key from machine fingerprint using PBKDF2.
+        Thread-safe: protected by _key_lock to prevent concurrent key generation.
         """
         if cls._key is not None:
             return cls._key
 
+        with cls._key_lock:
+            if cls._key is not None:
+                return cls._key
+
+            return cls._get_key_inner()
+
+    @classmethod
+    def _get_key_inner(cls):
+        """Internal key loading logic, must be called while holding _key_lock."""
         # 1. Try to load existing key file
         if os.path.exists(cls.KEY_FILE):
             try:
@@ -195,7 +207,13 @@ class SecurityManager:
                 "Use ConfigHandler to re-encrypt ts_token, db_password, ai_api_key after migration."
             )
 
-        for path in (cls.KEY_FILE, cls.KEY_FILE_BAK, _LEGACY_MARKER):
+        try:
+            cls._save_key(new_key)
+        except Exception as e:
+            logger.error("Failed to save new derived key during migration: %s", e)
+            return False
+
+        for path in (_LEGACY_MARKER, cls.KEY_FILE_BAK):
             if os.path.exists(path):
                 with contextlib.suppress(OSError):
                     os.remove(path)
