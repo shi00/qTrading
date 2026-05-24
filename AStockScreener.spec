@@ -43,17 +43,25 @@ hiddenimports = [
 ]
 
 
+_CUDA_DLL_KEYWORDS = ("cuda", "cublas", "cudart", "cufft", "curand", "cusolver", "cusparse", "nvrtc", "llama")
+
+
 def collect_cuda_dlls():
     """Collect llama-cpp-python CUDA DLLs for packaging."""
     binaries = []
     try:
         import llama_cpp
+
         llama_dir = Path(llama_cpp.__file__).parent
         for dll_pattern in ["*.dll", "**/*.dll"]:
             for dll in llama_dir.glob(dll_pattern):
                 if dll.is_file():
-                    binaries.append((str(dll), "."))
-                    print(f"[CUDA Hook] Collected DLL: {dll.name}")
+                    dll_lower = dll.name.lower()
+                    if any(kw in dll_lower for kw in _CUDA_DLL_KEYWORDS):
+                        binaries.append((str(dll), "."))
+                        print(f"[CUDA Hook] Collected DLL: {dll.name}")
+                    else:
+                        print(f"[CUDA Hook] Skipped non-CUDA DLL: {dll.name}")
     except ImportError:
         print("[CUDA Hook] llama_cpp not installed, skipping CUDA DLL collection")
     except Exception as e:
@@ -149,4 +157,3 @@ coll = COLLECT(
     upx_exclude=[],
     name="AStockScreener",
 )
-

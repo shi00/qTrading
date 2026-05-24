@@ -1,5 +1,5 @@
 # Core dependencies
 # Source: pyproject.toml [project.dependencies]
-# Regenerate: pip-compile pyproject.toml -o requirements.txt
+# Regenerate: uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
 # NOTE: This file is intentionally empty. All dependencies are declared in pyproject.toml.
-# This file exists only to document the pip-compile command and as a pre-commit trigger.
+# This file exists only to document the compile command and as a pre-commit trigger.
