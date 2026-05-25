@@ -181,6 +181,8 @@ class VectorBacktestEngine:
         quotes_df = await self._enrich_suspend_status(quotes_df, start_str, end_str)
         quotes_df = await self._enrich_limit_status(quotes_df, start_str, end_str)
 
+        quotes_df = self._compute_avg_daily_volume(quotes_df)
+
         quotes_df = self._apply_qfq(quotes_df)
 
         return quotes_df.sort(["ts_code", "trade_date"])
@@ -317,6 +319,25 @@ class VectorBacktestEngine:
                 qfq_ratio.alias("qfq_ratio"),
             ]
         )
+
+    def _compute_avg_daily_volume(self, quotes_df: pl.DataFrame) -> pl.DataFrame:
+        """
+        计算每只股票的前20日平均成交量。
+
+        avg_daily_volume 用于滑点模型计算交易冲击成本：
+        - participation = trade_volume / avg_daily_volume
+        - slippage_bps * (1 + participation * factor)
+
+        使用 rolling_mean 窗口计算，min_samples=5 允许部分窗口。
+        """
+        if "vol" not in quotes_df.columns:
+            return quotes_df
+
+        avg_vol_expr = (
+            pl.col("vol").rolling_mean(window_size=20, min_samples=5).over("ts_code").alias("avg_daily_volume")
+        )
+
+        return quotes_df.with_columns(avg_vol_expr)
 
     async def _load_benchmark(self, trade_dates: list[date]) -> pl.DataFrame:
         start_str = trade_dates[0].strftime("%Y%m%d")

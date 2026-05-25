@@ -123,6 +123,7 @@ class PortfolioSimulator:
                 price=exit_price,
                 volume=volume,
                 is_buy=False,
+                avg_daily_volume=self._get_avg_daily_volume(quote),
             )
 
             realized_pnl = cost.net_amount - pos["cost_basis"]
@@ -151,17 +152,28 @@ class PortfolioSimulator:
         day_signals: pl.DataFrame,
         day_quotes: pl.DataFrame,
     ) -> None:
+        from strategies.backtest.position_sizer import apply_max_weight_constraint, get_sizer
+
         signals_sorted = day_signals.sort("signal_rank", descending=True)
         signals_sorted = signals_sorted.head(self.config.max_position_count)
 
-        available_cash = self.cash * (1 - self.config.cash_reserve_pct)
-        position_value = available_cash / min(
-            len(signals_sorted),
-            self.config.max_position_count,
-        )
+        if signals_sorted.is_empty():
+            return
 
-        for row in signals_sorted.iter_rows(named=True):
+        available_cash = self.cash * (1 - self.config.cash_reserve_pct)
+
+        sizer = get_sizer(self.config.position_sizing)
+        weights_df = sizer.compute_weights(signals_sorted, day_quotes, self.config)
+
+        weights_df = apply_max_weight_constraint(weights_df, self.config.max_single_weight)
+
+        total_weight = float(weights_df.select(pl.col("weight").sum()).item() or 0)
+        if total_weight <= 0:
+            return
+
+        for row in weights_df.iter_rows(named=True):
             ts_code = row["ts_code"]
+            weight = float(row["weight"])
             quote = day_quotes.filter(pl.col("ts_code") == ts_code)
 
             if quote.is_empty():
@@ -212,7 +224,8 @@ class PortfolioSimulator:
                 entry_price = float(quote.select("raw_open").item())
                 qfq_entry_price = float(quote.select("qfq_open").item())
 
-            volume = int(position_value / entry_price / 100) * 100
+            target_value = available_cash * weight
+            volume = int(target_value / entry_price / 100) * 100
 
             if volume <= 0:
                 self.skipped_list.append(
@@ -231,6 +244,7 @@ class PortfolioSimulator:
                 price=entry_price,
                 volume=volume,
                 is_buy=True,
+                avg_daily_volume=self._get_avg_daily_volume(quote),
             )
 
             if cost.net_amount > self.cash:
@@ -321,3 +335,16 @@ class PortfolioSimulator:
             pl.DataFrame(self.skipped_list) if self.skipped_list else pl.DataFrame(),
             self.warnings,
         )
+
+    @staticmethod
+    def _get_avg_daily_volume(quote: pl.DataFrame) -> float | None:
+        """从行情数据中提取平均成交量"""
+        if "avg_daily_volume" not in quote.columns:
+            return None
+        avg_vol_val = quote.select("avg_daily_volume").item()
+        if avg_vol_val is None:
+            return None
+        try:
+            return float(avg_vol_val)
+        except (TypeError, ValueError):
+            return None
