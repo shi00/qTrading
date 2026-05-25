@@ -103,6 +103,59 @@ class TestEqualWeightSizer:
         assert len(result) == 1
         assert abs(result["weight"][0] - 1.0) < 1e-6
 
+    def test_equal_weight_empty_signals_returns_zero_weight(self):
+        """测试空信号 DataFrame 返回权重为 0"""
+        from strategies.backtest.position_sizer import EqualWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": [],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "total_mv": [100],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = EqualWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        assert len(result) == 0
+        assert "weight" in result.columns
+
+    def test_equal_weight_without_signal_rank(self):
+        """测试无 signal_rank 列时只返回 ts_code 和 weight"""
+        from strategies.backtest.position_sizer import EqualWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = EqualWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        assert len(result) == 2
+        assert "ts_code" in result.columns
+        assert "weight" in result.columns
+        assert "signal_rank" not in result.columns
+
 
 class TestMarketCapWeightSizer:
     """测试市值加权分配器"""
@@ -219,6 +272,60 @@ class TestMarketCapWeightSizer:
         weights = result["weight"].to_list()
         assert all(abs(w - 0.5) < 1e-6 for w in weights)
 
+    def test_market_cap_no_matching_quotes_fallback(self):
+        """测试无匹配行情时回退到等权重"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000003.SZ", "000004.SZ"],
+                "total_mv": [100, 200],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = MarketCapWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        weights = result["weight"].to_list()
+        assert all(abs(w - 0.5) < 1e-6 for w in weights)
+
+    def test_market_cap_with_signal_rank(self):
+        """测试市值加权保留 signal_rank 列"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "total_mv": [100, 200],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = MarketCapWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        assert "signal_rank" in result.columns
+        assert "total_mv" not in result.columns
+
 
 class TestRiskParitySizer:
     """测试风险平价分配器（简化版）"""
@@ -281,6 +388,57 @@ class TestRiskParitySizer:
         # signal_rank: [5, 3, 1] -> inv_rank: [0.2, 0.33, 1.0] -> weights: [0.13, 0.22, 0.65]
         # 数值越大，inv_rank 越小，权重越低
         assert weights[0] < weights[1] < weights[2]
+
+    def test_risk_parity_missing_signal_rank_fallback(self):
+        """测试缺失 signal_rank 列时回退到等权重"""
+        from strategies.backtest.position_sizer import RiskParitySizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = RiskParitySizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        weights = result["weight"].to_list()
+        assert all(abs(w - 0.5) < 1e-6 for w in weights)
+
+    def test_risk_parity_zero_signal_rank_fallback(self):
+        """测试 signal_rank 包含 0 时 inv_rank_sum 为 inf 的回退"""
+        from strategies.backtest.position_sizer import RiskParitySizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [0, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = RiskParitySizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        assert len(result) == 2
+        assert "weight" in result.columns
 
 
 class TestMaxSingleWeightConstraint:

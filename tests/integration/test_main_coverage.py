@@ -136,10 +136,11 @@ class _FakeColumn:
 
 
 class _FakeRow:
-    def __init__(self, controls=None, alignment=None, spacing=20):
+    def __init__(self, controls=None, alignment=None, spacing=20, vertical_alignment=None):
         self.controls = controls or []
         self.alignment = alignment
         self.spacing = spacing
+        self.vertical_alignment = vertical_alignment
 
 
 class _FakeContainer:
@@ -164,16 +165,16 @@ class _LoggerSpy:
         self.errors: list[str] = []
         self.debugs: list[str] = []
 
-    def info(self, msg, *args):
+    def info(self, msg, *args, **kwargs):
         self.messages.append(msg % args if args else msg)
 
-    def debug(self, msg, *args):
+    def debug(self, msg, *args, **kwargs):
         self.debugs.append(msg % args if args else msg)
 
-    def warning(self, msg, *args):
+    def warning(self, msg, *args, **kwargs):
         self.warnings.append(msg % args if args else msg)
 
-    def error(self, msg, *args):
+    def error(self, msg, *args, **kwargs):
         self.errors.append(msg % args if args else msg)
 
 
@@ -211,7 +212,9 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
             label=label, on_click=on_click, icon=icon
         ),
     )
-    monkeypatch.setattr(app_main.ft, "MainAxisAlignment", SimpleNamespace(END="end", CENTER="center"))
+    monkeypatch.setattr(
+        app_main.ft, "MainAxisAlignment", SimpleNamespace(END="end", CENTER="center", SPACE_BETWEEN="space_between")
+    )
     monkeypatch.setattr(app_main.ft, "CrossAxisAlignment", SimpleNamespace(CENTER="center"))
     monkeypatch.setattr(app_main.ft, "FontWeight", SimpleNamespace(BOLD="bold"))
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
@@ -624,3 +627,92 @@ class TestMainMaskSensitive:
 
             assert len(logger_spy.debugs) > 0
             assert any("DB_URL" in d for d in logger_spy.debugs)
+
+
+class TestMainOnError:
+    @pytest.mark.asyncio
+    async def test_on_error_handler_logs_error(self, monkeypatch):
+        _prepare_main(monkeypatch)
+        logger_spy = _LoggerSpy()
+        monkeypatch.setattr(app_main, "logger", logger_spy)
+
+        with patch("main.check_onboarding_needed", return_value=False):
+            page = _DummyPage()
+            await app_main.main(page)
+
+            assert page.on_error is not None
+            test_error = RuntimeError("test error")
+            page.on_error(test_error)
+
+            assert any("Unhandled UI Exception" in msg for msg in logger_spy.errors)
+
+
+class TestMainDisconnectCleanupDone:
+    @pytest.mark.asyncio
+    async def test_disconnect_when_cleanup_done_skips_force_exit(self, monkeypatch):
+        _prepare_main(monkeypatch, cleanup_result=True)
+
+        class _CoordinatorWithCleanupDone(_FakeCoordinator):
+            def __init__(self, page, **kwargs):
+                super().__init__(page, **kwargs)
+                self.cleanup_done = True
+
+        monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _CoordinatorWithCleanupDone)
+
+        with patch("main.check_onboarding_needed", return_value=False):
+            page = _DummyPage()
+            await app_main.main(page)
+
+            assert page.on_disconnect is not None
+            on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
+            await on_disconnect(MagicMock())
+
+            coordinator = _CoordinatorWithCleanupDone.last
+            assert coordinator is not None
+            assert coordinator.do_cleanup_calls == 1
+
+
+class TestMainWindowCloseShowDialogSkipped:
+    @pytest.mark.asyncio
+    async def test_show_dialog_skipped_when_already_visible(self, monkeypatch):
+        _prepare_main(monkeypatch)
+        logger_spy = _LoggerSpy()
+        monkeypatch.setattr(app_main, "logger", logger_spy)
+
+        with patch("main.check_onboarding_needed", return_value=False):
+            page = _DummyPage()
+            await app_main.main(page)
+
+            assert page.window.on_event is not None
+            on_event = cast(AsyncEventHandler, page.window.on_event)
+
+            await on_event(SimpleNamespace(type="close"))
+            assert page.current_dialog is not None
+
+            await on_event(SimpleNamespace(type="close"))
+
+            assert any("Skip showing close confirm dialog" in msg for msg in logger_spy.messages)
+
+
+class TestMainHideCloseConfirmDialog:
+    @pytest.mark.asyncio
+    async def test_hide_close_confirm_dialog_when_none(self, monkeypatch):
+        _prepare_main(monkeypatch)
+
+        with patch("main.check_onboarding_needed", return_value=False):
+            page = _DummyPage()
+            await app_main.main(page)
+
+            assert page.window.on_event is not None
+            on_event = cast(AsyncEventHandler, page.window.on_event)
+            await on_event(SimpleNamespace(type="close"))
+
+            dialog = page.current_dialog
+            assert dialog is not None
+
+            cancel_btn = cast(_FakeTextButton, dialog.actions[0])
+            assert cancel_btn.on_click is not None
+            cancel_btn.on_click(MagicMock())
+            await asyncio.sleep(0)
+
+            assert page.current_dialog is None
