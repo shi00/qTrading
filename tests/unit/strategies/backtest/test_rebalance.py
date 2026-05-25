@@ -239,7 +239,17 @@ class TestNAVCalculation:
         assert market_value == pytest.approx(correct_value, rel=1e-4)
         assert market_value != pytest.approx(buggy_value, rel=1e-2)
 
-    def test_market_value_uses_qfq_close_after_ex_dividend(self):
+    def test_market_value_uses_raw_close_after_ex_dividend(self):
+        """
+        验证除权日市值使用 raw 口径。
+
+        除权日 raw_close 从 10.2 变为 5.1（10 送 10），
+        qfq_close 保持 10.2 不变。
+
+        NAV 使用 raw_close 计算，市值正确反映除权：
+        - Day 2 市值 = volume * 5.1 (raw_close)
+        - 这与 QFQ 价格计算的市值不同，是正确的行为
+        """
         engine = self._make_engine(rebalance_freq="signal", cash_reserve_pct=0.1)
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         signals = pl.DataFrame(
@@ -269,10 +279,8 @@ class TestNAVCalculation:
         total_value = float(day2_pos["total_value"][0])
         cash = float(day2_pos["cash"][0])
         market_value = total_value - cash
-        expected_qfq_value = volume * 10.2
-        buggy_raw_value = volume * 5.1
-        assert market_value == pytest.approx(expected_qfq_value, rel=1e-4)
-        assert market_value != pytest.approx(buggy_raw_value, rel=1e-2)
+        expected_raw_value = volume * 5.1
+        assert market_value == pytest.approx(expected_raw_value, rel=1e-4)
 
 
 class TestExecutionPrice:

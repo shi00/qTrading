@@ -781,3 +781,105 @@ class TestRunMethod:
 
         with pytest.raises(ValueError, match="Invalid backtest config"):
             await engine.run(strategy=MagicMock())
+
+
+class TestEnrichSuspendStatus:
+    def _make_engine(self):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_no_suspend_data_returns_all_tradable(self):
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_suspend_d = AsyncMock(return_value=None)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert "is_tradable" in result.columns
+        assert all(result["is_tradable"].to_list())
+
+    @pytest.mark.asyncio
+    async def test_empty_suspend_data_returns_all_tradable(self):
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert "is_tradable" in result.columns
+        assert all(result["is_tradable"].to_list())
+
+    @pytest.mark.asyncio
+    async def test_suspend_data_marks_suspended_stocks(self):
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        suspend_pd = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "suspend_timing": ["09:30"],
+                "suspend_type": ["S"],
+            }
+        )
+        engine.cache.get_suspend_d = AsyncMock(return_value=suspend_pd)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert "is_tradable" in result.columns
+        is_tradable_list = result["is_tradable"].to_list()
+        assert is_tradable_list[0] is False
+        assert is_tradable_list[1] is True
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_all_tradable(self):
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_suspend_d = AsyncMock(side_effect=Exception("DB error"))
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "close": [10.0],
+            }
+        )
+
+        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert "is_tradable" in result.columns
+        assert all(result["is_tradable"].to_list())

@@ -13,22 +13,24 @@ class TestBacktestDataProviderAuxiliaryTables:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_quotes = AsyncMock(
+        cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
                     "trade_date": ["20240102", "20240102"],
                     "close": [10.0, 20.0],
                     "is_tradable": [True, True],
+                    "turnover_rate": [3.5, 5.2],
                 }
             )
         )
-        cache.get_daily_indicators = AsyncMock(
+        cache.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20240102"],
                     "is_tradable": [True],
+                    "roe": [12.5],
                 }
             )
         )
@@ -94,13 +96,24 @@ class TestBacktestDataProviderFundamentalData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_quotes = AsyncMock(
+        cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20240102"],
                     "close": [10.0],
                     "is_tradable": [True],
+                    "turnover_rate": [3.5],
+                }
+            )
+        )
+        cache.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "is_tradable": [True],
+                    "roe": [12.5],
                 }
             )
         )
@@ -113,12 +126,13 @@ class TestBacktestDataProviderFundamentalData:
 
     @pytest.mark.asyncio
     async def test_fundamental_data_with_is_tradable(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_indicators = AsyncMock(
+        mock_cache.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
                     "trade_date": ["20240102", "20240102"],
                     "is_tradable": [True, False],
+                    "roe": [12.5, 15.3],
                 }
             )
         )
@@ -134,7 +148,7 @@ class TestBacktestDataProviderFundamentalData:
 
     @pytest.mark.asyncio
     async def test_fundamental_data_none(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_indicators = AsyncMock(return_value=None)
+        mock_cache.get_fundamental_screening_data = AsyncMock(return_value=None)
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -146,7 +160,7 @@ class TestBacktestDataProviderFundamentalData:
 
     @pytest.mark.asyncio
     async def test_fundamental_data_empty(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -159,7 +173,8 @@ class TestBacktestDataProviderScreeningData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
         cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
@@ -169,7 +184,7 @@ class TestBacktestDataProviderScreeningData:
 
     @pytest.mark.asyncio
     async def test_screening_data_get_failure(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_quotes = AsyncMock(side_effect=Exception("db error"))
+        mock_cache.get_screening_data = AsyncMock(side_effect=Exception("db error"))
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -181,7 +196,7 @@ class TestBacktestDataProviderScreeningData:
 
     @pytest.mark.asyncio
     async def test_screening_data_returns_none(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_quotes = AsyncMock(return_value=None)
+        mock_cache.get_screening_data = AsyncMock(return_value=None)
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -208,17 +223,18 @@ class TestBacktestDataProviderDiagnostics:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_quotes = AsyncMock(
+        cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20240102"],
                     "close": [10.0],
                     "is_tradable": [True],
+                    "turnover_rate": [3.5],
                 }
             )
         )
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
         cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
@@ -254,13 +270,14 @@ class TestBacktestDataProviderDiagnostics:
 
     @pytest.mark.asyncio
     async def test_suspended_filtered_count_in_diagnostics(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
                     "trade_date": ["20240102", "20240102", "20240102"],
                     "close": [10.0, 20.0, 30.0],
                     "is_tradable": [True, False, True],
+                    "turnover_rate": [3.5, 5.2, 4.8],
                 }
             )
         )
@@ -277,17 +294,18 @@ class TestBacktestDataProviderBuildContext:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_quotes = AsyncMock(
+        cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20240102"],
                     "close": [10.0],
                     "is_tradable": [True],
+                    "turnover_rate": [3.5],
                 }
             )
         )
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
         cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
@@ -332,7 +350,8 @@ class TestBacktestDataProviderGetScreeningData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
         cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
@@ -342,7 +361,7 @@ class TestBacktestDataProviderGetScreeningData:
 
     @pytest.mark.asyncio
     async def test_get_screening_data_exception(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_quotes = AsyncMock(side_effect=Exception("connection refused"))
+        mock_cache.get_screening_data = AsyncMock(side_effect=Exception("connection refused"))
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -355,16 +374,18 @@ class TestBacktestDataProviderGetFundamentalScreeningData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_daily_quotes = AsyncMock(
+        cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20240102"],
                     "close": [10.0],
                     "is_tradable": [True],
+                    "turnover_rate": [3.5],
                 }
             )
         )
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
         cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
         cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
@@ -374,7 +395,7 @@ class TestBacktestDataProviderGetFundamentalScreeningData:
 
     @pytest.mark.asyncio
     async def test_get_fundamental_screening_data_exception(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_daily_indicators = AsyncMock(side_effect=Exception("db timeout"))
+        mock_cache.get_fundamental_screening_data = AsyncMock(side_effect=Exception("db timeout"))
 
         provider = BacktestDataProvider(mock_cache)
 

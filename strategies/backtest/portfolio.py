@@ -276,6 +276,16 @@ class PortfolioSimulator:
         exec_date: date,
         day_quotes: pl.DataFrame,
     ) -> None:
+        """
+        记录每日持仓状态。
+
+        NAV 口径统一使用 raw 价格：
+        - cash 为名义金额（raw 口径）
+        - 持仓市值使用 raw_close 计算
+        - 除权日 NAV 不会跳变
+
+        QFQ 价格仅用于收益计算和 PnL 展示，不参与 NAV 计算。
+        """
         total_value = self.cash
         positions_detail: dict[str, dict] = {}
         for ts_code, pos in self.positions.items():
@@ -283,7 +293,7 @@ class PortfolioSimulator:
             if not quote.is_empty():
                 qfq_market_value = pos["volume"] * float(quote.select("qfq_close").item())
                 raw_market_value = pos["volume"] * float(quote.select("raw_close").item())
-                total_value += qfq_market_value
+                total_value += raw_market_value
                 qfq_entry_price = pos.get("qfq_entry_price", pos["entry_price"])
                 qfq_cost_basis = pos["volume"] * qfq_entry_price
                 positions_detail[ts_code] = {

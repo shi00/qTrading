@@ -514,6 +514,41 @@ class QuoteDao(BaseDao):
             pk_columns=pk_columns,
         )
 
+    async def get_limit_list(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        trade_date: str | None = None,
+    ):
+        """
+        获取涨跌停股票列表。
+
+        Args:
+            start_date: 开始日期 (YYYYMMDD)
+            end_date: 结束日期 (YYYYMMDD)
+            trade_date: 单日日期 (YYYYMMDD)，优先于 start_date/end_date
+
+        Returns:
+            DataFrame 包含 ts_code, trade_date, limit ('U'=涨停, 'D'=跌停) 等字段
+        """
+        if trade_date:
+            sql = "SELECT ts_code, trade_date, limit, name, close, pct_chg FROM limit_list WHERE trade_date=$1"
+            return await self._read_db(sql, [trade_date])
+
+        sql = "SELECT ts_code, trade_date, limit, name, close, pct_chg FROM limit_list WHERE 1=1"
+        p = []
+        idx = 1
+        if start_date:
+            sql += f" AND trade_date>=${idx}"
+            p.append(start_date)
+            idx += 1
+        if end_date:
+            sql += f" AND trade_date<=${idx}"
+            p.append(end_date)
+            idx += 1
+        sql += " ORDER BY trade_date, ts_code"
+        return await self._read_db(sql, p)
+
     # --- Top List ---
     async def save_top_list(self, df: pd.DataFrame):
         cols = get_model_columns(TopList)
@@ -555,6 +590,41 @@ class QuoteDao(BaseDao):
             cols,
             pk_columns=pk_columns,
         )
+
+    async def get_suspend_d(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        trade_date: str | None = None,
+    ):
+        """
+        获取停牌股票列表。
+
+        Args:
+            start_date: 开始日期 (YYYYMMDD)
+            end_date: 结束日期 (YYYYMMDD)
+            trade_date: 单日日期 (YYYYMMDD)，优先于 start_date/end_date
+
+        Returns:
+            DataFrame 包含 ts_code, trade_date, suspend_timing, suspend_type 字段
+        """
+        if trade_date:
+            sql = "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE trade_date=$1"
+            return await self._read_db(sql, [trade_date])
+
+        sql = "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE 1=1"
+        p = []
+        idx = 1
+        if start_date:
+            sql += f" AND trade_date>=${idx}"
+            p.append(start_date)
+            idx += 1
+        if end_date:
+            sql += f" AND trade_date<=${idx}"
+            p.append(end_date)
+            idx += 1
+        sql += " ORDER BY trade_date, ts_code"
+        return await self._read_db(sql, p)
 
     # --- Moneyflow ---
     async def save_moneyflow(self, df: pd.DataFrame):

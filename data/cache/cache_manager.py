@@ -776,11 +776,27 @@ class CacheManager:
     async def save_limit_list(self, df: pd.DataFrame):
         return await self.quote_dao.save_limit_list(df)
 
+    async def get_limit_list(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        trade_date: str | None = None,
+    ):
+        return await self.quote_dao.get_limit_list(start_date, end_date, trade_date)
+
     async def save_margin_daily(self, df: pd.DataFrame):
         return await self.quote_dao.save_margin_daily(df)
 
     async def save_suspend_d(self, df: pd.DataFrame):
         return await self.quote_dao.save_suspend_d(df)
+
+    async def get_suspend_d(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        trade_date: str | None = None,
+    ):
+        return await self.quote_dao.get_suspend_d(start_date, end_date, trade_date)
 
     async def save_fina_audit(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_audit(df)

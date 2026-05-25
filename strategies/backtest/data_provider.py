@@ -156,25 +156,43 @@ class BacktestDataProvider:
         return context
 
     async def _get_screening_data(self, trade_date: str) -> pd.DataFrame | None:
-        """获取当日 screening_data（行情数据）。"""
+        """
+        获取当日 screening_data（行情数据）。
+
+        使用 ScreenerDao.get_screening_data() 标准 SQL，确保：
+        1. 包含 turnover_rate, pe_ttm, pb, total_mv 等完整字段
+        2. 过滤已退市股票 (list_status='L')
+        3. 过滤当时未上市股票 (list_date <= trade_date)
+        4. 包含 is_tradable 字段（来自 suspend_d 表）
+        5. 财报数据满足 ann_date <= trade_date 约束
+
+        这与 DataProcessor.prepare_screening_context() 的实盘路径完全一致。
+        """
         try:
-            return await self.cache.get_daily_quotes(
-                start_date=trade_date,
-                end_date=trade_date,
-            )
+            if self.data_processor is not None:
+                return await self.data_processor.get_screening_data(trade_date)
+            return await self.cache.get_screening_data(trade_date)
         except Exception as e:
-            logger.warning(f"[BacktestDataProvider] Failed to get screening_data for {trade_date}: {e}")
+            logger.warning("[BacktestDataProvider] Failed to get screening_data for %s: %s", trade_date, e)
             return None
 
     async def _get_fundamental_screening_data(self, trade_date: str) -> pd.DataFrame | None:
-        """获取当日 fundamental_screening_data（基本面数据）。"""
+        """
+        获取当日 fundamental_screening_data（基本面数据）。
+
+        使用 ScreenerDao.get_fundamental_screening_data() 标准 SQL，确保：
+        1. 包含 roe, or_yoy, netprofit_yoy, grossprofit_margin, debt_to_assets 等字段
+        2. 财报数据满足 ann_date <= trade_date 约束（防止未来函数）
+        3. 使用 ROW_NUMBER() 窗口函数获取最新一期财报
+
+        这与 DataProcessor.prepare_screening_context() 的实盘路径完全一致。
+        """
         try:
-            return await self.cache.get_daily_indicators(
-                start_date=trade_date,
-                end_date=trade_date,
-            )
+            if self.data_processor is not None:
+                return await self.data_processor.get_fundamental_screening_data(trade_date)
+            return await self.cache.get_fundamental_screening_data(trade_date)
         except Exception as e:
-            logger.warning(f"[BacktestDataProvider] Failed to get fundamental_data for {trade_date}: {e}")
+            logger.warning("[BacktestDataProvider] Failed to get fundamental_data for %s: %s", trade_date, e)
             return None
 
     @staticmethod

@@ -178,9 +178,96 @@ class VectorBacktestEngine:
 
         quotes_df = pl.from_pandas(quotes_pd)
 
+        quotes_df = await self._enrich_suspend_status(quotes_df, start_str, end_str)
+        quotes_df = await self._enrich_limit_status(quotes_df, start_str, end_str)
+
         quotes_df = self._apply_qfq(quotes_df)
 
         return quotes_df.sort(["ts_code", "trade_date"])
+
+    async def _enrich_suspend_status(
+        self,
+        quotes_df: pl.DataFrame,
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """
+        为行情数据增加停牌状态 (is_tradable)。
+
+        is_tradable 值：
+        - True: 可交易（不在 suspend_d 表中）
+        - False: 停牌（在 suspend_d 表中）
+
+        设计说明：
+        ========
+        本方法与 ScreenerDao.get_screening_data() 中的 is_tradable 来源相同（suspend_d 表），
+        但服务于不同的数据流：
+
+        1. 策略筛选路径：
+           - 使用 BacktestDataProvider._get_screening_data()
+           - 调用 ScreenerDao.get_screening_data()
+           - is_tradable 已在 SQL 中通过 LEFT JOIN suspend_d 获取
+
+        2. 撮合执行路径（本方法）：
+           - 使用 get_daily_quotes() 获取基础行情
+           - get_daily_quotes() 不含 is_tradable 字段
+           - 需要单独 enrich 以支持撮合层的停牌判断
+
+        两条路径的数据来源一致（suspend_d 表），但查询时机和方式不同。
+        这是为了避免在撮合层重复加载完整的 screening_data（包含大量不需要的字段）。
+        """
+        try:
+            suspend_pd = await self.cache.get_suspend_d(
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            if suspend_pd is None or suspend_pd.empty:
+                return quotes_df.with_columns(pl.lit(True).alias("is_tradable"))
+
+            suspend_df = pl.from_pandas(suspend_pd)
+            suspend_df = suspend_df.select(["ts_code", "trade_date"]).with_columns(pl.lit(False).alias("is_tradable"))
+
+            quotes_df = quotes_df.join(suspend_df, on=["ts_code", "trade_date"], how="left")
+
+            return quotes_df.with_columns(pl.col("is_tradable").fill_null(True))
+        except Exception as e:
+            logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", e)
+            return quotes_df.with_columns(pl.lit(True).alias("is_tradable"))
+
+    async def _enrich_limit_status(
+        self,
+        quotes_df: pl.DataFrame,
+        start_date: str,
+        end_date: str,
+    ) -> pl.DataFrame:
+        """
+        为行情数据增加涨跌停状态。
+
+        limit_status 值：
+        - 'U' (up_limit): 涨停
+        - 'D' (down_limit): 跌停
+        - None: 正常交易
+
+        涨跌停数据来自 limit_list 表，用于撮合层判断是否可买卖。
+        """
+        try:
+            limit_list_pd = await self.cache.get_limit_list(
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+            if limit_list_pd is None or limit_list_pd.empty:
+                return quotes_df.with_columns(pl.lit(None).alias("limit_status"))
+
+            limit_df = pl.from_pandas(limit_list_pd)
+            limit_df = limit_df.select(["ts_code", "trade_date", "limit"]).rename({"limit": "limit_status"})
+
+            quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
+            return quotes_df
+        except Exception as e:
+            logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", e)
+            return quotes_df.with_columns(pl.lit(None).alias("limit_status"))
 
     def _apply_qfq(self, quotes_df: pl.DataFrame) -> pl.DataFrame:
         """
