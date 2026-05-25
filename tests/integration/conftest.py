@@ -20,7 +20,7 @@ if not TEST_DB_PASSWORD:
 
         try:
             _local_user = getpass.getuser()
-        except Exception:
+        except (OSError, KeyError):
             _local_user = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
         TEST_DB_PASSWORD = hashlib.sha256(f"astock_local_{_local_user}".encode()).hexdigest()[:24]
     import warnings

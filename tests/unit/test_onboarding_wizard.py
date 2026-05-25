@@ -686,8 +686,6 @@ class TestProgressCallbackSignature:
         assert not inspect.iscoroutinefunction(sync_callback)
         assert inspect.iscoroutinefunction(async_callback)
 
-        assert True
-
     def test_initialize_system_callback_signature(self):
         """Test that initialize_system expects sync callback"""
         import inspect

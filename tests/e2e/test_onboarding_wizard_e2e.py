@@ -42,7 +42,7 @@ def _is_server_reachable(url="http://localhost:8550", timeout=2):
         req = urllib.request.Request(url, method="HEAD")
         urllib.request.urlopen(req, timeout=timeout)
         return True
-    except Exception:
+    except (OSError, urllib.error.URLError):
         return False
 
 

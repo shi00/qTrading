@@ -147,7 +147,7 @@ class MockFletPage:
             if asyncio.iscoroutine(result):
                 mock_task._coro = result
                 result.close()
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             pass
         self._tasks.append(mock_task)
         return mock_task

@@ -44,7 +44,7 @@ def extract_cols_from_method(method) -> set | None:
             return set(gmc(model_class, exclude=exclude))
 
         return _resolve_hardcoded_cols_from_method(method)
-    except Exception:
+    except (ImportError, AttributeError, OSError, TypeError):
         return None
 
 

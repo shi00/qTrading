@@ -200,6 +200,7 @@ class TestTrackPerformance:
         assert "slow_test" in log_capture.text
         assert "took" in log_capture.text
 
+    @pytest.mark.slow
     def test_sync_function(self, log_capture):
         @track_performance(threshold_ms=10)
         def sync_slow():

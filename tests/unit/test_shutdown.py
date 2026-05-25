@@ -449,6 +449,7 @@ class TestShutdownCoordinatorExecuteCleanup:
         assert result is False
 
 
+@pytest.mark.slow
 class TestShutdownWatchdogForceExit:
     def test_watchdog_force_exit_uses_exit_code_1(self):
         exit_codes = []
