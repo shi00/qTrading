@@ -210,20 +210,29 @@ class ThreadPoolManager:
         shutdown_performed = False
         if hasattr(self, "_io_pool") and self._io_pool:
             if not _quiet:
-                logger.info("Shutting down IO Pool...")
+                try:
+                    logger.info("Shutting down IO Pool...")
+                except (ValueError, OSError):
+                    pass
             self._io_pool.shutdown(wait=wait, cancel_futures=True)
             self._io_pool = None
             shutdown_performed = True
 
         if hasattr(self, "_cpu_pool") and self._cpu_pool:
             if not _quiet:
-                logger.info("Shutting down CPU Pool...")
+                try:
+                    logger.info("Shutting down CPU Pool...")
+                except (ValueError, OSError):
+                    pass
             self._cpu_pool.shutdown(wait=wait, cancel_futures=True)
             self._cpu_pool = None
             shutdown_performed = True
 
         if shutdown_performed and not _quiet:
-            logger.info("Thread Pools shut down.")
+            try:
+                logger.info("Thread Pools shut down.")
+            except (ValueError, OSError):
+                pass
 
 
 # Global Accessor

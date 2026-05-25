@@ -182,7 +182,7 @@ class TestThreadPoolManagerAtexitShutdown:
         tpm = ThreadPoolManager()
         tpm.shutdown = MagicMock()
         ThreadPoolManager._atexit_cleanup()
-        tpm.shutdown.assert_called_once_with(wait=False)
+        tpm.shutdown.assert_called_once_with(wait=False, _quiet=True)
 
     @patch("utils.thread_pool.ConfigHandler")
     def test_atexit_cleanup_handles_value_error(self, mock_ch):
@@ -226,7 +226,7 @@ class TestThreadPoolManagerAtexitCleanup:
         tpm = ThreadPoolManager()
         tpm.shutdown = MagicMock()
         ThreadPoolManager._atexit_cleanup()
-        tpm.shutdown.assert_called_once_with(wait=False)
+        tpm.shutdown.assert_called_once_with(wait=False, _quiet=True)
 
     @patch("utils.thread_pool.ConfigHandler")
     def test_atexit_cleanup_handles_value_error(self, mock_ch):
