@@ -94,6 +94,16 @@ class TushareClient:
         "index_weight": 2.5,
     }
 
+    TABLE_TO_API_MAP: dict[str, str] = {
+        "moneyflow_hsgt": "moneyflow_hsgt",
+        "northbound_holding": "hk_hold",
+        "moneyflow_daily": "moneyflow",
+        "top_list": "top_list",
+        "limit_list": "limit_list",
+        "margin_daily": "margin_detail",
+        "block_trade": "block_trade",
+    }
+
     def __new__(cls, token: str | None = None):
         if cls._instance is None:
             with cls._lock:
@@ -192,17 +202,48 @@ class TushareClient:
 
             self._initialized = True
 
-    def set_token(self, token: str | None):
-        self.token = token
-        ts.set_token(token)
-        self.pro = ts.pro_api(timeout=self.timeout)
+    def set_token(self, token: str | None) -> bool:
+        """
+        Set token and clear capability cache.
 
-        self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+        Thread-safe: uses _lock to protect concurrent access.
 
-        with self._capability_cache_lock:
+        Args:
+            token: New Tushare API token
+
+        Returns:
+            True if caller should trigger capability probe (cache was cleared or empty).
+            False if no action needed (token unchanged).
+
+        Note:
+            This method is synchronous. Caller (usually async context like verify_token)
+            should call probe_api_capabilities() if this returns True.
+
+        Example:
+            if client.set_token(new_token):
+                await client.probe_api_capabilities()
+        """
+        with self._lock:
+            if token == self.token:
+                logger.debug("[API] Token unchanged, skipping cache clear")
+                return False
+
+            old_token = self.token
+            self.token = token
+            ts.set_token(token)
+            self.pro = ts.pro_api(timeout=self.timeout) if token else None
+
+            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+
+            cache_size = len(self._capability_cache)
             self._capability_cache.clear()
 
-        logger.info(f"[API] Token updated. Client re-initialized with timeout={self.timeout}s")
+            logger.info(
+                f"[API] Token updated: {old_token[:4] + '****' if old_token else 'None'} -> "
+                f"{token[:4] + '****' if token else 'None'}. "
+                f"Cache cleared ({cache_size} entries)."
+            )
+            return True
 
     def is_api_available(self, api_name: str) -> bool | None:
         """
@@ -237,6 +278,140 @@ class TushareClient:
         """Get a copy of the capability cache."""
         with self._capability_cache_lock:
             return dict(self._capability_cache)
+
+    def get_effective_synced_tables(self, all_tables: list[str]) -> list[str]:
+        """
+        Return list of tables that are available for the current token.
+
+        Rules:
+        - Tables not in TABLE_TO_API_MAP are always included (base data)
+        - Tables in TABLE_TO_API_MAP are included only if API is available or unknown
+        - Tables with API explicitly marked as unavailable are excluded
+
+        Args:
+            all_tables: List of table names to filter
+
+        Returns:
+            List of table names that can be synced for current token
+        """
+        effective = []
+        for table in all_tables:
+            api_name = self.TABLE_TO_API_MAP.get(table)
+            if api_name is None or self.is_api_available(api_name) is not False:
+                effective.append(table)
+        return effective
+
+    async def persist_capabilities_to_app_state(self) -> None:
+        """
+        Persist capability cache to AppState for cross-session durability.
+
+        Writes a JSON payload containing:
+        - token_hash: SHA256 hash of current token (first 16 chars)
+        - capabilities: dict of api_name -> bool
+
+        Called after probe_api_capabilities or when capabilities change.
+        Safe to call when engine is not ready (no-op).
+        """
+        import hashlib
+        import json
+
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.app_state_service import set_app_state
+
+        engine = CacheManager().engine
+        if engine is None:
+            logger.debug("[TushareClient] Engine not ready, skipping capability persist")
+            return
+
+        token_hash = hashlib.sha256(self.token.encode()).hexdigest()[:16] if self.token else None
+        with self._capability_cache_lock:
+            capabilities = dict(self._capability_cache)
+
+        payload = {
+            "token_hash": token_hash,
+            "capabilities": capabilities,
+        }
+        await set_app_state(engine, "tushare_capabilities", json.dumps(payload))
+        logger.info(f"[TushareClient] Persisted {len(capabilities)} capabilities to AppState")
+
+    async def load_capabilities_from_app_state(self) -> None:
+        """
+        Load capability cache from AppState on startup.
+
+        Only loads if token_hash matches current token.
+        Called after CacheManager engine is created.
+        """
+        import hashlib
+        import json
+
+        from data.cache.cache_manager import CacheManager
+        from data.persistence.app_state_service import get_app_state
+
+        engine = CacheManager().engine
+        if engine is None:
+            return
+
+        stored = await get_app_state(engine, "tushare_capabilities")
+        if not stored:
+            return
+
+        try:
+            payload = json.loads(stored)
+            token_hash = hashlib.sha256(self.token.encode()).hexdigest()[:16] if self.token else None
+
+            if payload.get("token_hash") == token_hash:
+                with self._capability_cache_lock:
+                    self._capability_cache.update(payload.get("capabilities", {}))
+                logger.info(f"[TushareClient] Loaded {len(self._capability_cache)} capabilities from AppState")
+            else:
+                logger.debug("[TushareClient] Token hash mismatch, skipping capability load")
+        except Exception as e:
+            logger.warning(f"[TushareClient] Failed to load capabilities: {e}")
+
+    async def probe_api_capabilities(self) -> dict[str, bool | None]:
+        """
+        Probe key APIs to determine their availability for current token.
+
+        Tests each API with minimal parameters to detect permission errors.
+        Results are cached and persisted to AppState.
+
+        Returns:
+            dict mapping API names to availability:
+            - True: API is available
+            - False: API is not available (permission denied)
+            - None: Unable to determine (other error)
+        """
+        from utils.time_utils import get_now
+
+        recent_date = get_now().strftime("%Y%m%d")
+        probe_configs: list[tuple[str, dict]] = [
+            ("daily", {"trade_date": recent_date}),
+            ("moneyflow_hsgt", {"trade_date": recent_date}),
+            ("moneyflow", {"trade_date": recent_date}),
+            ("hk_hold", {"trade_date": recent_date}),
+            ("top_list", {"trade_date": recent_date}),
+            ("limit_list", {"trade_date": recent_date}),
+            ("margin_detail", {"trade_date": recent_date}),
+            ("block_trade", {"trade_date": recent_date}),
+        ]
+
+        results: dict[str, bool | None] = {}
+
+        for api_name, params in probe_configs:
+            try:
+                func = getattr(self.pro, api_name)
+                await self._handle_api_call(func, **params)
+                results[api_name] = True
+                self.mark_api_available(api_name)
+            except TushareAPIPermissionError:
+                results[api_name] = False
+                self.mark_api_unavailable(api_name)
+            except Exception as e:
+                results[api_name] = None
+                logger.warning(f"[TushareClient] Probe {api_name} failed with non-permission error: {e}")
+
+        await self.persist_capabilities_to_app_state()
+        return results
 
     async def _handle_api_call(self, func: typing.Callable, **kwargs: typing.Any):
         """Async wrapper that yields to event loop during rate limit / backoff

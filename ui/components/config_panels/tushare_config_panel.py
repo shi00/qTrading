@@ -299,13 +299,39 @@ class TushareConfigPanel(ft.Container):
             )
 
             from data.external.tushare_client import TushareClient
+            from strategies.all_strategies import StrategyManager
 
             ConfigHandler.save_token(token)
 
             client = TushareClient()
-            client.set_token(token)
+            needs_probe = client.set_token(token)
 
-            self._show_success(I18n.get("tushare_verify_success"))
+            if needs_probe:
+                try:
+                    logger.info("[TushareConfigPanel] Probing API capabilities...")
+                    probe_results = await client.probe_api_capabilities()
+
+                    StrategyManager().invalidate_dependency_cache()
+
+                    available_apis = [api for api, status in probe_results.items() if status is True]
+                    unavailable_apis = [api for api, status in probe_results.items() if status is False]
+
+                    if unavailable_apis:
+                        warning_msg = f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_restricted_apis')}: {', '.join(unavailable_apis)}"
+                        self._show_warning(warning_msg)
+                        logger.warning(f"[TushareConfigPanel] Restricted APIs: {unavailable_apis}")
+                    elif available_apis:
+                        self._show_success(I18n.get("tushare_verify_success"))
+                        logger.info(f"[TushareConfigPanel] All probed APIs available: {len(available_apis)}")
+                    else:
+                        self._show_warning(
+                            f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}"
+                        )
+                except Exception as probe_exc:
+                    logger.warning(f"[TushareConfigPanel] Capability probe failed (non-critical): {probe_exc}")
+                    self._show_success(f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}")
+            else:
+                self._show_success(I18n.get("tushare_verify_success"))
 
             if self.on_verify_success:
                 self.on_verify_success(token)

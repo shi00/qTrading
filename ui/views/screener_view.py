@@ -360,17 +360,22 @@ class ScreenerView(ft.Container):
 
     async def _load_strategies(self):  # pragma: no cover
         try:
-            strategies = await self.vm.get_strategies()
+            strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
             if not self.page:
                 return
 
-            # Use Name (value) for display, Key for ID
-            # strategies is Dict[key, name]
-            self.strategy_dropdown.options = [ft.dropdown.Option(k, v) for k, v in strategies.items()]
+            options = []
+            for key, info in strategies_with_dep.items():
+                name = info["name"]
+                if info.get("missing_apis"):
+                    name = f"{name} ⚠️"
+                options.append(ft.dropdown.Option(key, name))
+
+            self.strategy_dropdown.options = options
             self.strategy_dropdown.update()
         except Exception as e:
             logger.error(
-                f"[ScreenerView] Strategy | ❌ Failed to load strategies: {e}",
+                f"[ScreenerView] Strategy | Failed to load strategies: {e}",
                 exc_info=True,
             )
             self.status_text.value = I18n.get("screener_load_failed").format(error=e)
@@ -785,23 +790,33 @@ class ScreenerView(ft.Container):
         self.selected_strategy = self.strategy_dropdown.value
         self.run_btn.disabled = not self.selected_strategy
 
-        # Update description text
         if self.selected_strategy:
-            # Gather default params before rendering to push initial dynamic desc
             strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
+
+            strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
+            dep_info = strategies_with_dep.get(self.selected_strategy, {})
+
             if strategy_obj:
                 defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
                 desc = strategy_obj.get_dynamic_description(defaults)
             else:
                 desc = self.vm.get_strategy_desc(self.selected_strategy)
+
+            if dep_info.get("missing_apis"):
+                warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
+                desc = f"{desc}{warning_suffix}"
+                self.strategy_desc_text.color = AppColors.WARNING
+            else:
+                self.strategy_desc_text.color = AppColors.TEXT_PRIMARY
+
             self.strategy_desc_text.value = desc
         else:
             self.strategy_desc_text.value = ""
+            self.strategy_desc_text.color = AppColors.TEXT_PRIMARY
 
         self.strategy_desc_text.update()
         self.run_btn.update()
 
-        # Render dynamic parameters for this strategy
         self._render_strategy_params()
 
     async def _on_run_click(self, e):

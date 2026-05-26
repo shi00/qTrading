@@ -119,6 +119,7 @@ class TestScreenerView:
         self.mock_as = mock_app_styles
         self.mock_vm = MagicMock()
         self.mock_vm.strategy_mgr = MagicMock()
+        self.mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {}
         self.mock_vm.dispose = MagicMock()
         self.mock_vm.switch_to_history = MagicMock()
         self.mock_vm.switch_to_realtime = MagicMock()
@@ -203,6 +204,44 @@ class TestScreenerView:
         e = MagicMock()
         view._on_strategy_change(e)
         assert view.strategy_desc_text.value == "Dynamic desc"
+
+    def test_on_strategy_change_with_missing_apis(self, mock_page):
+        view = self._make_view(mock_page)
+        view.strategy_dropdown.value = "northbound_flow"
+        mock_strategy = MagicMock()
+        mock_strategy.get_parameters.return_value = []
+        mock_strategy.get_dynamic_description.return_value = "Northbound flow strategy"
+        view.vm.strategy_mgr.get_strategy.return_value = mock_strategy
+        view.vm.strategy_mgr.get_all_with_dependencies.return_value = {
+            "northbound_flow": {
+                "name": "北向资金流向",
+                "missing_apis": ["moneyflow_hsgt", "hk_hold"],
+            }
+        }
+        e = MagicMock()
+        view._on_strategy_change(e)
+        desc_value = view.strategy_desc_text.value or ""
+        assert "moneyflow_hsgt" in desc_value
+        assert "hk_hold" in desc_value
+
+    def test_on_strategy_change_no_missing_apis(self, mock_page):
+        view = self._make_view(mock_page)
+        view.strategy_dropdown.value = "momentum"
+        mock_strategy = MagicMock()
+        mock_strategy.get_parameters.return_value = []
+        mock_strategy.get_dynamic_description.return_value = "Momentum strategy"
+        view.vm.strategy_mgr.get_strategy.return_value = mock_strategy
+        view.vm.strategy_mgr.get_all_with_dependencies.return_value = {
+            "momentum": {
+                "name": "动量策略",
+                "missing_apis": [],
+            }
+        }
+        e = MagicMock()
+        view._on_strategy_change(e)
+        desc_value = view.strategy_desc_text.value or ""
+        assert desc_value == "Momentum strategy"
+        assert "missing_apis" not in desc_value.lower()
 
     @pytest.mark.asyncio
     async def test_on_run_click_disables_btn(self, mock_page):

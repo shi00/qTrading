@@ -63,7 +63,35 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     await NewsSubscriptionService().start()
     await MarketDataService().start()
 
+    await _warmup_tushare_capabilities()
+
     return {"success": True, "error": None, "detail": None, "current_rev": None, "head_rev": None}
+
+
+async def _warmup_tushare_capabilities() -> None:
+    """
+    Warm up Tushare capability cache from AppState on startup.
+
+    This ensures that API availability status persists across restarts,
+    avoiding repeated probe calls that waste API quota.
+    """
+    from data.external.tushare_client import TushareClient
+
+    client = TushareClient()
+    if not client.token:
+        logger.debug("[Bootstrap] No Tushare token configured, skipping capability warmup")
+        return
+
+    try:
+        await client.load_capabilities_from_app_state()
+
+        cache = client.get_capability_cache()
+        if cache:
+            logger.info(f"[Bootstrap] Loaded {len(cache)} Tushare capabilities from AppState")
+        else:
+            logger.debug("[Bootstrap] Tushare capability cache empty after load (first startup or token changed)")
+    except Exception as e:
+        logger.warning(f"[Bootstrap] Tushare capability warmup failed (non-critical): {e}")
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
