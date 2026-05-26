@@ -144,6 +144,7 @@ class TestAISelectionStrategy:
         assert result.empty
 
     @pytest.mark.asyncio
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
     @patch("strategies.ai_strategy.AIService")
     async def test_filter_returns_empty_when_no_dp(
         self,
@@ -153,8 +154,9 @@ class TestAISelectionStrategy:
     ):
         """Test: Strategy handles missing DataProcessor gracefully.
 
-        When data_processor is None, the quality gate is bypassed (logged as warning),
-        and the strategy proceeds. It should not crash.
+        When data_processor is None and STRICT_QUALITY_GATE is disabled,
+        the quality gate is bypassed (logged as warning), and the strategy
+        proceeds. It should not crash.
         """
         mock_ai_service = MagicMock()
         mock_ai_service.is_cloud_available.return_value = True
@@ -164,7 +166,6 @@ class TestAISelectionStrategy:
 
         context = {"screening_data": sample_screening_df, "data_processor": None}
 
-        # Should not raise; quality gate is bypassed when dp is None
         result = await strategy.filter(context)
         assert isinstance(result, pd.DataFrame)
 
