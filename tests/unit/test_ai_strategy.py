@@ -34,7 +34,7 @@ class TestAISelectionStrategyFilter:
     async def test_none_context(self, mock_ch, mock_ai_cls):
         mock_ch.get_ai_max_candidates.return_value = 10
         s = AISelectionStrategy()
-        result = await s.filter(None)
+        result = await s.filter({"data_processor": _make_dp()})
         assert result.empty
 
     @pytest.mark.asyncio
@@ -44,7 +44,7 @@ class TestAISelectionStrategyFilter:
         mock_ch.get_ai_max_candidates.return_value = 10
         mock_ch.get_strategy_min_turnover.return_value = 1.0
         s = AISelectionStrategy()
-        context = {}
+        context = {"data_processor": _make_dp()}
         result = await s.filter(context)
         assert result.empty
 
@@ -166,7 +166,7 @@ class TestAISelectionStrategyFilter:
                 "list_status": ["L"],
             }
         )
-        context = {"data": df}
+        context = {"data": df, "data_processor": _make_dp()}
         result = await s.filter(context)
         assert result.empty
 

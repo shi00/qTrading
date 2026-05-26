@@ -46,7 +46,14 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.context = {"screening_data": self.base_data, "fundamental_screening_data": self.base_data}
+        self.dp_mock = MagicMock()
+        self.dp_mock._quality_tier = QualityTier.GOLD
+
+        self.context = {
+            "screening_data": self.base_data,
+            "fundamental_screening_data": self.base_data,
+            "data_processor": self.dp_mock,
+        }
 
     def test_manager(self):
         s = self.mgr.get_strategy("value")
@@ -82,12 +89,12 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         nb_data = pd.DataFrame(
             {"ts_code": ["000001.SZ", "000002.SZ"], "ratio": [6.0, 1.0]},
         )
-        ctx = {"northbound_data": nb_data, "screening_data": self.base_data}
+        ctx = {"northbound_data": nb_data, "screening_data": self.base_data, "data_processor": self.dp_mock}
         s = NorthboundHoldingStrategy()
         res = await s.filter(ctx)
         self.assertIn("000001.SZ", res["ts_code"].values)
         self.assertNotIn("000002.SZ", res["ts_code"].values)
-        self.assertTrue((await s.filter({})).empty)
+        self.assertTrue((await s.filter({"data_processor": self.dp_mock})).empty)
 
     async def test_oversold(self):
         s = OversoldStrategy()
@@ -146,7 +153,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         lhb_data = pd.DataFrame(
             {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]},
         )
-        ctx = {"top_list": lhb_data, "screening_data": self.base_data}
+        ctx = {"top_list": lhb_data, "screening_data": self.base_data, "data_processor": self.dp_mock}
         s = InstitutionalStrategy()
         res = await s.filter(ctx)
         self.assertIn("000001.SZ", res["ts_code"].values)
@@ -156,7 +163,7 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         block_data_pass = pd.DataFrame(
             {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [10], "price": [10]},
         )
-        ctx = {"block_trade": block_data_pass, "screening_data": self.base_data}
+        ctx = {"block_trade": block_data_pass, "screening_data": self.base_data, "data_processor": self.dp_mock}
         s = BlockTradeStrategy()
         res = await s.filter(ctx)
         self.assertIn("000001.SZ", res["ts_code"].values)
@@ -173,9 +180,9 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_input(self):
         s = ValueStrategy()
-        self.assertTrue((await s.filter({})).empty)
-        self.assertTrue((await s.filter({"screening_data": None})).empty)
-        self.assertTrue((await s.filter({"screening_data": pd.DataFrame()})).empty)
+        self.assertTrue((await s.filter({"data_processor": self.dp_mock})).empty)
+        self.assertTrue((await s.filter({"screening_data": None, "data_processor": self.dp_mock})).empty)
+        self.assertTrue((await s.filter({"screening_data": pd.DataFrame(), "data_processor": self.dp_mock})).empty)
 
 
 class TestAIIntegration(unittest.TestCase):
