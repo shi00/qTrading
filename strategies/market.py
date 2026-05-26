@@ -82,6 +82,7 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
     not by net capital flow. For net flow analysis, use NorthboundFlowStrategy.
     """
 
+    required_quality_tier = QualityTier.BRONZE
     enable_ai_analysis = False
     required_context_keys = ["northbound_data"]
     required_tables = ["northbound_holding"]
@@ -213,6 +214,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
 
 @register_strategy("institutional")
 class InstitutionalStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.BRONZE
     enable_ai_analysis = False
     required_context_keys = ["top_list"]
     required_tables = ["top_list"]
@@ -265,9 +267,11 @@ class InstitutionalStrategy(PolarsBaseStrategy):
 
 @register_strategy("block_trade")
 class BlockTradeStrategy(PolarsBaseStrategy):
+    required_quality_tier = QualityTier.BRONZE
     enable_ai_analysis = False
     required_context_keys = ["block_trade"]
     required_tables = ["block_trade"]
+    required_apis = ["block_trade"]
 
     def __init__(self):
         super().__init__("strategy_block_trade_name", "strategy_block_trade_desc")
