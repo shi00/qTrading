@@ -25,9 +25,9 @@ class TestDeepLinking(unittest.TestCase):
             # 1. Init View
             with patch("ui.views.screener_view.ScreenerViewModel") as mock_vm_cls:
                 mock_vm = mock_vm_cls.return_value
-                mock_vm.get_strategies = AsyncMock(
-                    return_value={"strategy_a": "Description A"},
-                )
+                mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {
+                    "strategy_a": {"name": "Description A", "missing_apis": []},
+                }
                 mock_strategy = MagicMock()
                 mock_strategy.get_parameters = MagicMock(return_value=[])
                 mock_strategy.quality_tier = 0
@@ -71,9 +71,9 @@ class TestDeepLinking(unittest.TestCase):
         async def run_test():
             with patch("ui.views.screener_view.ScreenerViewModel") as mock_vm_cls:
                 mock_vm = mock_vm_cls.return_value
-                mock_vm.get_strategies = AsyncMock(
-                    return_value={"strategy_b": "Description B"},
-                )
+                mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {
+                    "strategy_b": {"name": "Description B", "missing_apis": []},
+                }
                 mock_strategy = MagicMock()
                 mock_strategy.get_parameters = MagicMock(return_value=[])
                 mock_strategy.quality_tier = 0

@@ -215,6 +215,7 @@ class TestTushareConfigPanel:
             mock_pro.trade_cal.return_value = MagicMock()
 
             mock_client_instance = MagicMock()
+            mock_client_instance.set_token.return_value = False
             mock_client_cls.return_value = mock_client_instance
 
             result = await panel.verify_token()
