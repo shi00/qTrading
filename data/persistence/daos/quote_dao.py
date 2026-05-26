@@ -77,6 +77,8 @@ def _get_default_synced_tables() -> list[str]:
     Avoids circular import at module load time.
 
     Security: Only returns tables that exist in the hardcoded safe whitelist.
+    Note: This returns all tables regardless of API capability.
+    For capability-aware table list, use get_effective_synced_tables() from TushareClient.
     """
     global _DEFAULT_SYNCED_TABLES
     if _DEFAULT_SYNCED_TABLES is None:
@@ -85,6 +87,24 @@ def _get_default_synced_tables() -> list[str]:
         raw_tables = HistoricalSyncStrategy.SYNCED_TABLES.copy()
         _DEFAULT_SYNCED_TABLES = [t for t in raw_tables if t in _SAFE_TABLE_NAMES]
     return _DEFAULT_SYNCED_TABLES
+
+
+def _get_effective_synced_tables() -> list[str]:
+    """
+    Get synced tables filtered by current token's API capabilities.
+
+    Returns tables that are either:
+    - Not in TABLE_TO_API_MAP (base data, always available)
+    - In TABLE_TO_API_MAP with API available or unknown
+
+    This should be used for:
+    - check_data_exists() completeness check
+    - get_bulk_sync_quality_scores() quality evaluation
+    """
+    from data.external.tushare_client import TushareClient
+
+    all_tables = _get_default_synced_tables()
+    return TushareClient().get_effective_synced_tables(all_tables)
 
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
@@ -153,7 +173,7 @@ class QuoteDao(BaseDao):
         trade_date = _normalize_trade_date(trade_date)
 
         if tables is None:
-            tables = _get_default_synced_tables()
+            tables = _get_effective_synced_tables()
 
         allowed_tables = set(_get_default_synced_tables())
         safe_tables = []
@@ -827,7 +847,7 @@ class QuoteDao(BaseDao):
         from utils.config_handler import ConfigHandler
 
         if tables is None:
-            tables = _get_default_synced_tables()
+            tables = _get_effective_synced_tables()
 
         config = ConfigHandler.get_sync_integrity_config()
 

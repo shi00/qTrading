@@ -85,6 +85,7 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
     enable_ai_analysis = False
     required_context_keys = ["northbound_data"]
     required_tables = ["northbound_holding"]
+    required_apis = ["hk_hold"]
 
     def __init__(self):
         super().__init__("strategy_northbound_holding_name", "strategy_northbound_holding_desc")
@@ -147,6 +148,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
     enable_ai_analysis = False
     required_context_keys = ["northbound_flow_data"]
     required_tables = ["moneyflow_hsgt"]
+    required_apis = ["moneyflow_hsgt"]
 
     def __init__(self):
         super().__init__("strategy_northbound_flow_name", "strategy_northbound_flow_desc")
@@ -214,6 +216,7 @@ class InstitutionalStrategy(PolarsBaseStrategy):
     enable_ai_analysis = False
     required_context_keys = ["top_list"]
     required_tables = ["top_list"]
+    required_apis = ["top_list"]
 
     def __init__(self):
         super().__init__("strategy_institutional_name", "strategy_institutional_desc")

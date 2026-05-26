@@ -8,6 +8,7 @@ from data.constants import (
     SYNC_RESULT_FETCH_FAILED,
     SYNC_RESULT_HAS_DATA,
     SYNC_RESULT_SAVE_FAILED,
+    SYNC_RESULT_SKIPPED_PERMISSION,
 )
 from utils.time_utils import get_now, parse_date
 
@@ -35,7 +36,9 @@ class SyncDao(BaseDao):
             raise TypeError(f"last_data_date must be str, datetime, or date, got {type(last_data_date)}")
 
         if last_result_status is None:
-            if status in ("success", "empty") and record_count > 0:
+            if status == "skipped_permission":
+                last_result_status = SYNC_RESULT_SKIPPED_PERMISSION
+            elif status in ("success", "empty") and record_count > 0:
                 last_result_status = SYNC_RESULT_HAS_DATA
             elif status in ("success", "empty") and record_count == 0:
                 last_result_status = SYNC_RESULT_EMPTY
@@ -49,10 +52,10 @@ class SyncDao(BaseDao):
                VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT("table_name") DO UPDATE SET
                "last_sync_date"=excluded."last_sync_date",
-               "last_data_date"=CASE WHEN excluded."status" IN ('success','empty') AND excluded."last_data_date" > COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+               "last_data_date"=CASE WHEN excluded."status" IN ('success','empty','skipped_permission') AND excluded."last_data_date" > COALESCE(sync_status."last_data_date",'1900-01-01'::date)
                                      THEN excluded."last_data_date"
                                      ELSE sync_status."last_data_date" END,
-               "record_count"=CASE WHEN excluded."status" IN ('success','empty') AND excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
+               "record_count"=CASE WHEN excluded."status" IN ('success','empty','skipped_permission') AND excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)
                                    THEN excluded."record_count"
                                    ELSE sync_status."record_count" END,
                "status"=CASE WHEN excluded."last_data_date" >= COALESCE(sync_status."last_data_date",'1900-01-01'::date)

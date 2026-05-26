@@ -53,6 +53,7 @@ class BaseStrategy(ABC):
 
     required_context_keys: list[str] = []
     required_tables: list[str] = []
+    required_apis: list[str] = []
 
     CONTEXT_KEY_TABLE_MAP: dict[str, str] = {
         "northbound_data": "northbound_holding",
@@ -123,10 +124,12 @@ class BaseStrategy(ABC):
           - 'status': 'ready' | 'degraded' | 'unready'
           - 'missing_keys': list of missing context keys
           - 'missing_tables': list of missing table names
+          - 'missing_apis': list of unavailable APIs
           - 'empty_keys': list of context keys present but with empty data
         """
         missing_keys = []
         missing_tables = []
+        missing_apis = []
         empty_keys = []
 
         for key in self.required_context_keys:
@@ -153,7 +156,14 @@ class BaseStrategy(ABC):
                 if not found and table not in missing_tables:
                     missing_tables.append(table)
 
-        if missing_keys:
+        for api in self.required_apis:
+            from data.external.tushare_client import TushareClient
+
+            client = TushareClient()
+            if client.is_api_available(api) is False:
+                missing_apis.append(api)
+
+        if missing_keys or missing_apis:
             status = "unready"
         elif empty_keys:
             status = "degraded"
@@ -165,6 +175,7 @@ class BaseStrategy(ABC):
             "status": status,
             "missing_keys": missing_keys,
             "missing_tables": missing_tables,
+            "missing_apis": missing_apis,
             "empty_keys": empty_keys,
         }
 

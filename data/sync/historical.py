@@ -20,9 +20,11 @@ from data.constants import (
     SYNC_RESULT_FETCH_FAILED,
     SYNC_RESULT_HAS_DATA,
     SYNC_RESULT_SAVE_FAILED,
+    SYNC_RESULT_SKIPPED_PERMISSION,
 )
 from data.sync.base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
@@ -210,13 +212,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.warning(f"[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults: {e}")
             QUALITY_THRESHOLD = 80
 
+        from data.external.tushare_client import TushareClient
+
+        effective_synced_tables = TushareClient().get_effective_synced_tables(self.SYNCED_TABLES)
+        effective_resume_tables = effective_synced_tables
+
         try:
             cached_dates_per_table = {}
-            for table in self.SYNCED_TABLES:
+            for table in effective_synced_tables:
                 cached_dates_per_table[table] = await self.context.cache.get_cached_dates_for_table(table)
 
             existing = set()
-            core_dates = [cached_dates_per_table.get(t, set()) for t in self.CORE_RESUME_TABLES]
+            core_dates = [cached_dates_per_table.get(t, set()) for t in effective_resume_tables]
             if core_dates and all(core_dates):
                 existing = set.intersection(*core_dates)
 
@@ -247,7 +254,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=dates_to_verify[0],
                         end_date=dates_to_verify[-1],
-                        tables=list(self.CORE_RESUME_TABLES),
+                        tables=list(effective_resume_tables),
                     )
 
                     for date in dates_to_verify:
@@ -481,10 +488,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def fetch_wrapper(key: typing.Any, func: typing.Callable, name: typing.Any):
             try:
-                # Return (key, data, error)
                 return (key, await func(trade_date=trade_date), None)
             except EngineDisposedError:
                 raise
+            except TushareAPIPermissionError as e:
+                logger.warning(
+                    f"[HistoricalSync] DaySync | ⚠️ PERMISSION_DENIED for {name}: {e}",
+                )
+                return (key, None, "permission_denied")
             except Exception as e:
                 logger.warning(
                     f"[HistoricalSync] DaySync | ⚠️ Fetch {name} failed for {trade_date}: {e}",
@@ -509,11 +520,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
         futures.append(fetch_indices())
 
         results_list = await asyncio.gather(*futures)
-        # Parse results: Map key -> (data, error)
+        # Parse results: Map key -> (data, error_type)
+        # error_type can be: None, "permission_denied", or Exception
         data_map = {k: v for k, v, e in results_list}
-        error_map = {k: e for k, v, e in results_list if e is not None}
+        permission_denied_map = {k: e for k, v, e in results_list if e == "permission_denied"}
+        error_map = {k: e for k, v, e in results_list if isinstance(e, Exception)}
 
-        # CRITICAL CHECK: If Quotes or Basic failed, we MUST raise exception to trigger retry
         if "quotes" in error_map:
             raise error_map["quotes"]
         if "basic" in error_map:
@@ -532,6 +544,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
               - 'result_status': SYNC_RESULT_* constant indicating the outcome
             """
             df = data_map.get(key)
+
+            # Check for permission denied first
+            if key in permission_denied_map:
+                return {
+                    "saved": None,
+                    "fetched": 0,
+                    "success": False,
+                    "result_status": SYNC_RESULT_SKIPPED_PERMISSION,
+                    "error_type": "permission_denied",
+                }
 
             if df is None:
                 if key in error_map:
@@ -690,6 +712,20 @@ class HistoricalSyncStrategy(ISyncStrategy):
         async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | datetime.date | None):
             saved = result.get("saved") if isinstance(result, dict) else result
             result_status = result.get("result_status") if isinstance(result, dict) else None
+            error_type = result.get("error_type") if isinstance(result, dict) else None
+
+            # Handle permission denied - mark as skipped_permission, not as failure
+            if error_type == "permission_denied" or result_status == SYNC_RESULT_SKIPPED_PERMISSION:
+                await cache.update_sync_status(
+                    table_name,
+                    trade_date,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+                logger.debug(f"[HistoricalSync] Recorded skipped_permission for {table_name}")
+                return
+
             if saved is not None:
                 effective_status = "success"
                 if table_name in CRITICAL_EMPTY_TABLES and result_status == SYNC_RESULT_EMPTY:
