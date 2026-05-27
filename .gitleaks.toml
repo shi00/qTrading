@@ -8,9 +8,9 @@ description = "Allow test fixtures and mock data"
 paths = [
   '''tests/fixtures/.*''',
   '''tests/.*/fixtures/.*''',
-  '''tests/unit/test_.*\.py$''',
-  '''tests/integration/test_.*\.py$''',
-  '''tests/e2e/test_.*\.py$''',
+  '''tests/unit/.*test.*\.py''',
+  '''tests/integration/.*test.*\.py''',
+  '''tests/e2e/.*test.*\.py''',
 ]
 
 [[allowlists]]
