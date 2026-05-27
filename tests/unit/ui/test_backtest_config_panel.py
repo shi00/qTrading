@@ -1,7 +1,7 @@
 """BacktestConfigPanel 单元测试"""
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import flet as ft
 import pytest
@@ -212,3 +212,117 @@ class TestBacktestConfigPanel:
 
         assert panel.start_date_value == one_year_ago
         assert panel.end_date_value == today
+
+    def test_on_stamp_duty_auto_change_to_auto(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_slider.update = MagicMock()
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.control.value = True
+
+        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_auto_text"
+            panel._on_stamp_duty_auto_change(mock_event)
+
+        assert panel.stamp_duty_slider.disabled is True
+        assert panel.stamp_duty_text.value == "mock_auto_text"
+        panel.stamp_duty_slider.update.assert_called_once()
+        panel.stamp_duty_text.update.assert_called_once()
+
+    def test_on_stamp_duty_auto_change_to_manual(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_slider.value = 1.0
+        panel.stamp_duty_slider.update = MagicMock()
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.control.value = False
+
+        panel._on_stamp_duty_auto_change(mock_event)
+
+        assert panel.stamp_duty_slider.disabled is False
+        assert panel.stamp_duty_text.value == "1.0‰"
+        panel.stamp_duty_slider.update.assert_called_once()
+        panel.stamp_duty_text.update.assert_called_once()
+
+    def test_on_stamp_duty_auto_change_with_page(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_slider.update = MagicMock()
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.control.value = True
+
+        panel._on_stamp_duty_auto_change(mock_event)
+
+        panel.stamp_duty_slider.update.assert_called_once()
+        panel.stamp_duty_text.update.assert_called_once()
+
+    def test_on_stamp_duty_auto_change_without_page(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_slider.update = MagicMock()
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = None
+
+        mock_event = MagicMock()
+        mock_event.control.value = True
+
+        panel._on_stamp_duty_auto_change(mock_event)
+
+        panel.stamp_duty_slider.update.assert_not_called()
+        panel.stamp_duty_text.update.assert_not_called()
+
+    def test_on_stamp_duty_slider_change_manual(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_auto_checkbox.value = False
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.control.value = 1.5
+
+        panel._on_stamp_duty_slider_change(mock_event)
+
+        assert panel.stamp_duty_text.value == "1.5‰"
+        panel.stamp_duty_text.update.assert_called_once()
+
+    def test_on_stamp_duty_slider_change_auto_mode(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_auto_checkbox.value = True
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = MagicMock()
+
+        mock_event = MagicMock()
+        mock_event.control.value = 1.5
+
+        panel._on_stamp_duty_slider_change(mock_event)
+
+        panel.stamp_duty_text.update.assert_not_called()
+
+    def test_on_stamp_duty_slider_change_without_page(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_auto_checkbox.value = False
+        panel.stamp_duty_text.update = MagicMock()
+        panel.page = None
+
+        mock_event = MagicMock()
+        mock_event.control.value = 1.5
+
+        panel._on_stamp_duty_slider_change(mock_event)
+
+        assert panel.stamp_duty_text.value == "1.5‰"
+        panel.stamp_duty_text.update.assert_not_called()
+
+    def test_get_config_stamp_duty_auto_true(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_auto_checkbox.value = True
+
+        config = panel.get_config()
+
+        assert config["stamp_duty_rate"] is None
+
+    def test_get_config_stamp_duty_slider_none(self, panel: BacktestConfigPanel) -> None:
+        panel.stamp_duty_auto_checkbox.value = False
+        type(panel.stamp_duty_slider).value = PropertyMock(return_value=None)
+
+        config = panel.get_config()
+
+        assert config["stamp_duty_rate"] is None
+
+        del type(panel.stamp_duty_slider).value
