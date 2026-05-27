@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.2.0](https://github.com/shi00/qTrading/compare/v0.1.1...v0.2.0) (2026-05-27)
+
+
+### Features
+
+* **backtest:** add position sizing module with multiple allocation strategies ([4bfb724](https://github.com/shi00/qTrading/commit/4bfb724b3176c21099fb2cb1009c3b95ab3feca0))
+* **backtest:** 实现印花税分段费率功能 ([2ded982](https://github.com/shi00/qTrading/commit/2ded982eda9cec278f408471b5d5ebcd5613c787))
+* Tushare Capability productization loop ([fc4369d](https://github.com/shi00/qTrading/commit/fc4369d78090a4eeb27a6afd2443dd642192b322))
+* 新增故障转移配置面板与增强测试覆盖 ([bdf3016](https://github.com/shi00/qTrading/commit/bdf3016ea647adfdbb45a6d0ab24517e94b697f7))
+
+
+### Bug Fixes
+
+* add page check before update() in ProviderCredentialDialog ([e963d56](https://github.com/shi00/qTrading/commit/e963d56692096c36a882d743fabdf91dd32f63fb))
+* **ai_strategy:** unify quality gate pattern with PolarsBaseStrategy ([2b521eb](https://github.com/shi00/qTrading/commit/2b521eb746ce9b1bce7557cc0cf2f95a38b5598d))
+* **ai-mixin:** add as_of_date filter to prevent lookahead bias in financial data queries ([50fdbd4](https://github.com/shi00/qTrading/commit/50fdbd4376d33cfd60ede7c330edaff28f9204a9))
+* **ai-service:** failover cross-provider credentials, reasoning check, CancelledError, and test fixes ([c99b42f](https://github.com/shi00/qTrading/commit/c99b42f0f26ce8caaae7d3dba332df4167d5727b))
+* **ai:** pass model parameter through failover chain to enable actual provider switching ([fff09ce](https://github.com/shi00/qTrading/commit/fff09ce3e737c7330bf267c55eb149b2b1d57cf5))
+* **async:** convert start() to async def for NewsSubscriptionService and MarketDataService ([8a961ee](https://github.com/shi00/qTrading/commit/8a961eefd76b5654fae3c875cc3da4e99ac472ed))
+* **async:** re-raise CancelledError instead of swallowing it ([132b9c6](https://github.com/shi00/qTrading/commit/132b9c61a185fc74c2e7c28cdb6f456b05086691))
+* **backtest:** set strategy.key in BacktestService._get_strategy ([a505a41](https://github.com/shi00/qTrading/commit/a505a417a02818cab045cc88fe793a9402d1ee32))
+* **backtest:** use ScreenerDao standard SQL to eliminate data path fork ([0d2a7f5](https://github.com/shi00/qTrading/commit/0d2a7f5229aac19c21e09eb111dcf435c40fa327))
+* **config:** gracefully handle NoKeyringError in CI Linux environments ([3874181](https://github.com/shi00/qTrading/commit/387418155c3cc0f77ecf55d458f503fcbbf13412))
+* **data:** add ann_date column to fina_mainbz and use it for as_of_date filtering ([a2a9848](https://github.com/shi00/qTrading/commit/a2a984805518a6ea8d69c6377cd9c31e295d2317))
+* **data:** add ann_date to pledge_stat to eliminate lookahead bias ([55c1d65](https://github.com/shi00/qTrading/commit/55c1d6558f03e7a721188fcf83c7d660d66e98e7))
+* **data:** add ann_date to tushare get_fina_mainbz API fields ([ba42a0c](https://github.com/shi00/qTrading/commit/ba42a0cf7ee37c699176e171a4ba88e2d0057677))
+* **data:** correct margin_daily and suspend_d type from global to stock ([6e14142](https://github.com/shi00/qTrading/commit/6e14142311f1d13aeaae7cb1ece9d6718a5924b4))
+* **data:** improve DAO error handling and review_manager robustness ([91551e2](https://github.com/shi00/qTrading/commit/91551e24257ee03779e6393770c0af788a1e9390))
+* **gitleaks:** correct path regex to match all test files ([f9618b4](https://github.com/shi00/qTrading/commit/f9618b46991e4fb6f65eb1cf404b57e78b9170b6))
+* handle TushareAPIPermissionError and improve type safety ([bda0b7a](https://github.com/shi00/qTrading/commit/bda0b7a2ce2f179107f90a792b77f167b6f8d268))
+* **services:** extract _await_worker_ready from _ensure_worker in LocalModelManager ([e26c557](https://github.com/shi00/qTrading/commit/e26c557721f5bea5c0d257786656a1026247ecb7))
+* **strategy:** clean up orphan news tasks on CancelledError in AIStrategyMixin ([03ed9a0](https://github.com/shi00/qTrading/commit/03ed9a0e59d0b6af657000cbdfdb77b7923ccf7e))
+* **strategy:** set required_quality_tier=BRONZE for market strategies ([292859b](https://github.com/shi00/qTrading/commit/292859b98fe39f335f344f6226472872c5723df3))
+* **test:** ensure test database is recreated from clean state ([8bea1ce](https://github.com/shi00/qTrading/commit/8bea1ceb8f93a28232baca3564f8bfce4111e45c))
+* **test:** rename parametrize base_url to api_url to avoid pytest-base-url fixture scope conflict ([0a5d2eb](https://github.com/shi00/qTrading/commit/0a5d2eba4af68d5f1a64fc6a4bcdc12e9b0aa91d))
+* **tests:** sync mock interfaces with production code refactoring ([b4bb688](https://github.com/shi00/qTrading/commit/b4bb6881289573b0e308378577a9e392da16da9c))
+* **thread_pool:** handle logger exceptions during shutdown ([8dfe587](https://github.com/shi00/qTrading/commit/8dfe58778a9c4ea5e1ef241ad16c7f7f342e6a43))
+* **utils:** add thread-safety to SecurityManager.get_key and fix migrate_to_derived_key ([7875013](https://github.com/shi00/qTrading/commit/787501393ba11445ad6b56a7b7cb1a75d9932098))
+* 为策略测试添加 data_processor mock 以修复 QualityGate STRICT 模式下的测试失败 ([75dfed7](https://github.com/shi00/qTrading/commit/75dfed7c266d55472890edf7d9569aa5655ca6a4))
+* 修复 test_automation_tab 类型检查错误 (reportOptionalCall) ([678cc41](https://github.com/shi00/qTrading/commit/678cc4147c3afa5178bbb06470f334cafa94af8c))
+
 ## [0.1.1](https://github.com/shi00/qTrading/compare/v0.1.0...v0.1.1) (2026-05-23)
 
 
