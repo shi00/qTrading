@@ -169,10 +169,12 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self.base_url_input.hint_text = default_url or I18n.get("failover_base_url_hint")
 
         self._update_links_row(provider)
-        if self.page:
+        if self.model_dropdown.page:
             self.model_dropdown.update()
+        if self.base_url_input.page:
             self.base_url_input.update()
-            self.links_row.update() if self.links_row.controls else None
+        if self.links_row.page and self.links_row.controls:
+            self.links_row.update()
 
     def _on_model_dropdown_change(self, e):
         if e.control.value:
