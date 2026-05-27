@@ -42,14 +42,20 @@ class NewsFetcher:
     """
 
     @staticmethod
-    async def get_stock_news(ts_code: str | None, limit: int | None = 5):
+    async def get_stock_news(ts_code: str | None, limit: int | None = 5, as_of: date | None = None):
         """
         Fetch specific stock news using a dual-layer strategy:
         1. 巨潮公告 (stock_zh_a_disclosure_report_cninfo) - Official exchange filings (Highest quality)
         2. 东财搜索 (stock_news_em) - Fallback to keyword search (Lower quality, more noise)
 
         Both use a pyarrow string_storage workaround for pandas compatibility.
+
+        as_of: When set to a historical date, returns empty list to prevent
+        look-ahead bias in backtesting / AI context construction.
         """
+        if as_of is not None and as_of != get_now().date():
+            return []
+
         if not ts_code:
             return []
 
@@ -171,10 +177,16 @@ class NewsFetcher:
             return []
 
     @staticmethod
-    async def get_latest_global_news(limit: int | None = 20):
+    async def get_latest_global_news(limit: int | None = 20, as_of: date | None = None):
         """
         Get major financial news (CCTV / Major Portals)
+
+        as_of: When set to a historical date, returns empty list to prevent
+        look-ahead bias in backtesting / AI context construction.
         """
+        if as_of is not None and as_of != get_now().date():
+            return []
+
         try:
 
             def _fetch():

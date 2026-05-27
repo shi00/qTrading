@@ -10,9 +10,10 @@ import threading
 
 import pandas as pd
 
-from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS
+from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS, SYNC_RESULT_SKIPPED_PERMISSION
 from data.sync.base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import I18n
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
@@ -653,22 +654,22 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
                 except EngineDisposedError:
                     raise
+                except TushareAPIPermissionError:
+                    logger.warning(
+                        f"[FinancialSync] BatchSync | ⛔ Permission Denied for {table_name}",
+                    )
+                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                    await self.context.cache.update_sync_status(
+                        table_name,
+                        date_obj,
+                        0,
+                        status="skipped_permission",
+                        last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                    )
                 except Exception as e:
-                    err_str = str(e).lower()
-                    if "permission" in err_str or "积分" in err_str or "no access" in err_str:
-                        logger.warning(
-                            f"[FinancialSync] BatchSync | ⛔ Permission Denied for {table_name}: {e}",
-                        )
-                        await self.context.cache.update_sync_status(
-                            table_name,
-                            datetime.datetime.strptime(date_str, "%Y%m%d").date(),
-                            0,
-                            status="permission_denied",
-                        )
-                    else:
-                        logger.warning(
-                            f"[FinancialSync] BatchSync | ⚠️ Failed {table_name} on {date_str}: {e}",
-                        )
+                    logger.warning(
+                        f"[FinancialSync] BatchSync | ⚠️ Failed {table_name} on {date_str}: {e}",
+                    )
 
         # Iterate per-date (not all-at-once) to avoid task explosion
         for i, d in enumerate(dates):
@@ -756,12 +757,12 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                 return 0
             except EngineDisposedError:
                 raise
-            except Exception as e:
-                err_str = str(e).lower()
-                if "permission" in err_str or "积分" in err_str:
-                    logger.debug(
-                        f"[FinancialSync] Fetch | Permission denied for aux table on {ts_code}",
-                    )
+            except TushareAPIPermissionError:
+                logger.debug(
+                    f"[FinancialSync] Fetch | Permission denied for aux table on {ts_code}",
+                )
+                return 0
+            except Exception:
                 return 0
 
         try:

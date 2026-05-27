@@ -438,29 +438,28 @@ class TestCrossProviderFailoverCredentials:
         assert params["api_key"] == "sk-primary-key"
         assert params["model"] == "deepseek/deepseek-v4-pro"
 
-    def test_cross_provider_with_custom_models_config(self):
-        """跨供应商 failover 时从 custom_models 查找备用供应商的 api_key"""
+    def test_cross_provider_reads_from_provider_credentials(self):
+        """跨供应商 failover 时从 ConfigHandler.get_llm_config_for_provider 读取凭证"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
             "api_key": "sk-deepseek-key",
             "base_url": "https://api.deepseek.com",
-            "custom_models": {
-                "qwen": {
-                    "api_key": "sk-qwen-key",
-                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                },
-            },
         }
         messages = [{"role": "user", "content": "test"}]
 
-        params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
+        mock_credential = {
+            "api_key": "sk-qwen-from-credentials",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
         assert params["model"] == "qwen/qwen-max"
-        assert params["api_key"] == "sk-qwen-key"
+        assert params["api_key"] == "sk-qwen-from-credentials"
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-    def test_cross_provider_without_custom_models_omits_api_key(self):
-        """跨供应商 failover 且无 custom_models 配置时不设置 api_key，让 LiteLLM 从环境变量查找"""
+    def test_cross_provider_without_credentials_omits_api_key(self):
+        """跨供应商 failover 且无凭证配置时不设置 api_key"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -469,29 +468,28 @@ class TestCrossProviderFailoverCredentials:
         }
         messages = [{"role": "user", "content": "test"}]
 
-        params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        mock_credential = {"api_key": None, "base_url": ""}
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert params["model"] == "openai/gpt-4o"
         assert "api_key" not in params
         assert "api_base" not in params
 
-    def test_cross_provider_custom_models_without_api_key_omits_key(self):
-        """custom_models 中有供应商配置但无 api_key 时不设置 api_key"""
+    def test_cross_provider_uses_credential_base_url(self):
+        """跨供应商 failover 时使用凭证中的 base_url"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
             "api_key": "sk-deepseek-key",
             "base_url": "https://api.deepseek.com",
-            "custom_models": {
-                "openai": {
-                    "base_url": "https://api.openai.com",
-                },
-            },
         }
         messages = [{"role": "user", "content": "test"}]
 
-        params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        mock_credential = {"api_key": "sk-openai-key", "base_url": "https://api.openai.com"}
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert params["model"] == "openai/gpt-4o"
-        assert "api_key" not in params
+        assert params["api_key"] == "sk-openai-key"
         assert params["api_base"] == "https://api.openai.com"
 
     def test_no_override_uses_primary_config(self):
@@ -507,3 +505,41 @@ class TestCrossProviderFailoverCredentials:
         params = AIService._build_litellm_params(llm_config, messages)
         assert params["api_key"] == "sk-primary-key"
         assert params["model"] == "deepseek/deepseek-v4-flash"
+
+
+class TestCrossProviderCredentialFallback:
+    """跨供应商 failover 凭证统一从 ConfigHandler.get_llm_config_for_provider 读取"""
+
+    def test_reads_provider_credential_from_config_handler(self):
+        """跨供应商 failover 从 ConfigHandler.get_llm_config_for_provider 读取凭证"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        mock_credential = {
+            "api_key": "sk-qwen-from-credentials",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
+        assert params["api_key"] == "sk-qwen-from-credentials"
+        assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def test_no_credential_logs_debug(self):
+        """ConfigHandler 也无凭证时，不设置 api_key 并输出 debug 日志"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        mock_credential = {"api_key": None, "base_url": ""}
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        assert "api_key" not in params

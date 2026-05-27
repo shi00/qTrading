@@ -481,3 +481,129 @@ class TestDatabaseMigratorGetRevision:
                             found = True
                             break
                     assert found
+
+
+class TestDatabaseMigratorCoverageGaps:
+    @pytest.mark.asyncio
+    async def test_init_db_schema_up_to_date(self):
+        mock_engine = _make_engine(has_alembic=True, has_old_schema=True)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value="same_rev")
+
+            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="same_rev")):
+                with patch("data.persistence.db_migrator.logger") as mock_logger:
+                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=False)
+                    found = False
+                    for call in mock_logger.info.call_args_list:
+                        if "up to date" in str(call.args):
+                            found = True
+                            break
+                    assert found
+
+    @pytest.mark.asyncio
+    async def test_init_db_upgrade_logs_new_revision(self):
+        mock_engine = _make_engine(has_alembic=False, has_old_schema=False)
+
+        call_count = 0
+
+        async def mock_run_async(task_type, func, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return "new_rev"
+            elif call_count == 2:
+                func()
+                return None
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=mock_run_async)
+
+            with (
+                patch("data.persistence.db_migrator.command"),
+                patch("data.persistence.db_migrator.ScriptDirectory"),
+                patch("data.persistence.db_migrator.Config"),
+                patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="new_rev")),
+                patch("data.persistence.db_migrator.logger") as mock_logger,
+            ):
+                await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+                found = False
+                for call in mock_logger.info.call_args_list:
+                    if "new_rev" in str(call.args):
+                        found = True
+                        break
+                assert found
+
+    @pytest.mark.asyncio
+    async def test_init_db_upgrade_logs_no_revision(self):
+        mock_engine = _make_engine(has_alembic=False, has_old_schema=False)
+
+        call_count = 0
+
+        async def mock_run_async(task_type, func, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return "new_rev"
+            elif call_count == 2:
+                func()
+                return None
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=mock_run_async)
+
+            with (
+                patch("data.persistence.db_migrator.command"),
+                patch("data.persistence.db_migrator.ScriptDirectory"),
+                patch("data.persistence.db_migrator.Config"),
+                patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=None)),
+                patch("data.persistence.db_migrator.logger") as mock_logger,
+            ):
+                await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+                found = False
+                for call in mock_logger.info.call_args_list:
+                    if "latest version" in str(call.args):
+                        found = True
+                        break
+                assert found
+
+    @pytest.mark.asyncio
+    async def test_get_current_revision_no_alembic_table(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+
+        def _sync_get_rev(c):
+            inspector = MagicMock()
+            inspector.get_table_names.return_value = ["stock_basic", "daily_quotes"]
+            return None
+
+        mock_conn.run_sync = AsyncMock(return_value=None)
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect = MagicMock(return_value=mock_conn)
+
+        with patch("data.persistence.db_migrator.inspect") as mock_inspect:
+            mock_inspector = MagicMock()
+            mock_inspector.get_table_names.return_value = ["stock_basic"]
+            mock_inspect.return_value = mock_inspector
+
+            result = await DatabaseMigrator._get_current_revision(mock_engine)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_check_schema_status_with_exception_in_head_rev(self):
+        mock_engine = _make_engine(has_alembic=True, has_old_schema=True)
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("config error"))
+
+            with pytest.raises(Exception, match="config error"):
+                await DatabaseMigrator.check_schema_status(mock_engine)

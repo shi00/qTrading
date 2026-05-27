@@ -23,6 +23,7 @@
 - **一步步思考**：在进行复杂的架构修改或重构前，先输出简短的思考过程和执行计划，经确认后再编写代码。
 - **自我检查**：在输出代码前，主动思考是否违反了 §3 "关键约束与红线"。
 - **拒绝过度设计**：不要为"未来可能的需求"引入抽象层；当前能跑通的最简方案优先。
+- **复用优先**：实现任何功能前，必须先搜索确认项目中是否已有可复用代码（工具函数、基类方法、混入类、现有组件）；若需引入新功能，优先采用业界广泛使用、维护活跃的稳定开源库，而非自行实现；已有成熟库提供的功能不得再封装薄包装，除非能证明该封装带来实质性价值。
 
 ### 1.3 调试与问题排查
 
@@ -42,6 +43,7 @@
 | 修改单例 / 资源生命周期 | §4.3、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | §6.7 性能红线、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | §8、§10.6、`pyproject.toml`、`.github/workflows/ci_cd.yml` |
+| 新增/修改回测 | §6.4、§10.8、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py` |
 
 ---
 
@@ -60,6 +62,7 @@
 | **任务调度** | APScheduler + 自研 `TaskManager` (优先级、持久化、UI 通知) |
 | **HTTP 客户端** | requests + httpx (异步) + urllib3 |
 | **代码质量** | Ruff (Linter + Formatter) + Pyright (类型检查) |
+| **配置验证** | Pydantic (AppConfig 模型验证 + 默认值管理) |
 | **CI/CD** | GitHub Actions (Linux + Windows 双平台，含 PyInstaller 打包) |
 | **依赖管理** | uv (`pyproject.toml` → `requirements*.txt`，`--universal` 跨平台锁定，pre-commit 自动同步) |
 
@@ -98,6 +101,7 @@
 - 新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。
 - 涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
+- **复用优先**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
 
 ---
 
@@ -192,7 +196,9 @@ class MyService:
 4. 支持 `_initialized` 标志防止重复初始化
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 方法 (由 `singleton_registry` 的集中 `atexit` 处理器调用，按注册逆序执行)
 
-**典型单例**: `CacheManager`、`ThreadPoolManager`、`TaskManager`、`AIService`、`SchedulerService`、`ProxyManager`、`ConfigHandler` (类方法形式)。
+**@register_singleton 单例**: `CacheManager`、`ThreadPoolManager`、`TaskManager`、`AIService`、`SchedulerService`、`DataProcessor`、`MarketDataService`、`NewsSubscription`、`TushareClient`、`LocalModelManager`、`StrategyManager`。
+
+**非注册单例**: `ConfigHandler` (纯静态方法 + RWLockFair 保护)、`ProxyManager` (非装饰器单例)。
 
 ---
 
@@ -350,24 +356,28 @@ class MyStrategy(BaseStrategy):
 - **策略依赖检查**: 每个策略声明 `required_context_keys` 和 `required_tables`，运行前通过 `check_dependencies()` 验证数据就绪状态，返回 `ready` / `degraded` / `unready`。`CONTEXT_KEY_TABLE_MAP` 定义了 context key 到表名的映射。
 - **动态参数**: 重写 `get_parameters()` 暴露可调参数 (`slider` / `number` / `dropdown` 三种 UI 控件)。
 - **动态描述**: 重写 `get_dynamic_description(current_params)` 让描述随参数变化。
+- **依赖声明**: 声明 `required_context_keys` / `required_tables` / `required_history_days`。可选声明 `required_apis: list[str] = []`（所需外部 API 端点列表，用于依赖检查）。
 
 ### 6.2 Polars 向量化策略基类
 
-继承 `PolarsBaseStrategy` 使用 Polars LazyFrame 进行高性能向量化计算：
+继承 `PolarsBaseStrategy` 使用 Polars LazyFrame 进行高性能向量化计算。
+`PolarsBaseStrategy` 同时继承了 `AIStrategyMixin`，Polars 过滤后自动进入 AI 分析阶段（可通过 `enable_ai_analysis = False` 关闭）：
 
 ```python
 from strategies.polars_base import PolarsBaseStrategy
-from data.persistence.quality_gate import QualityTier, require_quality
+from data.persistence.quality_gate import QualityTier
 
 class MyPolarsStrategy(PolarsBaseStrategy):
-    @require_quality(QualityTier.SILVER)
+    # 注：如需覆盖默认质量等级，应在类属性中定义 required_quality_tier = QualityTier.GOLD，而非在方法上加装饰器。
+    required_quality_tier = QualityTier.SILVER
+
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         return lf.filter(pl.col("pct_chg") > 5.0)
 ```
 
-### 6.3 AI 策略混入 (AIMixin)
+### 6.3 AI 策略混入 (AIStrategyMixin)
 
-`strategies/ai_mixin.py` 提供 AI 增强能力，混入到策略类中实现 LLM 驱动的智能选股：
+`strategies/ai_mixin.py` 的 `AIStrategyMixin` 类提供 AI 增强能力，混入到策略类中实现 LLM 驱动的智能选股：
 
 - 构建结构化 Prompt → 调用 LLM → 解析结构化响应
 - 支持云端 (LiteLLM) 和本地 (llama-cpp-python) 双模式
@@ -384,13 +394,13 @@ class MyPolarsStrategy(PolarsBaseStrategy):
 - `_save_upsert()` — 批量 UPSERT (**推荐**，基于 `pg_insert` + `ON CONFLICT`)
 - `chunked_in_query()` — 分块 IN 查询 (避免参数上限)
 
-**DAO 继承体系**: `BaseDao` → `StockDao` / `QuoteDao` / `FinancialDao` / `MarketDao` / `ScreenerDao` / `SyncDao` / `MacroDao` / `HolderDao`
+**DAO 继承体系**: `BaseDao` → `StockDao` / `QuoteDao` / `FinancialDao` / `MarketDao` / `ScreenerDao` / `SyncDao` / `MacroDao` / `HolderDao` / `BacktestDAO`
 
 ### 6.5 数据同步架构
 
 `data/sync/` 下按数据类别组织同步策略：
 
-- `base.py` — 同步基类 (断点续传、进度回调、错误重试、维护锁)
+- `base.py` — 同步基础定义 (`SyncContext` 依赖注入容器、`SyncResult` 结果数据类、`ISyncStrategy` 策略接口，含取消支持)
 - `historical.py` — 历史行情同步
 - `financial.py` — 财务报告同步
 - `holder.py` — 股东数据同步
@@ -477,8 +487,8 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 ### 7.3 覆盖率要求
 
-- **整体覆盖率** ≥ 80% (`pyproject.toml [tool.coverage.report] fail_under=80`)
-- **单文件覆盖率** ≥ 75% (`per_file_minimum=75`，由 `scripts/check_per_file_coverage.py` 强制检查)
+- **整体覆盖率** ≥ 85% (`pyproject.toml [tool.coverage.report] fail_under=85`)
+- **单文件覆盖率** ≥ 80% (`per_file_minimum=80`，由 `scripts/check_per_file_coverage.py` 强制检查)
 - **覆盖率源**: `core`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main` (`tests/`, `scripts/`, `tiktoken_cache/` 排除)
 - **覆盖率排除行**: `pragma: no cover`、`if __name__ == "__main__"`、`if TYPE_CHECKING:`、`raise NotImplementedError`、`...`
 
@@ -493,7 +503,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR 必须通过
 3. **Pyright Type Check** (`continue-on-error: false`)
 4. **Alembic Migration** (验证 upgrade → downgrade → upgrade，确保迁移幂等可逆)
 5. **Unit & Integration Tests** (含 e2e)
-6. **Per-File (≥ 75%) & Overall Coverage (≥ 80%)**
+6. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)**
 7. **requirements*.txt 同步验证** (Windows job 强制 `uv pip compile --universal` 输出与提交内容一致；不一致时自动在 main 分支创建修复 commit)
 
 发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → Inno Setup 制作安装包 → GitHub Release 发布。
@@ -571,7 +581,7 @@ python main.py
 1. 在 `strategies/` 下创建 `xxx_strategy.py`。
 2. 使用 `@register_strategy("key")` 装饰器注册；继承 `BaseStrategy` (普通) 或 `PolarsBaseStrategy` (向量化)。
 3. 声明 `required_context_keys` / `required_tables` / `required_history_days`。
-4. 若需访问 LLM，使用 `AIMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。
+4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。
 5. 在 `strategies/all_strategies.py` 中导入该模块以触发自动注册。
 6. 在 `locales/` 添加 `strategy_xxx` / `strategy_xxx_desc` 等 i18n key。
 7. 在 `tests/unit/` 下编写单测。
@@ -613,9 +623,19 @@ python main.py
 | Ruff `UP*` 报错 | 使用了过时语法 | 跑 `ruff check . --fix` 自动升级 |
 | Tushare 限流 | 短时调用过多 | 看 `utils/rate_limiter.py` 配置；考虑加缓存 |
 
+### 10.8 新增回测配置
+
+1. 在 `strategies/backtest/config.py` 中定义回测参数 (`BacktestConfig`)。
+2. 在 `strategies/backtest/adapter.py` 中适配待回测的策略。
+3. 通过 `services/backtest_service.py` 的 `run_backtest()` 启动。
+4. 结果通过 `BacktestDAO` 持久化，由 `ui/views/backtest_view.py` 展示。
+
 ---
 
 ## 11. 目录速查
+
+> [!TIP]
+> 对于 token 敏感的场景（如 Cursor/Continue 的上下文窗口），在对话中请告知 AI 助手在此章节按需查阅特定子目录，而非全量加载整个目录速查结构。
 
 ### 11.1 入口与配置
 
@@ -641,14 +661,14 @@ python main.py
 
 - **`data/persistence/models.py`** — SQLAlchemy ORM 模型定义
 - **`data/persistence/daos/base_dao.py`** — DAO 基类 (`_read_db` / `_read_db_select` / `_write_db` / `_save_upsert` / `chunked_in_query`)，含 `EngineDisposedError`
-- **`data/persistence/daos/*_dao.py`** — 各业务 DAO (`stock_dao`, `quote_dao`, `financial_dao`, `market_dao`, `screener_dao`, `sync_dao`, `macro_dao`, `holder_dao`)
+- **`data/persistence/daos/*_dao.py`** — 各业务 DAO (`stock_dao`, `quote_dao`, `financial_dao`, `market_dao`, `screener_dao`, `sync_dao`, `macro_dao`, `holder_dao`, `backtest_dao`)
 - **`data/persistence/db_migrator.py`** — Alembic 迁移执行器
 - **`data/persistence/database_manager.py`** — 同步 DB 管理 (只读快查、连接探活)
 - **`data/persistence/db_config_service.py`** — DB 连接配置服务
 - **`data/persistence/metadata_manager.py`** — 元数据 (表 schema 版本、同步水位线) 管理
 - **`data/persistence/app_state_service.py`** — 应用状态持久化 (上次启动、用户偏好)
 - **`data/persistence/review_manager.py`** — 复盘记录管理
-- **`data/persistence/data_quality.py`** — 数据质量评估逻辑
+- **`data/persistence/data_quality.py`** — 数据质量评估 logic
 - **`data/persistence/quality_gate.py`** — `@require_quality(QualityTier.X)` 装饰器、`QualityGateError`
 
 **字典与处理**:
@@ -673,6 +693,7 @@ python main.py
 - **`data/domain_services/trade_calendar_service.py`** — 交易日历服务 (节假日、开盘日判定)
 - **`data/domain_services/market_data_service.py`** — 市场数据综合服务
 - **`data/domain_services/offline_calendar.py`** — 离线日历快照 (CI/无网环境兜底)
+- **`data/domain_services/transaction_cost.py`** — 交易成本计算服务
 
 **混入**:
 
@@ -684,6 +705,7 @@ python main.py
 - **`services/ai_service.py`** — AI 服务 (LiteLLM 多模型网关、重试、Token 计量)
 - **`services/task_manager.py`** — 异步任务管理器 (优先级、持久化、UI 通知)
 - **`services/local_model_manager.py`** — 本地 GGUF 模型下载与管理 (llama-cpp-python)
+- **`services/backtest_service.py`** — 回测服务 (策略回测执行、结果管理)
 
 ### 11.5 策略层 (`strategies/`)
 
@@ -698,21 +720,24 @@ python main.py
 - **`strategies/strategy_prompts.py`** — LLM Prompt 模板
 - **`strategies/prompt_validator.py`** — LLM 响应结构校验
 - **`strategies/utils.py`** — `StrategyContext` 类型定义、策略公共工具
+- **`strategies/backtest/`** — 回测引擎子模块 (`adapter` 策略适配器、`engine` 回测引擎、`config` 回测配置、`data_provider` 数据提供器、`metrics` 绩效指标、`portfolio` 组合管理、`position_sizer` 仓位计算、`report` 报告生成)
 
 ### 11.6 表现层 (`ui/`)
 
-- **`ui/app_layout.py`** — 主布局 (5 标签页导航)
+- **`ui/app_layout.py`** — 主布局 (6 标签页导航: 市场、选股、回测、数据、任务、设置)
 - **`ui/theme.py`** — 主题系统 (亮色 / 暗色)
 - **`ui/i18n.py`** — UI 层 i18n 桥接 (Flet 文本绑定)
-- **`ui/viewmodels/`** — MVVM 视图模型 (`home_view_model`, `screener_view_model`)
-- **`ui/views/`** — 视图页面 (`home`, `data`, `screener`, `settings`, `task_center`, `onboarding_wizard`)
+- **`ui/viewmodels/`** — MVVM 视图模型 (`home_view_model`, `screener_view_model`, `backtest_view_model`)
+- **`ui/views/`** — 视图页面 (`home`, `data`, `screener`, `settings`, `task_center`, `onboarding_wizard`, `backtest`)
 - **`ui/views/settings_tabs/`** — 设置页子标签
 - **`ui/components/`** — 可复用 UI 组件 (`chart_utils`, `health_report_dialog`, `market_dashboard`, `news_feed`, `settings_widgets`, `stock_detail_dialog`, `toast_manager`, `virtual_table`)
 - **`ui/components/config_panels/`** — 配置面板组件
+- **`ui/components/backtest/`** — 回测相关 UI 组件
 
 ### 11.7 工具层 (`utils/`)
 
 - **`utils/config_handler.py`** — 配置读写 (读写锁 + keyring/AES-GCM)
+- **`utils/config_models.py`** — 配置数据模型 (Pydantic `AppConfig` 验证、默认值、验证结果)
 - **`utils/shutdown.py`** — 优雅退出协调器 (看门狗 + 分步超时)
 - **`utils/thread_pool.py`** — 线程池管理器 (`TaskType.IO` / `TaskType.CPU` 分离)
 - **`utils/singleton_registry.py`** — 单例注册表 (`@register_singleton` + 统一重置 + 集中 atexit)

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, TypeVar
+from typing import TypeVar
 from collections.abc import Callable
 
 import keyring
@@ -84,6 +84,71 @@ class ConfigHandler:
         return result, dirty
 
     @staticmethod
+    def _migrate_custom_models_credentials(current_config: dict) -> bool:
+        """
+        迁移 custom_models 中的凭证到 llm_provider_credentials
+
+        旧格式: llm_custom_models: {provider: {api_key: ..., base_url: ..., models: [...]}}
+        新格式: llm_custom_models: {provider: [model_id1, model_id2]}
+                llm_provider_credentials: {provider: {api_key_encrypted: ..., base_url: ...}}
+
+        Returns:
+            bool: 是否进行了迁移
+        """
+        custom_models = current_config.get("llm_custom_models", {})
+        if not custom_models:
+            return False
+
+        needs_migration = False
+        provider_credentials = current_config.get("llm_provider_credentials", {})
+        cleaned_custom_models: dict[str, list[str]] = {}
+
+        for provider, value in custom_models.items():
+            if isinstance(value, list):
+                cleaned_custom_models[provider] = [str(m) for m in value]
+            elif isinstance(value, dict):
+                needs_migration = True
+
+                if "api_key" in value and value["api_key"]:
+                    try:
+                        keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", str(value["api_key"]))
+                    except Exception:
+                        encrypted = SecurityManager.encrypt_data(str(value["api_key"]))
+                        cred = provider_credentials.get(provider, {})
+                        cred["api_key_encrypted"] = encrypted
+                        provider_credentials[provider] = cred
+
+                if "base_url" in value and value["base_url"]:
+                    cred = provider_credentials.get(provider, {})
+                    cred["base_url"] = str(value["base_url"])
+                    provider_credentials[provider] = cred
+
+                if "models" in value and isinstance(value["models"], list):
+                    cleaned_custom_models[provider] = [str(m) for m in value["models"]]
+
+                logger.info(f"[ConfigHandler] Migrated credentials from custom_models for provider: {provider}")
+
+        if needs_migration:
+            current_config["llm_custom_models"] = cleaned_custom_models
+            current_config["llm_provider_credentials"] = provider_credentials
+            logger.info("[ConfigHandler] Credential migration from custom_models completed")
+
+        for provider, cred in provider_credentials.items():
+            if "models" in cred:
+                if provider not in cleaned_custom_models and isinstance(cred["models"], list):
+                    cleaned_custom_models[provider] = [str(m) for m in cred["models"]]
+                    logger.info(f"[ConfigHandler] Migrated 'models' from credentials to custom_models for: {provider}")
+
+                del cred["models"]
+                needs_migration = True
+                logger.info(f"[ConfigHandler] Removed legacy 'models' from credentials for: {provider}")
+
+        if needs_migration and cleaned_custom_models:
+            current_config["llm_custom_models"] = cleaned_custom_models
+
+        return needs_migration
+
+    @staticmethod
     def ensure_defaults():
         """Ensure default settings exist AND remove unused keys from user_settings.json
 
@@ -130,6 +195,9 @@ class ConfigHandler:
                         logger.info(f"Removing deprecated/unused config: {key}")
                         current_config.pop(key)
                         dirty = True
+
+                if ConfigHandler._migrate_custom_models_credentials(current_config):
+                    dirty = True
 
                 if dirty:
                     success = ConfigHandler._save_json_atomically(current_config, CONFIG_FILE)
@@ -627,6 +695,7 @@ class ConfigHandler:
 
         if "custom_models" in kwargs:
             provider_extras["custom_models"] = kwargs["custom_models"]
+            config_update["llm_custom_models"] = kwargs["custom_models"]
 
         if provider_extras:
             config_update["llm_provider_extras"] = provider_extras  # type: ignore[assignment]
@@ -705,7 +774,6 @@ class ConfigHandler:
         api_version = AZURE_DEFAULT_API_VERSION
         azure_resource_name = ""
         azure_deployment_name = ""
-        custom_models: dict[str, Any] = {}
 
         if "azure" in provider_extras:
             azure_config = provider_extras["azure"]
@@ -717,10 +785,15 @@ class ConfigHandler:
             azure_resource_name = config.get("llm_azure_resource_name", "")
             azure_deployment_name = config.get("llm_azure_deployment_name", "")
 
-        if "custom_models" in provider_extras:
-            custom_models = provider_extras["custom_models"]
-        else:
-            custom_models = config.get("llm_custom_models", {})
+        custom_models: dict[str, list[str]] = {}
+        raw_custom_models = config.get("llm_custom_models") or provider_extras.get("custom_models", {})
+        for provider_id, value in raw_custom_models.items():
+            if isinstance(value, list):
+                custom_models[provider_id] = [str(m) for m in value]
+            elif isinstance(value, dict) and "models" in value:
+                models_list = value.get("models", [])
+                if isinstance(models_list, list):
+                    custom_models[provider_id] = [str(m) for m in models_list]
 
         return {
             "provider": provider,
@@ -760,6 +833,191 @@ class ConfigHandler:
             "fallbacks": fallbacks,
             "primary_config": llm_config,
         }
+
+    @staticmethod
+    def save_provider_credential(
+        provider: str,
+        api_key: str = "",
+        base_url: str = "",
+        models: list[str] | None = None,
+    ) -> bool:
+        """
+        保存指定 LLM 供应商的凭证（用于跨供应商 failover）
+
+        Args:
+            provider: 供应商 ID (如 "qwen", "deepseek", "openai")
+            api_key: API Key (加密存储到 Keyring)
+            base_url: API 基础 URL
+            models: 该供应商的自定义模型列表
+
+        Returns:
+            bool: 保存是否成功
+        """
+        config = ConfigHandler.load_config()
+
+        provider_credentials = config.get("llm_provider_credentials", {})
+        if not isinstance(provider_credentials, dict):
+            provider_credentials = {}
+
+        cred = provider_credentials.get(provider, {})
+
+        config_update = {}
+
+        if base_url:
+            cred["base_url"] = base_url
+
+        provider_credentials[provider] = cred
+        config_update["llm_provider_credentials"] = provider_credentials
+
+        if models is not None:
+            custom_models = config.get("llm_custom_models", {})
+            existing_models = custom_models.get(provider, [])
+            updated_models = list(existing_models)
+            for m in models:
+                if m not in updated_models:
+                    updated_models.append(m)
+            if len(updated_models) > 50:
+                updated_models = updated_models[-50:]
+            custom_models[provider] = updated_models
+            config_update["llm_custom_models"] = custom_models
+
+        if api_key:
+            try:
+                keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", api_key)
+            except Exception as e:
+                logger.warning(
+                    f"[ConfigHandler] Keyring save failed for {provider}: {e}. Falling back to encrypted storage."
+                )
+                try:
+                    encrypted_key = SecurityManager.encrypt_data(api_key)
+                    cred["api_key_encrypted"] = encrypted_key
+                    provider_credentials[provider] = cred
+                    config_update["llm_provider_credentials"] = provider_credentials
+                except Exception as enc_err:
+                    logger.error(f"[ConfigHandler] Failed to encrypt api_key for {provider}: {enc_err}")
+                    return False
+
+        ConfigHandler.save_config(config_update)
+
+        return True
+
+    @staticmethod
+    def get_provider_credential(provider: str) -> dict:
+        """
+        获取指定 LLM 供应商的完整凭证
+
+        Args:
+            provider: 供应商 ID
+
+        Returns:
+            {
+                "api_key": str | None,
+                "base_url": str,
+                "models": list[str],
+            }
+        """
+        config = ConfigHandler.load_config()
+
+        provider_credentials = config.get("llm_provider_credentials", {})
+        cred = provider_credentials.get(provider, {})
+
+        api_key = None
+
+        try:
+            api_key = keyring.get_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
+        except Exception:
+            pass
+
+        if not api_key and cred.get("api_key_encrypted"):
+            try:
+                api_key = SecurityManager.decrypt_data(cred["api_key_encrypted"])
+            except Exception:
+                pass
+
+        if not api_key:
+            try:
+                api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+            except Exception:
+                pass
+            if not api_key:
+                encrypted = config.get("ai_api_key", "")
+                if encrypted:
+                    api_key = ConfigHandler._try_decrypt(encrypted)
+
+        base_url = cred.get("base_url", "")
+        if not base_url:
+            from utils.llm_providers import LLM_PROVIDERS
+
+            base_url = LLM_PROVIDERS.get(provider, {}).get("base_url", "")
+
+        custom_models = config.get("llm_custom_models", {})
+        provider_models = custom_models.get(provider, cred.get("models", []))
+        return {
+            "api_key": api_key,
+            "base_url": base_url,
+            "models": provider_models,
+        }
+
+    @staticmethod
+    def get_llm_config_for_provider(provider: str) -> dict:
+        """
+        获取指定供应商的 LLM 配置（用于跨供应商 failover）
+
+        整合 get_provider_credential 结果，返回与 get_llm_config 兼容的格式
+
+        Args:
+            provider: 供应商 ID
+
+        Returns:
+            {
+                "provider": str,
+                "model": str,
+                "api_key": str | None,
+                "base_url": str,
+                "models": list[str],
+            }
+        """
+        cred = ConfigHandler.get_provider_credential(provider)
+
+        if not cred["models"]:
+            logger.warning("[ConfigHandler] No models found for provider '%s', returning empty model", provider)
+
+        return {
+            "provider": provider,
+            "model": cred["models"][0] if cred["models"] else "",
+            "api_key": cred["api_key"],
+            "base_url": cred["base_url"],
+            "models": cred["models"],
+        }
+
+    @staticmethod
+    def validate_failover_credentials() -> list[str]:
+        """
+        校验 failover 配置的凭证完整性
+
+        Returns:
+            list[str]: 缺少凭证的供应商列表
+        """
+        config = ConfigHandler.load_config()
+        failover_models = config.get("llm_failover_models", [])
+        missing = []
+        seen = set()
+
+        for model in failover_models:
+            if "/" in model:
+                provider = model.split("/")[0]
+                if provider in seen:
+                    continue
+                model_id = model.split("/", 1)[1]
+                cred = ConfigHandler.get_provider_credential(provider)
+                if not cred.get("api_key"):  # noqa: SIM114
+                    missing.append(provider)
+                    seen.add(provider)
+                elif model_id and (not cred.get("models") or model_id not in cred["models"]):
+                    missing.append(provider)
+                    seen.add(provider)
+
+        return missing
 
     @staticmethod
     def get_local_ai_timeout() -> int:

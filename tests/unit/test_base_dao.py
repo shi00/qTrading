@@ -1313,6 +1313,62 @@ class TestBaseDaoPrepareDataParamsExtended:
         assert isinstance(result[0][2], int)
 
 
+class TestDecimalPreservation:
+    """AUDIT5_02 §2.6: Decimal values should be preserved, not converted to float.
+
+    asyncpg natively supports Decimal type. Converting to float loses precision
+    for high-precision fields like adj_factor (Numeric(20,12)).
+    """
+
+    def test_decimal_preserved_not_converted_to_float(self):
+        from decimal import Decimal
+
+        df = pd.DataFrame({"col1": [Decimal("1.123456789012")]})
+        result = BaseDao._prepare_data_params(df, ["col1"])
+        assert result is not None
+        assert isinstance(result[0][0], Decimal)
+        assert result[0][0] == Decimal("1.123456789012")
+
+    def test_decimal_high_precision_preserved(self):
+        from decimal import Decimal
+
+        df = pd.DataFrame(
+            {
+                "adj_factor": [Decimal("1.123456789012345678901234")],
+            }
+        )
+        result = BaseDao._prepare_data_params(df, ["adj_factor"])
+        assert result is not None
+        assert isinstance(result[0][0], Decimal)
+        assert result[0][0] == Decimal("1.123456789012345678901234")
+
+    def test_decimal_with_multiple_rows(self):
+        from decimal import Decimal
+
+        df = pd.DataFrame(
+            {
+                "price": [Decimal("10.5"), Decimal("20.25"), Decimal("30.125")],
+            }
+        )
+        result = BaseDao._prepare_data_params(df, ["price"])
+        assert result is not None
+        assert len(result) == 3
+        for i, expected in enumerate([Decimal("10.5"), Decimal("20.25"), Decimal("30.125")]):
+            assert isinstance(result[i][0], Decimal)
+            assert result[i][0] == expected
+
+    def test_decimal_none_preserved_as_none(self):
+        from decimal import Decimal
+
+        df = pd.DataFrame({"col1": [Decimal("1.5"), None, Decimal("3.5")]})
+        result = BaseDao._prepare_data_params(df, ["col1"])
+        assert result is not None
+        assert len(result) == 3
+        assert isinstance(result[0][0], Decimal)
+        assert result[1][0] is None
+        assert isinstance(result[2][0], Decimal)
+
+
 class TestEngineDisposedErrorDBP01:
     @pytest.mark.asyncio
     async def test_write_db_disposed_raises_engine_disposed_error(self):

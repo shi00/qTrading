@@ -1769,3 +1769,146 @@ class TestTushareConfigPanelExtended:
         panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.page = None
         panel._safe_update()
+
+    def test_refresh_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel.refresh_locale()
+        mock_i18n.get.assert_called()
+
+    def test_compact_mode_hint_text(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)
+        assert panel.token_input.hint_text is not None
+
+    @pytest.mark.asyncio
+    async def test_verify_token_already_verifying(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel.token_input.value = "valid_token"
+        panel._is_verifying = True
+        result = await panel.verify_token()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_verify_token_with_api_probe_success(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_verify = MagicMock()
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
+        panel.token_input.value = "valid_token"
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api") as mock_pro_api,
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+            patch("strategies.all_strategies.StrategyManager") as mock_sm,
+        ):
+            mock_pro = MagicMock()
+            mock_pro_api.return_value = mock_pro
+            mock_pro.trade_cal.return_value = MagicMock()
+
+            mock_client_instance = MagicMock()
+            mock_client_instance.set_token.return_value = True
+            mock_client_instance.probe_api_capabilities = AsyncMock(return_value={"daily": True, "index": True})
+            mock_client_cls.return_value = mock_client_instance
+
+            mock_sm.return_value.invalidate_dependency_cache = MagicMock()
+
+            result = await panel.verify_token()
+
+        assert result is True
+        mock_ch_for_panels.save_token.assert_called_once_with("valid_token")
+        on_verify.assert_called_once_with("valid_token")
+
+    @pytest.mark.asyncio
+    async def test_verify_token_with_api_probe_restricted_apis(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_verify = MagicMock()
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
+        panel.token_input.value = "valid_token"
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api") as mock_pro_api,
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+            patch("strategies.all_strategies.StrategyManager") as mock_sm,
+        ):
+            mock_pro = MagicMock()
+            mock_pro_api.return_value = mock_pro
+            mock_pro.trade_cal.return_value = MagicMock()
+
+            mock_client_instance = MagicMock()
+            mock_client_instance.set_token.return_value = True
+            mock_client_instance.probe_api_capabilities = AsyncMock(return_value={"daily": True, "premium": False})
+            mock_client_cls.return_value = mock_client_instance
+
+            mock_sm.return_value.invalidate_dependency_cache = MagicMock()
+
+            result = await panel.verify_token()
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_token_with_api_probe_exception(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_verify = MagicMock()
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
+        panel.token_input.value = "valid_token"
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api") as mock_pro_api,
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_pro = MagicMock()
+            mock_pro_api.return_value = mock_pro
+            mock_pro.trade_cal.return_value = MagicMock()
+
+            mock_client_instance = MagicMock()
+            mock_client_instance.set_token.return_value = True
+            mock_client_instance.probe_api_capabilities = AsyncMock(side_effect=Exception("probe error"))
+            mock_client_cls.return_value = mock_client_instance
+
+            result = await panel.verify_token()
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_token_with_api_probe_empty_results(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_verify = MagicMock()
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
+        panel.token_input.value = "valid_token"
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api") as mock_pro_api,
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+            patch("strategies.all_strategies.StrategyManager") as mock_sm,
+        ):
+            mock_pro = MagicMock()
+            mock_pro_api.return_value = mock_pro
+            mock_pro.trade_cal.return_value = MagicMock()
+
+            mock_client_instance = MagicMock()
+            mock_client_instance.set_token.return_value = True
+            mock_client_instance.probe_api_capabilities = AsyncMock(return_value={})
+            mock_client_cls.return_value = mock_client_instance
+
+            mock_sm.return_value.invalidate_dependency_cache = MagicMock()
+
+            result = await panel.verify_token()
+
+        assert result is True
+
+    def test_on_verify_click_no_page(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel.page = None
+        panel._on_verify_click(MagicMock())
+
+    def test_on_verify_click_already_verifying(self, mock_ch_for_panels, mock_i18n, mock_page):
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._is_verifying = True
+        panel._on_verify_click(MagicMock())
+        assert panel.status_text.value != "" or panel._is_verifying is True
+
+    def test_set_loading_state_with_callback(self, mock_ch_for_panels, mock_i18n, mock_page):
+        on_loading = MagicMock()
+        panel = _make_tushare_panel(
+            mock_ch_for_panels, mock_i18n, mock_page, on_loading_change=on_loading, show_internal_loading=False
+        )
+        panel._set_loading_state(True)
+        on_loading.assert_called_with(True)

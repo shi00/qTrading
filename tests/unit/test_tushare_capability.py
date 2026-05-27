@@ -219,6 +219,63 @@ class TestProbeApiCapabilities:
             assert isinstance(results, dict)
             assert len(results) > 0
 
+    @pytest.mark.asyncio
+    async def test_probes_extended_api_list(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+
+        expected_apis = [
+            "daily",
+            "moneyflow_hsgt",
+            "moneyflow",
+            "hk_hold",
+            "top_list",
+            "limit_list",
+            "margin_detail",
+            "block_trade",
+            "fina_indicator",
+            "fina_mainbz",
+            "stk_holdernumber",
+            "top10_holders",
+        ]
+
+        async def mock_handle(func, **kwargs):
+            return MagicMock()
+
+        with (
+            patch.object(client, "_handle_api_call", side_effect=mock_handle),
+            patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
+        ):
+            results = await client.probe_api_capabilities()
+
+            for api in expected_apis:
+                assert api in results, f"Expected API '{api}' not in probe results"
+
+    @pytest.mark.asyncio
+    async def test_probe_uses_correct_parameters(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+
+        call_log = []
+
+        async def mock_handle(func, **kwargs):
+            call_log.append(kwargs)
+            return MagicMock()
+
+        with (
+            patch.object(client, "_handle_api_call", side_effect=mock_handle),
+            patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
+        ):
+            await client.probe_api_capabilities()
+
+            stock_based_calls = [c for c in call_log if "ts_code" in c]
+            assert len(stock_based_calls) >= 4
+
+            for call in stock_based_calls:
+                assert call.get("ts_code") == "000001.SZ"
+                if "period" in call:
+                    assert call["period"] == "20241231"
+                if "enddate" in call:
+                    assert call["enddate"] == "20241231"
+
 
 class TestCheckDependenciesWithRequiredApis:
     def test_check_dependencies_includes_missing_apis(self, tushare_client_mocks):
@@ -276,4 +333,74 @@ class TestCheckDependenciesWithRequiredApis:
 
         result = strategy.check_dependencies(context)
         assert result["missing_apis"] == []
-        assert result["ready"] is True
+
+
+class TestRuntimePermissionPersistence:
+    @pytest.mark.asyncio
+    async def test_handle_api_call_persists_on_permission_error(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+            patch.object(client, "_persist_capability_safely", new_callable=AsyncMock) as mock_persist_safe,
+        ):
+            mock_func = MagicMock()
+            mock_func.__name__ = "moneyflow_hsgt"
+            mock_func.side_effect = Exception("权限不足，积分不够")
+
+            with pytest.raises(Exception, match="权限不足"):
+                await client._handle_api_call(mock_func, trade_date="20240101")
+
+            assert mock_persist_safe.called
+
+    @pytest.mark.asyncio
+    async def test_persist_capability_safely_swallows_errors(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        client.mark_api_available("test_api")
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.app_state_service.set_app_state", new_callable=AsyncMock) as mock_set,
+        ):
+            mock_cm.return_value.engine = MagicMock()
+            mock_set.side_effect = RuntimeError("DB down")
+
+            await client._persist_capability_safely()
+            assert mock_set.called
+
+
+class TestBlockTradeStrategyRequiredApis:
+    def test_block_trade_strategy_has_required_apis(self, tushare_client_mocks):
+        from strategies.market import BlockTradeStrategy
+
+        assert hasattr(BlockTradeStrategy, "required_apis")
+        assert "block_trade" in BlockTradeStrategy.required_apis
+
+    def test_block_trade_strategy_check_dependencies_respects_api_status(self, tushare_client_mocks):
+        from strategies.market import BlockTradeStrategy
+        from strategies.utils import StrategyContext
+
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("block_trade")
+
+        strategy = BlockTradeStrategy()
+        context = StrategyContext()
+
+        result = strategy.check_dependencies(context)
+        assert "block_trade" in result["missing_apis"]
+        assert result["ready"] is False
+
+    def test_block_trade_strategy_ready_when_api_available(self, tushare_client_mocks):
+        from strategies.market import BlockTradeStrategy
+        from strategies.utils import StrategyContext
+
+        client, _, _ = tushare_client_mocks
+        client.mark_api_available("block_trade")
+
+        strategy = BlockTradeStrategy()
+        context: StrategyContext = {"block_trade": MagicMock(empty=False)}
+
+        result = strategy.check_dependencies(context)
+        assert result["missing_apis"] == []

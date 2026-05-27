@@ -305,12 +305,16 @@ class AIService:
             request_params["model"] = model
             if is_cross_provider:
                 override_provider = model.split("/")[0]
-                custom_models = llm_config.get("custom_models", {})
-                override_config = custom_models.get(override_provider, {})
-                if override_config.get("api_key"):
-                    request_params["api_key"] = override_config["api_key"]
-                if override_config.get("base_url"):
-                    request_params["api_base"] = override_config["base_url"]
+                override_llm_config = ConfigHandler.get_llm_config_for_provider(override_provider)
+                if override_llm_config.get("api_key"):
+                    request_params["api_key"] = override_llm_config["api_key"]
+                else:
+                    logger.debug(
+                        "[AIService] Cross-provider failover to '%s' has no dedicated API key, using primary key (may fail)",
+                        override_provider,
+                    )
+                if override_llm_config.get("base_url"):
+                    request_params["api_base"] = override_llm_config["base_url"]
             else:
                 request_params["api_key"] = llm_config.get("api_key")
                 request_params["api_base"] = llm_config.get("base_url", "")

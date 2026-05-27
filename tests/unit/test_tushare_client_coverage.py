@@ -133,7 +133,7 @@ class TestTushareClientHandleApiCallPartialFunc:
             return pd.DataFrame({"a": [1]})
 
         mock_func = MagicMock()
-        mock_func.__name__ = "income"
+        mock_func.__name__ = "unknown_api_not_in_overrides"
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=fake_wait_for):
             result = await client._handle_api_call(mock_func)
             assert result is not None

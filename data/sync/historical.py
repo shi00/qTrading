@@ -24,7 +24,7 @@ from data.constants import (
 )
 from data.sync.base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.external.tushare_client import TushareAPIPermissionError
+from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
@@ -121,10 +121,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 calendar_days = int(days * 365 / 250) + 30
                 start_date = end_date - datetime.timedelta(days=calendar_days)
                 try:
+                    effective_report_tables = TushareClient().get_effective_synced_tables(self.CORE_RESUME_TABLES)
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=start_date,
                         end_date=end_date,
-                        tables=list(self.CORE_RESUME_TABLES),
+                        tables=list(effective_report_tables),
                     )
                     for date, quality in quality_results.items():
                         result.quality_scores[date] = quality.get("score", 0)
@@ -211,8 +212,6 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except Exception as e:
             logger.warning(f"[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults: {e}")
             QUALITY_THRESHOLD = 80
-
-        from data.external.tushare_client import TushareClient
 
         effective_synced_tables = TushareClient().get_effective_synced_tables(self.SYNCED_TABLES)
         effective_resume_tables = effective_synced_tables

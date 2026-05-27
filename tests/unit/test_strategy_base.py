@@ -357,7 +357,9 @@ class TestPhase2Trigger(unittest.IsolatedAsyncioTestCase):
         data = pd.DataFrame(
             {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
         )
-        context = {"screening_data": data, "params": {}}
+        dp_mock = MagicMock()
+        dp_mock._quality_tier = QualityTier.GOLD
+        context = {"screening_data": data, "params": {}, "data_processor": dp_mock}
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             _ = await s.filter(context)
             mock_ai.assert_not_called()
@@ -367,8 +369,10 @@ class TestPhase2Trigger(unittest.IsolatedAsyncioTestCase):
         data = pd.DataFrame(
             {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
         )
+        dp_mock = MagicMock()
+        dp_mock._quality_tier = QualityTier.GOLD
         progress_mock = MagicMock()
-        context = {"screening_data": data, "params": {}, "on_progress": progress_mock}
+        context = {"screening_data": data, "params": {}, "on_progress": progress_mock, "data_processor": dp_mock}
         await s.filter(context)
         progress_mock.assert_not_called()
 

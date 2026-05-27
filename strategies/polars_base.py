@@ -39,7 +39,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
       AIStrategyMixin (history, tech indicators, news, capital flow, financials).
     """
 
-    required_quality_tier: QualityTier = QualityTier.BRONZE
+    required_quality_tier: QualityTier = QualityTier.SILVER
     requires_fundamental_coverage: bool = False
     required_context_keys: list[str] = ["screening_data"]
     required_tables: list[str] = ["daily_quotes"]

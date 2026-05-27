@@ -93,6 +93,13 @@ class SyncIntegrityConfig(BaseModel):
     }
 
 
+class ProviderCredential(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    base_url: str = ""
+    api_key_encrypted: str = ""
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -114,10 +121,11 @@ class AppConfig(BaseModel):
     llm_api_version: str = AZURE_DEFAULT_API_VERSION
     llm_azure_resource_name: str = ""
     llm_azure_deployment_name: str = ""
-    llm_custom_models: dict[str, Any] = {}
+    llm_custom_models: dict[str, list[str]] = {}
     llm_provider_extras: dict[str, Any] = {}
     llm_failover_models: list[str] = []
     ai_api_key: str = ""
+    llm_provider_credentials: dict[str, ProviderCredential] = {}
 
     local_model_path: str = ""
     local_model_timeout: int = Field(default=90, ge=1, le=3600)

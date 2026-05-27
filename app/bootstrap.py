@@ -65,6 +65,8 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     await _warmup_tushare_capabilities()
 
+    _validate_failover_credentials()
+
     return {"success": True, "error": None, "detail": None, "current_rev": None, "head_rev": None}
 
 
@@ -92,6 +94,25 @@ async def _warmup_tushare_capabilities() -> None:
             logger.debug("[Bootstrap] Tushare capability cache empty after load (first startup or token changed)")
     except Exception as e:
         logger.warning(f"[Bootstrap] Tushare capability warmup failed (non-critical): {e}")
+
+
+def _validate_failover_credentials() -> None:
+    """
+    Validate failover provider credentials on startup.
+
+    Logs a warning if any failover provider is missing API key.
+    """
+    from utils.config_handler import ConfigHandler
+
+    try:
+        missing = ConfigHandler.validate_failover_credentials()
+        if missing:
+            logger.warning(
+                "[Bootstrap] Failover providers missing credentials: %s. Cross-provider fallback may fail.",
+                ", ".join(missing),
+            )
+    except Exception as e:
+        logger.debug(f"[Bootstrap] Failover credential validation skipped: {e}")
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):

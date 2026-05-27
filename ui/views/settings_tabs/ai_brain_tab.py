@@ -11,6 +11,7 @@ import flet as ft
 
 from services.ai_service import AIService
 from services.local_model_manager import LocalModelManager
+from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.settings_widgets import DashboardCard, SectionHeader
@@ -141,6 +142,18 @@ class AIBrainTab(ft.Container):
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     self.llm_config_panel,  # pragma: no cover
+                ],  # pragma: no cover
+            ),  # pragma: no cover
+        )  # pragma: no cover
+
+        self.failover_panel = FailoverConfigPanel(  # pragma: no cover
+            on_save=self._on_llm_config_saved,  # pragma: no cover
+        )  # pragma: no cover
+
+        self.card_failover = DashboardCard(  # pragma: no cover
+            content=ft.Column(  # pragma: no cover
+                [  # pragma: no cover
+                    self.failover_panel,  # pragma: no cover
                 ],  # pragma: no cover
             ),  # pragma: no cover
         )  # pragma: no cover
@@ -291,6 +304,7 @@ class AIBrainTab(ft.Container):
         self.content = ft.Column(  # pragma: no cover
             controls=[  # pragma: no cover
                 self.card_connection,  # pragma: no cover
+                self.card_failover,  # pragma: no cover
                 self.card_local_ai,  # pragma: no cover
                 self.card_tuning,  # pragma: no cover
                 self.card_prompt,  # pragma: no cover
@@ -332,6 +346,7 @@ class AIBrainTab(ft.Container):
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)  # pragma: no cover
         logger.debug("[AIBrainTab] Subscribed to locale changes")  # pragma: no cover
         self.llm_config_panel.reload_config()  # pragma: no cover
+        self.failover_panel.reload_config()  # pragma: no cover
         self.local_model_panel.reload_config()  # pragma: no cover
 
     def will_unmount(self):  # pragma: no cover

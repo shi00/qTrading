@@ -600,3 +600,772 @@ class TestGetMaxIoWorkersUsesDefaultConfig:
     def test_custom_io_workers_within_db_capacity(self, mock_load):
         result = cfg_mod.ConfigHandler.get_max_io_workers()
         assert result == 5
+
+
+class TestMultiProviderCredentials:
+    """P0-8: 多供应商凭证存储与读取测试"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_save_provider_credential(self, mock_set, mock_save):
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="qwen_key_123",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            models=["qwen-plus", "qwen-turbo"],
+        )
+        assert result is True
+        mock_set.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key_qwen", "qwen_key_123")
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value="qwen_key_123")
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={
+            "llm_provider_credentials": {
+                "qwen": {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "models": ["qwen-plus"]}
+            }
+        },
+    )
+    def test_get_provider_credential(self, mock_load, mock_kr):
+        result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+        assert result["api_key"] == "qwen_key_123"
+        assert result["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert "qwen-plus" in result["models"]
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_fallback_to_global_api_key(self, mock_load, mock_decrypt, mock_kr):
+        with patch.object(
+            cfg_mod.keyring, "get_password", side_effect=lambda svc, key: "global_key" if key == "ai_api_key" else None
+        ):
+            result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+            assert result["api_key"] == "global_key"
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value="qwen_key")
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_provider_credentials": {"qwen": {"models": ["qwen-plus"]}}},
+    )
+    def test_get_llm_config_for_provider(self, mock_load, mock_kr):
+        result = cfg_mod.ConfigHandler.get_llm_config_for_provider("qwen")
+        assert result["provider"] == "qwen"
+        assert result["model"] == "qwen-plus"
+        assert result["api_key"] == "qwen_key"
+
+    @patch.object(
+        cfg_mod.ConfigHandler, "load_config", return_value={"llm_custom_models": {}, "llm_provider_credentials": {}}
+    )
+    @patch.object(cfg_mod.ConfigHandler, "save_config")
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_save_provider_credential_without_base_url_registers_provider(self, mock_set, mock_save, mock_load):
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="qwen_key",
+            base_url="",
+            models=["qwen-plus"],
+        )
+        assert result is True
+        saved_config = mock_save.call_args[0][0]
+        assert "qwen" in saved_config["llm_provider_credentials"]
+        assert saved_config["llm_custom_models"]["qwen"] == ["qwen-plus"]
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={
+            "llm_custom_models": {"qwen": [f"model-{i}" for i in range(48)]},
+            "llm_provider_credentials": {"qwen": {}},
+        },
+    )
+    @patch.object(cfg_mod.ConfigHandler, "save_config")
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_save_provider_credential_models_limit_50(self, mock_set, mock_save, mock_load):
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="qwen_key",
+            base_url="https://api.qwen.com/v1",
+            models=["model-48", "model-49", "model-50"],
+        )
+        assert result is True
+        saved_config = mock_save.call_args[0][0]
+        models_list = saved_config["llm_custom_models"]["qwen"]
+        assert len(models_list) == 50
+        assert models_list[-3:] == ["model-48", "model-49", "model-50"]
+
+
+class TestMigrateCustomModelsCredentials:
+    """测试 _migrate_custom_models_credentials 迁移旧格式到新格式"""
+
+    def test_no_custom_models_returns_false(self):
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials({})
+        assert result is False
+
+    def test_empty_custom_models_returns_false(self):
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials({"llm_custom_models": {}})
+        assert result is False
+
+    def test_already_new_format_list_returns_false(self):
+        config = {"llm_custom_models": {"deepseek": ["deepseek-v3", "deepseek-v4-flash"]}}
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        assert result is False
+        assert config["llm_custom_models"]["deepseek"] == ["deepseek-v3", "deepseek-v4-flash"]
+
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_migrate_old_dict_format_with_api_key(self, mock_keyring):
+        config = {
+            "llm_custom_models": {
+                "qwen": {
+                    "api_key": "qwen_secret_key",
+                    "base_url": "https://dashscope.aliyuncs.com/v1",
+                    "models": ["qwen-plus", "qwen-turbo"],
+                }
+            }
+        }
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        assert result is True
+        mock_keyring.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key_qwen", "qwen_secret_key")
+        assert config["llm_custom_models"]["qwen"] == ["qwen-plus", "qwen-turbo"]
+        assert "qwen" in config["llm_provider_credentials"]
+        assert config["llm_provider_credentials"]["qwen"]["base_url"] == "https://dashscope.aliyuncs.com/v1"
+
+    @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="ENCRYPTED_KEY")
+    def test_migrate_old_dict_format_keyring_fallback(self, mock_encrypt, mock_keyring):
+        config = {
+            "llm_custom_models": {
+                "qwen": {
+                    "api_key": "qwen_secret_key",
+                    "models": ["qwen-plus"],
+                }
+            }
+        }
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        assert result is True
+        mock_encrypt.assert_called_once_with("qwen_secret_key")
+        assert config["llm_provider_credentials"]["qwen"]["api_key_encrypted"] == "ENCRYPTED_KEY"
+
+    def test_migrate_old_dict_format_only_base_url(self):
+        config = {
+            "llm_custom_models": {
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "models": ["gpt-4"],
+                }
+            }
+        }
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        assert result is True
+        assert config["llm_custom_models"]["openai"] == ["gpt-4"]
+        assert config["llm_provider_credentials"]["openai"]["base_url"] == "https://api.openai.com/v1"
+
+    def test_migrate_old_dict_format_no_models(self):
+        config = {
+            "llm_custom_models": {
+                "deepseek": {
+                    "api_key": "ds_key",
+                }
+            }
+        }
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        assert result is True
+        assert "deepseek" not in config["llm_custom_models"]
+
+    def test_migrate_models_from_credentials_to_custom_models(self):
+        config = {
+            "llm_custom_models": {"other": ["model1"]},
+            "llm_provider_credentials": {"azure": {"models": ["gpt-4-azure"], "base_url": "https://azure.openai.com"}},
+        }
+        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        assert result is True
+        assert config["llm_custom_models"]["azure"] == ["gpt-4-azure"]
+        assert "models" not in config["llm_provider_credentials"]["azure"]
+
+    def test_migrate_mixed_formats(self):
+        config = {
+            "llm_custom_models": {
+                "deepseek": ["deepseek-v3"],
+                "qwen": {
+                    "api_key": "qwen_key",
+                    "models": ["qwen-plus"],
+                },
+            }
+        }
+        with patch.object(cfg_mod.keyring, "set_password"):
+            result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+            assert result is True
+            assert config["llm_custom_models"]["deepseek"] == ["deepseek-v3"]
+            assert config["llm_custom_models"]["qwen"] == ["qwen-plus"]
+
+
+class TestValidateFailoverCredentials:
+    """测试 validate_failover_credentials 校验 failover 配置完整性"""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": []})
+    def test_empty_failover_list_returns_empty(self, mock_load):
+        result = cfg_mod.ConfigHandler.validate_failover_credentials()
+        assert result == []
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["deepseek/deepseek-v3"]})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_provider_credential",
+        return_value={"api_key": "valid_key", "models": ["deepseek-v3"], "base_url": ""},
+    )
+    def test_valid_credentials_returns_empty(self, mock_cred, mock_load):
+        result = cfg_mod.ConfigHandler.validate_failover_credentials()
+        assert result == []
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["qwen/qwen-plus"]})
+    @patch.object(
+        cfg_mod.ConfigHandler, "get_provider_credential", return_value={"api_key": None, "models": [], "base_url": ""}
+    )
+    def test_missing_api_key(self, mock_cred, mock_load):
+        result = cfg_mod.ConfigHandler.validate_failover_credentials()
+        assert "qwen" in result
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["qwen/qwen-plus"]})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_provider_credential",
+        return_value={"api_key": "valid_key", "models": ["qwen-turbo"], "base_url": ""},
+    )
+    def test_model_not_in_list(self, mock_cred, mock_load):
+        result = cfg_mod.ConfigHandler.validate_failover_credentials()
+        assert "qwen" in result
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_failover_models": ["deepseek/v3", "qwen/qwen-plus", "openai/gpt-4"]},
+    )
+    def test_multiple_providers_dedup(self, mock_load):
+        cred_calls = {
+            "deepseek": {"api_key": "ds_key", "models": ["v3"], "base_url": ""},
+            "qwen": {"api_key": None, "models": [], "base_url": ""},
+            "openai": {"api_key": None, "models": [], "base_url": ""},
+        }
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "get_provider_credential",
+            side_effect=lambda p: cred_calls[p],
+        ):
+            result = cfg_mod.ConfigHandler.validate_failover_credentials()
+            assert "deepseek" not in result
+            assert "qwen" in result
+            assert "openai" in result
+
+
+class TestLoadConfigWithValidation:
+    """测试 load_config_with_validation 返回验证详情"""
+
+    @patch.object(cfg_mod, "CONFIG_FILE", "/nonexistent/user_settings.json")
+    def test_file_not_exist_returns_defaults(self):
+        with patch.object(cfg_mod.os.path, "exists", return_value=False):
+            result = cfg_mod.ConfigHandler.load_config_with_validation()
+            assert result.is_valid is True
+            assert result.used_defaults is True
+            assert result.errors == []
+
+    @patch.object(cfg_mod, "CONFIG_FILE", "/exists/user_settings.json")
+    @patch.object(cfg_mod.os.path, "exists", return_value=True)
+    @patch.object(cfg_mod, "open", create=True)
+    def test_valid_config(self, mock_open, mock_exists):
+        mock_file = MagicMock()
+        mock_file.read.return_value = '{"llm_provider": "deepseek", "llm_model": "deepseek-v3"}'
+        mock_open.return_value.__enter__.return_value = mock_file
+        with patch.object(cfg_mod.json, "load", return_value={"llm_provider": "deepseek", "llm_model": "deepseek-v3"}):
+            result = cfg_mod.ConfigHandler.load_config_with_validation()
+            assert result.is_valid is True
+            assert result.used_defaults is False
+
+    @patch.object(cfg_mod.os.path, "exists", return_value=True)
+    def test_validation_error_sanitizes_sensitive_keys(self, mock_exists):
+        from pydantic import ValidationError
+
+        config_data = {"ts_token": "secret_token_value", "invalid_key": "value"}
+        with patch.object(cfg_mod, "open", create=True) as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = "{}"
+            with patch.object(cfg_mod.json, "load", return_value=config_data):
+                with patch.object(
+                    cfg_mod.AppConfig,
+                    "model_validate",
+                    side_effect=ValidationError.from_exception_data(
+                        "test", [{"type": "extra_forbidden", "loc": ("ts_token",), "input": "secret_token_value"}]
+                    ),
+                ):
+                    result = cfg_mod.ConfigHandler.load_config_with_validation()
+                    assert result.is_valid is False
+                    assert result.used_defaults is True
+
+    @patch.object(cfg_mod, "CONFIG_FILE", "/exists/user_settings.json")
+    @patch.object(cfg_mod.os.path, "exists", return_value=True)
+    def test_general_exception(self, mock_exists):
+        with patch.object(cfg_mod.json, "load", side_effect=RuntimeError("read error")):
+            result = cfg_mod.ConfigHandler.load_config_with_validation()
+            assert result.is_valid is False
+            assert result.config == {}
+
+
+class TestAiPrompts:
+    """测试 AI prompt 相关方法"""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_system_prompt": "custom prompt"})
+    def test_get_ai_system_prompt_custom(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_ai_system_prompt()
+        assert result == "custom prompt"
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_get_ai_system_prompt_default(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_ai_system_prompt()
+        assert result == cfg_mod.DEFAULT_AI_PROMPT
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_ai_system_prompt_valid(self, mock_save):
+        import utils.prompt_guard as pg
+
+        with patch.object(pg, "validate_prompt", return_value=(True, None)):
+            with patch.object(pg, "sanitize_prompt", return_value="sanitized"):
+                result = cfg_mod.ConfigHandler.save_ai_system_prompt("test prompt")
+                assert result is True
+                mock_save.assert_called_once_with({"ai_system_prompt": "sanitized"})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_ai_system_prompt_invalid(self, mock_save):
+        import utils.prompt_guard as pg
+
+        with patch.object(pg, "validate_prompt", return_value=(False, "invalid")):
+            result = cfg_mod.ConfigHandler.save_ai_system_prompt("bad prompt")
+            assert result is False
+            mock_save.assert_not_called()
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_ai_system_prompt_empty(self, mock_save):
+        result = cfg_mod.ConfigHandler.save_ai_system_prompt("")
+        assert result is True
+        mock_save.assert_called_once_with({"ai_system_prompt": ""})
+
+    @patch.object(
+        cfg_mod.ConfigHandler, "load_config", return_value={"ai_strategy_prompt_oversold": "custom strategy prompt"}
+    )
+    def test_get_strategy_prompt(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_strategy_prompt("oversold")
+        assert result == "custom strategy prompt"
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_get_strategy_prompt_none(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_strategy_prompt("unknown")
+        assert result is None
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_strategy_prompt_valid(self, mock_save):
+        import utils.prompt_guard as pg
+
+        with patch.object(pg, "validate_prompt", return_value=(True, None)):
+            with patch.object(pg, "sanitize_prompt", return_value="sanitized"):
+                result = cfg_mod.ConfigHandler.set_strategy_prompt("oversold", "test prompt")
+                assert result is True
+                mock_save.assert_called_once_with({"ai_strategy_prompt_oversold": "sanitized"})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_strategy_prompt_invalid(self, mock_save):
+        import utils.prompt_guard as pg
+
+        with patch.object(pg, "validate_prompt", return_value=(False, "invalid")):
+            result = cfg_mod.ConfigHandler.set_strategy_prompt("oversold", "bad prompt")
+            assert result is False
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_news_prompt": "custom news prompt"})
+    def test_get_ai_news_prompt_custom(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_ai_news_prompt()
+        assert result == "custom news prompt"
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_get_ai_news_prompt_default(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_ai_news_prompt()
+        assert result == cfg_mod.DEFAULT_NEWS_PROMPT
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_ai_news_prompt(self, mock_save):
+        result = cfg_mod.ConfigHandler.set_ai_news_prompt("new prompt")
+        assert result is True
+
+
+class TestSaveProviderCredentialEncrypt:
+    """测试 save_provider_credential 加密 fallback 路径"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="ENCRYPTED_KEY")
+    def test_keyring_fallback_to_encrypt(self, mock_encrypt, mock_keyring, mock_save):
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="qwen_secret_key",
+        )
+        assert result is True
+        mock_encrypt.assert_called_once_with("qwen_secret_key")
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(cfg_mod.SecurityManager, "encrypt_data", side_effect=RuntimeError("encrypt failed"))
+    def test_encrypt_failure_returns_false(self, mock_encrypt, mock_keyring, mock_save):
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="qwen_secret_key",
+        )
+        assert result is False
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_with_models_limits_to_50(self, mock_keyring, mock_save):
+        models = [f"model_{i}" for i in range(60)]
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            models=models,
+        )
+        assert result is True
+        saved_config = mock_save.call_args[0][0]
+        assert len(saved_config["llm_custom_models"]["qwen"]) == 50
+
+
+class TestGetProviderCredentialFallback:
+    """测试 get_provider_credential keyring fallback 路径"""
+
+    @patch.object(
+        cfg_mod.keyring, "get_password", side_effect=lambda s, k: "provider_key" if k == "ai_api_key_qwen" else None
+    )
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_from_provider_keyring(self, mock_load, mock_kr):
+        result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+        assert result["api_key"] == "provider_key"
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_provider_credentials": {"qwen": {"api_key_encrypted": "ENC_KEY"}}},
+    )
+    @patch.object(cfg_mod.SecurityManager, "decrypt_data", return_value="decrypted_key")
+    def test_from_encrypted_config(self, mock_decrypt, mock_load, mock_kr):
+        result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+        assert result["api_key"] == "decrypted_key"
+
+    @patch.object(cfg_mod.keyring, "get_password", side_effect=lambda s, k: "global_key" if k == "ai_api_key" else None)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_fallback_to_global_keyring(self, mock_load, mock_kr):
+        result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")
+        assert result["api_key"] == "global_key"
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_from_config")
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_api_key": "ENCRYPTED_GLOBAL"})
+    def test_fallback_to_global_encrypted(self, mock_load, mock_decrypt, mock_kr):
+        result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")
+        assert result["api_key"] == "decrypted_from_config"
+
+
+class TestSimpleGetterSetters:
+    """测试简单 getter/setter 方法"""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"log_level": "DEBUG"})
+    def test_get_log_level(self, mock_load):
+        assert cfg_mod.ConfigHandler.get_log_level() == "DEBUG"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_log_level(self, mock_set):
+        cfg_mod.ConfigHandler.set_log_level("info")
+        mock_set.assert_called_once_with("log_level", "INFO")
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"log_format": "json"})
+    def test_get_log_format(self, mock_load):
+        assert cfg_mod.ConfigHandler.get_log_format() == "json"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_log_format(self, mock_set):
+        cfg_mod.ConfigHandler.set_log_format("TEXT")
+        mock_set.assert_called_once_with("log_format", "text")
+
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=5)
+    def test_get_init_history_years(self, mock_get):
+        assert cfg_mod.ConfigHandler.get_init_history_years() == 5
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_init_history_years_clamped(self, mock_set):
+        cfg_mod.ConfigHandler.set_init_history_years(10)
+        mock_set.assert_called_once_with("init_history_years", 5)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_doubao_schedule_enabled(self, mock_set):
+        cfg_mod.ConfigHandler.set_doubao_schedule_enabled(True)
+        mock_set.assert_called_once_with("doubao_schedule_enabled", True)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_doubao_schedule_time(self, mock_set):
+        cfg_mod.ConfigHandler.set_doubao_schedule_time("12:00")
+        mock_set.assert_called_once_with("doubao_schedule_time", "12:00")
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_db_connection_pool_size(self, mock_set):
+        cfg_mod.ConfigHandler.set_db_connection_pool_size(20)
+        mock_set.assert_called_once_with("db_connection_pool_size", 20)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_db_max_overflow(self, mock_set):
+        cfg_mod.ConfigHandler.set_db_max_overflow(10)
+        mock_set.assert_called_once_with("db_max_overflow", 10)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_db_pool_timeout(self, mock_set):
+        cfg_mod.ConfigHandler.set_db_pool_timeout(60)
+        mock_set.assert_called_once_with("db_pool_timeout", 60)
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_concurrency(self, mock_save):
+        cfg_mod.ConfigHandler.set_sync_concurrency(5)
+        mock_save.assert_called_once_with({"sync_max_concurrent_heavy": 5})
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_max_batch_rows(self, mock_set):
+        cfg_mod.ConfigHandler.set_max_batch_rows(50000)
+        mock_set.assert_called_once_with("max_batch_rows", 50000)
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"locale": "en"})
+    def test_get_locale(self, mock_load):
+        assert cfg_mod.ConfigHandler.get_locale() == "en"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_locale(self, mock_set):
+        cfg_mod.ConfigHandler.set_locale("zh")
+        mock_set.assert_called_once_with("locale", "zh")
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"theme_name": "light"})
+    def test_get_theme_name(self, mock_load):
+        assert cfg_mod.ConfigHandler.get_theme_name() == "light"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_theme_name(self, mock_set):
+        cfg_mod.ConfigHandler.set_theme_name("dark")
+        mock_set.assert_called_once_with("theme_name", "dark")
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_max_io_workers(self, mock_set):
+        cfg_mod.ConfigHandler.set_max_io_workers(8)
+        mock_set.assert_called_once_with("max_io_workers", 8)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_max_cpu_workers(self, mock_set):
+        cfg_mod.ConfigHandler.set_max_cpu_workers(4)
+        mock_set.assert_called_once_with("max_cpu_workers", 4)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_max_concurrent_tasks(self, mock_set):
+        cfg_mod.ConfigHandler.set_max_concurrent_tasks(10)
+        mock_set.assert_called_once_with("max_concurrent_tasks", 10)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_sync_request_delay_heavy(self, mock_set):
+        cfg_mod.ConfigHandler.set_sync_request_delay(0.5, is_heavy=True)
+        mock_set.assert_called_once_with("sync_request_delay_heavy", 0.5)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_sync_request_delay_light(self, mock_set):
+        cfg_mod.ConfigHandler.set_sync_request_delay(0.1, is_heavy=False)
+        mock_set.assert_called_once_with("sync_request_delay_light", 0.1)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_news_poll_interval(self, mock_set):
+        cfg_mod.ConfigHandler.set_news_poll_interval(30)
+        mock_set.assert_called_once_with("news_poll_interval", 30)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_market_data_poll_interval(self, mock_set):
+        cfg_mod.ConfigHandler.set_market_data_poll_interval(15)
+        mock_set.assert_called_once_with("market_data_poll_interval", 15)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_ai_max_candidates(self, mock_set):
+        cfg_mod.ConfigHandler.set_ai_max_candidates(50)
+        mock_set.assert_called_once_with("ai_max_candidates", 50)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_ai_max_concurrent_analysis(self, mock_set):
+        cfg_mod.ConfigHandler.set_ai_max_concurrent_analysis(10)
+        mock_set.assert_called_once_with("ai_max_concurrent_analysis", 10)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_strategy_min_turnover(self, mock_set):
+        cfg_mod.ConfigHandler.set_strategy_min_turnover(5.0)
+        mock_set.assert_called_once_with("strategy_min_turnover", 5.0)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_tushare_timeout(self, mock_set):
+        cfg_mod.ConfigHandler.set_tushare_timeout(60)
+        mock_set.assert_called_once_with("tushare_timeout", 60)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_tushare_api_limit(self, mock_set):
+        cfg_mod.ConfigHandler.set_tushare_api_limit(500)
+        mock_set.assert_called_once_with("tushare_api_rate_limit", 500)
+
+
+class TestGetFailoverConfig:
+    """测试 get_failover_config 获取 failover 配置"""
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_llm_config",
+        return_value={
+            "provider": "deepseek",
+            "model": "deepseek-v3",
+            "api_key": "key",
+            "base_url": "",
+            "api_version": "",
+            "azure_resource_name": "",
+            "azure_deployment_name": "",
+            "custom_models": {},
+        },
+    )
+    @patch.object(
+        cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["qwen/qwen-plus", "openai/gpt-4"]}
+    )
+    def test_with_fallbacks(self, mock_load, mock_llm):
+        result = cfg_mod.ConfigHandler.get_failover_config()
+        assert result["primary"] == "deepseek/deepseek-v3"
+        assert result["fallbacks"] == ["qwen/qwen-plus", "openai/gpt-4"]
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_llm_config",
+        return_value={
+            "provider": "deepseek",
+            "model": "deepseek-v3",
+            "api_key": "key",
+            "base_url": "",
+            "api_version": "",
+            "azure_resource_name": "",
+            "azure_deployment_name": "",
+            "custom_models": {},
+        },
+    )
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": "not_a_list"})
+    def test_invalid_fallbacks_returns_empty(self, mock_load, mock_llm):
+        result = cfg_mod.ConfigHandler.get_failover_config()
+        assert result["fallbacks"] == []
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_llm_config",
+        return_value={
+            "provider": "",
+            "model": "",
+            "api_key": "key",
+            "base_url": "",
+            "api_version": "",
+            "azure_resource_name": "",
+            "azure_deployment_name": "",
+            "custom_models": {},
+        },
+    )
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_empty_provider(self, mock_load, mock_llm):
+        result = cfg_mod.ConfigHandler.get_failover_config()
+        assert result["primary"] == ""
+
+
+class TestGetTypedExceptions:
+    """测试 get_typed 异常路径"""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"test_bool": "true"})
+    def test_bool_from_string_true(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_typed("test_bool", bool, False)
+        assert result is True
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"test_bool": "FALSE"})
+    def test_bool_from_string_false(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_typed("test_bool", bool, True)
+        assert result is False
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"test_int": "not_a_number"})
+    def test_int_invalid_returns_default(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_typed("test_int", int, 42)
+        assert result == 42
+
+
+class TestSetTypedValidation:
+    """测试 set_typed 验证路径"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_with_validator_pass(self, mock_save):
+        result = cfg_mod.ConfigHandler.set_typed("test_key", "valid_value", validator=lambda x: len(x) > 3)
+        assert result is True
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_with_validator_fail(self, mock_save):
+        result = cfg_mod.ConfigHandler.set_typed("test_key", "x", validator=lambda x: len(x) > 3)
+        assert result is False
+        mock_save.assert_not_called()
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_sensitive_key_sanitized_in_log(self, mock_save):
+        with patch.object(cfg_mod, "logger"):
+            result = cfg_mod.ConfigHandler.set_typed("ts_token", "short", validator=lambda x: len(x) > 10)
+            assert result is False
+
+
+class TestSaveDbConfig:
+    """测试 save_db_config 保存数据库配置"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_full_config(self, mock_save, mock_pw):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch.object(DatabaseConfigService, "build_url", return_value="postgresql://user:pass@host:5432/db"):
+            result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "password", "mydb")
+            assert result is True
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_without_password(self, mock_save, mock_pw):
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        with patch.object(DatabaseConfigService, "build_url", return_value="postgresql://user:@host:5432/db"):
+            result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "", "mydb")
+            assert result is True
+            mock_pw.assert_not_called()
+
+
+class TestGetLlmConfigForProviderWarning:
+    """测试 get_llm_config_for_provider 无模型警告"""
+
+    @patch.object(
+        cfg_mod.ConfigHandler, "get_provider_credential", return_value={"api_key": "key", "base_url": "", "models": []}
+    )
+    def test_no_models_warning(self, mock_cred):
+        with patch.object(cfg_mod, "logger") as mock_logger:
+            result = cfg_mod.ConfigHandler.get_llm_config_for_provider("unknown")
+            assert result["model"] == ""
+            mock_logger.warning.assert_called_once()
+
+
+class TestGetMaxConcurrentTasks:
+    """测试 get_max_concurrent_tasks 默认值逻辑"""
+
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=0)
+    @patch.object(cfg_mod.ConfigHandler, "get_max_cpu_workers", return_value=8)
+    def test_fallback_to_cpu_workers(self, mock_cpu, mock_get):
+        result = cfg_mod.ConfigHandler.get_max_concurrent_tasks()
+        assert result == 8
+
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=0)
+    @patch.object(cfg_mod.ConfigHandler, "get_max_cpu_workers", return_value=0)
+    def test_fallback_to_default_5(self, mock_cpu, mock_get):
+        result = cfg_mod.ConfigHandler.get_max_concurrent_tasks()
+        assert result == 5
+
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=10)
+    def test_configured_value(self, mock_get):
+        result = cfg_mod.ConfigHandler.get_max_concurrent_tasks()
+        assert result == 10

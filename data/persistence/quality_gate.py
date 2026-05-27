@@ -7,7 +7,7 @@ from enum import IntEnum
 
 logger = logging.getLogger(__name__)
 
-_STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "false").lower() in ("true", "1", "yes")
+_STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "true").lower() in ("true", "1", "yes")
 
 
 class QualityTier(IntEnum):

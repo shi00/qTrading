@@ -10,6 +10,8 @@ from utils.time_utils import get_now
 
 from .base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.external.tushare_client import TushareAPIPermissionError
+from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +172,19 @@ class HolderSyncStrategy(ISyncStrategy):
             return 0
         except EngineDisposedError:
             raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[HolderSync] ⛔ Permission denied for stk_holdernumber",
+            )
+            qe_date = datetime.datetime.strptime(enddate, "%Y%m%d").date()
+            await self.context.cache.update_sync_status(
+                "stk_holdernumber",
+                qe_date,
+                0,
+                status="skipped_permission",
+                last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+            )
+            return -1
         except Exception as e:
             self._log_sync_error("stk_holdernumber", enddate, e)
             return -1
@@ -354,15 +369,9 @@ class HolderSyncStrategy(ISyncStrategy):
             return False
 
     def _log_sync_error(self, table_name: str, date_str: str, e: Exception):
-        err_str = str(e).lower()
-        if "permission" in err_str or "积分" in err_str:
-            logger.warning(
-                f"[HolderSync] ⛔ Permission denied for {table_name}: {e}",
-            )
-        else:
-            logger.warning(
-                f"[HolderSync] Table | ⚠️ Error syncing {table_name} date={date_str}: {e}",
-            )
+        logger.warning(
+            f"[HolderSync] Table | ⚠️ Error syncing {table_name} date={date_str}: {e}",
+        )
 
     async def _sync_one_table(
         self,
@@ -389,16 +398,24 @@ class HolderSyncStrategy(ISyncStrategy):
             return 0
         except EngineDisposedError:
             raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                f"[HolderSync] ⛔ Permission denied for {table_name}",
+            )
+            if end_date:
+                qe_date = datetime.datetime.strptime(end_date, "%Y%m%d").date()
+                await self.context.cache.update_sync_status(
+                    table_name,
+                    qe_date,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            return -1
         except Exception as e:
-            err_str = str(e).lower()
-            if "permission" in err_str or "积分" in err_str:
-                logger.warning(
-                    f"[HolderSync] ⛔ Permission denied for {table_name}: {e}",
-                )
-            else:
-                logger.warning(
-                    f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}",
-                )
+            logger.warning(
+                f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}",
+            )
             return -1
 
     async def _sync_pledge_stat(self):
@@ -463,14 +480,24 @@ class HolderSyncStrategy(ISyncStrategy):
                 "[HolderSync] Table | pledge_stat: no data",
             )
             return 0, None
-        except Exception as e:
-            err_str = str(e).lower()
-            if "permission" in err_str or "积分" in err_str:
-                logger.warning(
-                    f"[HolderSync] ⛔ Permission denied for pledge_stat: {e}",
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[HolderSync] ⛔ Permission denied for pledge_stat",
+            )
+            try:
+                today = await self._get_effective_trade_date()
+                await self.context.cache.update_sync_status(
+                    "pledge_stat",
+                    today,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-            else:
-                logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")
+            except Exception:
+                logger.debug("[HolderSync] pledge_stat | Failed to record skipped_permission status")
+            return -1, None
+        except Exception as e:
+            logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")
             return -1, None
 
     @staticmethod

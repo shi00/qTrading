@@ -12,6 +12,8 @@ from utils.time_utils import get_now, parse_date
 
 from .base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.external.tushare_client import TushareAPIPermissionError
+from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +147,24 @@ class MacroSyncStrategy(ISyncStrategy):
 
         except EngineDisposedError:
             raise
+        except TushareAPIPermissionError:
+            logger.warning("[MacroSync] Monthly | ⛔ Permission denied for macro APIs")
+            result.errors.append("Macro Monthly: permission denied")
+            try:
+                latest = await self.dao.get_macro_latest_date()
+                if latest:
+                    latest_period = parse_date(str(latest)).date() if isinstance(latest, str) else latest
+                else:
+                    latest_period = get_now().date()
+                await self.context.cache.update_sync_status(
+                    "macro_economy",
+                    latest_period,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except Exception:
+                logger.debug("[MacroSync] Monthly | Failed to record skipped_permission status")
         except Exception as e:
             logger.warning(f"[MacroSync] Monthly | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Macro Monthly: {e}")
@@ -260,6 +280,20 @@ class MacroSyncStrategy(ISyncStrategy):
 
         except EngineDisposedError:
             raise
+        except TushareAPIPermissionError:
+            logger.warning("[MacroSync] Shibor | ⛔ Permission denied for shibor API")
+            result.errors.append("Shibor: permission denied")
+            try:
+                today = await self._get_effective_trade_date()
+                await self.context.cache.update_sync_status(
+                    "shibor_daily",
+                    today,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except Exception:
+                logger.debug("[MacroSync] Shibor | Failed to record skipped_permission status")
         except Exception as e:
             logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
             result.errors.append(f"Shibor: {e}")
@@ -325,6 +359,10 @@ class MacroSyncStrategy(ISyncStrategy):
                             result.added += count
                 except EngineDisposedError:
                     raise
+                except TushareAPIPermissionError:
+                    logger.warning(
+                        f"[MacroSync] IndexWeight | ⛔ Permission denied for {idx_code}",
+                    )
                 except Exception as e:
                     logger.warning(
                         f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}",
@@ -339,6 +377,21 @@ class MacroSyncStrategy(ISyncStrategy):
 
         except EngineDisposedError:
             raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[MacroSync] IndexWeight | ⛔ Permission denied",
+            )
+            try:
+                today_date = await self._get_effective_trade_date()
+                await self.context.cache.update_sync_status(
+                    "index_weight",
+                    today_date,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except Exception:
+                logger.debug("[MacroSync] IndexWeight | Failed to record skipped_permission status")
         except Exception as e:
             logger.warning(
                 f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}",

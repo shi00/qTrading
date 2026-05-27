@@ -82,6 +82,12 @@ class TushareClient:
         "fina_audit": 0.5,
         "fina_mainbz": 0.5,
         "repurchase": 0.5,
+        "income": 0.3,
+        "balancesheet": 0.3,
+        "cashflow": 0.3,
+        "fina_indicator": 0.3,
+        "disclosure_date": 0.5,
+        "forecast": 0.5,
     }
 
     _FAST_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
@@ -279,6 +285,17 @@ class TushareClient:
         with self._capability_cache_lock:
             return dict(self._capability_cache)
 
+    async def _persist_capability_safely(self) -> None:
+        """Fire-and-forget persistence of capability cache to AppState.
+
+        Catches all exceptions so that persistence failure never disrupts
+        the caller (typically _handle_api_call raising TushareAPIPermissionError).
+        """
+        try:
+            await self.persist_capabilities_to_app_state()
+        except Exception as exc:
+            logger.debug(f"[TushareClient] Capability persist failed (non-critical): {exc}")
+
     def get_effective_synced_tables(self, all_tables: list[str]) -> list[str]:
         """
         Return list of tables that are available for the current token.
@@ -384,6 +401,8 @@ class TushareClient:
         from utils.time_utils import get_now
 
         recent_date = get_now().strftime("%Y%m%d")
+        PROBE_STOCK_CODE = "000001.SZ"
+        PROBE_RECENT_PERIOD = "20241231"
         probe_configs: list[tuple[str, dict]] = [
             ("daily", {"trade_date": recent_date}),
             ("moneyflow_hsgt", {"trade_date": recent_date}),
@@ -393,6 +412,10 @@ class TushareClient:
             ("limit_list", {"trade_date": recent_date}),
             ("margin_detail", {"trade_date": recent_date}),
             ("block_trade", {"trade_date": recent_date}),
+            ("fina_indicator", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+            ("fina_mainbz", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+            ("stk_holdernumber", {"ts_code": PROBE_STOCK_CODE, "enddate": PROBE_RECENT_PERIOD}),
+            ("top10_holders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
         ]
 
         results: dict[str, bool | None] = {}
@@ -510,6 +533,10 @@ class TushareClient:
 
                 if is_permission_error:
                     self.mark_api_unavailable(api_name)
+                    try:
+                        asyncio.create_task(self._persist_capability_safely())
+                    except RuntimeError:
+                        pass
                     logger.error(
                         f"[tushare_api] PERMISSION_DENIED ({api_name}): {error_msg}",
                     )

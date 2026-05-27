@@ -144,7 +144,7 @@ class BaseDao:
             if isinstance(val, (np.float64, np.float32)):  # type: ignore[union-attr]
                 return float(val)
             if isinstance(val, Decimal):
-                return float(val)
+                return val
             if isinstance(val, (np.bool_)):
                 return bool(val)
             if isinstance(val, pd.Timestamp):

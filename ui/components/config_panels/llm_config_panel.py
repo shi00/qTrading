@@ -806,6 +806,31 @@ class LLMConfigPanel(ft.Container):
 
         self.page.run_task(self._save_config)
 
+    def _build_custom_models_update(
+        self, provider: str, model: str, is_azure: bool = False
+    ) -> dict[str, list[str]] | None:
+        if not model or is_azure:
+            return None
+        if provider != "custom" and model in [m.get("id") for m in LLM_PROVIDERS.get(provider, {}).get("models", [])]:
+            return None
+        llm_config = ConfigHandler.get_llm_config()
+        custom_models = llm_config.get("custom_models", {})
+        if provider not in custom_models:
+            custom_models[provider] = []
+        if model not in custom_models[provider]:
+            custom_models[provider].append(model)
+            custom_models[provider] = custom_models[provider][-50:]
+        return custom_models
+
+    @staticmethod
+    def _remove_primary_from_failover(provider: str) -> None:
+        failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
+        primary_prefix = f"{provider}/"
+        new_failover_models = [m for m in failover_models if not m.startswith(primary_prefix)]
+        if len(new_failover_models) != len(failover_models):
+            ConfigHandler.save_config({"llm_failover_models": new_failover_models})
+            logger.info(f"[LLMConfigPanel] Automatically removed primary provider {provider} models from failover list")
+
     async def _save_config(self):
         provider = self._current_provider
         api_key = self.api_key_input.value if self._api_key_modified else None
@@ -834,21 +859,9 @@ class LLMConfigPanel(ft.Container):
             model = self.model_dropdown.value or self.custom_model_input.value
             base_url = self.base_url_input.value
 
-            if model and (
-                provider == "custom"
-                or model not in [m.get("id") for m in LLM_PROVIDERS.get(provider, {}).get("models", [])]
-            ):
-                llm_config = ConfigHandler.get_llm_config()
-                custom_models = llm_config.get("custom_models", {})
-
-                if provider not in custom_models:
-                    custom_models[provider] = []
-
-                if model not in custom_models[provider]:
-                    custom_models[provider].append(model)
-                    custom_models[provider] = custom_models[provider][-20:]
-
-                kwargs["custom_models"] = custom_models
+            custom_models_update = self._build_custom_models_update(provider, model, is_azure=False)
+            if custom_models_update is not None:
+                kwargs["custom_models"] = custom_models_update
 
         try:
             ConfigHandler.save_llm_config(
@@ -860,6 +873,11 @@ class LLMConfigPanel(ft.Container):
             )
 
             self._api_key_modified = False
+
+            self._remove_primary_from_failover(provider)
+
+            custom_models = kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
+            self._sync_provider_credential_to_failover(provider, api_key, base_url, custom_models.get(provider))
 
             from services.ai_service import AIService
 
@@ -931,6 +949,12 @@ class LLMConfigPanel(ft.Container):
             kwargs["azure_resource_name"] = config.get("azure_resource_name", "")
             kwargs["azure_deployment_name"] = config.get("azure_deployment_name", "")
 
+        custom_models_update = self._build_custom_models_update(
+            config["provider"], config["model"], is_azure=self._is_azure
+        )
+        if custom_models_update is not None:
+            kwargs["custom_models"] = custom_models_update
+
         try:
             ConfigHandler.save_llm_config(
                 provider=config["provider"],
@@ -939,10 +963,45 @@ class LLMConfigPanel(ft.Container):
                 api_key=config["api_key"],
                 **kwargs,
             )
+            self._remove_primary_from_failover(config["provider"])
+            custom_models = kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
+            self._sync_provider_credential_to_failover(
+                config["provider"],
+                config["api_key"],
+                config["base_url"],
+                custom_models.get(config["provider"]),
+            )
             return True
         except Exception as e:
             logger.error(f"[LLMConfigPanel] Save current config error: {e}")
             return False
+
+    def _sync_provider_credential_to_failover(
+        self,
+        provider: str,
+        api_key: str | None,
+        base_url: str,
+        models: list[str] | None = None,
+    ) -> None:
+        """
+        如果当前 provider 在 failover_models 中，自动同步凭证到 llm_provider_credentials。
+
+        这样用户配置主供应商时，failover 凭证自动同步，无需额外配置。
+        """
+        try:
+            failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
+            for model in failover_models:
+                if model.startswith(f"{provider}/"):
+                    ConfigHandler.save_provider_credential(
+                        provider=provider,
+                        api_key=api_key or "",
+                        base_url=base_url,
+                        models=models,
+                    )
+                    logger.debug(f"[LLMConfigPanel] Synced credential and models to failover provider: {provider}")
+                    break
+        except Exception as e:
+            logger.debug(f"[LLMConfigPanel] Failed to sync failover credential: {e}")
 
     def _show_success(self, message: str):  # pragma: no cover
         self.status_text.value = message
