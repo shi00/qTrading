@@ -12,6 +12,26 @@ from data.domain_services.transaction_cost import TransactionCostConfig
 
 
 @dataclass(frozen=True)
+class DataWarning:
+    """回测数据警告（结构化）
+
+    用于记录 enrichment 失败时的详细信息，便于用户理解数据质量问题。
+    """
+
+    warning_type: Literal["suspend_enrich_failed", "limit_enrich_failed"]
+    start_date: str
+    end_date: str
+    affected_stock_count: int
+    error_message: str
+
+    def __str__(self) -> str:
+        return (
+            f"[{self.warning_type}] {self.start_date}-{self.end_date}: "
+            f"{self.affected_stock_count} stocks affected. {self.error_message}"
+        )
+
+
+@dataclass(frozen=True)
 class BacktestConfig:
     """回测配置（不可变，确保回测可复现）"""
 
@@ -21,7 +41,7 @@ class BacktestConfig:
 
     commission_rate: float = 3e-4
     commission_min: float = 5.0
-    stamp_duty_rate: float = 1e-3
+    stamp_duty_rate: float | None = None  # None=自动按政策分段，显式值覆盖
     stamp_duty_buy: bool = False
     transfer_fee_rate: float = 1e-5
 

@@ -49,9 +49,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self._existing_providers = existing_providers or []
         self._provider = edit_item.provider if edit_item else ""
         self._is_edit = edit_item is not None
+        self._page_ref = page
 
         super().__init__()
 
+        self.page = page
         self._build_ui()
         if self._is_edit:
             self._populate_edit_data()

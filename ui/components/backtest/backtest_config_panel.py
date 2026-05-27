@@ -4,7 +4,7 @@
 - 日期范围
 - 初始资金
 - 调仓频率
-- 费率设置
+- 费率设置（含印花税自动分段费率）
 """
 
 from __future__ import annotations
@@ -109,15 +109,26 @@ class BacktestConfigPanel(ft.Container):
         )
         self.commission_text = ft.Text("3‱", size=12, color=AppColors.TEXT_SECONDARY)
 
+        self.stamp_duty_auto_checkbox = ft.Checkbox(
+            label=I18n.get("backtest_stamp_duty_auto"),
+            value=True,
+            on_change=self._on_stamp_duty_auto_change,
+        )
         self.stamp_duty_slider = ft.Slider(
             min=0,
             max=2,
             divisions=4,
-            value=1,
+            value=0.5,
             label="{value}",
             width=200,
+            disabled=True,
+            on_change=self._on_stamp_duty_slider_change,
         )
-        self.stamp_duty_text = ft.Text("1‰", size=12, color=AppColors.TEXT_SECONDARY)
+        self.stamp_duty_text = ft.Text(
+            I18n.get("backtest_stamp_duty_auto"),
+            size=12,
+            color=AppColors.TEXT_SECONDARY,
+        )
 
         self.slippage_slider = ft.Slider(
             min=0,
@@ -211,17 +222,23 @@ class BacktestConfigPanel(ft.Container):
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 ),
-                                ft.Row(
+                                ft.Column(
                                     [
-                                        ft.Text(
-                                            I18n.get("backtest_stamp_duty_rate"),
-                                            size=12,
-                                            color=AppColors.TEXT_SECONDARY,
+                                        self.stamp_duty_auto_checkbox,
+                                        ft.Row(
+                                            [
+                                                ft.Text(
+                                                    I18n.get("backtest_stamp_duty_rate"),
+                                                    size=12,
+                                                    color=AppColors.TEXT_SECONDARY,
+                                                ),
+                                                self.stamp_duty_slider,
+                                                self.stamp_duty_text,
+                                            ],
+                                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                         ),
-                                        self.stamp_duty_slider,
-                                        self.stamp_duty_text,
                                     ],
-                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                    spacing=4,
                                 ),
                                 ft.Row(
                                     [
@@ -255,6 +272,26 @@ class BacktestConfigPanel(ft.Container):
             self.end_date_btn.text = self.end_date_value.strftime("%Y-%m-%d")
             self.end_date_btn.update()
 
+    def _on_stamp_duty_auto_change(self, e):
+        is_auto = e.control.value
+        self.stamp_duty_slider.disabled = is_auto
+        if is_auto:
+            self.stamp_duty_text.value = I18n.get("backtest_stamp_duty_auto")
+        else:
+            slider_val = self.stamp_duty_slider.value or 0.5
+            self.stamp_duty_text.value = f"{slider_val:.1f}‰"
+        if self.page:
+            self.stamp_duty_slider.update()
+            self.stamp_duty_text.update()
+
+    def _on_stamp_duty_slider_change(self, e):
+        """滑块值变化时实时更新文案。"""
+        if not self.stamp_duty_auto_checkbox.value:
+            slider_val = e.control.value or 0.5
+            self.stamp_duty_text.value = f"{slider_val:.1f}‰"
+            if self.page:
+                self.stamp_duty_text.update()
+
     def _on_run_click(self, e):
         if self.on_run_backtest:
             config = self.get_config()
@@ -272,6 +309,11 @@ class BacktestConfigPanel(ft.Container):
         except ValueError:
             max_positions = 50
 
+        if self.stamp_duty_auto_checkbox.value:
+            stamp_duty_rate = None
+        else:
+            stamp_duty_rate = self.stamp_duty_slider.value / 1000 if self.stamp_duty_slider.value else None
+
         return {
             "start_date": self.start_date_value,
             "end_date": self.end_date_value,
@@ -279,7 +321,7 @@ class BacktestConfigPanel(ft.Container):
             "rebalance_freq": self.rebalance_dropdown.value or "signal",
             "max_position_count": max_positions,
             "commission_rate": self.commission_slider.value / 10000 if self.commission_slider.value else 3e-4,
-            "stamp_duty_rate": self.stamp_duty_slider.value / 1000 if self.stamp_duty_slider.value else 1e-3,
+            "stamp_duty_rate": stamp_duty_rate,
             "slippage_bps": self.slippage_slider.value or 5.0,
         }
 

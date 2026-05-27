@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,19 @@ MOCK_PROVIDERS = {
         "models": [],
     },
 }
+
+
+@pytest.fixture
+def mock_page():
+    page = MagicMock()
+    page.overlay = []
+    page.launch_url = MagicMock()
+    page.close = MagicMock()
+    page.update = MagicMock()
+    page.run_task = MagicMock()
+    page.open = MagicMock()
+    page.snack_bar = None
+    return page
 
 
 @pytest.fixture
@@ -240,9 +253,10 @@ class TestFailoverConfigPanelAdd:
         panel = _make_panel(
             mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
         )
-        initial_overlay_count = len(mock_page.overlay)
         panel._on_add_click(MagicMock())
-        assert len(mock_page.overlay) == initial_overlay_count + 1
+        mock_page.open.assert_called_once()
+        dialog = mock_page.open.call_args[0][0]
+        assert isinstance(dialog, ProviderCredentialDialog)
 
     def test_add_excludes_primary_provider(
         self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
@@ -251,7 +265,7 @@ class TestFailoverConfigPanelAdd:
             mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
         )
         panel._on_add_click(MagicMock())
-        dialog = mock_page.overlay[-1]
+        dialog = mock_page.open.call_args[0][0]
         assert isinstance(dialog, ProviderCredentialDialog)
         existing = dialog._existing_providers
         assert "deepseek" in existing
@@ -304,7 +318,63 @@ class TestProviderCredentialDialog:
 
         mock_config_handler.save_provider_credential.assert_not_called()
 
-    def test_confirm_custom_model(
+
+class TestProviderCredentialDialogEdit:
+    def test_populate_edit_data(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "sk-test-key-12345678",
+            "base_url": "https://api.example.com",
+        }
+        edit_item = FailoverItem(
+            provider="qwen",
+            model="qwen-plus",
+            display_name="通义千问",
+            has_credential=True,
+        )
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            edit_item=edit_item,
+        )
+        assert dialog.provider_dropdown.value == "qwen"
+        assert dialog.model_dropdown.value == "qwen-plus"
+        assert dialog.base_url_input.value == "https://api.example.com"
+        assert dialog.api_key_input.value == "sk-test-key-12345678"
+
+    def test_edit_mode_updates_existing_entry(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["qwen/qwen-plus"],
+            "llm_provider": "deepseek",
+        }
+        edit_item = FailoverItem(
+            provider="qwen",
+            model="qwen-plus",
+            display_name="通义千问",
+            has_credential=True,
+        )
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            edit_item=edit_item,
+        )
+        dialog._provider = "qwen"
+        dialog.model_dropdown.value = "qwen-turbo"
+        dialog.custom_model_input.value = ""
+        dialog.base_url_input.value = ""
+        dialog.api_key_input.value = "sk-new-key"
+
+        dialog._on_confirm_click(MagicMock())
+
+        saved_data = mock_config_handler.save_config.call_args[0][0]
+        assert "qwen/qwen-turbo" in saved_data["llm_failover_models"]
+
+
+class TestProviderCredentialDialogProviderChange:
+    def test_on_provider_change_updates_models(
         self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
     ):
         dialog = ProviderCredentialDialog(
@@ -313,21 +383,11 @@ class TestProviderCredentialDialog:
             existing_providers=[],
         )
         dialog._provider = "qwen"
-        dialog.model_dropdown.value = None
-        dialog.custom_model_input.value = "qwen-custom-model"
-        dialog.base_url_input.value = ""
-        dialog.api_key_input.value = "sk-key"
+        dialog._on_provider_change_internal("qwen")
+        assert len(dialog.model_dropdown.options) > 0
+        assert dialog.model_dropdown.options[0].key == "qwen-plus"
 
-        dialog._on_confirm_click(MagicMock())
-
-        mock_config_handler.save_provider_credential.assert_called_once_with(
-            provider="qwen",
-            api_key="sk-key",
-            base_url="",
-            models=["qwen-custom-model"],
-        )
-
-    def test_confirm_no_provider_noop(
+    def test_on_provider_change_updates_base_url(
         self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
     ):
         dialog = ProviderCredentialDialog(
@@ -335,9 +395,374 @@ class TestProviderCredentialDialog:
             on_confirm=MagicMock(),
             existing_providers=[],
         )
-        dialog._provider = ""
-        dialog.custom_model_input.value = "some-model"
+        dialog._on_provider_change_internal("deepseek")
+        assert dialog.base_url_input.value == "https://api.deepseek.com"
+
+
+class TestProviderCredentialDialogModelChange:
+    def test_on_model_dropdown_change_clears_custom_input(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            existing_providers=[],
+        )
+        dialog.custom_model_input.value = "custom-model"
+        e = MagicMock()
+        e.control.value = "qwen-plus"
+        dialog._on_model_dropdown_change(e)
+        assert dialog.custom_model_input.value == ""
+
+
+class TestProviderCredentialDialogLinks:
+    def test_update_links_row_adds_buttons(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            existing_providers=[],
+        )
+        dialog._update_links_row("deepseek")
+        assert len(dialog.links_row.controls) >= 1
+
+    def test_open_url_calls_page_launch(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            existing_providers=[],
+        )
+        dialog._open_url("https://example.com")
+        mock_page.launch_url.assert_called_once_with("https://example.com")
+
+
+class TestProviderCredentialDialogCancel:
+    def test_on_cancel_closes_dialog(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            existing_providers=[],
+        )
+        dialog._on_cancel(MagicMock())
+        assert dialog.open is False
+        mock_page.close.assert_called_once()
+
+
+class TestProviderCredentialDialogTestConnection:
+    @pytest.mark.asyncio
+    async def test_test_connection_success(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        with patch("services.ai_service.AIService") as mock_ai_service:
+            mock_ai_service.test_connection = AsyncMock(return_value={"success": True})
+            dialog = ProviderCredentialDialog(
+                page=mock_page,
+                on_confirm=MagicMock(),
+                existing_providers=[],
+            )
+            dialog._provider = "qwen"
+            dialog.model_dropdown.value = "qwen-plus"
+            dialog.custom_model_input.value = ""
+            dialog.api_key_input.value = "sk-test"
+
+            await dialog._on_test_connection(MagicMock())
+
+            mock_ai_service.test_connection.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_failure(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        with patch("services.ai_service.AIService") as mock_ai_service:
+            mock_ai_service.test_connection = AsyncMock(return_value={"success": False, "error": "Connection failed"})
+            dialog = ProviderCredentialDialog(
+                page=mock_page,
+                on_confirm=MagicMock(),
+                existing_providers=[],
+            )
+            dialog._provider = "qwen"
+            dialog.model_dropdown.value = "qwen-plus"
+            dialog.custom_model_input.value = ""
+            dialog.api_key_input.value = "sk-test"
+
+            await dialog._on_test_connection(MagicMock())
+
+            mock_ai_service.test_connection.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_exception(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        with patch("services.ai_service.AIService") as mock_ai_service:
+            mock_ai_service.test_connection = AsyncMock(side_effect=Exception("Network error"))
+            dialog = ProviderCredentialDialog(
+                page=mock_page,
+                on_confirm=MagicMock(),
+                existing_providers=[],
+            )
+            dialog._provider = "qwen"
+            dialog.model_dropdown.value = "qwen-plus"
+            dialog.custom_model_input.value = ""
+            dialog.api_key_input.value = "sk-test"
+
+            await dialog._on_test_connection(MagicMock())
+
+            mock_ai_service.test_connection.assert_called_once()
+
+
+class TestProviderCredentialDialogShowSnack:
+    def test_show_snack_adds_snackbar(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            existing_providers=[],
+        )
+        dialog._show_snack("Test message", "#4CAF50")
+        assert len(mock_page.overlay) > 0
+        assert mock_page.overlay[-1].open is True
+
+
+class TestFailoverConfigPanelEdit:
+    def test_on_edit_item_opens_dialog(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        panel._on_edit_item(0)
+        mock_page.open.assert_called_once()
+        dialog = mock_page.open.call_args[0][0]
+        assert isinstance(dialog, ProviderCredentialDialog)
+
+
+class TestFailoverConfigPanelMoveDown:
+    def test_move_down_last_item_noop(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        initial_call_count = mock_config_handler.save_config.call_count
+        panel._on_move_down(len(panel._failover_items) - 1)
+        assert mock_config_handler.save_config.call_count == initial_call_count
+
+
+class TestFailoverConfigPanelSave:
+    def test_on_save_click_calls_on_save(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        on_save = MagicMock()
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        panel.on_save = on_save
+        panel._on_save_click(MagicMock())
+        on_save.assert_called_once()
+
+
+class TestFailoverConfigPanelDialogConfirmed:
+    def test_on_dialog_confirmed_reloads_config(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        initial_call_count = mock_config_handler.load_config.call_count
+        panel._on_dialog_confirmed()
+        assert mock_config_handler.load_config.call_count > initial_call_count
+
+
+class TestFailoverConfigPanelShowSnack:
+    def test_panel_show_snack(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        panel._show_snack("Test message", "#4CAF50")
+        assert len(mock_page.overlay) > 0
+
+
+class TestFailoverConfigPanelSafeUpdate:
+    def test_safe_update_on_page_with_controls(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        panel._safe_update()
+        mock_page.update.assert_called_once_with(panel)
+
+    def test_safe_update_handles_exception(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        mock_page.update.side_effect = Exception("Update failed")
+        panel._safe_update()
+
+
+class TestFailoverConfigPanelLifecycle:
+    def test_did_mount_subscribes_i18n(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        panel.did_mount()
+        mock_i18n.subscribe.assert_called_once()
+
+    def test_will_unmount_unsubscribes_i18n(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        panel.will_unmount()
+        mock_i18n.unsubscribe.assert_called_once()
+
+    def test_on_locale_change_rebuilds_ui(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        panel._on_locale_change("en")
+        mock_config_handler.load_config.assert_called()
+
+
+class TestFailoverConfigPanelReloadConfig:
+    def test_reload_config_refreshes_data(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        initial_call_count = mock_config_handler.load_config.call_count
+        panel.reload_config()
+        assert mock_config_handler.load_config.call_count > initial_call_count
+
+
+class TestFailoverConfigPanelBuildListItem:
+    def test_build_list_item_with_credential(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        item = FailoverItem(
+            provider="qwen",
+            model="qwen-plus",
+            display_name="通义千问",
+            has_credential=True,
+            api_key_masked="sk-t...t",
+        )
+        container = panel._build_list_item(0, item)
+        assert container is not None
+        assert container.content is not None
+
+    def test_build_list_item_without_credential(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["qwen/qwen-plus"],
+            "llm_provider": "deepseek",
+        }
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": None,
+            "base_url": "",
+        }
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        item = FailoverItem(
+            provider="qwen",
+            model="qwen-plus",
+            display_name="通义千问",
+            has_credential=False,
+        )
+        container = panel._build_list_item(0, item)
+        assert container is not None
+
+
+class TestFailoverConfigPanelRenderList:
+    def test_render_list_empty_shows_hint(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": [],
+            "llm_provider": "deepseek",
+        }
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        assert len(panel._list_column.controls) == 1
+        assert panel._failover_items == []
+
+    def test_render_list_with_items(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["qwen/qwen-plus", "deepseek/deepseek-chat"],
+            "llm_provider": "openai",
+        }
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "key",
+            "base_url": "",
+        }
+        panel = _make_panel(
+            mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+        )
+        assert len(panel._list_column.controls) == 2
+
+
+class TestProviderCredentialDialogConfirmNoModel:
+    def test_confirm_no_model_noop(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        dialog = ProviderCredentialDialog(
+            page=mock_page,
+            on_confirm=MagicMock(),
+            existing_providers=[],
+        )
+        dialog._provider = "qwen"
+        dialog.custom_model_input.value = ""
+        dialog.model_dropdown.value = None
 
         dialog._on_confirm_click(MagicMock())
 
         mock_config_handler.save_provider_credential.assert_not_called()
+
+
+class TestProviderCredentialDialogTestConnectionNoInput:
+    @pytest.mark.asyncio
+    async def test_test_connection_no_provider_returns_early(
+        self, mock_config_handler, mock_i18n, mock_llm_providers, mock_app_colors, mock_app_styles, mock_page
+    ):
+        with patch("services.ai_service.AIService") as mock_ai_service:
+            mock_ai_service.test_connection = AsyncMock(return_value={"success": True})
+            dialog = ProviderCredentialDialog(
+                page=mock_page,
+                on_confirm=MagicMock(),
+                existing_providers=[],
+            )
+            dialog._provider = ""
+            dialog.model_dropdown.value = "qwen-plus"
+            dialog.api_key_input.value = "sk-test"
+
+            await dialog._on_test_connection(MagicMock())
+
+            mock_ai_service.test_connection.assert_not_called()

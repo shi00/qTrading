@@ -15,7 +15,7 @@ import polars as pl
 
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
-from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning
 from strategies.backtest.data_provider import BacktestDataProvider
 from strategies.backtest.metrics import BacktestMetrics
 from strategies.backtest.portfolio import PortfolioSimulator
@@ -67,7 +67,7 @@ class VectorBacktestEngine:
             progress_callback(0.0, "Loading historical data...")
 
         trade_dates = await self._get_trade_dates()
-        quotes_df = await self._load_quotes(trade_dates)
+        quotes_df, quote_warnings = await self._load_quotes(trade_dates)
         benchmark_df = await self._load_benchmark(trade_dates)
 
         if progress_callback:
@@ -128,6 +128,8 @@ class VectorBacktestEngine:
 
         duration_ms = int((time.perf_counter() - start_time) * 1000)
 
+        all_warnings = [str(w) for w in quote_warnings] + list(sim_warnings)
+
         return BacktestResult(
             config=self.config,
             strategy_name=strategy.name,
@@ -149,7 +151,7 @@ class VectorBacktestEngine:
             run_id=run_id,
             executed_at=datetime.datetime.now(),
             duration_ms=duration_ms,
-            data_warnings=tuple(sim_warnings),
+            data_warnings=tuple(all_warnings),
             failed_signal_dates=tuple(failed_signal_dates),
         )
 
@@ -164,7 +166,7 @@ class VectorBacktestEngine:
 
         return sorted([datetime.datetime.strptime(str(d), "%Y%m%d").date() for d in cal_df["cal_date"].tolist()])
 
-    async def _load_quotes(self, trade_dates: list[date]) -> pl.DataFrame:
+    async def _load_quotes(self, trade_dates: list[date]) -> tuple[pl.DataFrame, list[DataWarning]]:
         start_str = trade_dates[0].strftime("%Y%m%d")
         end_str = trade_dates[-1].strftime("%Y%m%d")
 
@@ -178,27 +180,37 @@ class VectorBacktestEngine:
 
         quotes_df = pl.from_pandas(quotes_pd)
 
-        quotes_df = await self._enrich_suspend_status(quotes_df, start_str, end_str)
-        quotes_df = await self._enrich_limit_status(quotes_df, start_str, end_str)
+        data_warnings: list[DataWarning] = []
+        quotes_df, suspend_warning = await self._enrich_suspend_status(quotes_df, start_str, end_str)
+        if suspend_warning:
+            data_warnings.append(suspend_warning)
+
+        quotes_df, limit_warning = await self._enrich_limit_status(quotes_df, start_str, end_str)
+        if limit_warning:
+            data_warnings.append(limit_warning)
 
         quotes_df = self._compute_avg_daily_volume(quotes_df)
 
         quotes_df = self._apply_qfq(quotes_df)
 
-        return quotes_df.sort(["ts_code", "trade_date"])
+        return quotes_df.sort(["ts_code", "trade_date"]), data_warnings
 
     async def _enrich_suspend_status(
         self,
         quotes_df: pl.DataFrame,
         start_date: str,
         end_date: str,
-    ) -> pl.DataFrame:
+    ) -> tuple[pl.DataFrame, DataWarning | None]:
         """
         为行情数据增加停牌状态 (is_tradable)。
 
         is_tradable 值：
         - True: 可交易（不在 suspend_d 表中）
         - False: 停牌（在 suspend_d 表中）
+
+        失败时保守策略：
+        - 所有股票标记为不可交易 (is_tradable=False)
+        - 返回 DataWarning 记录失败详情
 
         设计说明：
         ========
@@ -225,24 +237,31 @@ class VectorBacktestEngine:
             )
 
             if suspend_pd is None or suspend_pd.empty:
-                return quotes_df.with_columns(pl.lit(True).alias("is_tradable"))
+                return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), None
 
             suspend_df = pl.from_pandas(suspend_pd)
             suspend_df = suspend_df.select(["ts_code", "trade_date"]).with_columns(pl.lit(False).alias("is_tradable"))
 
             quotes_df = quotes_df.join(suspend_df, on=["ts_code", "trade_date"], how="left")
 
-            return quotes_df.with_columns(pl.col("is_tradable").fill_null(True))
+            return quotes_df.with_columns(pl.col("is_tradable").fill_null(True)), None
         except Exception as e:
             logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", e)
-            return quotes_df.with_columns(pl.lit(True).alias("is_tradable"))
+            warning = DataWarning(
+                warning_type="suspend_enrich_failed",
+                start_date=start_date,
+                end_date=end_date,
+                affected_stock_count=quotes_df.height,
+                error_message=str(e),
+            )
+            return quotes_df.with_columns(pl.lit(False).alias("is_tradable")), warning
 
     async def _enrich_limit_status(
         self,
         quotes_df: pl.DataFrame,
         start_date: str,
         end_date: str,
-    ) -> pl.DataFrame:
+    ) -> tuple[pl.DataFrame, DataWarning | None]:
         """
         为行情数据增加涨跌停状态。
 
@@ -250,6 +269,11 @@ class VectorBacktestEngine:
         - 'U' (up_limit): 涨停
         - 'D' (down_limit): 跌停
         - None: 正常交易
+
+        失败时策略：
+        - limit_status 保持 None（无涨跌停限制）
+        - 但返回 DataWarning 让用户知晓数据质量问题
+        - 撮合层行为不变（允许买卖），但报告中有记录
 
         涨跌停数据来自 limit_list 表，用于撮合层判断是否可买卖。
         """
@@ -260,16 +284,23 @@ class VectorBacktestEngine:
             )
 
             if limit_list_pd is None or limit_list_pd.empty:
-                return quotes_df.with_columns(pl.lit(None).alias("limit_status"))
+                return quotes_df.with_columns(pl.lit(None).alias("limit_status")), None
 
             limit_df = pl.from_pandas(limit_list_pd)
             limit_df = limit_df.select(["ts_code", "trade_date", "limit"]).rename({"limit": "limit_status"})
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
-            return quotes_df
+            return quotes_df, None
         except Exception as e:
             logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", e)
-            return quotes_df.with_columns(pl.lit(None).alias("limit_status"))
+            warning = DataWarning(
+                warning_type="limit_enrich_failed",
+                start_date=start_date,
+                end_date=end_date,
+                affected_stock_count=quotes_df.height,
+                error_message=str(e),
+            )
+            return quotes_df.with_columns(pl.lit(None).alias("limit_status")), warning
 
     def _apply_qfq(self, quotes_df: pl.DataFrame) -> pl.DataFrame:
         """

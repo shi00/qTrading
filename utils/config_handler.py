@@ -21,12 +21,18 @@ from utils.config_models import (
 )
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 from utils.sanitizers import DataSanitizer
-from utils.security_utils import DecryptionError, SecurityManager
+from utils.security_utils import DecryptionError, SecurityError, SecurityManager
 
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
+
+ENV_FALLBACK_MAP = {
+    "ts_token": "TS_TOKEN",
+    "db_password": "DB_PASSWORD",
+    "ai_api_key": "AI_API_KEY",
+}
 
 SENSITIVE_KEYS = frozenset({"ts_token", "db_password", "db_password_encrypted", "ai_api_key"})
 
@@ -357,6 +363,12 @@ class ConfigHandler:
 
     @staticmethod
     def get_token():
+        # 1. 环境变量优先（最高优先级）
+        env_token = os.environ.get(ENV_FALLBACK_MAP["ts_token"])
+        if env_token:
+            return env_token
+
+        # 2. keyring
         kr_token = None
         try:
             kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
@@ -365,6 +377,7 @@ class ConfigHandler:
         if kr_token:
             return kr_token
 
+        # 3. 加密配置文件（如果 SecurityManager 可用）
         config = ConfigHandler.load_config()
         token = config.get("ts_token", "")
         decrypted = ConfigHandler._try_decrypt(token)
@@ -397,6 +410,11 @@ class ConfigHandler:
             try:
                 encrypted = SecurityManager.encrypt_data(token)
                 return ConfigHandler.save_config({"ts_token": encrypted})
+            except SecurityError as se:
+                logger.error(
+                    f"Cannot securely store ts_token: {se}\nPlease use environment variable TS_TOKEN instead.",
+                )
+                return False
             except Exception as enc_err:
                 logger.error(f"Failed to encrypt ts_token: {enc_err}")
                 return False
@@ -499,14 +517,21 @@ class ConfigHandler:
 
     @staticmethod
     def get_db_password():
-        """Get database password from keyring."""
+        """Get database password from keyring or encrypted config."""
+        # 1. 环境变量优先（最高优先级）
+        env_password = os.environ.get(ENV_FALLBACK_MAP["db_password"])
+        if env_password:
+            return env_password
+
+        # 2. keyring
         try:
             password = keyring.get_password(KEYRING_SERVICE_NAME, "db_password")
             if password:
                 return password
         except Exception as e:
-            logger.warning(f"Failed to get db_password from keyring: {e}")
+            logger.debug(f"Failed to get db_password from keyring: {e}")
 
+        # 3. 加密配置文件
         user_config = ConfigHandler.load_config()
         encrypted = user_config.get("db_password_encrypted", "")
         if encrypted:
@@ -527,11 +552,16 @@ class ConfigHandler:
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "db_password")
             except Exception:
-                logger.debug("Keyring db_password deletion skipped (not stored or keyring unavailable)")
+                logger.debug("Keyring db_password deletion skipped")
             try:
                 encrypted = SecurityManager.encrypt_data(password)
                 ConfigHandler.save_config({"db_password_encrypted": encrypted})
                 return True
+            except SecurityError as se:
+                logger.error(
+                    f"Cannot securely store db_password: {se}\nPlease use environment variable DB_PASSWORD instead.",
+                )
+                return False
             except Exception as e2:
                 logger.error(f"Failed to encrypt db_password: {e2}")
                 return False
@@ -713,13 +743,18 @@ class ConfigHandler:
                     try:
                         encrypted_key = SecurityManager.encrypt_data(api_key)
                         ConfigHandler.save_config({"ai_api_key": encrypted_key})
+                    except SecurityError as se:
+                        logger.error(
+                            f"Cannot securely store ai_api_key: {se}\n"
+                            "Please use environment variable AI_API_KEY instead.",
+                        )
                     except Exception as enc_err:
                         logger.error(f"Failed to encrypt ai_api_key: {enc_err}")
             else:
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
                 except Exception:
-                    logger.debug("Keyring ai_api_key deletion skipped (not stored or keyring unavailable)")
+                    logger.debug("Keyring ai_api_key deletion skipped")
                 ConfigHandler.save_config({"ai_api_key": ""})
 
         return True
@@ -743,11 +778,17 @@ class ConfigHandler:
         """
         config = ConfigHandler.load_config()
 
-        api_key = None
-        try:
-            api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
-        except Exception as exc:
-            logger.debug(f"Keyring get_password for ai_api_key failed: {exc}")
+        # 1. 环境变量优先（最高优先级）
+        api_key = os.environ.get(ENV_FALLBACK_MAP["ai_api_key"])
+
+        # 2. keyring
+        if not api_key:
+            try:
+                api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+            except Exception as exc:
+                logger.debug(f"Keyring get_password for ai_api_key failed: {exc}")
+
+        # 3. 加密配置文件
         if not api_key:
             encrypted = config.get("ai_api_key", "")
             api_key = ConfigHandler._try_decrypt(encrypted)

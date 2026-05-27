@@ -1364,6 +1364,7 @@
     "backtest_fee_settings": "Fee Settings",
     "backtest_commission_rate": "Commission Rate",
     "backtest_stamp_duty_rate": "Stamp Duty Rate",
+    "backtest_stamp_duty_auto": "Auto (policy-based: 0.1% before 2023-08-28, 0.05% after)",
     "backtest_slippage": "Slippage",
     "backtest_run": "Start Backtest",
     "backtest_starting": "Starting backtest...",

@@ -1,14 +1,53 @@
 """交易成本模型单元测试"""
 
 import math
+from datetime import date
 
 import pytest
 
 from data.domain_services.transaction_cost import (
+    STAMP_DUTY_SCHEDULE,
+    StampDutySchedule,
     TransactionCost,
     TransactionCostConfig,
     TransactionCostModel,
+    get_stamp_duty_rate,
+    get_stamp_duty_schedule_description,
 )
+
+
+class TestStampDutySchedule:
+    def test_schedule_is_sorted(self) -> None:
+        dates = [s.effective_date for s in STAMP_DUTY_SCHEDULE]
+        assert dates == sorted(dates)
+
+    def test_get_rate_before_first_schedule(self) -> None:
+        assert get_stamp_duty_rate(date(2000, 1, 1)) == STAMP_DUTY_SCHEDULE[0].rate
+
+    def test_get_rate_at_first_schedule(self) -> None:
+        assert get_stamp_duty_rate(date(2008, 9, 19)) == STAMP_DUTY_SCHEDULE[0].rate
+
+    def test_get_rate_between_schedules(self) -> None:
+        assert get_stamp_duty_rate(date(2015, 1, 1)) == STAMP_DUTY_SCHEDULE[0].rate
+
+    def test_get_rate_at_second_schedule(self) -> None:
+        assert get_stamp_duty_rate(date(2023, 8, 28)) == STAMP_DUTY_SCHEDULE[1].rate
+
+    def test_get_rate_after_last_schedule(self) -> None:
+        assert get_stamp_duty_rate(date(2025, 1, 1)) == STAMP_DUTY_SCHEDULE[-1].rate
+
+    def test_get_rate_none_returns_current(self) -> None:
+        assert get_stamp_duty_rate(None) == STAMP_DUTY_SCHEDULE[-1].rate
+
+    def test_description_returns_correct_text(self) -> None:
+        assert "0.1%" in get_stamp_duty_schedule_description(date(2020, 1, 1))
+        assert "0.05%" in get_stamp_duty_schedule_description(date(2024, 1, 1))
+
+    def test_schedule_item_creation(self) -> None:
+        item = StampDutySchedule(date(2023, 8, 28), 5e-4, "减半征收 0.05%")
+        assert item.effective_date == date(2023, 8, 28)
+        assert item.rate == 5e-4
+        assert item.description == "减半征收 0.05%"
 
 
 class TestTransactionCost:
@@ -142,3 +181,73 @@ class TestTransactionCostModel:
         gross = 10000.0
         expected_net = gross - cost.commission - cost.stamp_duty - cost.transfer_fee - cost.slippage_cost
         assert cost.net_amount == pytest.approx(expected_net, rel=0.01)
+
+
+class TestTransactionCostWithSchedule:
+    @pytest.fixture
+    def model(self) -> TransactionCostModel:
+        return TransactionCostModel(TransactionCostConfig(stamp_duty_rate=None))
+
+    def test_sell_uses_date_based_rate_before_2023(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2022, 1, 1),
+        )
+        assert cost.stamp_duty == 10000.0 * 1e-3
+
+    def test_sell_uses_date_based_rate_after_2023(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2024, 1, 1),
+        )
+        assert cost.stamp_duty == 10000.0 * 5e-4
+
+    def test_sell_uses_date_based_rate_on_change_date(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2023, 8, 28),
+        )
+        assert cost.stamp_duty == 10000.0 * 5e-4
+
+    def test_explicit_rate_overrides_schedule(self) -> None:
+        model = TransactionCostModel(TransactionCostConfig(stamp_duty_rate=2e-3))
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2024, 1, 1),
+        )
+        assert cost.stamp_duty == 10000.0 * 2e-3
+
+    def test_buy_never_has_stamp_duty(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=True,
+            trade_date=date(2022, 1, 1),
+        )
+        assert cost.stamp_duty == 0.0
+
+    def test_no_trade_date_uses_current_rate(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(price=10.0, volume=1000, is_buy=False)
+        assert cost.stamp_duty == 10000.0 * 5e-4
+
+
+class TestFutureScheduleExtension:
+    def test_can_add_new_schedule_item(self) -> None:
+        extended_schedule = STAMP_DUTY_SCHEDULE + [
+            StampDutySchedule(date(2030, 1, 1), 3e-4, "未来费率"),
+        ]
+        assert len(extended_schedule) == 3
+        assert extended_schedule[-1].rate == 3e-4
+
+    def test_schedule_is_frozen(self) -> None:
+        assert isinstance(STAMP_DUTY_SCHEDULE, list)
+        for item in STAMP_DUTY_SCHEDULE:
+            assert isinstance(item, StampDutySchedule)

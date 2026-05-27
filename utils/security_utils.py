@@ -63,6 +63,32 @@ class DecryptionError(Exception):
     pass
 
 
+class SecurityError(Exception):
+    """
+    Raised when secure key storage is unavailable and fallback is prohibited.
+
+    This indicates that the application cannot safely store sensitive data
+    because no secure keyring service is available. The user should either:
+
+    1. Ensure keyring service is running (Windows/macOS: automatic; Linux: libsecret)
+    2. Use environment variables instead (TS_TOKEN, DB_PASSWORD, AI_API_KEY)
+
+    This is intentionally NOT a silent fallback to maintain security guarantees.
+    """
+
+    def __init__(self, message: str | None = None):
+        if message is None:
+            message = (
+                "Cannot create encryption key: secure keyring unavailable.\n\n"
+                "Solutions:\n"
+                "  - Windows/macOS: ensure you are logged in with a user account\n"
+                "  - Linux: install libsecret and ensure a keyring daemon is running\n"
+                "  - Or use environment variables: TS_TOKEN, DB_PASSWORD, AI_API_KEY\n\n"
+                "See docs/security.md for details."
+            )
+        super().__init__(message)
+
+
 class SecurityManager:
     """
     Manages AES-GCM encryption for sensitive data.
@@ -140,15 +166,17 @@ class SecurityManager:
             logger.warning(
                 "Legacy key marker found but key file is missing. "
                 "Previously encrypted data (API keys, tokens) may be undecryptable. "
-                "Run SecurityManager.migrate_to_derived_key() to re-encrypt with the new key, "
-                "or delete .secret.legacy to suppress this warning (data will be lost)."
+                "You may need to re-enter credentials, or use environment variables."
             )
 
-        # 5. Derive key from machine fingerprint (PBKDF2)
-        logger.info("Deriving security key from machine fingerprint (PBKDF2)...")
-        salt = cls._get_or_create_salt()
-        cls._key = _derive_key_from_machine(salt)
-        return cls._key
+        # 5. NO MORE SILENT FALLBACK TO PBKDF2
+        # Require the caller to provide a master key, or use environment variables for credentials
+        raise SecurityError()
+
+    @classmethod
+    def has_legacy_encrypted_data(cls) -> bool:
+        """Check if there is legacy encrypted data that may be undecryptable."""
+        return os.path.exists(_LEGACY_MARKER)
 
     @classmethod
     def _ensure_legacy_marker(cls):

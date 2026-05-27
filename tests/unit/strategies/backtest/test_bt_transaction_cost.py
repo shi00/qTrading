@@ -1,8 +1,15 @@
 """交易成本模型单元测试"""
 
+from datetime import date
+
 import pytest
 
-from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+from data.domain_services.transaction_cost import (
+    STAMP_DUTY_SCHEDULE,
+    TransactionCostConfig,
+    TransactionCostModel,
+    get_stamp_duty_rate,
+)
 
 
 class TestTransactionCost:
@@ -112,3 +119,77 @@ class TestTransactionCost:
         gross = 10.0 * 1000
         expected_net = gross - cost.commission - cost.stamp_duty - cost.transfer_fee
         assert cost.net_amount == expected_net
+
+
+class TestStampDutyScheduleIntegration:
+    def test_stamp_duty_rate_before_2023_change(self):
+        config = TransactionCostConfig(stamp_duty_rate=None)
+        model = TransactionCostModel(config)
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2022, 1, 1),
+        )
+        expected_rate = STAMP_DUTY_SCHEDULE[0].rate
+        assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
+
+    def test_stamp_duty_rate_after_2023_change(self):
+        config = TransactionCostConfig(stamp_duty_rate=None)
+        model = TransactionCostModel(config)
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2024, 1, 1),
+        )
+        expected_rate = STAMP_DUTY_SCHEDULE[-1].rate
+        assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
+
+    def test_stamp_duty_rate_on_change_date(self):
+        config = TransactionCostConfig(stamp_duty_rate=None)
+        model = TransactionCostModel(config)
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2023, 8, 28),
+        )
+        expected_rate = STAMP_DUTY_SCHEDULE[-1].rate
+        assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
+
+    def test_explicit_rate_overrides_schedule(self):
+        config = TransactionCostConfig(stamp_duty_rate=2e-3)
+        model = TransactionCostModel(config)
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=False,
+            trade_date=date(2024, 1, 1),
+        )
+        assert cost.stamp_duty == 20.0
+
+    def test_no_trade_date_uses_current_rate(self):
+        config = TransactionCostConfig(stamp_duty_rate=None)
+        model = TransactionCostModel(config)
+        cost = model.calculate(price=10.0, volume=1000, is_buy=False)
+        expected_rate = get_stamp_duty_rate(None)
+        assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
+
+    def test_buy_stamp_duty_zero_regardless_of_date(self):
+        config = TransactionCostConfig(stamp_duty_rate=None)
+        model = TransactionCostModel(config)
+        cost_before = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=True,
+            trade_date=date(2022, 1, 1),
+        )
+        cost_after = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=True,
+            trade_date=date(2024, 1, 1),
+        )
+        assert cost_before.stamp_duty == 0.0
+        assert cost_after.stamp_duty == 0.0

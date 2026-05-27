@@ -1,10 +1,13 @@
 import pytest
 import datetime
+import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from data.sync.macro import MacroSyncStrategy, _parse_period
 from data.sync.base import SyncContext, SyncResult
+from data.persistence.daos.base_dao import EngineDisposedError
+from data.external.tushare_client import TushareAPIPermissionError
 
 
 class TestParsePeriod:
@@ -598,3 +601,377 @@ class TestMacroSyncIndexWeightCounterIsolation:
             expected_iw_count = 3 * len(MAJOR_INDICES)
             assert call_args[0][2] == expected_iw_count
             assert call_args[0][2] != result.added
+
+
+class TestMacroSyncEngineDisposedError:
+    @pytest.mark.asyncio
+    async def test_get_effective_trade_date_reraises_engine_disposed(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(
+            side_effect=EngineDisposedError("Engine disposed")
+        )
+        strategy = MacroSyncStrategy(ctx)
+        with pytest.raises(EngineDisposedError):
+            await strategy._get_effective_trade_date()
+
+    @pytest.mark.asyncio
+    async def test_run_handles_engine_disposed_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+
+        async def mock_monthly(result):
+            raise EngineDisposedError("Engine disposed")
+
+        strategy._sync_macro_monthly = mock_monthly
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result.status == "failed"
+        assert "Engine disposed" in result.errors[0]
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_reraises_engine_disposed(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(side_effect=EngineDisposedError("Engine disposed"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+        result = SyncResult()
+        with pytest.raises(EngineDisposedError):
+            await strategy._sync_macro_monthly(result)
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_reraises_engine_disposed(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(side_effect=EngineDisposedError("Engine disposed"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2023, 1, 1)])
+            result = SyncResult()
+            with pytest.raises(EngineDisposedError):
+                await strategy._sync_shibor_daily(result)
+
+    @pytest.mark.asyncio
+    async def test_sync_index_weights_reraises_engine_disposed(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(
+            side_effect=EngineDisposedError("Engine disposed")
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        with pytest.raises(EngineDisposedError):
+            await strategy._sync_index_weights(result)
+
+
+class TestMacroSyncCancelledError:
+    @pytest.mark.asyncio
+    async def test_run_propagates_cancelled_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+
+        async def mock_monthly(result):
+            raise asyncio.CancelledError()
+
+        strategy._sync_macro_monthly = mock_monthly
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        with pytest.raises(asyncio.CancelledError):
+            await strategy.run()
+
+    @pytest.mark.asyncio
+    async def test_run_sets_cancelled_status_on_cancelled_flag(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+
+        async def mock_monthly(result):
+            pass
+
+        async def mock_shibor(result):
+            strategy._cancelled = True
+
+        strategy._sync_macro_monthly = mock_monthly
+        strategy._sync_shibor_daily = mock_shibor
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result.status == "cancelled"
+
+
+class TestMacroSyncTusharePermissionError:
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_handles_permission_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(side_effect=TushareAPIPermissionError("macro_data", "Permission denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value="20240601")
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert len(result.errors) == 1
+        assert "permission denied" in result.errors[0].lower()
+        ctx.cache.update_sync_status.assert_called_once()
+        call_kwargs = ctx.cache.update_sync_status.call_args
+        assert call_kwargs[1].get("status") == "skipped_permission"
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_handles_permission_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(side_effect=TushareAPIPermissionError("shibor", "Permission denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2023, 1, 1)])
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+            assert len(result.errors) == 1
+            assert "permission denied" in result.errors[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_sync_index_weights_handles_permission_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(side_effect=TushareAPIPermissionError("index_weight", "Permission denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+            assert result.added == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_index_weights_handles_outer_permission_error(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(
+            side_effect=TushareAPIPermissionError("index_weight", "Permission denied")
+        )
+        ctx.cache.update_sync_status = AsyncMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        await strategy._sync_index_weights(result)
+        assert result.added == 0
+
+
+class TestMacroSyncShiborDateParsing:
+    @pytest.mark.asyncio
+    async def test_sync_shibor_invalid_date_fallback(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [2.0]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value="invalid-date-format")
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        result = SyncResult()
+        await strategy._sync_shibor_daily(result)
+        assert result.added == 1
+
+
+class TestMacroSyncIndexWeightsIndividualError:
+    @pytest.mark.asyncio
+    async def test_index_weight_individual_index_error_continues(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=5)
+        ctx.cache.update_sync_status = AsyncMock()
+
+        call_count = 0
+
+        def mock_get_index_weight(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("Individual index error")
+            return pd.DataFrame({"index_code": ["000001.SH"]})
+
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(side_effect=mock_get_index_weight)
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+            assert call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_index_weight_individual_engine_disposed_reraises(self):
+
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock()
+        ctx.cache.update_sync_status = AsyncMock()
+
+        call_count = 0
+
+        def mock_get_index_weight(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise EngineDisposedError("Engine disposed")
+            return pd.DataFrame()
+
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(side_effect=mock_get_index_weight)
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            with pytest.raises(EngineDisposedError):
+                await strategy._sync_index_weights(result)
+
+
+class TestMacroSyncGetEffectiveTradeDateEdgeCases:
+    @pytest.mark.asyncio
+    async def test_trade_date_returns_date_object(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        strategy = MacroSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert result == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_trade_date_string_parsing(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value="2024-06-14")
+        strategy = MacroSyncStrategy(ctx)
+        result = await strategy._get_effective_trade_date()
+        assert isinstance(result, datetime.date)
+
+
+class TestMacroSyncMergeMacroDataEdgeCases:
+    def test_merge_macro_data_missing_period_column_after_merge(self):
+        df_m2 = pd.DataFrame({"m2": [100.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None)
+        assert result is None
+
+    def test_merge_macro_data_with_empty_indicator(self):
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+        df_cpi = pd.DataFrame()
+        result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, None)
+        assert result is not None
+        assert "m2" in result.columns
+
+    def test_merge_indicator_missing_target_col_logs_warning(self):
+        df = pd.DataFrame({"period": ["202406"], "other": [1.0]})
+        result = MacroSyncStrategy._merge_indicator(None, df, "cpi")
+        assert result is None
+
+
+class TestMacroSyncRunSuccessPath:
+    @pytest.mark.asyncio
+    async def test_run_success_with_all_syncs(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = MacroSyncStrategy(ctx)
+        strategy._sync_macro_monthly = AsyncMock()
+        strategy._sync_shibor_daily = AsyncMock()
+        strategy._sync_index_weights = AsyncMock()
+        result = await strategy.run()
+        assert result.status != "failed"
+        assert result.status != "cancelled"
+
+
+class TestMacroSyncMonthlyWithSkippedPermission:
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_skipped_permission_no_latest(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(side_effect=TushareAPIPermissionError("macro_data", "Permission denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert len(result.errors) == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_skipped_permission_exception_in_status_update(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock(side_effect=Exception("Status update failed"))
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(side_effect=TushareAPIPermissionError("shibor", "Permission denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2023, 1, 1)])
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+            assert len(result.errors) == 1

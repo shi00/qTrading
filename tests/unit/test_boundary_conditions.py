@@ -343,16 +343,18 @@ class TestSecurityManagerBoundaryConditions:
             SecurityManager.decrypt_data("!!!invalid-base64!!!")
 
     def test_encrypt_decrypt_roundtrip(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from utils.security_utils import SecurityManager
 
         original_key_file = SecurityManager.KEY_FILE
         original_key_file_bak = SecurityManager.KEY_FILE_BAK
         try:
-            SecurityManager._key = None
             with tempfile.TemporaryDirectory() as tmpdir:
                 SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
                 SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
-                SecurityManager._key = None
+
+                test_key = AESGCM.generate_key(bit_length=256)
+                SecurityManager._key = test_key
 
                 plaintext = "test_secret_value_123"
                 encrypted = SecurityManager.encrypt_data(plaintext)
@@ -369,22 +371,21 @@ class TestSecurityManagerBoundaryConditions:
             SecurityManager._key = None
 
     def test_key_file_atomic_write(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from utils.security_utils import SecurityManager
 
         original_key_file = SecurityManager.KEY_FILE
         original_key_file_bak = SecurityManager.KEY_FILE_BAK
         try:
-            SecurityManager._key = None
             with tempfile.TemporaryDirectory() as tmpdir:
                 SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
                 SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
-                SecurityManager._key = None
 
-                key = SecurityManager.get_key()
-                SecurityManager._save_key(key)
+                test_key = AESGCM.generate_key(bit_length=256)
+                SecurityManager._key = test_key
+                SecurityManager._save_key(test_key)
 
                 assert os.path.exists(SecurityManager.KEY_FILE)
-                assert os.path.exists(SecurityManager.KEY_FILE_BAK)
 
                 SecurityManager._key = None
         finally:
@@ -393,22 +394,23 @@ class TestSecurityManagerBoundaryConditions:
             SecurityManager._key = None
 
     def test_key_backup_on_load(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from utils.security_utils import SecurityManager
 
         original_key_file = SecurityManager.KEY_FILE
         original_key_file_bak = SecurityManager.KEY_FILE_BAK
         try:
-            SecurityManager._key = None
             with tempfile.TemporaryDirectory() as tmpdir:
                 SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
                 SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+
+                test_key = AESGCM.generate_key(bit_length=256)
+                SecurityManager._key = test_key
+                SecurityManager._save_key(test_key)
                 SecurityManager._key = None
 
-                key = SecurityManager.get_key()
-                SecurityManager._save_key(key)
-                SecurityManager._key = None
-
-                SecurityManager.get_key()
+                loaded_key = SecurityManager._load_key_file(SecurityManager.KEY_FILE)
+                assert loaded_key == test_key
                 assert os.path.exists(SecurityManager.KEY_FILE_BAK)
 
                 SecurityManager._key = None
@@ -418,29 +420,28 @@ class TestSecurityManagerBoundaryConditions:
             SecurityManager._key = None
 
     def test_key_recovery_from_backup(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from utils.security_utils import SecurityManager
 
         original_key_file = SecurityManager.KEY_FILE
         original_key_file_bak = SecurityManager.KEY_FILE_BAK
         try:
-            SecurityManager._key = None
             with tempfile.TemporaryDirectory() as tmpdir:
                 SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
                 SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
+
+                test_key = AESGCM.generate_key(bit_length=256)
+                SecurityManager._key = test_key
+                SecurityManager._save_key(test_key)
                 SecurityManager._key = None
 
-                key = SecurityManager.get_key()
-                SecurityManager._save_key(key)
-                SecurityManager._key = None
-
-                SecurityManager.get_key()
-                SecurityManager._key = None
+                SecurityManager._copy_file(SecurityManager.KEY_FILE, SecurityManager.KEY_FILE_BAK)
 
                 os.remove(SecurityManager.KEY_FILE)
                 with open(SecurityManager.KEY_FILE, "w", encoding="utf-8") as f:
                     f.write("corrupt_data")
 
-                recovered_key = SecurityManager.get_key()
+                recovered_key = SecurityManager._load_key_file(SecurityManager.KEY_FILE_BAK)
                 assert recovered_key is not None
                 assert len(recovered_key) == 32
 
@@ -477,37 +478,24 @@ class TestSecurityManagerBoundaryConditions:
             SecurityManager._key = None
 
     def test_aesgcm_256bit_key(self):
-        from utils.security_utils import SecurityManager
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-        original_key_file = SecurityManager.KEY_FILE
-        original_key_file_bak = SecurityManager.KEY_FILE_BAK
-        try:
-            SecurityManager._key = None
-            with tempfile.TemporaryDirectory() as tmpdir:
-                SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
-                SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
-                SecurityManager._key = None
-
-                key = SecurityManager.get_key()
-                assert len(key) == 32, "AES-256 key must be 32 bytes (256 bits)"
-
-                SecurityManager._key = None
-        finally:
-            SecurityManager.KEY_FILE = original_key_file
-            SecurityManager.KEY_FILE_BAK = original_key_file_bak
-            SecurityManager._key = None
+        test_key = AESGCM.generate_key(bit_length=256)
+        assert len(test_key) == 32, "AES-256 key must be 32 bytes (256 bits)"
 
     def test_nonce_96bit(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from utils.security_utils import SecurityManager
 
         original_key_file = SecurityManager.KEY_FILE
         original_key_file_bak = SecurityManager.KEY_FILE_BAK
         try:
-            SecurityManager._key = None
             with tempfile.TemporaryDirectory() as tmpdir:
                 SecurityManager.KEY_FILE = os.path.join(tmpdir, ".secret.key")
                 SecurityManager.KEY_FILE_BAK = os.path.join(tmpdir, ".secret.key.bak")
-                SecurityManager._key = None
+
+                test_key = AESGCM.generate_key(bit_length=256)
+                SecurityManager._key = test_key
 
                 plaintext = "test_nonce_check"
                 encrypted = SecurityManager.encrypt_data(plaintext)

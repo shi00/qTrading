@@ -108,6 +108,7 @@ def mock_cache() -> MagicMock:
     cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
     cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
     cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+    cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
     return cache
 
@@ -421,6 +422,7 @@ class TestBacktestE2E:
         cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         class EmptyStrategy(BaseStrategy):
             required_context_keys = []
@@ -525,6 +527,7 @@ class TestBacktestHandCalculated:
         cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         return cache
 
@@ -677,6 +680,7 @@ class TestBacktestHandCalculated:
         cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         config = BacktestConfig(
             start_date=date(2024, 1, 2),

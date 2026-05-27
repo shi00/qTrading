@@ -55,6 +55,7 @@ class TestBacktestConfigPanel:
         panel.max_position_input.value = "50"
         panel.rebalance_dropdown.value = "signal"
         panel.commission_slider.value = 3
+        panel.stamp_duty_auto_checkbox.value = False
         panel.stamp_duty_slider.value = 1
         panel.slippage_slider.value = 5
 
@@ -72,6 +73,7 @@ class TestBacktestConfigPanel:
         panel.max_position_input.value = "30"
         panel.rebalance_dropdown.value = "weekly"
         panel.commission_slider.value = 5
+        panel.stamp_duty_auto_checkbox.value = False
         panel.stamp_duty_slider.value = 2
         panel.slippage_slider.value = 10
 
@@ -114,7 +116,8 @@ class TestBacktestConfigPanel:
 
     def test_get_config_slider_fallback_values(self, panel: BacktestConfigPanel) -> None:
         panel.commission_slider.value = 0
-        panel.stamp_duty_slider.value = 0
+        panel.stamp_duty_auto_checkbox.value = False
+        panel.stamp_duty_slider.value = 1
         panel.slippage_slider.value = 0
 
         config = panel.get_config()

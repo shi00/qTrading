@@ -124,6 +124,7 @@ class PortfolioSimulator:
                 volume=volume,
                 is_buy=False,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
+                trade_date=exec_date,
             )
 
             realized_pnl = cost.net_amount - pos["cost_basis"]
@@ -245,6 +246,7 @@ class PortfolioSimulator:
                 volume=volume,
                 is_buy=True,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
+                trade_date=exec_date,
             )
 
             if cost.net_amount > self.cash:

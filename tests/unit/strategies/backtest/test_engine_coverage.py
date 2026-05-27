@@ -808,10 +808,11 @@ class TestEnrichSuspendStatus:
             }
         )
 
-        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+        result, warning = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
 
         assert "is_tradable" in result.columns
         assert all(result["is_tradable"].to_list())
+        assert warning is None
 
     @pytest.mark.asyncio
     async def test_empty_suspend_data_returns_all_tradable(self):
@@ -829,10 +830,11 @@ class TestEnrichSuspendStatus:
             }
         )
 
-        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+        result, warning = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
 
         assert "is_tradable" in result.columns
         assert all(result["is_tradable"].to_list())
+        assert warning is None
 
     @pytest.mark.asyncio
     async def test_suspend_data_marks_suspended_stocks(self):
@@ -858,28 +860,124 @@ class TestEnrichSuspendStatus:
             }
         )
 
-        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+        result, warning = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
 
         assert "is_tradable" in result.columns
         is_tradable_list = result["is_tradable"].to_list()
         assert is_tradable_list[0] is False
         assert is_tradable_list[1] is True
+        assert warning is None
 
     @pytest.mark.asyncio
-    async def test_exception_returns_all_tradable(self):
+    async def test_exception_marks_all_not_tradable_and_creates_warning(self):
+
         engine = self._make_engine()
         engine.cache = MagicMock()
         engine.cache.get_suspend_d = AsyncMock(side_effect=Exception("DB error"))
 
         quotes_df = pl.DataFrame(
             {
-                "ts_code": ["000001.SZ"],
-                "trade_date": [date(2024, 1, 2)],
-                "close": [10.0],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0],
             }
         )
 
-        result = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+        result, warning = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
 
         assert "is_tradable" in result.columns
-        assert all(result["is_tradable"].to_list())
+        assert not any(result["is_tradable"].to_list())
+        assert warning is not None
+        assert warning.warning_type == "suspend_enrich_failed"
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240131"
+        assert warning.affected_stock_count == 2
+        assert "DB error" in warning.error_message
+
+
+class TestEnrichLimitStatus:
+    def _make_engine(self):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_no_limit_data_returns_none_limit_status(self):
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_limit_list = AsyncMock(return_value=None)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
+        assert "limit_status" in result.columns
+        assert all(v is None for v in result["limit_status"].to_list())
+        assert warning is None
+
+    @pytest.mark.asyncio
+    async def test_limit_data_marks_limit_stocks(self):
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        limit_pd = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "limit": ["U"],
+            }
+        )
+        engine.cache.get_limit_list = AsyncMock(return_value=limit_pd)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
+        assert "limit_status" in result.columns
+        limit_status_list = result["limit_status"].to_list()
+        assert limit_status_list[0] == "U"
+        assert limit_status_list[1] is None
+        assert warning is None
+
+    @pytest.mark.asyncio
+    async def test_exception_creates_warning(self):
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_limit_list = AsyncMock(side_effect=Exception("DB error"))
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
+        assert "limit_status" in result.columns
+        assert all(v is None for v in result["limit_status"].to_list())
+        assert warning is not None
+        assert warning.warning_type == "limit_enrich_failed"
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240131"
+        assert warning.affected_stock_count == 2
+        assert "DB error" in warning.error_message

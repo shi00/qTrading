@@ -1364,6 +1364,7 @@
     "backtest_fee_settings": "费率设置",
     "backtest_commission_rate": "佣金率",
     "backtest_stamp_duty_rate": "印花税率",
+    "backtest_stamp_duty_auto": "自动（按政策分段：2023-08-28 前 0.1%，之后 0.05%）",
     "backtest_slippage": "滑点",
     "backtest_run": "开始回测",
     "backtest_starting": "正在启动回测...",

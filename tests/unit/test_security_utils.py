@@ -83,14 +83,14 @@ class TestSecurityManagerGetKey:
         assert result == b"cached_key_32bytes_long_enough!!"
 
     @patch("utils.security_utils.os.path.exists")
-    def test_derive_key_when_no_files(self, mock_exists):
+    def test_no_key_files_raises_security_error(self, mock_exists):
+        from utils.security_utils import SecurityError
+
         mock_exists.side_effect = lambda p: False
         SecurityManager._key = None
 
-        with patch.object(SecurityManager, "_get_or_create_salt", return_value=b"s" * 32):
-            result = SecurityManager.get_key()
-            assert result is not None
-            assert len(result) == 32
+        with pytest.raises(SecurityError):
+            SecurityManager.get_key()
 
     @patch("utils.security_utils.os.path.exists")
     def test_load_existing_key(self, mock_exists):
@@ -274,22 +274,13 @@ class TestLegacyMarker:
 
     @patch("utils.security_utils.os.path.exists")
     def test_legacy_marker_warning_when_key_missing(self, mock_exists):
-        from utils.security_utils import _LEGACY_MARKER
+        from utils.security_utils import _LEGACY_MARKER, SecurityError
 
         SecurityManager._key = None
         mock_exists.side_effect = lambda p: p == _LEGACY_MARKER
 
-        with (
-            patch.object(SecurityManager, "_get_or_create_salt", return_value=b"s" * 32),
-            patch("utils.security_utils.logger") as mock_logger,
-        ):
+        with pytest.raises(SecurityError):
             SecurityManager.get_key()
-            mock_logger.warning.assert_any_call(
-                "Legacy key marker found but key file is missing. "
-                "Previously encrypted data (API keys, tokens) may be undecryptable. "
-                "Run SecurityManager.migrate_to_derived_key() to re-encrypt with the new key, "
-                "or delete .secret.legacy to suppress this warning (data will be lost)."
-            )
 
 
 class TestMigrateToDerivedKey:
@@ -347,3 +338,97 @@ class TestPyInstallerSpecExcludesKeyFiles:
             content = f.read()
         assert "_key_patterns" in content, "S-P1-4: .spec should define _key_patterns for exclusion"
         assert "_datas_filtered" in content, "S-P1-4: .spec should filter datas list"
+
+
+class TestSecurityError:
+    """P0-7: SecurityError 异常类测试"""
+
+    def test_security_error_is_exception(self):
+        from utils.security_utils import SecurityError
+
+        err = SecurityError()
+        assert isinstance(err, Exception)
+
+    def test_security_error_default_message(self):
+        from utils.security_utils import SecurityError
+
+        err = SecurityError()
+        assert "keyring unavailable" in str(err) or "secure" in str(err).lower()
+        assert "environment variable" in str(err).lower() or "env" in str(err).lower()
+
+    def test_security_error_custom_message(self):
+        from utils.security_utils import SecurityError
+
+        err = SecurityError("custom error message")
+        assert str(err) == "custom error message"
+
+
+class TestSecurityManagerNoFallback:
+    """P0-7: 禁止 PBKDF2 降级测试"""
+
+    def setup_method(self):
+        SecurityManager._key = None
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_no_key_files_raises_security_error(self, mock_exists):
+        """无密钥文件时抛出 SecurityError，而非静默降级到 PBKDF2"""
+        from utils.security_utils import SecurityError
+
+        mock_exists.side_effect = lambda p: False
+        SecurityManager._key = None
+
+        with pytest.raises(SecurityError):
+            SecurityManager.get_key()
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_legacy_marker_with_no_key_raises_security_error(self, mock_exists):
+        """有 legacy 标记但无密钥文件时抛出 SecurityError"""
+        from utils.security_utils import SecurityError, _LEGACY_MARKER
+
+        SecurityManager._key = None
+        mock_exists.side_effect = lambda p: p == _LEGACY_MARKER
+
+        with pytest.raises(SecurityError):
+            SecurityManager.get_key()
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_encrypt_without_key_raises_decryption_error(self, mock_exists):
+        """无密钥时 encrypt_data 抛出 DecryptionError（包装 SecurityError）"""
+        from utils.security_utils import DecryptionError
+
+        mock_exists.return_value = False
+        SecurityManager._key = None
+
+        with pytest.raises(DecryptionError, match="Encryption failed"):
+            SecurityManager.encrypt_data("secret_data")
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_decrypt_without_key_raises_decryption_error(self, mock_exists):
+        """无密钥时 decrypt_data 抛出 DecryptionError（包装 SecurityError）"""
+        from utils.security_utils import DecryptionError
+
+        mock_exists.return_value = False
+        SecurityManager._key = None
+
+        fake_encrypted = base64.b64encode(b"x" * 28).decode()
+
+        with pytest.raises(DecryptionError, match="Decryption failed"):
+            SecurityManager.decrypt_data(fake_encrypted)
+
+
+class TestHasLegacyEncryptedData:
+    """P0-7: 检测 legacy 加密数据测试"""
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_returns_true_when_legacy_marker_exists(self, mock_exists):
+        from utils.security_utils import _LEGACY_MARKER
+
+        mock_exists.side_effect = lambda p: p == _LEGACY_MARKER
+        result = SecurityManager.has_legacy_encrypted_data()
+        assert result is True
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_returns_false_when_no_legacy_marker(self, mock_exists):
+        mock_exists.return_value = False
+        result = SecurityManager.has_legacy_encrypted_data()
+        assert result is False
