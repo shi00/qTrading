@@ -473,4 +473,5 @@ class TestNotificationsTab:
                 page = _FakePageWithWeakRef()
                 tab = NotificationsTab(MagicMock(), page)
 
+                assert tab._page_ref is not None
                 assert tab._page_ref() is page
