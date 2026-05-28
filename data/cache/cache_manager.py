@@ -43,12 +43,11 @@ class CacheManager:
     _lock = threading.Lock()  # Thread-safe singleton
 
     def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-                    cls._instance._disposed = False
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._disposed = False
+                cls._initialized = False
         return cls._instance
 
     @classmethod
@@ -59,37 +58,38 @@ class CacheManager:
             cls._initialized = False
 
     def __init__(self):
-        if self._initialized:
-            return
+        with self._lock:
+            if self.__class__._initialized:
+                return
 
-        connection_string = self._get_connection_string()
+            connection_string = self._get_connection_string()
 
-        self.engine: AsyncEngine | None = None
-        self._disposed = False
+            self.engine: AsyncEngine | None = None
+            self._disposed = False
 
-        self.stock_dao = StockDao(self.engine)
-        self.quote_dao = QuoteDao(self.engine)
-        self.financial_dao = FinancialDao(self.engine)
-        self.sync_dao = SyncDao(self.engine)
-        self.market_dao = MarketDao(self.engine)
-        self.screener_dao = ScreenerDao(self.engine)
-        self.macro_dao = MacroDao(self.engine)
-        self.holder_dao = HolderDao(self.engine)
-        self.backtest_dao = BacktestDAO(self.engine)
+            self.stock_dao = StockDao(self.engine)
+            self.quote_dao = QuoteDao(self.engine)
+            self.financial_dao = FinancialDao(self.engine)
+            self.sync_dao = SyncDao(self.engine)
+            self.market_dao = MarketDao(self.engine)
+            self.screener_dao = ScreenerDao(self.engine)
+            self.macro_dao = MacroDao(self.engine)
+            self.holder_dao = HolderDao(self.engine)
+            self.backtest_dao = BacktestDAO(self.engine)
 
-        self._schema_initialized = False
+            self._schema_initialized = False
 
-        if not connection_string:
-            logger.debug(
-                "[CacheManager] No DB_URL configured, skipping engine creation. "
-                "Engine will be created after onboarding wizard completes."
-            )
-            self._initialized = True
-            return
+            if not connection_string:
+                logger.debug(
+                    "[CacheManager] No DB_URL configured, skipping engine creation. "
+                    "Engine will be created after onboarding wizard completes."
+                )
+                self.__class__._initialized = True
+                return
 
-        self._create_engine(connection_string)
-        self._initialized = True
-        logger.debug("[CacheManager] Initialized with AsyncEngine: %s", self._sanitize_url(connection_string))
+            self._create_engine(connection_string)
+            self.__class__._initialized = True
+            logger.debug("[CacheManager] Initialized with AsyncEngine: %s", self._sanitize_url(connection_string))
 
     def _get_connection_string(self) -> str | None:
         """Get database connection string from config."""
