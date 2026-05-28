@@ -231,7 +231,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
         staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
     )
 
-    holder: dict[str, typing.Any] = {"factory": None, "saved": None}
+    holder: dict[str, typing.Any] = {"factory": None, "saved": None, "unique_key": None}
 
     class _FakeTradeCalendar:
         async def is_trading_day(self, _today):
@@ -263,6 +263,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
 
         def submit_task(self, **kwargs):
             holder["factory"] = kwargs.get("coroutine_factory")
+            holder["unique_key"] = kwargs.get("unique_key")
 
     class _FakeStrategy:
         async def filter(self, context):
@@ -276,6 +277,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
 
     await service._run_nightly_prediction()
     assert holder["factory"] is not None
+    assert holder["unique_key"] == "nightly_prediction", "nightly_prediction should have unique_key for deduplication"
 
     msg = await holder["factory"]("task-id")
     assert msg == "sched_pred_done_found:1"
@@ -305,7 +307,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
         staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
     )
 
-    holder: dict[str, typing.Any] = {"factory": None, "save_called": False}
+    holder: dict[str, typing.Any] = {"factory": None, "save_called": False, "unique_key": None}
 
     class _FakeTradeCalendar:
         async def is_trading_day(self, _today):
@@ -334,6 +336,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
 
         def submit_task(self, **kwargs):
             holder["factory"] = kwargs.get("coroutine_factory")
+            holder["unique_key"] = kwargs.get("unique_key")
 
     class _FakeStrategy:
         async def filter(self, context):
@@ -346,6 +349,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
 
     await service._run_nightly_prediction()
     assert holder["factory"] is not None
+    assert holder["unique_key"] == "nightly_prediction", "nightly_prediction should have unique_key for deduplication"
 
     with pytest.raises(RuntimeError, match="missing trade_date"):
         await holder["factory"]("task-id")

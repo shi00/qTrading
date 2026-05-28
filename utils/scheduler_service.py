@@ -512,6 +512,7 @@ class SchedulerService:
             task_type=I18n.get("task_type_ai_screening"),
             coroutine_factory=_prediction_logic,
             cancellable=False,
+            unique_key="nightly_prediction",
         )
 
     def get_status(self) -> dict:
