@@ -83,6 +83,11 @@ class DataSanitizer:
         re.IGNORECASE,
     )
 
+    _PATTERN_STANDALONE_KEY_VALUE = re.compile(
+        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)\s*=\s*[^\s,;\"']+",
+        re.IGNORECASE,
+    )
+
     _PATTERN_BEARER = re.compile(r"Bearer\s+[^\s\"']+", re.IGNORECASE)
 
     _PATTERN_URL_CREDENTIALS = re.compile(
@@ -107,6 +112,8 @@ class DataSanitizer:
         msg = str(exception)
 
         msg = DataSanitizer._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", msg)
+
+        msg = DataSanitizer._PATTERN_STANDALONE_KEY_VALUE.sub(r"\1=***", msg)
 
         msg = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(r"\1://\2:***@", msg)
 

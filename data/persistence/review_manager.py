@@ -236,9 +236,7 @@ class ReviewManager:
             logger.error(f"[Review] Error fetching pending predictions: {e}")
             return pd.DataFrame()
 
-    async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | None = None):
-        if as_of is not None and isinstance(as_of, datetime.datetime):
-            as_of = as_of.date()
+    async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | datetime.datetime | None = None):
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
         Returns formatted XML string for few-shot learning.
@@ -252,6 +250,13 @@ class ReviewManager:
         - All wins/no losses: Handles gracefully
         - DB errors: Returns empty context (non-blocking)
         """
+        if as_of is not None and isinstance(as_of, datetime.datetime):
+            as_of = as_of.date()
+        if as_of is None:
+            logger.warning(
+                "[ReviewManager] get_learning_context called without as_of; "
+                "using all completed samples. This may introduce look-ahead bias in backtest scenarios."
+            )
         wins = []
         losses = []
 

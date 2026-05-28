@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
 
 from data.persistence.daos.screener_dao import ScreenerDao
+from data.constants import REVIEW_STATUS_COMPLETED
 
 
 class TestScreenerDaoGetScreeningHistory:
@@ -200,7 +201,7 @@ class TestScreenerDaoGetLearningContext:
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "trade_date < $2" in sql
-        assert call_args[0][1] == ("WIN", as_of_date, 3)
+        assert call_args[0][1] == ("WIN", as_of_date, 3, REVIEW_STATUS_COMPLETED)
 
     @pytest.mark.asyncio
     async def test_no_as_of_no_date_filter(self):
@@ -209,7 +210,42 @@ class TestScreenerDaoGetLearningContext:
         await dao.get_learning_context(limit=3, is_win=True)
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
-        assert "trade_date" not in sql
+        assert "trade_date <" not in sql
+
+    @pytest.mark.asyncio
+    async def test_sql_includes_t5_pct_filter(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "t5_pct IS NOT NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_sql_includes_review_status_filter(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "review_status" in sql
+        params = call_args[0][1]
+        assert REVIEW_STATUS_COMPLETED in params
+
+    @pytest.mark.asyncio
+    async def test_as_of_sql_includes_t5_pct_and_review_status(self):
+        import datetime
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        as_of_date = datetime.date(2024, 6, 1)
+        await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "t5_pct IS NOT NULL" in sql
+        assert "review_status" in sql
+        params = call_args[0][1]
+        assert REVIEW_STATUS_COMPLETED in params
 
 
 class TestScreenerDaoUpdatePredictionResult:

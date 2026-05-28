@@ -14,6 +14,15 @@ from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
+_LEARNING_CONTEXT_BASE_SQL = """
+    SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
+    FROM screening_history
+    WHERE prediction_result = $1
+      AND alpha IS NOT NULL
+      AND t5_pct IS NOT NULL
+      AND review_status = $4
+"""
+
 
 class ScreenerDao(BaseDao):
     @functools.cached_property
@@ -212,7 +221,7 @@ class ScreenerDao(BaseDao):
         self,
         limit: int = 3,
         is_win: bool = True,
-        as_of: datetime.date | None = None,
+        as_of: datetime.date | datetime.datetime | None = None,
     ):
         label = "WIN" if is_win else "LOSS"
         order = "DESC" if is_win else "ASC"
@@ -221,22 +230,19 @@ class ScreenerDao(BaseDao):
             if isinstance(as_of, datetime.datetime):
                 as_of = as_of.date()
             sql = f"""
-                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
-                FROM screening_history
-                WHERE prediction_result = $1 AND alpha IS NOT NULL AND trade_date < $2
+                {_LEARNING_CONTEXT_BASE_SQL}
+                AND trade_date < $2
                 ORDER BY alpha {order}, t1_pct {order}
                 LIMIT $3
             """
-            df = await self._read_db(sql, (label, as_of, limit))
+            df = await self._read_db(sql, (label, as_of, limit, REVIEW_STATUS_COMPLETED))
         else:
             sql = f"""
-                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
-                FROM screening_history
-                WHERE prediction_result = $1 AND alpha IS NOT NULL
+                {_LEARNING_CONTEXT_BASE_SQL}
                 ORDER BY alpha {order}, t1_pct {order}
                 LIMIT $2
             """
-            df = await self._read_db(sql, (label, limit))
+            df = await self._read_db(sql, (label, limit, REVIEW_STATUS_COMPLETED))
         return df if df is not None else pd.DataFrame()
 
     async def update_prediction_result(

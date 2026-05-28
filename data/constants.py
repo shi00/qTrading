@@ -158,6 +158,10 @@ def get_column_unit_source(df, column_name: str, default: dict | None = None) ->
 # Jan/Apr/Jul/Oct are the start of disclosure windows usually
 EARNINGS_SEASON_MONTHS = [1, 4, 7, 10]
 
+# Learning Context Safety Margins (prevents look-ahead bias)
+SAFE_LIVE_LEARNING_OFFSET_DAYS = 10
+SAFE_BACKTEST_LEARNING_OFFSET_DAYS = 15
+
 # --- Unified Financial Tables Configuration (Single Source of Truth) ---
 
 # Group A: Batch Sync (O(Time))

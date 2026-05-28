@@ -65,6 +65,29 @@ def reset_singletons():
         pass
 
 
+@pytest.fixture(autouse=True)
+def mock_keyring():
+    """Mock keyring with an in-memory dictionary to isolate tests from OS keyring."""
+    keyring_store = {}
+
+    def get_password(service_name, username):
+        return keyring_store.get((service_name, username))
+
+    def set_password(service_name, username, password):
+        keyring_store[(service_name, username)] = password
+
+    def delete_password(service_name, username):
+        if (service_name, username) in keyring_store:
+            del keyring_store[(service_name, username)]
+
+    with (
+        patch("utils.config_handler.keyring.get_password", side_effect=get_password),
+        patch("utils.config_handler.keyring.set_password", side_effect=set_password),
+        patch("utils.config_handler.keyring.delete_password", side_effect=delete_password),
+    ):
+        yield keyring_store
+
+
 class TestConfigHandlerLLM:
     """Tests for ConfigHandler LLM configuration methods"""
 

@@ -22,13 +22,14 @@ from decimal import Decimal
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import httpx
 from cachetools import TTLCache
 
 import pandas as pd
 
+from data.constants import SAFE_BACKTEST_LEARNING_OFFSET_DAYS, SAFE_LIVE_LEARNING_OFFSET_DAYS
 from data.constants import TOP_LIST_NET_AMOUNT_UNIT, get_column_unit
 from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
@@ -64,6 +65,8 @@ class PreFetchedContext:
     market_context_str: str = ""
     macro_context: str = ""
     auxiliary_data: dict = field(default_factory=dict)
+    news_as_of: date | None = None
+    is_backtest: bool = False
 
 
 ContextBuilder = Callable[[dict, PreFetchedContext], str]
@@ -211,21 +214,28 @@ class AIStrategyMixin:
         return end_date
 
     @staticmethod
-    def compute_learning_as_of(trade_date_raw, is_backtest: bool):
-        import datetime as _dt
+    def compute_learning_as_of(trade_date_raw, is_backtest: bool) -> date:
+        import datetime
 
-        from utils.time_utils import parse_date
+        from utils.time_utils import get_now, parse_date
 
         as_of = None
         if trade_date_raw is not None:
             try:
                 as_of = parse_date(str(trade_date_raw))
-                if isinstance(as_of, _dt.datetime):
+                if isinstance(as_of, datetime.datetime):
                     as_of = as_of.date()
             except Exception:
                 pass
-        if as_of is not None and is_backtest:
-            as_of = as_of - _dt.timedelta(days=8)
+        if as_of is None and is_backtest:
+            raise ValueError(
+                f"Cannot compute learning as_of for backtest: trade_date is {trade_date_raw!r}. "
+                f"Refusing to use unbounded learning context to prevent lookahead bias."
+            )
+        if as_of is None:
+            as_of = get_now().date() - datetime.timedelta(days=SAFE_LIVE_LEARNING_OFFSET_DAYS)
+        elif is_backtest:
+            as_of = as_of - datetime.timedelta(days=SAFE_BACKTEST_LEARNING_OFFSET_DAYS)
         return as_of
 
     async def run_ai_analysis(
@@ -284,6 +294,13 @@ class AIStrategyMixin:
             )
             return candidates_df
 
+        # --- Guard: Backtest AI Disabled? ---
+        if context.get("_disable_ai"):
+            logger.info(
+                "[AIStrategyMixin] AI disabled by backtest config — returning math-only results",
+            )
+            return candidates_df
+
         # --- Guard: Empty Input ---
         if candidates_df is None or candidates_df.empty:
             return pd.DataFrame()
@@ -295,6 +312,21 @@ class AIStrategyMixin:
                 f"[AIStrategyMixin] Capping candidates from {len(candidates_df)} to {cap}",
             )
             candidates_df = candidates_df.head(cap)
+
+        # --- Calculate News as_of ---
+        news_as_of = None
+        trade_date_raw = context.get("trade_date")
+        if trade_date_raw is not None:
+            try:
+                from utils.time_utils import parse_date
+
+                parsed = parse_date(str(trade_date_raw))
+                if isinstance(parsed, datetime):
+                    news_as_of = parsed.date()
+                elif isinstance(parsed, date):
+                    news_as_of = parsed
+            except Exception:
+                pass
 
         # --- Fetch Global Context ONCE ---
         # --- Pre-fetch Learning Context ONCE for the entire batch ---
@@ -314,18 +346,7 @@ class AIStrategyMixin:
         global_context = ""
         if self.should_include_global_context():
             try:
-                trade_date_raw = context.get("trade_date")
-                as_of = None
-                if trade_date_raw is not None:
-                    from utils.time_utils import parse_date
-
-                    try:
-                        as_of = parse_date(str(trade_date_raw))
-                        if isinstance(as_of, datetime.datetime):
-                            as_of = as_of.date()
-                    except Exception:
-                        pass
-                global_context = await NewsFetcher.get_us_major_moves(as_of=as_of)
+                global_context = await NewsFetcher.get_us_major_moves(as_of=news_as_of)
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to fetch global context: %s", e)
 
@@ -371,7 +392,7 @@ class AIStrategyMixin:
             async def bg_fetch_news(code):
                 async with news_sem:
                     try:
-                        return await NewsFetcher.get_stock_news(code, limit=5)
+                        return await NewsFetcher.get_stock_news(code, limit=5, as_of=news_as_of)
                     except (ValueError, RuntimeError, OSError, ConnectionError):
                         return []
 
@@ -435,6 +456,8 @@ class AIStrategyMixin:
             global_context=global_context,
             trade_date=trade_date,
             auxiliary_data=auxiliary_data,
+            news_as_of=news_as_of,
+            is_backtest=bool(context.get("is_backtest")),
         )
 
         # --- Strategy-specific prefetch hook ---
@@ -667,7 +690,7 @@ class AIStrategyMixin:
 
             # 3. News
             if news is None:
-                news = await NewsFetcher.get_stock_news(ts_code, limit=5)
+                news = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
 
             # 4. Concepts (use pre-fetched map)
             concepts = []
@@ -759,6 +782,7 @@ class AIStrategyMixin:
                 include_global_context=self.should_include_global_context(),
                 include_learning_context=self.should_include_learning_context(),
                 ui_prompt_override=ui_prompt_override,
+                is_backtest=prefetched.is_backtest,
             )
             return ai_result
 

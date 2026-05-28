@@ -409,6 +409,66 @@ class TestAnalyzeStockDeepBranches:
         assert result["score"] == 50
 
     @pytest.mark.asyncio
+    async def test_fallback_learning_context_passes_non_none_as_of(self):
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+
+        mock_rm = AsyncMock()
+        mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
+
+        with (
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+                include_learning_context=True,
+            )
+        assert result["score"] == 50
+        mock_rm.get_learning_context.assert_called_once()
+        call_kwargs = mock_rm.get_learning_context.call_args
+        as_of_arg = call_kwargs.kwargs.get("as_of") if call_kwargs.kwargs else call_kwargs[1].get("as_of")
+        assert as_of_arg is not None, "fallback path must pass non-None as_of to prevent lookahead bias"
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_fallback_raises_in_backtest_mode(self):
+        svc = _make_svc_with_cloud()
+        with pytest.raises(ValueError, match="analyze_stock called with history_context=None in backtest mode"):
+            await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context=None,
+                include_learning_context=True,
+                is_backtest=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_fallback_works_in_live_mode(self):
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        mock_rm = AsyncMock()
+        mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
+
+        with (
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context=None,
+                include_learning_context=True,
+                is_backtest=False,
+            )
+            assert result["score"] == 50
+            mock_rm.get_learning_context.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_no_strategy_key_no_override(self):
         svc = _make_svc_with_cloud()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
