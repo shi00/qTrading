@@ -66,6 +66,8 @@ def backtest_result(backtest_config: BacktestConfig) -> BacktestResult:
                 "monthly_return": [0.01],
                 "benchmark_return": [0.008],
                 "excess_return": [0.002],
+                "start_nav": [100.0],
+                "end_nav": [101.0],
             }
         ),
         data_warnings=(),

@@ -29,7 +29,7 @@ class BacktestMetrics:
         if len(nav_curve) <= 1:
             return pl.Series([0.0] * len(nav_curve))
         returns = nav_curve.pct_change()
-        return returns.fill_null(0.0)
+        return returns.fill_nan(0.0).fill_null(0.0)
 
     @staticmethod
     def calc_total_return(nav_curve: pl.Series) -> float:

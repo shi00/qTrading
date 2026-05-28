@@ -1,5 +1,6 @@
 """strategies/backtest/engine.py 补充测试 - 覆盖 _is_rebalance_day、_calc_ic_series、_apply_qfq 等"""
 
+import math
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
@@ -461,6 +462,7 @@ class TestCalcPeriodStats:
         assert "monthly_return" in result.columns
         assert "benchmark_return" in result.columns
         assert "excess_return" in result.columns
+        assert "start_nav" in result.columns
         assert "end_nav" in result.columns
 
     def test_period_stats_monthly_aggregation(self):
@@ -472,9 +474,9 @@ class TestCalcPeriodStats:
             date(2024, 2, 1),
             date(2024, 2, 2),
         ]
-        nav_curve = pl.Series([1.0, 1.01, 1.02, 1.03, 1.04])
-        daily_returns = pl.Series([0.01, 0.01, 0.01, 0.01, 0.01])
-        benchmark_returns = pl.Series([0.005, 0.005, 0.005, 0.005, 0.005])
+        nav_curve = pl.Series([100.0, 105.0, 102.9, 106.0, 110.24])
+        daily_returns = pl.Series([0.0, 0.05, -0.02, 0.030125, 0.04])
+        benchmark_returns = pl.Series([0.0, 0.02, -0.01, 0.015, 0.01])
 
         result = engine._calc_period_stats(nav_curve, daily_returns, benchmark_returns, trade_dates)
 
@@ -482,6 +484,49 @@ class TestCalcPeriodStats:
         year_months = result["year_month"].to_list()
         assert "2024-01" in year_months
         assert "2024-02" in year_months
+
+        jan_row = result.filter(pl.col("year_month") == "2024-01")
+        jan_monthly = float(jan_row["monthly_return"][0])
+        expected_jan = (1.05 * 0.98) - 1
+        assert jan_monthly == pytest.approx(expected_jan, rel=1e-4)
+
+        jan_bench = float(jan_row["benchmark_return"][0])
+        expected_jan_bench = (1.02 * 0.99) - 1
+        assert jan_bench == pytest.approx(expected_jan_bench, rel=1e-4)
+
+        feb_row = result.filter(pl.col("year_month") == "2024-02")
+        feb_monthly = float(feb_row["monthly_return"][0])
+        expected_feb = (1.030125 * 1.04) - 1
+        assert feb_monthly == pytest.approx(expected_feb, rel=1e-4)
+
+        feb_bench = float(feb_row["benchmark_return"][0])
+        expected_feb_bench = (1.015 * 1.01) - 1
+        assert feb_bench == pytest.approx(expected_feb_bench, rel=1e-4)
+
+        jan_excess = float(jan_row["excess_return"][0])
+        assert jan_excess == pytest.approx(expected_jan - expected_jan_bench, rel=1e-4)
+
+        feb_excess = float(feb_row["excess_return"][0])
+        assert feb_excess == pytest.approx(expected_feb - expected_feb_bench, rel=1e-4)
+
+    def test_period_stats_nan_defense(self):
+        engine = self._make_engine()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        nav_curve = pl.Series([100.0, 105.0])
+        daily_returns = pl.Series([0.05, float("nan")])
+        benchmark_returns = pl.Series([0.02, float("nan")])
+
+        result = engine._calc_period_stats(nav_curve, daily_returns, benchmark_returns, trade_dates)
+
+        assert not result.is_empty()
+        monthly_ret = float(result["monthly_return"][0])
+        bench_ret = float(result["benchmark_return"][0])
+
+        assert not math.isnan(monthly_ret), "monthly_return should not be NaN"
+        assert not math.isnan(bench_ret), "benchmark_return should not be NaN"
+
+        expected_monthly = 1.05 * 1.0 - 1
+        assert monthly_ret == pytest.approx(expected_monthly, rel=1e-4)
 
 
 class TestGetNextRebalanceDate:
