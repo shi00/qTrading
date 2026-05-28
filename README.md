@@ -59,6 +59,14 @@
 * **弹性任务中心**: 基于 `ThreadPoolManager` 的高可靠任务调度，IO/CPU 线程池分离，任务状态持久化，支持异常断点续传。
 * **国际化支持**: 内置中英文双语切换。
 
+### 8. 📈 向量化回测框架
+
+* **高性能引擎**: 基于 Polars 向量化计算，支持毫秒级全市场回测。
+* **灵活策略适配**: 通过 `StrategyAdapter` 将选股策略无缝接入回测框架。
+* **多维度绩效指标**: 内置夏普比率、最大回撤、Alpha/Beta、胜率等 10+ 核心指标。
+* **仓位管理**: 支持等权、市值加权、风险平价等多种仓位分配策略。
+* **交易成本建模**: 精确建模佣金、印花税、滑点等真实交易成本。
+
 ---
 
 ## 🛠️ 技术栈
@@ -99,7 +107,8 @@ astock_screener/
 │   ├── domain_services/    # 领域服务
 │   │   ├── trade_calendar_service.py  # 交易日历服务（三级降级）
 │   │   ├── offline_calendar.py        # 离线日历数据
-│   │   └── market_data_service.py     # 市场数据后台服务
+│   │   ├── market_data_service.py     # 市场数据后台服务
+│   │   └── transaction_cost.py        # 交易成本计算服务
 │   ├── external/           # 外部数据源
 │   │   ├── tushare_client.py   # Tushare API 客户端（限流、重试）
 │   │   ├── news_fetcher.py     # 新闻抓取服务
@@ -114,7 +123,8 @@ astock_screener/
 │   │   │   ├── macro_dao.py    # 宏观经济数据
 │   │   │   ├── market_dao.py   # 市场指数数据
 │   │   │   ├── screener_dao.py # 选股结果存储
-│   │   │   └── sync_dao.py     # 同步状态管理
+│   │   │   ├── sync_dao.py     # 同步状态管理
+│   │   │   └── backtest_dao.py # 回测结果存储
 │   │   ├── models.py           # SQLAlchemy ORM 模型
 │   │   ├── db_migrator.py      # 数据库迁移管理
 │   │   ├── database_manager.py # 数据库连接管理（同步引擎）
@@ -138,6 +148,15 @@ astock_screener/
 │   └── data_processor.py   # 数据处理门面类
 │
 ├── strategies/             # 策略层
+│   ├── backtest/               # 向量化回测框架
+│   │   ├── adapter.py              # 策略适配器
+│   │   ├── engine.py               # 回测引擎核心
+│   │   ├── config.py               # 回测参数配置
+│   │   ├── data_provider.py        # 数据提供器
+│   │   ├── metrics.py              # 绩效指标计算
+│   │   ├── portfolio.py            # 组合管理
+│   │   ├── position_sizer.py       # 仓位分配策略
+│   │   └── report.py               # 回测报告生成
 │   ├── base_strategy.py        # 策略基类 + 自动注册装饰器
 │   ├── polars_base.py          # Polars 策略基类
 │   ├── ai_mixin.py             # AI 分析混入
@@ -153,10 +172,11 @@ astock_screener/
 ├── services/               # 服务层
 │   ├── ai_service.py           # AI 服务（LiteLLM 多模型网关）
 │   ├── local_model_manager.py  # 本地模型管理
-│   └── task_manager.py         # 异步任务管理器
+│   ├── task_manager.py         # 异步任务管理器
+│   └── backtest_service.py     # 回测服务（策略回测执行、结果管理）
 │
 ├── ui/                     # 表现层 (MVVM)
-│   ├── app_layout.py           # 主布局（5 标签页导航）
+│   ├── app_layout.py           # 主布局（6 标签页导航：市场 | 选股 | 回测 | 数据 | 任务 | 设置）
 │   ├── i18n.py                 # UI 层国际化封装（核心引擎在 core/i18n.py）
 │   ├── theme.py                # 主题管理
 │   ├── components/             # 可复用组件
@@ -165,6 +185,9 @@ astock_screener/
 │   │   │   ├── llm_config_panel.py
 │   │   │   ├── local_model_config_panel.py
 │   │   │   └── tushare_config_panel.py
+│   │   ├── backtest/           # 回测相关组件
+│   │   │   ├── backtest_config_panel.py
+│   │   │   └── backtest_result_panel.py
 │   │   ├── virtual_table.py    # 虚拟化表格
 │   │   ├── toast_manager.py    # 消息提示
 │   │   ├── market_dashboard.py # 市场仪表盘
@@ -175,10 +198,12 @@ astock_screener/
 │   │   └── health_report_dialog.py
 │   ├── viewmodels/             # 视图模型
 │   │   ├── home_view_model.py
-│   │   └── screener_view_model.py
+│   │   ├── screener_view_model.py
+│   │   └── backtest_view_model.py
 │   └── views/                  # 视图
 │       ├── home_view.py
 │       ├── screener_view.py
+│       ├── backtest_view.py    # 回测视图
 │       ├── data_view.py
 │       ├── settings_view.py
 │       ├── task_center_view.py
@@ -210,7 +235,7 @@ astock_screener/
 │   ├── sanitizers.py           # 数据脱敏工具
 │   └── time_utils.py           # 时间工具函数
 │
-├── tests/                  # 测试层（100+ 文件，~2700 用例）
+├── tests/                  # 测试层（140+ 单元测试文件，50+ 集成测试文件）
 │   ├── conftest.py             # 全局测试配置
 │   ├── unit/                   # 单元测试
 │   │   ├── conftest.py
@@ -220,17 +245,18 @@ astock_screener/
 │   │   ├── test_config_handler.py
 │   │   ├── test_cache_manager.py
 │   │   ├── test_boundary_conditions.py
-│   │   └── ... (80+ 文件)
-│   ├── integration/            # 集成测试
-│   │   ├── conftest.py
-│   │   ├── test_historical_sync_integrity.py
-│   │   ├── test_financial_sync_integrity.py
-│   │   ├── test_task_manager_ai_service.py
-│   │   ├── test_review_round_trip.py
-│   │   └── ... (40+ 文件)
-│   └── e2e/                    # 端到端测试
+│   │   ├── strategies/         # 策略测试（含回测模块测试）
+│   │   ├── data/               # 数据层测试
+│   │   ├── ui/                 # UI 层测试
+│   │   └── ... (140+ 文件)
+│   └── integration/            # 集成测试
 │       ├── conftest.py
-│       └── test_onboarding_wizard_e2e.py
+│       ├── test_historical_sync_integrity.py
+│       ├── test_financial_sync_integrity.py
+│       ├── test_task_manager_ai_service.py
+│       ├── test_review_round_trip.py
+│       ├── test_backtest_e2e.py
+│       └── ... (50+ 文件)
 │
 ├── assets/                 # 静态资源
 │   └── icons/
@@ -261,7 +287,7 @@ graph TB
     subgraph PRESENTATION["<b>表现层 Presentation</b>"]
         direction LR
         APP["🖥️ Flet Desktop App"]
-        TABS["📑 5 标签页导航<br/>市场 | 选股 | 数据 | 任务 | 设置"]
+        TABS["📑 6 标签页导航<br/>市场 | 选股 | 回测 | 数据 | 任务 | 设置"]
         VM["🧩 ViewModels<br/>MVVM 数据绑定"]
         COMP["🎨 Components<br/>虚拟表格 | 仪表盘 | 新闻订阅 | Toast"]
         APP --> TABS --> VM --> COMP
@@ -378,7 +404,7 @@ python main.py
 
 ## 🧪 测试
 
-项目包含 **100+ 测试文件，约 2700 个测试用例**，按三层金字塔结构组织：
+项目采用双层测试金字塔结构，包含 **140+ 单元测试文件，50+ 集成测试文件**：
 
 ```bash
 # 运行所有测试
@@ -393,7 +419,6 @@ python -m pytest tests/integration/ -v
 # 按标记筛选
 python -m pytest tests/ -v -m unit
 python -m pytest tests/ -v -m integration
-python -m pytest tests/ -v -m e2e
 
 # 运行特定模块测试
 python -m pytest tests/unit/test_ai_service.py tests/unit/test_llm_providers.py -v
@@ -404,9 +429,8 @@ python -m pytest tests/integration/test_historical_sync_integrity.py -v
 
 | 层级 | 目录 | 文件数 | 覆盖内容 |
 |------|------|--------|----------|
-| **Unit** | `tests/unit/` | 80+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件 |
-| **Integration** | `tests/integration/` | 40+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度 |
-| **E2E** | `tests/e2e/` | 1 | 全链路：Onboarding 向导端到端流程 |
+| **Unit** | `tests/unit/` | 140+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
+| **Integration** | `tests/integration/` | 50+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度、回测全流程 |
 
 ### 关键测试覆盖
 
@@ -529,6 +553,32 @@ from data.persistence.review_manager import ReviewManager
 review = ReviewManager(cache)
 await review.run_review(screener_result_id)
 # → 计算 Alpha 收益，标记成功/失败案例，注入后续 Prompt
+```
+
+### 向量化回测框架
+
+```python
+from strategies.backtest.engine import BacktestEngine
+from strategies.backtest.config import BacktestConfig
+
+# 配置回测参数
+config = BacktestConfig(
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    initial_capital=1_000_000,
+    commission_rate=0.0003,  # 万三佣金
+    slippage=0.001,          # 千一滑点
+)
+
+# 运行回测
+engine = BacktestEngine(config)
+result = await engine.run(strategy, data_provider)
+
+# 获取绩效指标
+metrics = result.metrics
+print(f"Sharpe: {metrics.sharpe_ratio:.2f}")
+print(f"Max Drawdown: {metrics.max_drawdown:.2%}")
+print(f"Alpha: {metrics.alpha:.4f}")
 ```
 
 ---
