@@ -277,15 +277,14 @@ class TestAIServiceLiteLLM:
         from services.ai_service import AIService
         from utils.config_handler import ConfigHandler
 
-        with patch("utils.config_handler.keyring.set_password"):
-            ConfigHandler.save_llm_config(
-                provider="azure",
-                model="gpt-5.4-deployment",
-                base_url="",
-                api_key="azure-key",
-                azure_resource_name="myresource",
-                azure_deployment_name="gpt-5.4-deployment",
-            )
+        ConfigHandler.save_llm_config(
+            provider="azure",
+            model="gpt-5.4-deployment",
+            base_url="",
+            api_key="azure-key",
+            azure_resource_name="myresource",
+            azure_deployment_name="gpt-5.4-deployment",
+        )
 
         AIService._instance = None
 
