@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.1](https://github.com/shi00/qTrading/compare/v0.2.0...v0.2.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **backtest:** 月度收益计算改用复利公式 ([f0198dd](https://github.com/shi00/qTrading/commit/f0198ddefd03d8b9006fc7c925d0e89850584c35)), closes [#78](https://github.com/shi00/qTrading/issues/78)
+* **backtest:** 月度收益计算改用复利公式 ([#78](https://github.com/shi00/qTrading/issues/78)) ([fe3082a](https://github.com/shi00/qTrading/commit/fe3082a6ffd5912f0c76de194ead7b85aa346b1d))
+* CacheManager 单例模式竞态条件修复 ([1ccda37](https://github.com/shi00/qTrading/commit/1ccda378fab8aff715a738fe5c8093b41571b37a))
+* prevent look-ahead bias in AI backtest context ([0ca9ef7](https://github.com/shi00/qTrading/commit/0ca9ef7dcc986df2d1be14c8fd7a9f209cae2c17))
+* **scheduler:** add unique_key to nightly_prediction task ([51d651a](https://github.com/shi00/qTrading/commit/51d651ac521749f83e9b615880ece4c7e17fe319))
+* **scheduler:** add unique_key to nightly_prediction task (Fixes [#68](https://github.com/shi00/qTrading/issues/68)) ([6f251f1](https://github.com/shi00/qTrading/commit/6f251f1b6c5718de5433bf31ffd9c3245000c901))
+* TaskManager 单例模式 _initialized 改为类属性 ([da0b64d](https://github.com/shi00/qTrading/commit/da0b64dccdfbf3c09a9869b0deec3d7c0d9c09e4))
+* **test:** remove unnecessary keyring patch in azure URL test ([7fbff0d](https://github.com/shi00/qTrading/commit/7fbff0d591050311fdc31501c0a2739298693ccc))
+* **tests:** add explicit keyring mock for Linux CI compatibility ([719f791](https://github.com/shi00/qTrading/commit/719f791203bd686327ed1b4f036e2ee589086ada))
+
+
+### Documentation
+
+* update README with backtest framework and simplify test structure ([6f63ff5](https://github.com/shi00/qTrading/commit/6f63ff50f3760d2343745e9ef34363fb2ed1dddc))
+
 ## [0.2.0](https://github.com/shi00/qTrading/compare/v0.1.1...v0.2.0) (2026-05-27)
 
 
