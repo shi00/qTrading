@@ -482,6 +482,26 @@ class OnboardingWizard(ft.Container):
         self._safe_update()
 
     def _build_welcome_step(self):  # pragma: no cover
+        # Language Selector  # pragma: no cover
+        self.wizard_language_dropdown = ft.Dropdown(  # pragma: no cover
+            label=I18n.get("settings_language"),  # pragma: no cover
+            value=ConfigHandler.get_locale(),  # pragma: no cover
+            width=200,  # pragma: no cover
+            text_size=14,  # pragma: no cover
+            border_radius=8,  # pragma: no cover
+            content_padding=10,  # pragma: no cover
+            options=[  # pragma: no cover
+                ft.dropdown.Option("zh_CN", "简体中文"),  # pragma: no cover
+                ft.dropdown.Option("en_US", "English"),  # pragma: no cover
+            ],  # pragma: no cover
+            on_change=self._on_language_change_wizard,  # pragma: no cover
+        )  # pragma: no cover
+
+        language_container = ft.Container(  # pragma: no cover
+            content=self.wizard_language_dropdown,  # pragma: no cover
+            alignment=ft.alignment.center,  # pragma: no cover
+        )  # pragma: no cover
+
         rocket_container = ft.Container(  # pragma: no cover
             content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=72, color=AppColors.PRIMARY),  # pragma: no cover
             width=120,  # pragma: no cover
@@ -515,6 +535,8 @@ class OnboardingWizard(ft.Container):
         return ft.Column(  # pragma: no cover
             [  # pragma: no cover
                 ft.Container(height=20),  # pragma: no cover
+                language_container,  # pragma: no cover
+                ft.Container(height=16),  # pragma: no cover
                 rocket_container,  # pragma: no cover
                 ft.Container(height=16),  # pragma: no cover
                 gradient_title,  # pragma: no cover
@@ -1180,9 +1202,26 @@ class OnboardingWizard(ft.Container):
         self.schedule_time.label = I18n.get("wizard_schedule_time_label")
         self.loading_overlay_text.value = I18n.get("wizard_validating")
 
+        if hasattr(self, "wizard_language_dropdown"):
+            self.wizard_language_dropdown.label = I18n.get("settings_language")
+
         self.step_indicators.controls = self._build_step_indicators()
         self._update_navigation_buttons()
         self._safe_update()
+
+    def _on_language_change_wizard(self, e):  # pragma: no cover
+        """Handle language change in Onboarding Wizard"""
+        try:
+            new_locale = self.wizard_language_dropdown.value
+            I18n.set_locale(new_locale)
+
+            self.steps_content[0] = self._build_welcome_step()
+            self.step_indicators.controls = self._build_step_indicators()
+            self._update_navigation_buttons()
+
+            self._safe_update()
+        except Exception as ex:
+            logger.error(f"[OnboardingWizard] Language change failed: {ex}")
 
     def _safe_update(self):  # pragma: no cover
         try:

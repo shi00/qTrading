@@ -21,6 +21,21 @@ class SystemTab(ft.Container):
 
         # --- Controls ---  # pragma: no cover
 
+        # Language Selector  # pragma: no cover
+        self.language_dropdown = ft.Dropdown(  # pragma: no cover
+            label=I18n.get("settings_language"),  # pragma: no cover
+            value=ConfigHandler.get_locale(),  # pragma: no cover
+            width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
+            text_size=14,  # pragma: no cover
+            border_radius=8,  # pragma: no cover
+            content_padding=10,  # pragma: no cover
+            options=[  # pragma: no cover
+                ft.dropdown.Option("zh_CN", "简体中文"),  # pragma: no cover
+                ft.dropdown.Option("en_US", "English"),  # pragma: no cover
+            ],  # pragma: no cover
+            on_change=self.on_language_change,  # pragma: no cover
+        )  # pragma: no cover
+
         # Theme Selector  # pragma: no cover
         self.theme_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get("settings_theme"),  # pragma: no cover
@@ -156,6 +171,15 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
         # --- Instantiate Rows (for theme updates) ---  # pragma: no cover
 
+        # 0. Language Selector  # pragma: no cover
+        self.row_language = SettingRow(  # pragma: no cover
+            icon=ft.Icons.LANGUAGE_ROUNDED,  # pragma: no cover
+            icon_color=ft.Colors.BLUE,  # pragma: no cover
+            title=I18n.get("settings_language"),  # pragma: no cover
+            subtitle=I18n.get("settings_language_desc"),  # pragma: no cover
+            control=self.language_dropdown,  # pragma: no cover
+        )  # pragma: no cover
+
         # 1. Theme Selector  # pragma: no cover
         self.row_theme = SettingRow(  # pragma: no cover
             icon=ft.Icons.COLOR_LENS_ROUNDED,  # pragma: no cover
@@ -287,6 +311,8 @@ class SystemTab(ft.Container):
                         [  # pragma: no cover
                             SectionHeader(I18n.get("sys_core_config")),  # pragma: no cover
                             ft.Container(height=10),  # pragma: no cover
+                            self.row_language,  # pragma: no cover
+                            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
                             self.row_theme,  # pragma: no cover
                             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
                             self.row_log,  # pragma: no cover
@@ -320,6 +346,61 @@ class SystemTab(ft.Container):
             padding=ft.padding.only(bottom=50),  # pragma: no cover
         )  # pragma: no cover
         self.card_main = self.content.controls[0]  # pragma: no cover
+        self._locale_subscription_id = None  # pragma: no cover
+
+    def on_language_change(self, e):  # pragma: no cover
+        """Handle language change"""
+        UILogger.log_action("SystemTab", "Select", f"language={self.language_dropdown.value}")
+        try:
+            new_locale = self.language_dropdown.value
+            I18n.set_locale(new_locale)
+            self.show_snack(I18n.get("settings_language_changed"))
+        except Exception as ex:
+            logger.error(f"[SystemTab] Language | ❌ Change failed: {ex}", exc_info=True)
+            self.show_snack(f"Error: {ex}", color=AppColors.ERROR)
+
+    def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
+        """语言变更回调 - 更新 Settings UI 文本"""
+        try:
+            self.language_dropdown.label = I18n.get("settings_language")
+            self.theme_dropdown.label = I18n.get("settings_theme")
+            self.log_level_dropdown.label = I18n.get("settings_log_level")
+
+            self.theme_dropdown.options = [
+                ft.dropdown.Option(ThemeName.DARK, I18n.get("theme_dark")),
+                ft.dropdown.Option(ThemeName.LIGHT, I18n.get("theme_light")),
+                ft.dropdown.Option(ThemeName.NAVY, I18n.get("theme_navy")),
+                ft.dropdown.Option(ThemeName.DRACULA, I18n.get("theme_dracula")),
+            ]
+
+            self.log_level_dropdown.options = [
+                ft.dropdown.Option("DEBUG", I18n.get("sys_opt_debug")),
+                ft.dropdown.Option("INFO", I18n.get("sys_opt_info")),
+                ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
+                ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
+            ]
+
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[SystemTab] Locale update failed: {e}")
+
+    def _safe_update(self):  # pragma: no cover
+        """线程安全的 UI 更新"""
+        try:
+            if self.page:
+                self.page.update()
+        except Exception as e:
+            logger.debug(f"[SystemTab] Update skipped: {e}")
+
+    def did_mount(self):  # pragma: no cover
+        """挂载时订阅语言变更"""
+        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
+
+    def will_unmount(self):  # pragma: no cover
+        """卸载时取消订阅"""
+        if self._locale_subscription_id:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
 
     def on_theme_change(self, e):
         """Handle theme change"""
