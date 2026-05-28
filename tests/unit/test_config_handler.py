@@ -769,7 +769,8 @@ class TestMigrateCustomModelsCredentials:
                 }
             }
         }
-        result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
+        with patch.object(cfg_mod.keyring, "set_password"):
+            result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
         assert result is True
         assert "deepseek" not in config["llm_custom_models"]
 

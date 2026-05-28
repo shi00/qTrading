@@ -42,8 +42,12 @@ class TestConfigHandler:
 
     def test_get_save_token(self, isolated_config):
         token = "test_token_123"
-        ConfigHandler.save_token(token)
-        assert ConfigHandler.get_token() == token
+        with (
+            patch("utils.config_handler.keyring.set_password"),
+            patch("utils.config_handler.keyring.get_password", return_value=token),
+        ):
+            ConfigHandler.save_token(token)
+            assert ConfigHandler.get_token() == token
 
     def test_onboarding_status(self, isolated_config):
         assert ConfigHandler.is_onboarding_complete() is False

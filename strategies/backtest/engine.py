@@ -652,13 +652,16 @@ class VectorBacktestEngine:
             df.group_by("year_month")
             .agg(
                 [
-                    pl.col("daily_return").sum().alias("monthly_return"),
-                    pl.col("benchmark_return").sum().alias("benchmark_return"),
-                    (pl.col("daily_return") - pl.col("benchmark_return")).sum().alias("excess_return"),
+                    ((pl.col("daily_return").fill_nan(0.0) + 1).product() - pl.lit(1.0)).alias("monthly_return"),
+                    ((pl.col("benchmark_return").fill_nan(0.0) + 1).product() - pl.lit(1.0)).alias("benchmark_return"),
+                    pl.col("nav").first().alias("start_nav"),
                     pl.col("nav").last().alias("end_nav"),
                 ]
             )
             .sort("year_month")
+            .with_columns(
+                (pl.col("monthly_return") - pl.col("benchmark_return")).alias("excess_return"),
+            )
         )
 
         return monthly

@@ -434,3 +434,17 @@ class TestDailyReturnConsistency:
 
         assert simple_sum != pytest.approx(compound, rel=0.01)
         assert compound == pytest.approx(0.1576, rel=1e-3)
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 31))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        trade_dates = [date(2024, 1, i) for i in range(1, 5)]
+        benchmark_returns = pl.Series([0.0, 0.01, 0.01, 0.01])
+
+        result = engine._calc_period_stats(nav_curve, daily_returns, benchmark_returns, trade_dates)
+
+        monthly_ret = float(result["monthly_return"][0])
+        assert monthly_ret == pytest.approx(compound, rel=1e-3), (
+            f"monthly_return={monthly_ret:.6f} should equal compound={compound:.6f}, not simple_sum={simple_sum:.6f}"
+        )

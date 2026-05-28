@@ -14,12 +14,19 @@ from ui.views.onboarding_wizard import OnboardingWizard
 from utils.config_handler import ConfigHandler
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
+from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
 
 logger = logging.getLogger(__name__)
 
 
 async def main(page: ft.Page):
     setup_logging()
+
+    try:
+        loop = asyncio.get_running_loop()
+        install_asyncio_handler_for_loop(loop)
+    except RuntimeError:
+        pass
 
     ConfigHandler.ensure_defaults()
 
@@ -454,6 +461,8 @@ if __name__ == "__main__":  # pragma: no cover
     import os
 
     multiprocessing.freeze_support()
+
+    install_global_exception_hooks()
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
     ft.app(target=main, assets_dir=assets)

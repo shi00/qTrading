@@ -773,10 +773,17 @@ class AIService:
         include_global_context: bool = True,
         include_learning_context: bool = True,
         ui_prompt_override: str | None = None,
+        is_backtest: bool = False,
     ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'llm_model' to be configured.
+
+        ⚠️ Backtest safety: When called in a backtest context, ``history_context``
+        MUST be pre-fetched via ``AIStrategyMixin.run_ai_analysis()`` so that the
+        learning context is filtered by the correct ``as_of`` date.  Calling this
+        method directly with ``history_context=None`` in a backtest will use the
+        current date as the ``as_of`` cutoff, which may introduce look-ahead bias.
         """
         if not self.is_cloud_available():
             return None
@@ -829,11 +836,22 @@ class AIService:
 
         # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
         if history_context is None and include_learning_context:
+            if is_backtest:
+                raise ValueError(
+                    "analyze_stock called with history_context=None in backtest mode. "
+                    "Learning context must be pre-fetched via AIStrategyMixin.run_ai_analysis() "
+                    "to prevent look-ahead bias."
+                )
             try:
+                import datetime
+
+                from data.constants import SAFE_LIVE_LEARNING_OFFSET_DAYS
                 from data.persistence.review_manager import ReviewManager
+                from utils.time_utils import get_now
 
                 rm = ReviewManager()
-                history_context = await rm.get_learning_context()
+                safe_as_of = get_now().date() - datetime.timedelta(days=SAFE_LIVE_LEARNING_OFFSET_DAYS)
+                history_context = await rm.get_learning_context(as_of=safe_as_of)
             except Exception as e:
                 logger.warning(
                     f"[AIService] Analyze | ⚠️ Learning context fetch failed: {DataSanitizer.sanitize_error(e)}",

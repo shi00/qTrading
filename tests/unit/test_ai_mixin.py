@@ -506,6 +506,101 @@ class TestRunAiAnalysis:
                     result = await s.run_ai_analysis(candidates, context)
                     assert len(result) <= 2
 
+    @pytest.mark.asyncio
+    async def test_disable_ai_skips_ai_analysis(self):
+        """_disable_ai=True should skip AI analysis and return math-only results."""
+        s = ConcreteStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        dp = MagicMock()
+        context = {"data_processor": dp, "_disable_ai": True}
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = True
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+            mock_ai.return_value.analyze_stock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disable_ai_false_runs_ai_analysis(self):
+        """_disable_ai=False should proceed with AI analysis normally."""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        context = {"data_processor": dp, "_disable_ai": False}
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_disable_ai_absent_runs_ai_analysis(self):
+        """No _disable_ai key in context should proceed normally (backward compatibility)."""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        context = {"data_processor": dp}
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_backtest_news_fetch_passes_as_of(self):
+        """Backtest mode should pass trade_date as as_of to NewsFetcher.get_stock_news."""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        context = {"data_processor": dp, "trade_date": "20240118", "is_backtest": True}
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.NewsFetcher.get_stock_news", new_callable=AsyncMock) as mock_get_news,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            mock_get_news.return_value = []
+
+            await s.run_ai_analysis(candidates, context)
+
+            # Verify as_of parameter is passed with correctly parsed trade_date (datetime.date object)
+            import datetime
+
+            mock_get_news.assert_called_with("000001.SZ", limit=5, as_of=datetime.date(2024, 1, 18))
+
 
 class TestCancelOrphanNewsTasks:
     def test_cancels_undone_tasks(self):
