@@ -87,13 +87,14 @@ class TaskManager:
     """
 
     _instance = None
+    _initialized = False
     _lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
+                cls._initialized = False
         return cls._instance
 
     @classmethod
@@ -108,7 +109,7 @@ class TaskManager:
 
     def __init__(self):
         with self._lock:
-            if getattr(self, "_initialized", False):
+            if self.__class__._initialized:
                 return
 
             self._tasks: dict[str, AppTask] = {}
@@ -129,7 +130,7 @@ class TaskManager:
             self._persist_pending_count = 0
             self._persist_counter_lock = threading.Lock()
 
-            self._initialized = True
+            self.__class__._initialized = True
             logger.info("[TaskManager] Initialized global task manager.")
 
     def _get_semaphore(self) -> asyncio.Semaphore:
