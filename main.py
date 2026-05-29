@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 import flet as ft
 
@@ -65,8 +66,9 @@ async def main(page: ft.Page):
             cleanup_ok = await coordinator.do_cleanup(timeout_s=12.0, step_timeout_s=2.0)
 
             try:
-                page.window.prevent_close = False
-                page.window.destroy()
+                if not _is_web_mode():
+                    page.window.prevent_close = False
+                    page.window.destroy()
             except Exception as e:
                 logger.debug(f"Window destroy ignored: {e}")
 
@@ -201,7 +203,11 @@ async def main(page: ft.Page):
             _page_dialog_matches_close_confirm(),
         )
 
-    page.window.prevent_close = True
+    def _is_web_mode() -> bool:
+        return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
+
+    if not _is_web_mode():
+        page.window.prevent_close = True
 
     async def _on_window_event(e):
         logger.info(
@@ -217,7 +223,8 @@ async def main(page: ft.Page):
             logger.info("[Main] Window CLOSE event received.")
             _show_close_confirm_dialog()
 
-    page.window.on_event = _on_window_event
+    if not _is_web_mode():
+        page.window.on_event = _on_window_event
 
     async def _on_disconnect(e):
         coordinator.start_watchdog(15)
@@ -239,12 +246,16 @@ async def main(page: ft.Page):
 
     page.on_error = on_error
 
-    page.window.min_width = 960
-    page.window.min_height = 640
-    if not page.window.width or page.window.width < 1200:
-        page.window.width = 1280
-        page.window.height = 800
-    page.window.center()
+    if not _is_web_mode():
+        page.window.min_width = 960
+        page.window.min_height = 640
+        if not page.window.width or page.window.width < 1200:
+            page.window.width = 1280
+            page.window.height = 800
+        try:
+            page.window.center()
+        except Exception:  # noqa: BLE001
+            pass
 
     page.padding = 0
     apply_page_theme(page)
@@ -316,8 +327,12 @@ async def main(page: ft.Page):
                             cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=1.0)
                             if not cleanup_ok:
                                 logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
-                            page.window.prevent_close = False
-                            page.window.destroy()
+                            try:
+                                if not _is_web_mode():
+                                    page.window.prevent_close = False
+                                    page.window.destroy()
+                            except Exception:  # noqa: BLE001
+                                pass
                             coordinator._force_exit(1)
 
                         error_dialog = ft.AlertDialog(
