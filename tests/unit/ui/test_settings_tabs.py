@@ -1019,6 +1019,66 @@ class TestSystemTab:
         tab.save_db_pool_settings(None)
         snack.assert_called_once()
 
+    def test_on_language_change_calls_set_locale(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.language_dropdown.value = "en_US"
+        tab.on_language_change(None)
+        self.mock_i18n.set_locale.assert_called_with("en_US")
+
+    def test_on_language_change_calls_snack(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.show_snack = snack
+        tab.language_dropdown.value = "en_US"
+        tab.on_language_change(None)
+        snack.assert_called_once()
+
+    def test_on_language_change_exception_handled(self, mock_page):
+        snack = MagicMock()
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.show_snack = snack
+        self.mock_i18n.set_locale.side_effect = Exception("test error")
+        tab.language_dropdown.value = "en_US"
+        tab.on_language_change(None)
+        snack.assert_called()
+
+    def test_did_mount_subscribes_i18n(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.did_mount()
+        self.mock_i18n.subscribe.assert_called()
+
+    def test_will_unmount_unsubscribes_i18n(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab._locale_subscription_id = "test_id"
+        tab.will_unmount()
+        self.mock_i18n.unsubscribe.assert_called_with("test_id")
+
+    def test_language_dropdown_initial_value(self, mock_page):
+        self.mock_ch.get_locale.return_value = "zh_CN"
+        tab = self._make_tab()
+        assert tab.language_dropdown.value == "zh_CN"
+
+    def test_language_dropdown_has_two_options(self, mock_page):
+        tab = self._make_tab()
+        assert len(tab.language_dropdown.options) == 2
+
+    def test_on_locale_change_updates_labels(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab._on_locale_change("en_US")
+        self.mock_i18n.get.assert_called()
+
+    def test_on_locale_change_exception_handled(self, mock_page):
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        self.mock_i18n.get.side_effect = Exception("locale error")
+        tab._on_locale_change("en_US")
+
 
 class TestDataSourceTab:
     patches: list
