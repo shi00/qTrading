@@ -698,7 +698,7 @@ class TestGetSemaphore:
     async def test_returns_semaphore(self):
         svc = _make_svc_with_cloud()
         with patch("services.ai_service.ConfigHandler.get_ai_max_concurrent_analysis", return_value=3):
-            sem = await svc._get_semaphore()
+            sem = svc._get_analysis_semaphore()
             assert isinstance(sem, asyncio.Semaphore)
 
 

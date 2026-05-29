@@ -204,6 +204,20 @@ def reset_config_cache():
 
 
 @pytest.fixture(autouse=True)
+def reset_loop_local_cache():
+    """
+    Reset loop_local cache before each test to prevent cross-test pollution.
+    Tests like TestAIServiceSemaphoreSeparation.test_reload_config_invalidates_both_semaphores
+    store string values in the cache which break subsequent tests expecting asyncio.Semaphore.
+    """
+    from utils.loop_local import clear_all_loop_locals
+
+    clear_all_loop_locals()
+    yield
+    clear_all_loop_locals()
+
+
+@pytest.fixture(autouse=True)
 def _reset_mock_keyring_store():
     """Clear mock keyring password store between tests to prevent leakage."""
     yield

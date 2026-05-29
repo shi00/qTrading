@@ -26,11 +26,17 @@ class TestAIBrainTabEventHandlers:
         from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 
         with (
-            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService"),
             patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager"),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
+            mock_ch.get_ai_max_candidates.return_value = 30
+            mock_ch.get_strategy_min_turnover.return_value = 1000.0
+            mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+            mock_ch.get_ai_news_max_concurrent.return_value = 1
+            mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+            mock_ch.get_ai_news_prompt.return_value = "Classify this news."
             return AIBrainTab(show_snack_callback=MagicMock())
 
     def test_on_llm_config_saved(self):
@@ -108,11 +114,17 @@ class TestAIBrainTabSaveAISettings:
         from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 
         with (
-            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService"),
             patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager"),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
+            mock_ch.get_ai_max_candidates.return_value = 30
+            mock_ch.get_strategy_min_turnover.return_value = 1000.0
+            mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+            mock_ch.get_ai_news_max_concurrent.return_value = 1
+            mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+            mock_ch.get_ai_news_prompt.return_value = "Classify this news."
             return AIBrainTab(show_snack_callback=MagicMock())
 
     @pytest.mark.asyncio

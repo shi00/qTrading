@@ -514,7 +514,7 @@ class AIStrategyMixin:
                     if on_chunk and hasattr(on_chunk, "final_flush"):
                         on_chunk.final_flush()
 
-        tasks = [asyncio.create_task(analyze_one(row._asdict())) for row in candidates_df.itertuples(index=False)]
+        tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in candidates_df.to_dict("records")]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for res in results:
