@@ -25,7 +25,7 @@ from utils.security_utils import DecryptionError, SecurityError, SecurityManager
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = os.path.join(config.APP_ROOT, "user_settings.json")
+CONFIG_FILE = os.environ.get("ASTOCK_CONFIG_FILE") or os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
 
 ENV_FALLBACK_MAP = {
@@ -1192,11 +1192,23 @@ class ConfigHandler:
 
     @staticmethod
     def get_ai_max_concurrent_analysis():
-        return ConfigHandler.get_typed("ai_max_concurrent_analysis", int, 5)
+        val = ConfigHandler.get_typed("ai_max_concurrent_analysis", int, 5)
+        return max(1, min(val, 10))
 
     @staticmethod
     def set_ai_max_concurrent_analysis(val):
-        return ConfigHandler.set_typed("ai_max_concurrent_analysis", int(val))
+        safe_val = max(1, min(int(val), 10))
+        return ConfigHandler.set_typed("ai_max_concurrent_analysis", safe_val)
+
+    @staticmethod
+    def get_ai_news_max_concurrent():
+        val = ConfigHandler.get_typed("ai_news_max_concurrent", int, 1)
+        return max(1, min(val, 5))
+
+    @staticmethod
+    def set_ai_news_max_concurrent(val):
+        safe_val = max(1, min(int(val), 5))
+        return ConfigHandler.set_typed("ai_news_max_concurrent", safe_val)
 
     @staticmethod
     def get_sync_concurrency_light():

@@ -40,6 +40,8 @@ _MIN_TURNOVER_MIN = 0.0
 _MIN_TURNOVER_MAX = 100.0
 _CONCURRENCY_MIN = 1
 _CONCURRENCY_MAX = 10
+_NEWS_CONCURRENCY_MIN = 1
+_NEWS_CONCURRENCY_MAX = 5
 
 
 class AIBrainTab(ft.Container):
@@ -88,6 +90,16 @@ class AIBrainTab(ft.Container):
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             hint_text=I18n.get("ai_hint_default").format(val=5),  # pragma: no cover
             tooltip=I18n.get("settings_hint_ai_model"),  # pragma: no cover
+        )  # pragma: no cover
+
+        current_news_concurrency = ConfigHandler.get_ai_news_max_concurrent()  # pragma: no cover
+        self.ai_news_concurrency_input = ft.TextField(  # pragma: no cover
+            label=I18n.get("settings_ai_news_concurrency"),  # pragma: no cover
+            value=str(current_news_concurrency),  # pragma: no cover
+            width=_INPUT_WIDTH_SMALL,  # pragma: no cover
+            keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
+            hint_text=I18n.get("ai_hint_default").format(val=1),  # pragma: no cover
+            tooltip=I18n.get("settings_hint_ai_news_concurrency"),  # pragma: no cover
         )  # pragma: no cover
 
         self.ai_prompt_input = ft.TextField(  # pragma: no cover
@@ -242,6 +254,12 @@ class AIBrainTab(ft.Container):
                                         ],  # pragma: no cover
                                         spacing=5,  # pragma: no cover
                                     ),  # pragma: no cover
+                                    ft.Row(  # pragma: no cover
+                                        [  # pragma: no cover
+                                            self.ai_news_concurrency_input,  # pragma: no cover
+                                        ],  # pragma: no cover
+                                        spacing=5,  # pragma: no cover
+                                    ),  # pragma: no cover
                                 ],  # pragma: no cover
                                 col={"sm": 12, "md": 4},  # pragma: no cover
                             ),  # pragma: no cover
@@ -327,6 +345,7 @@ class AIBrainTab(ft.Container):
             self.ai_max_candidates_input,  # pragma: no cover
             self.strategy_min_turnover_input,  # pragma: no cover
             self.ai_concurrency_input,  # pragma: no cover
+            self.ai_news_concurrency_input,  # pragma: no cover
             self.ai_prompt_input,  # pragma: no cover
             self.ai_news_prompt_input,  # pragma: no cover
         ]  # pragma: no cover
@@ -488,6 +507,23 @@ class AIBrainTab(ft.Container):
                         field=I18n.get("settings_ai_concurrency"),
                         min=_CONCURRENCY_MIN,
                         max=_CONCURRENCY_MAX,
+                    ),
+                    color=AppColors.ERROR,
+                )
+                return
+
+            news_concurrency_str = self.ai_news_concurrency_input.value.strip()
+            try:
+                news_concurrency = int(news_concurrency_str)
+                if not (_NEWS_CONCURRENCY_MIN <= news_concurrency <= _NEWS_CONCURRENCY_MAX):
+                    raise ValueError("Range")
+                ConfigHandler.set_ai_news_max_concurrent(news_concurrency)
+            except ValueError:
+                self.show_snack(
+                    I18n.get("ai_snack_invalid_range").format(
+                        field=I18n.get("settings_ai_news_concurrency"),
+                        min=_NEWS_CONCURRENCY_MIN,
+                        max=_NEWS_CONCURRENCY_MAX,
                     ),
                     color=AppColors.ERROR,
                 )

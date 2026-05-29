@@ -63,16 +63,26 @@ class ScreenerViewModel:
         self.on_status: Callable[[str, str], None] | None = None
         self.on_progress: Callable[[float], None] | None = None
         self.on_log_stream_start: Callable[[str], Callable] | None = None
+        self.on_ai_card_start: Callable[[str], None] | None = None
         self._main_loop = None
         self._background_tasks: set = set()
         self._threadsafe_futures: set = set()
 
-    def bind(self, on_update, on_log, on_status, on_progress, on_log_stream_start=None):
+    def bind(
+        self,
+        on_update,
+        on_log,
+        on_status,
+        on_progress,
+        on_log_stream_start=None,
+        on_ai_card_start=None,
+    ):
         self.on_update = on_update
         self.on_log = on_log
         self.on_status = on_status
         self.on_progress = on_progress
         self.on_log_stream_start = on_log_stream_start
+        self.on_ai_card_start = on_ai_card_start
         try:
             self._main_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -89,6 +99,7 @@ class ScreenerViewModel:
         self.on_status = None
         self.on_progress = None
         self.on_log_stream_start = None
+        self.on_ai_card_start = None
         self._main_loop = None
 
         for f in self._threadsafe_futures:
@@ -192,6 +203,8 @@ class ScreenerViewModel:
                 context["on_result"] = self._on_ai_result_stream
                 if self.on_log_stream_start:
                     context["on_stream_start"] = self.on_log_stream_start
+                if self.on_ai_card_start:
+                    context["on_card_start"] = self.on_ai_card_start
 
                 # We inject the task_id into context so deep AI tasks can check cancellation
                 context["_task_id"] = task_id

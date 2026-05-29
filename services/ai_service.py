@@ -348,15 +348,25 @@ class AIService:
 
         return request_params
 
-    async def _get_semaphore(self):
-        """Get or create semaphore for current event loop"""
+    def _get_analysis_semaphore(self):
+        """股票分析云端 LLM 调用信号量（loop-local，热生效）。"""
 
         def _factory():
             raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
             concurrency = max(1, int(raw_val)) if raw_val else 5
             return asyncio.Semaphore(concurrency)
 
-        return get_loop_local("ai_semaphore", _factory)
+        return get_loop_local("ai_analysis_semaphore", _factory)
+
+    def _get_news_semaphore(self):
+        """新闻分类云端兜底信号量（loop-local，热生效）。"""
+
+        def _factory():
+            raw_val = ConfigHandler.get_ai_news_max_concurrent()
+            concurrency = max(1, int(raw_val)) if raw_val else 1
+            return asyncio.Semaphore(concurrency)
+
+        return get_loop_local("ai_news_semaphore", _factory)
 
     def _safe_truncate(self, text: str, max_len: int) -> str:
         """Safely truncate text to avoid token overflow"""
@@ -373,7 +383,8 @@ class AIService:
         # M-4: _cleanup_prompt_dumps moved out of hot path; only runs at init
         from utils.loop_local import del_loop_local
 
-        del_loop_local("ai_semaphore")
+        del_loop_local("ai_analysis_semaphore")
+        del_loop_local("ai_news_semaphore")
 
     async def _chat_completion_litellm(
         self,
@@ -527,6 +538,7 @@ class AIService:
         timeout: float = 30.0,
         json_mode: bool = True,
         on_chunk=None,
+        purpose: str = "analysis",
     ) -> dict:
         """
         Unified helper for Chat Completions (Cloud or Local).
@@ -573,7 +585,8 @@ class AIService:
             if not self.is_cloud_available():
                 raise ValueError("Cloud LLM not configured. Please set up API Key.")
 
-            async with await self._get_semaphore():
+            sem = self._get_news_semaphore() if purpose == "news" else self._get_analysis_semaphore()
+            async with sem:
                 logger.debug(
                     f"[AIService] Cloud | Invoking LiteLLM ({len(messages)} messages)",
                 )
@@ -668,6 +681,7 @@ class AIService:
                     timeout=timeout,
                     json_mode=json_mode,
                     on_chunk=on_chunk,
+                    purpose="analysis",
                 )
 
                 if i > 0:
@@ -1129,6 +1143,7 @@ class AIService:
                 messages,
                 provider="cloud",
                 json_mode=True,
+                purpose="news",
             )
             result = self._parse_news_result(raw_result)
             logger.debug(

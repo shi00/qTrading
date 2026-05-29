@@ -36,6 +36,7 @@ from services.ai_service import AIService
 from strategies.utils import fmt_val, safe_float
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_error
 from utils.technical_analysis import TechnicalAnalysis
 from utils.time_utils import get_now, to_yyyymmdd_str
 
@@ -386,8 +387,9 @@ class AIStrategyMixin:
                 for code, group in bulk_history_df.groupby("ts_code"):
                     prefetched_history[code] = group
 
-            # 2. Background Pipelining for News with Semaphore(1)
-            news_sem = asyncio.Semaphore(1)
+            # 2. Background Pipelining for News (concurrency follows analysis concurrency)
+            _news_concurrency = ConfigHandler.get_ai_max_concurrent_analysis()
+            news_sem = asyncio.Semaphore(_news_concurrency)
 
             async def bg_fetch_news(code):
                 async with news_sem:
@@ -463,143 +465,82 @@ class AIStrategyMixin:
         # --- Strategy-specific prefetch hook ---
         prefetched = await self._prefetch_strategy_specific(candidates_df, context, prefetched)
 
-        # --- Sequential Analysis Loop ---
+        # D7: Prefetch macro_context once before concurrent loop to avoid thundering herd
+        try:
+            prefetched.macro_context = await self._build_macro_context(dp.cache, as_of_date=prefetched.trade_date)
+        except Exception as e:
+            logger.warning("[AIStrategyMixin] Failed to prefetch macro context: %s", e)
+
+        # --- Concurrent Analysis ---
+        concurrency = ConfigHandler.get_ai_max_concurrent_analysis()
+        screening_sem = asyncio.Semaphore(concurrency)
+        stream_enabled = concurrency == 1
+
         total_tasks = len(candidates_df)
-        completed_count = 0
+        completed = 0
+        final_rows: list[dict] = []
+        on_stream_start = context.get("on_stream_start") if stream_enabled else None
+        on_card_start = context.get("on_card_start") if not stream_enabled else None
 
         if on_progress:
-            on_progress(
-                0,
-                total_tasks,
-                I18n.get("ai_progress_init", "初始化 AI 分析引擎..."),
-            )
+            on_progress(0, total_tasks, I18n.get("ai_progress_init", "初始化 AI 分析引擎..."))
 
-        final_rows = []
-        on_stream_start = context.get("on_stream_start")
-
-        for row in candidates_df.itertuples(index=False):
-            if dp and dp.is_cancelled():
-                logger.info(
-                    "[AIStrategyMixin] Cancellation detected — stopping remaining tasks",
-                )
-                break
-
-            row_data = row._asdict()  # type: ignore[union-attr]
-            stock_name = row_data.get("name", row_data.get("ts_code", "?"))
-
-            # Setup streaming callback for this specific stock
-            on_chunk_callback = None
-            if on_stream_start:
-                on_chunk_callback = on_stream_start(stock_name)
-
-            try:
-                if on_progress:
-                    on_progress(
-                        completed_count,
-                        total_tasks,
-                        I18n.get("ai_analyzing_stock", name=stock_name),
+        async def analyze_one(row_data: dict) -> dict | None:
+            async with screening_sem:
+                if dp and dp.is_cancelled():
+                    return None
+                stock_name = row_data.get("name", row_data.get("ts_code", "?"))
+                on_chunk = on_stream_start(stock_name) if on_stream_start else None
+                if on_card_start:
+                    on_card_start(stock_name)
+                try:
+                    hist_df = prefetched.history.get(row_data.get("ts_code"), pd.DataFrame())
+                    news_list = []
+                    if row_data.get("ts_code") in prefetched.news_tasks:
+                        news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+                    res = await self._mixin_analyze_single(
+                        row_data,
+                        dp,
+                        ai_client,
+                        prefetched,
+                        on_chunk=on_chunk,
+                        history_df=hist_df,
+                        news=news_list,
+                        ui_prompt_override=ui_prompt_override,
+                        vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
                     )
+                    return self._build_result_row(row_data, res)
+                finally:
+                    if on_chunk and hasattr(on_chunk, "final_flush"):
+                        on_chunk.final_flush()
 
-                hist_df = prefetched.history.get(
-                    row_data.get("ts_code"),
-                    pd.DataFrame(),
-                )
-                news_list = []
-                if row_data.get("ts_code") in prefetched.news_tasks:
-                    news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+        tasks = [asyncio.create_task(analyze_one(row._asdict())) for row in candidates_df.itertuples(index=False)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                res = await self._mixin_analyze_single(
-                    row_data,
-                    dp,
-                    ai_client,
-                    prefetched,
-                    on_chunk=on_chunk_callback,
-                    history_df=hist_df,
-                    news=news_list,
-                    ui_prompt_override=ui_prompt_override,  # type: ignore[arg-type]
-                    vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
-                )
-
-                completed_count += 1
-
-                if isinstance(res, Exception) or res is None or res.get("score", 0) == 0:
-                    if on_progress:
-                        on_progress(
-                            completed_count,
-                            total_tasks,
-                            I18n.get("ai_progress_skipped", name=stock_name),
-                        )
-                    continue
-
-                # Valid result — enrich row
-                row_dict = dict(row_data)
-
-                # 组装置信度与风险点到 summary 中，实现 UI 无感展示
-                summary_raw = res.get("summary", "")
-                summary = str(summary_raw) if summary_raw else ""
-                confidence = res.get("confidence")
-                uncertainty = res.get("uncertainty_factors")
-
-                if confidence is not None:
-                    summary = f"[{I18n.get('ai_confidence_label')}: {confidence}%] {summary}"
-                if uncertainty:
-                    if isinstance(uncertainty, list):
-                        uncertainty_str = ", ".join(str(u) for u in uncertainty if u)
-                    else:
-                        uncertainty_str = str(uncertainty).strip()
-                    if uncertainty_str and uncertainty_str not in [
-                        "",
-                        "None",
-                        I18n.get("ai_none_risk"),
-                        I18n.get("ai_none_risk_period"),
-                        "[]",
-                    ]:
-                        summary += f" ({I18n.get('ai_risk_label')}: {uncertainty_str})"
-
-                score_raw = res.get("score", 0)
-                row_dict["ai_score"] = (
-                    round(min(100, max(0, float(score_raw))), 1) if isinstance(score_raw, (int, float)) else 0
-                )
-                row_dict["ai_reason"] = summary
-                thinking_raw = res.get("thinking", "")
-                row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
-                row_dict["confidence"] = (
-                    min(100, max(1, int(confidence))) if isinstance(confidence, (int, float, Decimal)) else 50
-                )
-                final_rows.append(row_dict)
-
-                # Stream to UI
-                if on_result:
-                    on_result(row_dict)
-
-                if on_progress:
-                    on_progress(
-                        completed_count,
-                        total_tasks,
-                        I18n.get(
-                            "ai_progress_analyzed",
-                            name=stock_name,
-                            score=row_dict["ai_score"],
-                        ),
-                    )
-
-            except asyncio.CancelledError:
-                logger.info("[AIStrategyMixin] Task cancelled, cleaning up news tasks")
+        for res in results:
+            if isinstance(res, asyncio.CancelledError):
                 self._cancel_orphan_news_tasks(prefetched)
-                raise
-            except Exception as e:
-                logger.error(
-                    f"[AIStrategyMixin] Task error for {stock_name}: {e}",
-                    exc_info=True,
+                raise res
+            completed += 1
+            if isinstance(res, Exception):
+                error_info = classify_error(res, context="general")
+                logger.error("[AIStrategyMixin] Task error (%s): %s", error_info["code"], res)
+            elif res is not None:
+                final_rows.append(res)
+                if on_result:
+                    on_result(res)
+            if on_progress:
+                on_progress(
+                    completed,
+                    total_tasks,
+                    I18n.get("ai_progress_done", done=completed, total=total_tasks),
                 )
-                completed_count += 1
-            finally:
-                # Always drain pending throttled text so the UI doesn't freeze mid-stream
-                if on_chunk_callback and hasattr(on_chunk_callback, "final_flush"):
-                    on_chunk_callback.final_flush()
 
         logger.info(
-            f"[AIStrategyMixin] Complete. {completed_count}/{total_tasks} processed, {len(final_rows)} valid results",
+            "[AIStrategyMixin] Complete. %d/%d processed, %d valid results",
+            completed,
+            total_tasks,
+            len(final_rows),
         )
 
         self._cancel_orphan_news_tasks(prefetched)
@@ -625,6 +566,47 @@ class AIStrategyMixin:
         for _code, task in prefetched.news_tasks.items():
             if not task.done():
                 task.cancel()
+
+    def _build_result_row(self, row_data: dict, res: object) -> dict | None:
+        """把单股 AI 结果组装为结果行；无效（None/异常/score==0）返回 None。"""
+        if isinstance(res, Exception) or res is None:
+            return None
+        score_val = res.get("score", 0)  # type: ignore[union-attr]
+        if score_val == 0:
+            return None
+
+        row_dict = dict(row_data)
+        summary_raw = res.get("summary", "")  # type: ignore[union-attr]
+        summary = str(summary_raw) if summary_raw else ""
+        confidence = res.get("confidence")  # type: ignore[union-attr]
+        uncertainty = res.get("uncertainty_factors")  # type: ignore[union-attr]
+
+        if confidence is not None:
+            summary = f"[{I18n.get('ai_confidence_label')}: {confidence}%] {summary}"
+        if uncertainty:
+            if isinstance(uncertainty, list):
+                uncertainty_str = ", ".join(str(u) for u in uncertainty if u)
+            else:
+                uncertainty_str = str(uncertainty).strip()
+            if uncertainty_str and uncertainty_str not in [
+                "",
+                "None",
+                I18n.get("ai_none_risk"),
+                I18n.get("ai_none_risk_period"),
+                "[]",
+            ]:
+                summary += f" ({I18n.get('ai_risk_label')}: {uncertainty_str})"
+
+        row_dict["ai_score"] = (
+            round(min(100, max(0, float(score_val))), 1) if isinstance(score_val, (int, float)) else 0
+        )
+        row_dict["ai_reason"] = summary
+        thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
+        row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
+        row_dict["confidence"] = (
+            min(100, max(1, int(confidence))) if isinstance(confidence, (int, float, Decimal)) else 50
+        )
+        return row_dict
 
     async def _mixin_analyze_single(
         self,
@@ -735,9 +717,7 @@ class AIStrategyMixin:
                 ts_code, dp.cache, prefetched.auxiliary_data, as_of_date=prefetched.trade_date
             )
 
-            # 7c. Macro Context (Phase 1.3) - build once per batch
-            if not prefetched.macro_context:
-                prefetched.macro_context = await self._build_macro_context(dp.cache, as_of_date=prefetched.trade_date)
+            # 7c. Macro Context — 已在 run_ai_analysis 预取阶段算好（D7），此处只读
 
             # Combine all financial context
             financials_parts = [base_financials]

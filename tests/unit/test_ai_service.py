@@ -770,6 +770,61 @@ class TestAIServiceAnalyzeTimeoutHandling:
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
 
+
+class TestAIServiceSemaphoreSeparation:
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_separate_semaphore_factories_exist(self, mock_ch):
+        from tests.conftest import reset_singleton
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+        mock_ch.get_ai_news_max_concurrent.return_value = 1
+
+        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+            svc = AIService()
+            analysis_sem = svc._get_analysis_semaphore()
+            news_sem = svc._get_news_semaphore()
+            assert analysis_sem is not news_sem
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_reload_config_invalidates_both_semaphores(self, mock_ch):
+        from tests.conftest import reset_singleton
+        from utils import loop_local
+
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+        mock_ch.get_ai_news_max_concurrent.return_value = 1
+
+        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+            svc = AIService()
+            svc._get_analysis_semaphore()
+            svc._get_news_semaphore()
+            await svc.reload_config()
+            assert loop_local.get_loop_local("ai_analysis_semaphore", lambda: "rebuilt") == "rebuilt"
+            assert loop_local.get_loop_local("ai_news_semaphore", lambda: "rebuilt") == "rebuilt"
+
+
+class TestAIServiceBuildLiteLLMParamsZhipuBoundary:
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
     async def test_httpx_timeout_exception_caught(self, mock_ch):
@@ -1200,7 +1255,7 @@ class TestAIServiceClassifyNewsFallback:
 class TestAIServiceGetSemaphore:
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
-    async def test_get_semaphore(self, mock_ch):
+    async def test_get_analysis_semaphore(self, mock_ch):
         mock_ch.get_ai_provider.return_value = "cloud"
         mock_ch.get_llm_config.return_value = {
             "api_key": "key",
@@ -1212,8 +1267,9 @@ class TestAIServiceGetSemaphore:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_max_concurrent_analysis.return_value = 3
+        mock_ch.get_ai_news_max_concurrent.return_value = 1
         svc = AIService()
-        sem = await svc._get_semaphore()
+        sem = svc._get_analysis_semaphore()
         assert sem is not None
 
 

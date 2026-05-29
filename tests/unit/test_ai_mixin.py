@@ -1441,3 +1441,106 @@ class TestSafeFloat:
 
     def test_custom_default(self):
         assert safe_float(None, default=-1.0) == -1.0
+
+
+class TestRunAiAnalysisConcurrency:
+    def _make_strategy(self):
+        return ConcreteStrategy()
+
+    def _make_context(self):
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
+        dp.get_latest_trade_date = AsyncMock(return_value="20240118")
+        return {"data_processor": dp}
+
+    async def _make_candidates(self, n):
+        return pd.DataFrame([{"ts_code": f"{i:06d}.SZ", "name": f"S{i}"} for i in range(n)])
+
+    @pytest.mark.asyncio
+    async def test_concurrency_bounded_by_screening_sem(self):
+        import asyncio
+
+        s = self._make_strategy()
+        candidates = await self._make_candidates(12)
+        context = self._make_context()
+
+        active = 0
+        peak = 0
+        lock = asyncio.Lock()
+
+        async def fake_single(*args, **kwargs):
+            nonlocal active, peak
+            async with lock:
+                active += 1
+                peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            async with lock:
+                active -= 1
+            return {"score": 70, "summary": "ok"}
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=3),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=100),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai.return_value = mock_ai_instance
+
+            with patch.object(s, "_mixin_analyze_single", fake_single):
+                await s.run_ai_analysis(candidates, context)
+            assert peak <= 3, f"Peak concurrency {peak} should be <= 3"
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_does_not_abort(self):
+        s = self._make_strategy()
+        candidates = await self._make_candidates(5)
+        context = self._make_context()
+
+        calls = {"n": 0}
+
+        async def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+            return {"score": 60, "summary": "ok"}
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai.return_value = mock_ai_instance
+
+            with patch.object(s, "_mixin_analyze_single", flaky):
+                result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 4
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        s = self._make_strategy()
+        candidates = await self._make_candidates(3)
+        context = self._make_context()
+
+        async def cancel_one(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai.return_value = mock_ai_instance
+
+            with patch.object(s, "_mixin_analyze_single", cancel_one):
+                with pytest.raises(asyncio.CancelledError):
+                    await s.run_ai_analysis(candidates, context)

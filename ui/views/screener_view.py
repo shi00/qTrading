@@ -183,6 +183,9 @@ class ScreenerView(ft.Container):
             auto_scroll=True,  # pragma: no cover
         )  # pragma: no cover
 
+        # 5. AI 占位卡登记（并发模式下用于"分析中"占位 → 结果替换）
+        self._ai_cards: dict[str, dict] = {}  # pragma: no cover
+
         # 5. Pagination
         self.page_info_text = ft.Text(  # pragma: no cover
             I18n.get("screener_page_info").format(current=1, total=1),  # pragma: no cover
@@ -302,6 +305,7 @@ class ScreenerView(ft.Container):
             on_status=self._update_status,
             on_progress=self._toggle_progress,
             on_log_stream_start=self._on_log_stream_start,
+            on_ai_card_start=self._on_ai_card_start,
         )
 
         # Subscribe to TaskManager to unlock UI on background task completion
@@ -1403,6 +1407,19 @@ class ScreenerView(ft.Container):
             return
 
         async def _do_log():
+            # 并发占位卡：若存在则就地替换为结果摘要
+            entry = self._ai_cards.pop(name, None)
+            if entry and entry["card"].page:
+                # 替换占位卡内容为结果摘要
+                entry["content_md"].value = f"**{I18n.get('ai_score_label', '评分')}: {score}**\n\n{thinking[:200]}"
+                # 移除 ProgressRing
+                row_ctrl = entry["card_content"].controls[0]
+                if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) > 1:
+                    row_ctrl.controls.pop()
+                self.log_view.update()
+                return
+
+            # 无占位卡时走原有逻辑（串行模式或降级）
             line = f"[{name}] {I18n.get('screener_score')}: {score} | {thinking[:80]}..."
 
             # Colors based on score
@@ -1542,6 +1559,54 @@ class ScreenerView(ft.Container):
         _on_chunk.final_flush = lambda: _flush_display() if state["pending"] else None
 
         return _on_chunk
+
+    def _on_ai_card_start(self, name):  # pragma: no cover
+        """并发模式：插入一张'分析中'占位卡，登记到 _ai_cards 以便结果回推时替换。"""
+        if not self.page:
+            return None
+
+        content_md = ft.Markdown(
+            I18n.get("ai_card_analyzing"),
+            selectable=True,
+            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+        )
+        progress_ring = ft.ProgressRing(width=14, height=14, stroke_width=2)
+        card_content = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
+                        progress_ring,
+                    ],
+                    spacing=8,
+                ),
+                ft.Container(content=content_md, padding=ft.padding.only(left=5, right=5)),
+            ],
+            spacing=8,
+        )
+        card = ft.Container(
+            content=card_content,
+            border=ft.border.all(1, AppColors.DIVIDER),
+            border_radius=8,
+            padding=15,
+            bgcolor=AppColors.SURFACE,
+            margin=ft.margin.only(bottom=10),
+        )
+        self._ai_cards[name] = {
+            "card": card,
+            "content_md": content_md,
+            "card_content": card_content,
+            "progress_ring": progress_ring,
+        }
+
+        async def _add():
+            if len(self.log_view.controls) > 10:
+                self.log_view.controls.pop(0)
+            self.log_view.controls.append(card)
+            self.log_view.update()
+
+        self.page.run_task(_add)
+        return None
 
     def _update_status(self, msg, color=None):  # pragma: no cover
         if not self.page:
