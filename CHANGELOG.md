@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/shi00/qTrading/compare/v0.2.1...v0.3.0) (2026-05-29)
+
+
+### Features
+
+* **ui:** 添加语言切换 UI 控件 (Fixes [#12](https://github.com/shi00/qTrading/issues/12)) ([597557f](https://github.com/shi00/qTrading/commit/597557fcb9bd35a803b559a4959cd0d3a093bbdb))
+* **ui:** 添加语言切换 UI 控件 (Fixes [#12](https://github.com/shi00/qTrading/issues/12)) ([1b87867](https://github.com/shi00/qTrading/commit/1b87867c4e9451e2be063708eb0879422b9a845a))
+
 ## [0.2.1](https://github.com/shi00/qTrading/compare/v0.2.0...v0.2.1) (2026-05-28)
 
 
