@@ -1,6 +1,6 @@
 [project]
 name = "AStockScreener"
-version = "0.2.1"
+version = "0.3.0"
 description = "智能 A 股 AI 量化交易员"
 requires-python = ">=3.13"
 
