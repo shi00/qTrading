@@ -45,6 +45,9 @@ pip-delete-this-directory.txt
 # Do NOT edit them manually; edit .in files or pyproject.toml instead
 # These files SHOULD be committed to version control for reproducible builds
 
+# uv lock file (not needed since we use universal requirements*.txt)
+uv.lock
+
 # Unit test / coverage reports / Cache
 htmlcov/
 .tox/
@@ -76,6 +79,7 @@ user_settings.json
 logs/
 *.log
 *.bak
+*.html
 
 # 3. Environment Variables & Secrets
 .env
@@ -92,5 +96,8 @@ logs/
 *.parquet
 *.gguf
 
-# 5. docs
+# 5. E2E test diagnostics
+e2e-artifacts/
+
+# 6. docs
 docs/

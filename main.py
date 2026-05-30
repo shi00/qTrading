@@ -239,7 +239,11 @@ async def main(page: ft.Page):
             await asyncio.sleep(0.2)
             coordinator._force_exit(1)
 
-    page.on_disconnect = _on_disconnect
+    # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
+    # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
+    # 进程最终通过 proc.terminate() 清理。
+    if not os.environ.get("E2E_TESTING"):
+        page.on_disconnect = _on_disconnect
 
     def on_error(e):
         logger.error(f"[App] Unhandled UI Exception: {e}", exc_info=True)

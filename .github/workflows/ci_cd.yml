@@ -215,29 +215,13 @@ jobs:
             junit-*.xml
           retention-days: 14
 
-  e2e-tests:
-    name: E2E Tests (Disabled - Flet Desktop Incompatible)
-    if: false  # Disabled: Playwright not compatible with Flet 0.28.3 desktop mode
+  e2e-tests-windows:
+    name: E2E Tests (Windows)
     needs: lint-fast
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 20
     permissions:
       contents: read
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ${{ env.CI_PG_PASSWORD }}
-          POSTGRES_DB: test_astock
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - name: Checkout Code
@@ -262,7 +246,84 @@ jobs:
           uv pip install --system -r requirements-optional.txt || echo "Optional deps failed"
           uv pip install --system -r requirements-dev.txt
           pip install playwright pytest-playwright
-          playwright install chromium
+
+      - name: Get Playwright Version
+        shell: bash
+        run: |
+          PLAYWRIGHT_VERSION=$(python -c "import playwright; print(playwright.__version__)")
+          echo "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" >> $GITHUB_ENV
+
+      - name: Cache Playwright Browsers
+        id: cache-playwright
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~\AppData\Local\ms-playwright
+            ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ env.PLAYWRIGHT_VERSION }}
+
+      - name: Install Playwright Chromium
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: playwright install chromium
+
+      - name: Start PostgreSQL Service (Windows)
+        shell: pwsh
+        run: |
+          $service = Get-Service | Where-Object { $_.Name -like "postgresql*" }
+          if ($service) {
+            Set-Service -Name $service.Name -StartupType Automatic
+            Start-Service $service.Name
+            Write-Host "Successfully started PostgreSQL service: $($service.Name)"
+          } else {
+            Write-Error "PostgreSQL service not found on this Windows Runner."
+            exit 1
+          }
+
+      - name: Initialize PostgreSQL Database and Password
+        shell: pwsh
+        run: |
+          $pgBin = Get-ChildItem -Path "C:\Program Files\PostgreSQL" -Recurse -Filter "createdb.exe" | Select-Object -First 1 -ExpandProperty DirectoryName
+          if ($pgBin) {
+            $env:Path += ";$pgBin"
+            Write-Host "PostgreSQL bin path: $pgBin"
+            
+            for ($i=1; $i -le 15; $i++) {
+              $ready = & pg_isready -h localhost -p 5432 -U postgres
+              if ($ready -like "*accepting connections*") {
+                Write-Host "PostgreSQL is accepting connections."
+                break
+              }
+              Start-Sleep -Seconds 1
+            }
+
+            $newPwd = "${{ env.CI_PG_PASSWORD }}"
+            $sql = "ALTER USER postgres WITH PASSWORD '$newPwd';"
+            
+            $env:PGPASSWORD = "root"
+            & psql -h localhost -p 5432 -U postgres -d postgres -c $sql
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Failed with password 'root', trying with empty password..."
+              $env:PGPASSWORD = ""
+              & psql -h localhost -p 5432 -U postgres -d postgres -c $sql
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to update postgres user password."
+                exit 1
+              }
+            }
+
+            $env:PGPASSWORD = $newPwd
+            & dropdb -h localhost -p 5432 -U postgres test_astock --if-exists
+            & createdb -h localhost -p 5432 -U postgres test_astock
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to create test_astock database."
+              exit 1
+            }
+            Write-Host "Successfully initialized database and password."
+          } else {
+            Write-Error "PostgreSQL binaries not found."
+            exit 1
+          }
 
       - name: Setup database
         env:
@@ -274,21 +335,29 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           E2E_TEST_DB: 1
           FLET_SERVER_PORT: 8550
+        shell: pwsh
         run: |
-          python main.py &
-          echo "Waiting for server to start..."
-          for i in {1..30}; do
-            if curl -s http://localhost:8550 > /dev/null 2>&1; then
-              echo "Server is ready"
-              break
-            fi
-            sleep 1
-          done
+          Start-Process python -ArgumentList "main.py" -NoNewWindow
+          Write-Host "Waiting for server to start..."
+          for ($i=1; $i -le 30; $i++) {
+            try {
+              $resp = Invoke-WebRequest -Uri "http://localhost:8550" -UseBasicParsing -TimeoutSec 1
+              if ($resp.StatusCode -eq 200) {
+                Write-Host "Server is ready"
+                break
+              }
+            } catch {
+              # Ignore error
+            }
+            Start-Sleep -Seconds 1
+          }
 
       - name: Run E2E Tests
         env:
           E2E_TEST_DB: 1
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
+          E2E_BROWSER_CHANNEL: ""
+          E2E_ARTIFACT_DIR: "e2e-artifacts"
         run: |
           python -m pytest tests/e2e/ -v --tb=short --junitxml=junit-e2e.xml
 
@@ -296,8 +365,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: test-reports-e2e
-          path: junit-e2e.xml
+          name: test-reports-e2e-windows
+          path: |
+            junit-e2e.xml
+            e2e-artifacts/
           retention-days: 14
 
   ci-checks-windows:
@@ -450,7 +521,7 @@ jobs:
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
-    needs: [ci-checks, ci-checks-windows]
+    needs: [ci-checks, ci-checks-windows, e2e-tests-windows]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 45

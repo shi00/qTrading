@@ -182,6 +182,10 @@ class CacheManager:
         if self.engine is not None:
             await self.engine.dispose()
             self.engine = None
+        # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
+        # 桌面模式下 close() 后进程退出，此重置不会被观测到；
+        # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
+        self._schema_initialized = False
         try:
             from data.persistence.daos.base_dao import BaseDao
 
@@ -246,7 +250,7 @@ class CacheManager:
             auto_migrate: Override for AUTO_MIGRATE env var. If True, automatically run migrations.
         """
         async with self._init_lock:
-            if self._schema_initialized and not force:
+            if self._schema_initialized and not force and self.engine is not None:
                 return
 
             if self.engine is None:

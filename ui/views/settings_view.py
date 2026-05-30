@@ -130,6 +130,7 @@ class SettingsView(ft.Container):
         btn = ft.ElevatedButton(  # pragma: no cover
             text=text,  # pragma: no cover
             icon=icon,  # pragma: no cover
+            tooltip=text,  # 为无障碍语义树提供稳定的 aria-label  # pragma: no cover
             data=str(index),  # pragma: no cover
             on_click=self._on_tab_click,  # pragma: no cover
             style=self._get_tab_button_style(is_selected=(index == 0)),  # pragma: no cover
