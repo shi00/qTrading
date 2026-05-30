@@ -83,7 +83,7 @@
     "history_total": "共 {count} 条",
     "settings_title": "设置",
     "settings_general": "基本设置",
-    "settings_language": "语言 / Language",
+    "settings_language": "语言",
     "settings_language_desc": "选择界面显示语言",
     "settings_language_changed": "语言已切换",
     "settings_theme": "主题",
