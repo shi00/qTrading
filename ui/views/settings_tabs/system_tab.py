@@ -21,6 +21,10 @@ class SystemTab(ft.Container):
 
         # --- Controls ---  # pragma: no cover
 
+        self.section_header = SectionHeader(
+            I18n.get("sys_core_config"), title_key="sys_core_config"
+        )  # pragma: no cover
+
         # Language Selector  # pragma: no cover
         self.language_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get_language_label(),  # pragma: no cover
@@ -325,7 +329,7 @@ class SystemTab(ft.Container):
                 DashboardCard(  # pragma: no cover
                     content=ft.Column(  # pragma: no cover
                         [  # pragma: no cover
-                            SectionHeader(I18n.get("sys_core_config"), title_key="sys_core_config"),  # pragma: no cover
+                            self.section_header,  # pragma: no cover
                             ft.Container(height=10),  # pragma: no cover
                             self.row_language,  # pragma: no cover
                             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
@@ -421,6 +425,8 @@ class SystemTab(ft.Container):
                 self.row_proxy,
             ]:
                 row.update_locale()
+
+            self.section_header.update_locale()
 
             self._safe_update()
         except Exception as e:

@@ -242,7 +242,6 @@ class SectionHeader(ft.Row):
     """
 
     def __init__(self, title, action=None, title_key=None):
-        super().__init__()
         self.title_key = title_key
         self.title_view = ft.Text(
             title,
