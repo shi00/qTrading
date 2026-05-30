@@ -34,4 +34,5 @@ async def test_settings_theme_switch(e2e_page):
     theme_light = I18n.get("theme_light")
     await e2e_page.select_dropdown(theme_label, theme_light)
 
-    await e2e_page.expect_text(theme_light, timeout_ms=5000)
+    theme_updated = I18n.get("settings_snack_theme_updated")
+    await e2e_page.expect_text(theme_updated, timeout_ms=5000)

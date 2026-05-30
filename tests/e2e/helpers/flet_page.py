@@ -28,20 +28,10 @@ class FletPage:
                 break
             await self.page.wait_for_timeout(1000)
 
-    async def click_button(self, name: str, timeout_ms: int = 8000) -> None:
-        btn = self.page.get_by_role("button", name=name).first
-        await btn.wait_for(state="attached", timeout=timeout_ms)
-        await btn.click(timeout=timeout_ms)
-
-    async def click_tab(self, text: str, timeout_ms: int = 8000) -> None:
-        """点击 Tab 按钮（Flet 0.28.3 ElevatedButton(icon+text) 兼容）。
-
-        Flutter 语义树中，带 icon 的 ElevatedButton 可能将 icon 和 text
-        拆分为独立子语义节点，导致 get_by_role("button", name=text) 失败。
-        本方法使用多策略回退确保点击成功。
-        """
-        # 策略 1: 标准 role 匹配（纯文字按钮可命中）
-        btn = self.page.get_by_role("button", name=text)
+    async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = 8000) -> None:
+        """使用多策略回退点击机制，兼容 Flet 0.28.3 因带 icon 拆分语义节点的问题。"""
+        # 策略 1: 标准 role 匹配（纯文本按钮或完整匹配时命中）
+        btn = self.page.get_by_role(role, name=name)
         if await btn.count() > 0:
             try:
                 await btn.first.click(timeout=3000)
@@ -49,8 +39,8 @@ class FletPage:
             except Exception:
                 pass
 
-        # 策略 2: 通过 tooltip/aria-label 匹配（添加 tooltip 后可命中）
-        by_label = self.page.locator(f'flt-semantics[aria-label="{text}"]')
+        # 策略 2: 通过 aria-label/tooltip 匹配
+        by_label = self.page.locator(f'flt-semantics[aria-label="{name}"]')
         if await by_label.count() > 0:
             try:
                 await by_label.first.click(timeout=3000)
@@ -59,7 +49,7 @@ class FletPage:
                 pass
 
         # 策略 3: 坐标点击（定位文本节点的中心坐标）
-        text_loc = self.page.get_by_text(text, exact=True).first
+        text_loc = self.page.get_by_text(name, exact=True).first
         await text_loc.wait_for(state="attached", timeout=timeout_ms)
         box = await text_loc.bounding_box()
         if box:
@@ -71,6 +61,13 @@ class FletPage:
 
         # 策略 4: 最后尝试 force click
         await text_loc.click(force=True, timeout=timeout_ms)
+
+    async def click_button(self, name: str, timeout_ms: int = 8000) -> None:
+        await self._click_with_fallback(name, "button", timeout_ms)
+
+    async def click_tab(self, text: str, timeout_ms: int = 8000) -> None:
+        """点击 Tab 按钮（Flet 0.28.3 ElevatedButton(icon+text) 兼容）。"""
+        await self._click_with_fallback(text, "button", timeout_ms)
 
     async def click_text(self, text: str, timeout_ms: int = 8000) -> None:
         loc = self.page.get_by_text(text, exact=False).first
@@ -87,9 +84,9 @@ class FletPage:
         norm_label = current_or_label.lower()
         match_keys = [current_or_label, norm_label]
         if "语言" in norm_label or "language" in norm_label:
-            match_keys.extend(["language", "语言", "locale"])
+            match_keys.extend(["language", "语言", "locale", "简体中文", "english", "chinese", "简体中文 / english"])
         elif "主题" in norm_label or "theme" in norm_label:
-            match_keys.extend(["theme", "主题"])
+            match_keys.extend(["theme", "主题", "浅色", "深色", "light", "dark", "浅色 / 深色", "light / dark"])
 
         match_keys = list(set(match_keys))
 
@@ -106,10 +103,24 @@ class FletPage:
 
         def get_option_locators():
             return [
+                # 1. 优先使用标准 role="option" 定位器
                 self.page.locator(f'[role="option"][aria-label*="{option_text}" i]').first,
                 self.page.locator(f'[role="option"][aria-label*="{opt_match_key}" i]').first,
                 self.page.locator('[role="option"]').filter(has_text=option_text).first,
                 self.page.locator('[role="option"]').filter(has_text=opt_match_key).first,
+                # 2. 匹配 role="button" 或 role="menuitem" 且 textContent 包含或等于选项值（Flet 0.28.3 语义树特异性结构）
+                self.page.locator('[role="button"]').filter(has_text=option_text).first,
+                self.page.locator('[role="button"]').filter(has_text=opt_match_key).first,
+                self.page.locator('[role="menuitem"]').filter(has_text=option_text).first,
+                self.page.locator('[role="menuitem"]').filter(has_text=opt_match_key).first,
+                # 3. 精确匹配 aria-label 属性
+                self.page.locator(f'[aria-label="{option_text}"]').first,
+                self.page.locator(f'[aria-label="{opt_match_key}"]').first,
+                # 4. 匹配 role="button" 或 role="menuitem" 且 aria-label 匹配选项值的元素
+                self.page.locator(f'[role="button"][aria-label*="{option_text}" i]').first,
+                self.page.locator(f'[role="button"][aria-label*="{opt_match_key}" i]').first,
+                self.page.locator(f'[role="menuitem"][aria-label*="{option_text}" i]').first,
+                self.page.locator(f'[role="menuitem"][aria-label*="{opt_match_key}" i]').first,
             ]
 
         async def check_option_visible() -> bool:
@@ -122,16 +133,30 @@ class FletPage:
             return False
 
         async def click_option() -> bool:
-            for loc in get_option_locators():
+            for idx, loc in enumerate(get_option_locators()):
                 try:
                     if await loc.count() > 0 and await loc.is_visible():
-                        await loc.click(timeout=3000)
+                        desc = await loc.evaluate("""e => ({
+                            tag: e.tagName,
+                            role: e.getAttribute('role'),
+                            aria: e.getAttribute('aria-label') || '',
+                            text: e.textContent || '',
+                            rect: e.getBoundingClientRect().toJSON()
+                        })""")
+                        print(
+                            f"--- [DEBUG] 尝试点击选项候选[{idx}]: tag={desc['tag']}, role={desc['role']}, aria='{desc['aria']}', text='{desc['text']}', rect={desc['rect']}",
+                            flush=True,
+                        )
+                        await loc.click(timeout=3000, force=True)
+                        print(f"--- [DEBUG] 选项候选[{idx}]点击成功！", flush=True)
                         return True
-                except Exception:
+                except Exception as ex:
+                    print(f"--- [DEBUG] 选项候选[{idx}]点击抛出异常: {ex}", flush=True)
                     pass
             return False
 
         initial_visible = await check_option_visible()
+        print(f"--- [DEBUG] select_dropdown: initial_visible={initial_visible}", flush=True)
 
         if not initial_visible:
             trigger_targets = []
@@ -141,13 +166,26 @@ class FletPage:
             trigger_targets.append(self.page.get_by_text(current_or_label, exact=False).first)
 
             triggered = False
-            for target in trigger_targets:
+            for idx, target in enumerate(trigger_targets):
                 try:
                     if await target.count() > 0:
-                        await target.click(timeout=3000)
+                        desc = await target.evaluate("""e => ({
+                            tag: e.tagName,
+                            role: e.getAttribute('role'),
+                            aria: e.getAttribute('aria-label') || '',
+                            text: e.textContent || '',
+                            rect: e.getBoundingClientRect().toJSON()
+                        })""")
+                        print(
+                            f"--- [DEBUG] 尝试点击触发器候选[{idx}]: tag={desc['tag']}, role={desc['role']}, aria='{desc['aria']}', text='{desc['text']}', rect={desc['rect']}",
+                            flush=True,
+                        )
+                        await target.click(timeout=3000, force=True)
                         triggered = True
+                        print(f"--- [DEBUG] 触发器候选[{idx}]点击成功！", flush=True)
                         break
-                except Exception:
+                except Exception as ex:
+                    print(f"--- [DEBUG] 触发器候选[{idx}]点击失败: {ex}", flush=True)
                     continue
 
             if triggered:
@@ -165,6 +203,26 @@ class FletPage:
             await self.page.wait_for_timeout(200)
 
         if not option_ready:
+            try:
+                nodes = await self.page.eval_on_selector_all(
+                    "flt-semantics, [role]",
+                    """els => els.map(e => ({
+                        tag: e.tagName,
+                        role: e.getAttribute('role'),
+                        aria: e.getAttribute('aria-label') || '',
+                        id: e.id,
+                        text: e.textContent || ''
+                    }))""",
+                )
+                print("\n=== E2E DEBUG: CURRENT SEMANTICS NODES ===")
+                for i, n in enumerate(nodes):
+                    if n["role"] or n["aria"] or n["text"].strip():
+                        print(
+                            f"[{i}] tag={n['tag']} role={n['role']} aria='{n['aria']}' id={n['id']} text='{n['text'].strip()[:50]}'"
+                        )
+                print("==========================================\n", flush=True)
+            except Exception as ex:
+                print(f"Failed to dump debug semantics: {ex}", flush=True)
             raise RuntimeError(f"Timeout waiting for option '{option_text}' (key: '{opt_match_key}') to appear")
 
         await self.page.wait_for_timeout(350)
@@ -188,7 +246,62 @@ class FletPage:
 
         # 策略 2: aria-label 模糊查找
         loc_aria = self.page.locator(f'[aria-label*="{text}"]').first
-        await loc_aria.wait_for(state="attached", timeout=timeout_ms)
+        try:
+            await loc_aria.wait_for(state="attached", timeout=2000)
+            return
+        except Exception:
+            pass
+
+        # 策略 3: input 元素 value 匹配
+        try:
+            inputs_match = self.page.locator("input")
+            count = await inputs_match.count()
+            for i in range(count):
+                el = inputs_match.nth(i)
+                val = await el.evaluate("e => e.value")
+                if text.lower() in val.lower():
+                    return
+        except Exception:
+            pass
+
+        # 如果还是找不到，在真正抛出 TimeoutError 前打印当前的 DOM 状态
+        try:
+            inputs = await self.page.eval_on_selector_all(
+                "input",
+                """els => els.map(e => ({
+                    tag: e.tagName,
+                    value: e.value,
+                    aria: e.getAttribute('aria-label') || '',
+                    id: e.id,
+                }))""",
+            )
+            print("\n=== E2E DEBUG: ALL INPUT ELEMENTS ===")
+            for idx, ip in enumerate(inputs):
+                print(f"[{idx}] tag={ip['tag']} value='{ip['value']}' aria='{ip['aria']}' id={ip['id']}")
+
+            nodes = await self.page.eval_on_selector_all(
+                "flt-semantics, [role]",
+                """els => els.map(e => ({
+                    tag: e.tagName,
+                    role: e.getAttribute('role'),
+                    aria: e.getAttribute('aria-label') || '',
+                    id: e.id,
+                    text: e.textContent || ''
+                }))""",
+            )
+            print("\n=== E2E DEBUG: CURRENT SEMANTICS NODES ===")
+            for i, n in enumerate(nodes):
+                if n["role"] or n["aria"] or n["text"].strip():
+                    print(
+                        f"[{i}] tag={n['tag']} role={n['role']} aria='{n['aria']}' id={n['id']} text='{n['text'].strip()[:60]}'"
+                    )
+            print("==========================================\n", flush=True)
+        except Exception as ex:
+            print(f"Failed to dump debug semantics in expect_text: {ex}", flush=True)
+
+        # 最终抛出 TimeoutError 或者是做最后的等待
+        loc_final = self.page.locator(f'[aria-label*="{text}"]').first
+        await loc_final.wait_for(state="attached", timeout=timeout_ms)
 
     async def has_text(self, text: str) -> bool:
         """检查页面上是否存在指定文本。"""
