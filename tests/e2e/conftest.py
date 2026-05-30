@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -10,6 +11,8 @@ from tests.e2e.helpers.app_launcher import start_flet_app
 from tests.e2e.helpers.flet_page import FletPage
 
 from tests.conftest import _get_test_db_url
+
+logger = logging.getLogger(__name__)
 
 TEST_DATABASE_URL = os.environ.get(
     "E2E_DATABASE_URL",
@@ -71,8 +74,8 @@ async def _make_page(url: str, request) -> FletPage:
     context = await browser.new_context(viewport={"width": 1400, "height": 900})
     await context.tracing.start(screenshots=True, snapshots=True)
     page = await context.new_page()
-    page.on("console", lambda msg: print(f"--- [BROWSER CONSOLE] {msg.type}: {msg.text}", flush=True))
-    page.on("pageerror", lambda err: print(f"--- [BROWSER ERROR] {err}", flush=True))
+    page.on("console", lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text))
+    page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
     fp = FletPage(page)
     await fp.open(url)
     fp.bind_context((p, browser, context, page, request))

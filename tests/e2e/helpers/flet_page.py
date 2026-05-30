@@ -1,6 +1,9 @@
+import logging
 from typing import Any
 
 from playwright.async_api import Page, Playwright, Browser, BrowserContext
+
+logger = logging.getLogger(__name__)
 
 
 class FletPage:
@@ -30,7 +33,6 @@ class FletPage:
 
     async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = 8000) -> None:
         """使用多策略回退点击机制，兼容 Flet 0.28.3 因带 icon 拆分语义节点的问题。"""
-        # 策略 1: 标准 role 匹配（纯文本按钮或完整匹配时命中）
         btn = self.page.get_by_role(role, name=name)
         if await btn.count() > 0:
             try:
@@ -39,7 +41,6 @@ class FletPage:
             except Exception:
                 pass
 
-        # 策略 2: 通过 aria-label/tooltip 匹配
         by_label = self.page.locator(f'flt-semantics[aria-label="{name}"]')
         if await by_label.count() > 0:
             try:
@@ -48,7 +49,6 @@ class FletPage:
             except Exception:
                 pass
 
-        # 策略 3: 坐标点击（定位文本节点的中心坐标）
         text_loc = self.page.get_by_text(name, exact=True).first
         await text_loc.wait_for(state="attached", timeout=timeout_ms)
         box = await text_loc.bounding_box()
@@ -59,7 +59,6 @@ class FletPage:
             )
             return
 
-        # 策略 4: 最后尝试 force click
         await text_loc.click(force=True, timeout=timeout_ms)
 
     async def click_button(self, name: str, timeout_ms: int = 8000) -> None:
@@ -103,20 +102,16 @@ class FletPage:
 
         def get_option_locators():
             return [
-                # 1. 优先使用标准 role="option" 定位器
                 self.page.locator(f'[role="option"][aria-label*="{option_text}" i]').first,
                 self.page.locator(f'[role="option"][aria-label*="{opt_match_key}" i]').first,
                 self.page.locator('[role="option"]').filter(has_text=option_text).first,
                 self.page.locator('[role="option"]').filter(has_text=opt_match_key).first,
-                # 2. 匹配 role="button" 或 role="menuitem" 且 textContent 包含或等于选项值（Flet 0.28.3 语义树特异性结构）
                 self.page.locator('[role="button"]').filter(has_text=option_text).first,
                 self.page.locator('[role="button"]').filter(has_text=opt_match_key).first,
                 self.page.locator('[role="menuitem"]').filter(has_text=option_text).first,
                 self.page.locator('[role="menuitem"]').filter(has_text=opt_match_key).first,
-                # 3. 精确匹配 aria-label 属性
                 self.page.locator(f'[aria-label="{option_text}"]').first,
                 self.page.locator(f'[aria-label="{opt_match_key}"]').first,
-                # 4. 匹配 role="button" 或 role="menuitem" 且 aria-label 匹配选项值的元素
                 self.page.locator(f'[role="button"][aria-label*="{option_text}" i]').first,
                 self.page.locator(f'[role="button"][aria-label*="{opt_match_key}" i]').first,
                 self.page.locator(f'[role="menuitem"][aria-label*="{option_text}" i]').first,
@@ -136,27 +131,32 @@ class FletPage:
             for idx, loc in enumerate(get_option_locators()):
                 try:
                     if await loc.count() > 0 and await loc.is_visible():
-                        desc = await loc.evaluate("""e => ({
-                            tag: e.tagName,
-                            role: e.getAttribute('role'),
-                            aria: e.getAttribute('aria-label') || '',
-                            text: e.textContent || '',
-                            rect: e.getBoundingClientRect().toJSON()
-                        })""")
-                        print(
-                            f"--- [DEBUG] 尝试点击选项候选[{idx}]: tag={desc['tag']}, role={desc['role']}, aria='{desc['aria']}', text='{desc['text']}', rect={desc['rect']}",
-                            flush=True,
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            desc = await loc.evaluate("""e => ({
+                                tag: e.tagName,
+                                role: e.getAttribute('role'),
+                                aria: e.getAttribute('aria-label') || '',
+                                text: e.textContent || '',
+                                rect: e.getBoundingClientRect().toJSON()
+                            })""")
+                            logger.debug(
+                                "尝试点击选项候选[%d]: tag=%s, role=%s, aria='%s', text='%s', rect=%s",
+                                idx,
+                                desc["tag"],
+                                desc["role"],
+                                desc["aria"],
+                                desc["text"],
+                                desc["rect"],
+                            )
                         await loc.click(timeout=3000, force=True)
-                        print(f"--- [DEBUG] 选项候选[{idx}]点击成功！", flush=True)
+                        logger.debug("选项候选[%d]点击成功", idx)
                         return True
                 except Exception as ex:
-                    print(f"--- [DEBUG] 选项候选[{idx}]点击抛出异常: {ex}", flush=True)
-                    pass
+                    logger.debug("选项候选[%d]点击抛出异常: %s", idx, ex)
             return False
 
         initial_visible = await check_option_visible()
-        print(f"--- [DEBUG] select_dropdown: initial_visible={initial_visible}", flush=True)
+        logger.debug("select_dropdown: initial_visible=%s", initial_visible)
 
         if not initial_visible:
             trigger_targets = []
@@ -169,23 +169,29 @@ class FletPage:
             for idx, target in enumerate(trigger_targets):
                 try:
                     if await target.count() > 0:
-                        desc = await target.evaluate("""e => ({
-                            tag: e.tagName,
-                            role: e.getAttribute('role'),
-                            aria: e.getAttribute('aria-label') || '',
-                            text: e.textContent || '',
-                            rect: e.getBoundingClientRect().toJSON()
-                        })""")
-                        print(
-                            f"--- [DEBUG] 尝试点击触发器候选[{idx}]: tag={desc['tag']}, role={desc['role']}, aria='{desc['aria']}', text='{desc['text']}', rect={desc['rect']}",
-                            flush=True,
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            desc = await target.evaluate("""e => ({
+                                tag: e.tagName,
+                                role: e.getAttribute('role'),
+                                aria: e.getAttribute('aria-label') || '',
+                                text: e.textContent || '',
+                                rect: e.getBoundingClientRect().toJSON()
+                            })""")
+                            logger.debug(
+                                "尝试点击触发器候选[%d]: tag=%s, role=%s, aria='%s', text='%s', rect=%s",
+                                idx,
+                                desc["tag"],
+                                desc["role"],
+                                desc["aria"],
+                                desc["text"],
+                                desc["rect"],
+                            )
                         await target.click(timeout=3000, force=True)
                         triggered = True
-                        print(f"--- [DEBUG] 触发器候选[{idx}]点击成功！", flush=True)
+                        logger.debug("触发器候选[%d]点击成功", idx)
                         break
                 except Exception as ex:
-                    print(f"--- [DEBUG] 触发器候选[{idx}]点击失败: {ex}", flush=True)
+                    logger.debug("触发器候选[%d]点击失败: %s", idx, ex)
                     continue
 
             if triggered:
@@ -203,26 +209,8 @@ class FletPage:
             await self.page.wait_for_timeout(200)
 
         if not option_ready:
-            try:
-                nodes = await self.page.eval_on_selector_all(
-                    "flt-semantics, [role]",
-                    """els => els.map(e => ({
-                        tag: e.tagName,
-                        role: e.getAttribute('role'),
-                        aria: e.getAttribute('aria-label') || '',
-                        id: e.id,
-                        text: e.textContent || ''
-                    }))""",
-                )
-                print("\n=== E2E DEBUG: CURRENT SEMANTICS NODES ===")
-                for i, n in enumerate(nodes):
-                    if n["role"] or n["aria"] or n["text"].strip():
-                        print(
-                            f"[{i}] tag={n['tag']} role={n['role']} aria='{n['aria']}' id={n['id']} text='{n['text'].strip()[:50]}'"
-                        )
-                print("==========================================\n", flush=True)
-            except Exception as ex:
-                print(f"Failed to dump debug semantics: {ex}", flush=True)
+            if logger.isEnabledFor(logging.DEBUG):
+                self._dump_semantics_debug()
             raise RuntimeError(f"Timeout waiting for option '{option_text}' (key: '{opt_match_key}') to appear")
 
         await self.page.wait_for_timeout(350)
@@ -234,9 +222,8 @@ class FletPage:
         """期望页面上存在指定文本。
 
         Flet 0.28.3 在列表/容器中可能将多个子控件的文本合并到父 group 节点的 aria-label 中。
-        本方法采用“文本节点匹配”与“aria-label 模糊匹配”双重策略。
+        本方法采用"文本节点匹配"与"aria-label 模糊匹配"双重策略。
         """
-        # 策略 1: 文本节点查找
         loc = self.page.get_by_text(text, exact=False).first
         try:
             await loc.wait_for(state="attached", timeout=2000)
@@ -244,7 +231,6 @@ class FletPage:
         except Exception:
             pass
 
-        # 策略 2: aria-label 模糊查找
         loc_aria = self.page.locator(f'[aria-label*="{text}"]').first
         try:
             await loc_aria.wait_for(state="attached", timeout=2000)
@@ -252,7 +238,6 @@ class FletPage:
         except Exception:
             pass
 
-        # 策略 3: input 元素 value 匹配
         try:
             inputs_match = self.page.locator("input")
             count = await inputs_match.count()
@@ -264,42 +249,9 @@ class FletPage:
         except Exception:
             pass
 
-        # 如果还是找不到，在真正抛出 TimeoutError 前打印当前的 DOM 状态
-        try:
-            inputs = await self.page.eval_on_selector_all(
-                "input",
-                """els => els.map(e => ({
-                    tag: e.tagName,
-                    value: e.value,
-                    aria: e.getAttribute('aria-label') || '',
-                    id: e.id,
-                }))""",
-            )
-            print("\n=== E2E DEBUG: ALL INPUT ELEMENTS ===")
-            for idx, ip in enumerate(inputs):
-                print(f"[{idx}] tag={ip['tag']} value='{ip['value']}' aria='{ip['aria']}' id={ip['id']}")
+        if logger.isEnabledFor(logging.DEBUG):
+            self._dump_dom_debug(text)
 
-            nodes = await self.page.eval_on_selector_all(
-                "flt-semantics, [role]",
-                """els => els.map(e => ({
-                    tag: e.tagName,
-                    role: e.getAttribute('role'),
-                    aria: e.getAttribute('aria-label') || '',
-                    id: e.id,
-                    text: e.textContent || ''
-                }))""",
-            )
-            print("\n=== E2E DEBUG: CURRENT SEMANTICS NODES ===")
-            for i, n in enumerate(nodes):
-                if n["role"] or n["aria"] or n["text"].strip():
-                    print(
-                        f"[{i}] tag={n['tag']} role={n['role']} aria='{n['aria']}' id={n['id']} text='{n['text'].strip()[:60]}'"
-                    )
-            print("==========================================\n", flush=True)
-        except Exception as ex:
-            print(f"Failed to dump debug semantics in expect_text: {ex}", flush=True)
-
-        # 最终抛出 TimeoutError 或者是做最后的等待
         loc_final = self.page.locator(f'[aria-label*="{text}"]').first
         await loc_final.wait_for(state="attached", timeout=timeout_ms)
 
@@ -314,3 +266,94 @@ class FletPage:
             "flt-semantics, [role]",
             "els => els.map(e => ({role:e.getAttribute('role'), aria:e.getAttribute('aria-label'), text:(e.textContent||'').trim().slice(0,40)}))",
         )
+
+    def _dump_semantics_debug(self) -> None:
+        """在 DEBUG 级别输出当前语义树快照（仅 logger.isEnabledFor(DEBUG) 时调用）。"""
+        import asyncio
+
+        async def _dump():
+            try:
+                nodes = await self.page.eval_on_selector_all(
+                    "flt-semantics, [role]",
+                    """els => els.map(e => ({
+                        tag: e.tagName,
+                        role: e.getAttribute('role'),
+                        aria: e.getAttribute('aria-label') || '',
+                        id: e.id,
+                        text: e.textContent || ''
+                    }))""",
+                )
+                logger.debug("=== E2E DEBUG: CURRENT SEMANTICS NODES ===")
+                for i, n in enumerate(nodes):
+                    if n["role"] or n["aria"] or n["text"].strip():
+                        logger.debug(
+                            "[%d] tag=%s role=%s aria='%s' id=%s text='%s'",
+                            i,
+                            n["tag"],
+                            n["role"],
+                            n["aria"],
+                            n["id"],
+                            n["text"].strip()[:50],
+                        )
+                logger.debug("==========================================")
+            except Exception as ex:
+                logger.debug("Failed to dump debug semantics: %s", ex)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_dump())
+        except RuntimeError:
+            pass
+
+    def _dump_dom_debug(self, text: str) -> None:
+        """在 DEBUG 级别输出 DOM 状态（仅 logger.isEnabledFor(DEBUG) 时调用）。"""
+        import asyncio
+
+        async def _dump():
+            try:
+                inputs = await self.page.eval_on_selector_all(
+                    "input",
+                    """els => els.map(e => ({
+                        tag: e.tagName,
+                        value: e.value,
+                        aria: e.getAttribute('aria-label') || '',
+                        id: e.id,
+                    }))""",
+                )
+                logger.debug("=== E2E DEBUG: ALL INPUT ELEMENTS ===")
+                for idx, ip in enumerate(inputs):
+                    logger.debug(
+                        "[%d] tag=%s value='%s' aria='%s' id=%s", idx, ip["tag"], ip["value"], ip["aria"], ip["id"]
+                    )
+
+                nodes = await self.page.eval_on_selector_all(
+                    "flt-semantics, [role]",
+                    """els => els.map(e => ({
+                        tag: e.tagName,
+                        role: e.getAttribute('role'),
+                        aria: e.getAttribute('aria-label') || '',
+                        id: e.id,
+                        text: e.textContent || ''
+                    }))""",
+                )
+                logger.debug("=== E2E DEBUG: CURRENT SEMANTICS NODES (expect_text '%s') ===", text)
+                for i, n in enumerate(nodes):
+                    if n["role"] or n["aria"] or n["text"].strip():
+                        logger.debug(
+                            "[%d] tag=%s role=%s aria='%s' id=%s text='%s'",
+                            i,
+                            n["tag"],
+                            n["role"],
+                            n["aria"],
+                            n["id"],
+                            n["text"].strip()[:60],
+                        )
+                logger.debug("==========================================")
+            except Exception as ex:
+                logger.debug("Failed to dump debug DOM in expect_text: %s", ex)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_dump())
+        except RuntimeError:
+            pass

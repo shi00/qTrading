@@ -1,8 +1,12 @@
+import logging
+
 import pytest
 
 pytestmark = pytest.mark.e2e
 
 from ui.i18n import I18n
+
+logger = logging.getLogger(__name__)
 
 
 async def test_diagnostic_all_tabs(e2e_page):
@@ -41,6 +45,6 @@ async def test_diagnostic_all_tabs(e2e_page):
             }""")
 
             selected = [b for b in all_buttons if b["bg"] != "rgba(0, 0, 0, 0)"]
-            print(f"--- [E2E DIAG] Tab[{i}] '{tab_name}': clicked, selected tabs: {selected} ---", flush=True)
+            logger.info("Tab[%d] '%s': clicked, selected tabs: %s", i, tab_name, selected)
         except Exception as ex:
-            print(f"--- [E2E DIAG] Tab[{i}] '{tab_name}': FAILED - {ex} ---", flush=True)
+            logger.info("Tab[%d] '%s': FAILED - %s", i, tab_name, ex)
