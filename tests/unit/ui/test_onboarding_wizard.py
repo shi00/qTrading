@@ -600,6 +600,68 @@ class TestOnboardingWizard:
         assert result is True
         assert wizard.step_validated["schedule"] is True
 
+    def test_on_locale_change_updates_header_title(self, mock_page):
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        original_title = wizard.header_title
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_title" else key
+        wizard._on_locale_change("en_US")
+        assert original_title.value == "en_wizard_welcome_title"
+        assert wizard.header_title is original_title
+
+    def test_on_locale_change_updates_header_desc(self, mock_page):
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        original_desc = wizard.header_desc
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: (
+            f"en_{key}" if key == "wizard_welcome_desc_with_time" else key
+        )
+        wizard._on_locale_change("en_US")
+        assert original_desc.value == "en_wizard_welcome_desc_with_time"
+        assert wizard.header_desc is original_desc
+
+    def test_on_locale_change_updates_gradient_guide_text(self, mock_page):
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        original_text = wizard.gradient_guide_text
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_guide" else key
+        wizard._on_locale_change("en_US")
+        assert original_text.value == "en_wizard_welcome_guide"
+        assert wizard.gradient_guide_text is original_text
+
+    def test_header_title_is_in_ui_tree(self, mock_page):
+        wizard = self._make_wizard(mock_page)
+        header_column = wizard.header_container
+        assert wizard.header_title in header_column.controls
+        assert wizard.header_desc in header_column.controls
+
+    def test_on_language_change_wizard_preserves_header_reference(self, mock_page):
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        original_header_container = wizard.header_container
+        original_header_title = wizard.header_title
+        original_header_desc = wizard.header_desc
+        wizard.wizard_language_dropdown = MagicMock()
+        wizard.wizard_language_dropdown.value = "en_US"
+        wizard._on_language_change_wizard(MagicMock())
+        assert wizard.header_container is original_header_container
+        assert wizard.header_title is original_header_title
+        assert wizard.header_desc is original_header_desc
+
+    def test_on_language_change_wizard_updates_header_title_directly(self, mock_page):
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        original_title = wizard.header_title
+        original_desc = wizard.header_desc
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if "welcome" in key else key
+        wizard.wizard_language_dropdown = MagicMock()
+        wizard.wizard_language_dropdown.value = "en_US"
+        wizard._on_language_change_wizard(MagicMock())
+        assert original_title.value == "en_wizard_welcome_title"
+        assert original_desc.value == "en_wizard_welcome_desc_with_time"
+        assert wizard.header_title is original_title
+        assert wizard.header_desc is original_desc
+
 
 def _async_true():
     import asyncio

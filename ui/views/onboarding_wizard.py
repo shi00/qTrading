@@ -355,21 +355,23 @@ class OnboardingWizard(ft.Container):
         self.step_validated[step_id] = False
 
     def _build_header(self):  # pragma: no cover
+        self.header_title = ft.Text(  # pragma: no cover
+            I18n.get("wizard_welcome_title"),  # pragma: no cover
+            size=32,  # pragma: no cover
+            weight=ft.FontWeight.BOLD,  # pragma: no cover
+            color=AppColors.PRIMARY,  # pragma: no cover
+            text_align=ft.TextAlign.CENTER,  # pragma: no cover
+        )  # pragma: no cover
+        self.header_desc = ft.Text(  # pragma: no cover
+            I18n.get("wizard_welcome_desc_with_time"),  # pragma: no cover
+            size=16,  # pragma: no cover
+            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
+            text_align=ft.TextAlign.CENTER,  # pragma: no cover
+        )  # pragma: no cover
         return ft.Column(  # pragma: no cover
             [  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_welcome_title"),  # pragma: no cover
-                    size=32,  # pragma: no cover
-                    weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    color=AppColors.PRIMARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_welcome_desc_with_time"),  # pragma: no cover
-                    size=16,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
+                self.header_title,  # pragma: no cover
+                self.header_desc,  # pragma: no cover
             ],  # pragma: no cover
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
         )  # pragma: no cover
@@ -485,6 +487,7 @@ class OnboardingWizard(ft.Container):
         # Language Selector  # pragma: no cover
         self.wizard_language_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get("settings_language"),  # pragma: no cover
+            tooltip=I18n.get("settings_language"),  # pragma: no cover
             value=ConfigHandler.get_locale(),  # pragma: no cover
             width=200,  # pragma: no cover
             text_size=14,  # pragma: no cover
@@ -517,13 +520,14 @@ class OnboardingWizard(ft.Container):
             ),  # pragma: no cover
         )  # pragma: no cover
 
+        self.gradient_guide_text = ft.Text(  # pragma: no cover
+            I18n.get("wizard_welcome_guide"),  # pragma: no cover
+            size=20,  # pragma: no cover
+            weight=ft.FontWeight.W_600,  # pragma: no cover
+            text_align=ft.TextAlign.CENTER,  # pragma: no cover
+        )  # pragma: no cover
         gradient_title = ft.ShaderMask(  # pragma: no cover
-            content=ft.Text(  # pragma: no cover
-                I18n.get("wizard_welcome_guide"),  # pragma: no cover
-                size=20,  # pragma: no cover
-                weight=ft.FontWeight.W_600,  # pragma: no cover
-                text_align=ft.TextAlign.CENTER,  # pragma: no cover
-            ),  # pragma: no cover
+            content=self.gradient_guide_text,  # pragma: no cover
             shader=ft.LinearGradient(  # pragma: no cover
                 begin=ft.alignment.center_left,  # pragma: no cover
                 end=ft.alignment.center_right,  # pragma: no cover
@@ -1194,6 +1198,12 @@ class OnboardingWizard(ft.Container):
             self._locale_subscription_id = None
 
     def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
+        if hasattr(self, "header_title"):
+            self.header_title.value = I18n.get("wizard_welcome_title")
+        if hasattr(self, "header_desc"):
+            self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
+        if hasattr(self, "gradient_guide_text"):
+            self.gradient_guide_text.value = I18n.get("wizard_welcome_guide")
         self.sync_status.value = I18n.get("wizard_status_ready")
         self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
         self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
@@ -1215,7 +1225,30 @@ class OnboardingWizard(ft.Container):
             new_locale = self.wizard_language_dropdown.value
             I18n.set_locale(new_locale)
 
-            self.steps_content[0] = self._build_welcome_step()
+            if hasattr(self, "header_title"):
+                self.header_title.value = I18n.get("wizard_welcome_title")
+            if hasattr(self, "header_desc"):
+                self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
+
+            self._init_database_controls()
+            self._init_token_controls()
+            self._init_cloud_ai_controls()
+            self._init_local_model_controls()
+            self._init_sync_controls()
+            self._init_schedule_controls()
+
+            self.steps_content = [
+                self._build_welcome_step(),
+                self._build_database_step(),
+                self._build_token_step(),
+                self._build_cloud_ai_step(),
+                self._build_local_model_step(),
+                self._build_sync_step(),
+                self._build_schedule_step(),
+                self._build_complete_step(),
+            ]
+
+            self.step_container.content = self.steps_content[self.current_step]
             self.step_indicators.controls = self._build_step_indicators()
             self._update_navigation_buttons()
 
