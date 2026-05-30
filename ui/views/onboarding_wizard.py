@@ -486,16 +486,16 @@ class OnboardingWizard(ft.Container):
     def _build_welcome_step(self):  # pragma: no cover
         # Language Selector  # pragma: no cover
         self.wizard_language_dropdown = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("settings_language"),  # pragma: no cover
-            tooltip=I18n.get("settings_language"),  # pragma: no cover
+            label=I18n.get_language_label(),  # pragma: no cover
+            tooltip=I18n.get_language_label(),  # pragma: no cover
             value=ConfigHandler.get_locale(),  # pragma: no cover
             width=200,  # pragma: no cover
             text_size=14,  # pragma: no cover
             border_radius=8,  # pragma: no cover
             content_padding=10,  # pragma: no cover
             options=[  # pragma: no cover
-                ft.dropdown.Option("zh_CN", "简体中文"),  # pragma: no cover
-                ft.dropdown.Option("en_US", "English"),  # pragma: no cover
+                ft.dropdown.Option(code, name)  # pragma: no cover
+                for code, name in I18n.get_language_options()  # pragma: no cover
             ],  # pragma: no cover
             on_change=self._on_language_change_wizard,  # pragma: no cover
         )  # pragma: no cover
@@ -1213,7 +1213,7 @@ class OnboardingWizard(ft.Container):
         self.loading_overlay_text.value = I18n.get("wizard_validating")
 
         if hasattr(self, "wizard_language_dropdown"):
-            self.wizard_language_dropdown.label = I18n.get("settings_language")
+            self.wizard_language_dropdown.label = I18n.get_language_label()
 
         self.step_indicators.controls = self._build_step_indicators()
         self._update_navigation_buttons()

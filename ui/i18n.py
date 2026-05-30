@@ -12,7 +12,7 @@ UI modules can continue to import from ui.i18n:
     from ui.i18n import I18n
 """
 
-from core.i18n import I18n, LOCALE_MAP, SUPPORTED_LOCALES, DEFAULT_LOCALE  # noqa: F401
+from core.i18n import I18n, LOCALE_MAP, LOCALE_NAMES, SUPPORTED_LOCALES, DEFAULT_LOCALE  # noqa: F401
 
 from utils.error_classifier import classify_error, get_error_message  # noqa: F401
 

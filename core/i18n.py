@@ -16,6 +16,11 @@ LOCALE_MAP = {
 SUPPORTED_LOCALES = ["zh_CN", "en_US"]
 DEFAULT_LOCALE = "zh_CN"
 
+LOCALE_NAMES: dict[str, str] = {
+    "zh_CN": "简体中文",
+    "en_US": "English",
+}
+
 
 class I18n:
     """
@@ -184,6 +189,26 @@ class I18n:
     def get_supported_locales(cls) -> list:
         """Return list of supported locale codes."""
         return SUPPORTED_LOCALES.copy()
+
+    @classmethod
+    def get_language_label(cls) -> str:
+        """Return bilingual language label like '语言 / Language'.
+
+        Format: '<current_locale_native_name> / <other_locale_native_name>'
+        If only one locale is supported, returns its native name.
+        """
+        if not cls._initialized:
+            cls.initialize()
+        current_name = LOCALE_NAMES.get(cls._locale, cls._locale)
+        other_names = [LOCALE_NAMES[loc] for loc in SUPPORTED_LOCALES if loc != cls._locale and loc in LOCALE_NAMES]
+        if other_names:
+            return f"{current_name} / {' / '.join(other_names)}"
+        return current_name
+
+    @classmethod
+    def get_language_options(cls) -> list[tuple[str, str]]:
+        """Return list of (locale_code, native_name) tuples for dropdown options."""
+        return [(loc, LOCALE_NAMES.get(loc, loc)) for loc in SUPPORTED_LOCALES]
 
     @classmethod
     def reload_locale(cls):

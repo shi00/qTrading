@@ -23,15 +23,15 @@ class SystemTab(ft.Container):
 
         # Language Selector  # pragma: no cover
         self.language_dropdown = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("settings_language"),  # pragma: no cover
+            label=I18n.get_language_label(),  # pragma: no cover
             value=ConfigHandler.get_locale(),  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
             text_size=14,  # pragma: no cover
             border_radius=8,  # pragma: no cover
             content_padding=10,  # pragma: no cover
             options=[  # pragma: no cover
-                ft.dropdown.Option("zh_CN", "简体中文"),  # pragma: no cover
-                ft.dropdown.Option("en_US", "English"),  # pragma: no cover
+                ft.dropdown.Option(code, name)  # pragma: no cover
+                for code, name in I18n.get_language_options()  # pragma: no cover
             ],  # pragma: no cover
             on_change=self.on_language_change,  # pragma: no cover
         )  # pragma: no cover
@@ -362,7 +362,7 @@ class SystemTab(ft.Container):
     def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
         """语言变更回调 - 更新 Settings UI 文本"""
         try:
-            self.language_dropdown.label = I18n.get("settings_language")
+            self.language_dropdown.label = I18n.get_language_label()
             self.theme_dropdown.label = I18n.get("settings_theme")
             self.log_level_dropdown.label = I18n.get("settings_log_level")
 
