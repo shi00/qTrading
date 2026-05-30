@@ -15,6 +15,8 @@ def mock_page():
 def mock_i18n():
     m = MagicMock()
     m.get.side_effect = lambda key, *a, **kw: key
+    m.get_language_options.return_value = [("zh_CN", "中文"), ("en_US", "English")]
+    m.get_language_label.return_value = "语言 / Language"
     m.subscribe = MagicMock(return_value="sub_id")
     m.unsubscribe = MagicMock()
     return m
