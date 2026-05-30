@@ -226,7 +226,7 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main.ConfigHandler, "get_token", lambda: None)
     monkeypatch.setattr(app_main.ConfigHandler, "get_llm_config", lambda: {"api_key": None})
     monkeypatch.setattr(app_main.ConfigHandler, "is_onboarding_complete", lambda: False)
-    monkeypatch.setattr(app_main.I18n, "initialize", lambda: None)
+    monkeypatch.setattr(app_main.I18n, "initialize", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_main.I18n, "get", lambda key, default=None: default or key)
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
     if exit_spy is None:
