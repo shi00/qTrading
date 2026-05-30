@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0](https://github.com/shi00/qTrading/compare/v0.3.0...v0.4.0) (2026-05-30)
+
+
+### Features
+
+* data-driven locale update for SettingRow and SectionHeader ([68d5f25](https://github.com/shi00/qTrading/commit/68d5f251f3a2842df4b97922179452646332190b))
+
+
+### Bug Fixes
+
+* add missing 'import os' in main.py for _is_web_mode function ([89a0b71](https://github.com/shi00/qTrading/commit/89a0b717355cd4896bcb13871c2a610e5cf4bb0a))
+* AI candidate analysis concurrency (Closes [#14](https://github.com/shi00/qTrading/issues/14)) ([506ab4d](https://github.com/shi00/qTrading/commit/506ab4d49f41fcc63382c7238afcff2bb4d1ad8a))
+* mock_i18n 缺少 get_language_options/get_language_label 返回值导致测试失败 ([4c65c08](https://github.com/shi00/qTrading/commit/4c65c088a4cb87e9c337f69ce518a3ad34821d7d))
+* onboarding wizard header title not updating on language switch ([f6f59ed](https://github.com/shi00/qTrading/commit/f6f59ed5408cf2921cf42b376a52498bfbd3094a))
+* resolve 5 failing unit tests caused by test pollution and mock issues ([8ff0d91](https://github.com/shi00/qTrading/commit/8ff0d9191644651dc65f3b8332d7424367d040d5))
+* revert zh_CN settings_language to pure Chinese label ([db5aa56](https://github.com/shi00/qTrading/commit/db5aa5606d1de8bb451cb274f2d5446a56143109))
+* save SectionHeader as instance attr in system_tab + remove double super init ([be72043](https://github.com/shi00/qTrading/commit/be72043091060ed86592c426063fb0211927bec9))
+* unify language dropdown label to bilingual format in en_US locale ([8e479c7](https://github.com/shi00/qTrading/commit/8e479c77b6b43babde33103b05fe6df614c19d59))
+
 ## [0.3.0](https://github.com/shi00/qTrading/compare/v0.2.1...v0.3.0) (2026-05-29)
 
 
