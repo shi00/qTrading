@@ -2,6 +2,7 @@ import logging
 
 import flet as ft
 
+from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -240,8 +241,15 @@ class SectionHeader(ft.Row):
     Uses semantic tokens — auto-updates with theme.
     """
 
-    def __init__(self, title, action=None):
+    def __init__(self, title, action=None, title_key=None):
         super().__init__()
+        self.title_key = title_key
+        self.title_view = ft.Text(
+            title,
+            size=16,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.ON_SURFACE,
+        )
         controls = [
             ft.Row(
                 [
@@ -251,12 +259,7 @@ class SectionHeader(ft.Row):
                         bgcolor=ft.Colors.SECONDARY,
                         border_radius=2,
                     ),
-                    ft.Text(
-                        title,
-                        size=16,
-                        weight=ft.FontWeight.BOLD,
-                        color=ft.Colors.ON_SURFACE,
-                    ),
+                    self.title_view,
                 ],
                 spacing=10,
             ),
@@ -270,6 +273,10 @@ class SectionHeader(ft.Row):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+    def update_locale(self):
+        if self.title_key:
+            self.title_view.value = I18n.get(self.title_key)
+
 
 class SettingRow(ft.ResponsiveRow):
     """
@@ -278,9 +285,11 @@ class SettingRow(ft.ResponsiveRow):
     and gracefully wraps to next line on mobile.
     """
 
-    def __init__(self, icon, title, subtitle, control, icon_color=None):
+    def __init__(self, icon, title, subtitle, control, icon_color=None, title_key=None, subtitle_key=None):
         super().__init__()
         self.vertical_alignment = ft.CrossAxisAlignment.CENTER
+        self.title_key = title_key
+        self.subtitle_key = subtitle_key
 
         # Default icon color is a semantic token
         color = icon_color if icon_color else ft.Colors.PRIMARY
@@ -332,3 +341,9 @@ class SettingRow(ft.ResponsiveRow):
             ft.Container(content=left_side, col={"xs": 12, "sm": 7, "md": 7}),
             ft.Container(content=right_side, col={"xs": 12, "sm": 5, "md": 5}),
         ]
+
+    def update_locale(self):
+        if self.title_key:
+            self.title_view.value = I18n.get(self.title_key)
+        if self.subtitle_key:
+            self.subtitle_view.value = I18n.get(self.subtitle_key)

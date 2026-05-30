@@ -209,12 +209,12 @@ class LLMConfigPanel(ft.Container):
             alignment=ft.MainAxisAlignment.CENTER,
         )
 
-        header_text = SectionHeader(I18n.get("settings_sec_ai"))
-        header_text.visible = not self._compact
+        self.section_header = SectionHeader(I18n.get("settings_sec_ai"), title_key="settings_sec_ai")
+        self.section_header.visible = not self._compact
 
         form_content = ft.Column(
             controls=[
-                header_text,
+                self.section_header,
                 provider_row,
                 self.model_row,
                 self.base_url_input,
@@ -1065,5 +1065,7 @@ class LLMConfigPanel(ft.Container):
         self.provider_dropdown.value = self._current_provider
 
         self._update_links_row()
+
+        self.section_header.update_locale()
 
         self.update()

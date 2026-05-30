@@ -110,6 +110,8 @@ class AutomationTab(ft.Container):
             subtitle=I18n.get("settings_auto_desc"),
             control=self.schedule_enabled,
             icon_color=AppColors.PRIMARY,
+            title_key="settings_auto_update",
+            subtitle_key="settings_auto_desc",
         )
 
         self.row_time = SettingRow(
@@ -118,6 +120,8 @@ class AutomationTab(ft.Container):
             subtitle=I18n.get("settings_trading_days"),
             control=self.schedule_time,
             icon_color=AppColors.ACCENT,
+            title_key="settings_update_time",
+            subtitle_key="settings_trading_days",
         )
 
         self.card_main = DashboardCard(
@@ -150,6 +154,8 @@ class AutomationTab(ft.Container):
             ),
             control=self.doubao_enabled,
             icon_color=AppColors.PRIMARY,
+            title_key="settings_doubao_update",
+            subtitle_key="settings_doubao_desc",
         )
 
         self.row_doubao_time = SettingRow(
@@ -158,6 +164,8 @@ class AutomationTab(ft.Container):
             subtitle=I18n.get("settings_saturdays", "限定每个周六执行"),
             control=self.doubao_time,
             icon_color=AppColors.ACCENT,
+            title_key="settings_update_time",
+            subtitle_key="settings_saturdays",
         )
 
         self.card_doubao = DashboardCard(
@@ -263,6 +271,9 @@ class AutomationTab(ft.Container):
             self.doubao_status.value = self._get_schedule_status_text(
                 self.doubao_enabled.value,
             )
+
+            for row in [self.row_schedule, self.row_time, self.row_doubao_schedule, self.row_doubao_time]:
+                row.update_locale()
 
             # 重建整个内容以确保所有文本更新
             self._build_content()
@@ -379,6 +390,8 @@ class NotificationsTab(ft.Container):
             subtitle=I18n.get("settings_notify_desc"),
             control=self.news_alerts_enabled,
             icon_color=AppColors.WARNING,
+            title_key="settings_news_alerts",
+            subtitle_key="settings_notify_desc",
         )
 
         self.row_interval = SettingRow(
@@ -387,6 +400,8 @@ class NotificationsTab(ft.Container):
             subtitle=I18n.get("settings_news_interval_desc"),
             control=self.news_interval,
             icon_color=AppColors.INFO,
+            title_key="settings_news_interval",
+            subtitle_key="settings_news_interval_desc",
         )
 
         self.card_notify = DashboardCard(
@@ -455,6 +470,8 @@ class NotificationsTab(ft.Container):
             self.news_alerts_enabled.label = I18n.get("settings_news_alerts")
             self.news_interval.label = I18n.get("settings_news_interval")
             self.news_interval.options = self._build_interval_options()
+            for row in [self.row_alerts, self.row_interval]:
+                row.update_locale()
             self._build_content()
             self._safe_update()
         except Exception as e:

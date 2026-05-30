@@ -178,6 +178,8 @@ class SystemTab(ft.Container):
             title=I18n.get("settings_language"),  # pragma: no cover
             subtitle=I18n.get("settings_language_desc"),  # pragma: no cover
             control=self.language_dropdown,  # pragma: no cover
+            title_key="settings_language",  # pragma: no cover
+            subtitle_key="settings_language_desc",  # pragma: no cover
         )  # pragma: no cover
 
         # 1. Theme Selector  # pragma: no cover
@@ -187,6 +189,8 @@ class SystemTab(ft.Container):
             title=I18n.get("settings_theme"),  # pragma: no cover
             subtitle=I18n.get("settings_snack_theme_updated"),  # pragma: no cover
             control=self.theme_dropdown,  # pragma: no cover
+            title_key="settings_theme",  # pragma: no cover
+            subtitle_key="settings_snack_theme_updated",  # pragma: no cover
         )  # pragma: no cover
 
         # 2. Log Level Item  # pragma: no cover
@@ -196,6 +200,8 @@ class SystemTab(ft.Container):
             title=I18n.get("settings_log_level"),  # pragma: no cover
             subtitle=I18n.get("sys_log_label"),  # pragma: no cover
             control=self.log_level_dropdown,  # pragma: no cover
+            title_key="settings_log_level",  # pragma: no cover
+            subtitle_key="sys_log_label",  # pragma: no cover
         )  # pragma: no cover
 
         # 3. Concurrency Item  # pragma: no cover
@@ -216,6 +222,8 @@ class SystemTab(ft.Container):
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
+            title_key="sys_sync_heavy",  # pragma: no cover
+            subtitle_key="sys_sync_heavy_hint",  # pragma: no cover
         )  # pragma: no cover
 
         # 4. Thread Pool Settings (Advanced)  # pragma: no cover
@@ -239,6 +247,8 @@ class SystemTab(ft.Container):
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
+            title_key="sys_thread_pool_title",  # pragma: no cover
+            subtitle_key="sys_thread_pool_desc",  # pragma: no cover
         )  # pragma: no cover
 
         # 5. DB Connection Pool  # pragma: no cover
@@ -261,6 +271,8 @@ class SystemTab(ft.Container):
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
+            title_key="settings_db_pool",  # pragma: no cover
+            subtitle_key="settings_pool_desc",  # pragma: no cover
         )  # pragma: no cover
 
         # 6. API Rate Limit Item  # pragma: no cover
@@ -281,6 +293,8 @@ class SystemTab(ft.Container):
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
+            title_key="sys_tushare_limit",  # pragma: no cover
+            subtitle_key="sys_tushare_limit_desc",  # pragma: no cover
         )  # pragma: no cover
 
         # 7. No-Proxy Domains  # pragma: no cover
@@ -302,6 +316,8 @@ class SystemTab(ft.Container):
                 spacing=5,  # pragma: no cover
                 expand=True,  # pragma: no cover
             ),  # pragma: no cover
+            title_key="settings_no_proxy_domains",  # pragma: no cover
+            subtitle_key="settings_no_proxy_desc",  # pragma: no cover
         )  # pragma: no cover
 
         self.content = ft.ListView(  # pragma: no cover
@@ -309,7 +325,7 @@ class SystemTab(ft.Container):
                 DashboardCard(  # pragma: no cover
                     content=ft.Column(  # pragma: no cover
                         [  # pragma: no cover
-                            SectionHeader(I18n.get("sys_core_config")),  # pragma: no cover
+                            SectionHeader(I18n.get("sys_core_config"), title_key="sys_core_config"),  # pragma: no cover
                             ft.Container(height=10),  # pragma: no cover
                             self.row_language,  # pragma: no cover
                             ft.Divider(height=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
@@ -379,6 +395,32 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
                 ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
             ]
+
+            self.concurrency_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.pool_size_input.label = I18n.get("settings_db_pool")
+            self.pool_size_input.suffix_text = I18n.get("common_items")
+            self.db_overflow_input.label = I18n.get("settings_db_overflow")
+            self.db_overflow_input.suffix_text = I18n.get("common_items")
+            self.db_timeout_input.label = I18n.get("settings_db_timeout")
+            self.db_timeout_input.suffix_text = I18n.get("common_seconds")
+            self.io_workers_input.label = I18n.get("sys_pool_io")
+            self.io_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.cpu_workers_input.label = I18n.get("sys_pool_cpu")
+            self.cpu_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.rate_limit_input.suffix_text = I18n.get("common_times_min")
+            self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
+
+            for row in [
+                self.row_language,
+                self.row_theme,
+                self.row_log,
+                self.row_concurrency,
+                self.row_thread_pool,
+                self.row_db_pool,
+                self.row_limit,
+                self.row_proxy,
+            ]:
+                row.update_locale()
 
             self._safe_update()
         except Exception as e:

@@ -95,12 +95,23 @@ class DataSourceTab(ft.Container):
             width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
         )  # pragma: no cover
 
+        self.header_health = SectionHeader(
+            I18n.get("settings_sec_health"), title_key="settings_sec_health"
+        )  # pragma: no cover
+        self.header_console = SectionHeader(
+            I18n.get("ds_shortcut_console"), title_key="ds_shortcut_console"
+        )  # pragma: no cover
+        self.header_api = SectionHeader(I18n.get("settings_sec_api"), title_key="settings_sec_api")  # pragma: no cover
+        self.header_init = SectionHeader(
+            I18n.get("settings_init_data"), title_key="settings_init_data"
+        )  # pragma: no cover
+
         self.health_dashboard = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     ft.Row(  # pragma: no cover
                         [  # pragma: no cover
-                            SectionHeader(I18n.get("settings_sec_health")),  # pragma: no cover
+                            self.header_health,  # pragma: no cover
                             ft.Row(  # pragma: no cover
                                 [  # pragma: no cover
                                     ft.IconButton(  # pragma: no cover
@@ -159,7 +170,7 @@ class DataSourceTab(ft.Container):
         self.action_console = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
-                    SectionHeader(I18n.get("ds_shortcut_console")),  # pragma: no cover
+                    self.header_console,  # pragma: no cover
                     ft.Divider(height=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
                     ft.ResponsiveRow(  # pragma: no cover
                         [  # pragma: no cover
@@ -198,11 +209,13 @@ class DataSourceTab(ft.Container):
             subtitle=I18n.get("settings_token_desc"),  # pragma: no cover
             control=self.tushare_panel,  # pragma: no cover
             icon_color=AppColors.ACCENT,  # pragma: no cover
+            title_key="settings_token",  # pragma: no cover
+            subtitle_key="settings_token_desc",  # pragma: no cover
         )  # pragma: no cover
         self.connection_card = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
-                    SectionHeader(I18n.get("settings_sec_api")),  # pragma: no cover
+                    self.header_api,  # pragma: no cover
                     ft.Container(height=10),  # pragma: no cover
                     self.row_token,  # pragma: no cover
                 ],  # pragma: no cover
@@ -271,11 +284,13 @@ class DataSourceTab(ft.Container):
                 expand=True,  # pragma: no cover
             ),  # pragma: no cover
             icon_color=ft.Colors.PURPLE,  # pragma: no cover
+            title_key="settings_init_data",  # pragma: no cover
+            subtitle_key="settings_hint_first_run",  # pragma: no cover
         )  # pragma: no cover
         self.historical_card = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
-                    SectionHeader(I18n.get("settings_init_data")),  # pragma: no cover
+                    self.header_init,  # pragma: no cover
                     ft.Container(height=10),  # pragma: no cover
                     self.row_init,  # pragma: no cover
                 ],  # pragma: no cover
@@ -432,8 +447,9 @@ class DataSourceTab(ft.Container):
         # Historical Data Card
         self.sync_button.text = I18n.get("settings_init_data")
         self.sync_button.tooltip = I18n.get("settings_init_desc")
-        self.row_init.title = I18n.get("settings_init_data")  # type: ignore[untyped]
-        self.row_init.subtitle = I18n.get("settings_hint_first_run")  # type: ignore[untyped]
+        self.row_init.title_view.value = I18n.get("settings_init_data")
+        self.row_init.subtitle_view.value = I18n.get("settings_hint_first_run")
+        self.row_token.update_locale()
         self.history_years_dropdown.label = I18n.get(
             "settings_history_range",
             "History Range",
@@ -445,6 +461,11 @@ class DataSourceTab(ft.Container):
             ft.dropdown.Option("4", f"4 {I18n.get('unit_years', 'Years')}".strip()),
             ft.dropdown.Option("5", f"5 {I18n.get('unit_years', 'Years')}".strip()),
         ]
+
+        self.header_health.update_locale()
+        self.header_console.update_locale()
+        self.header_api.update_locale()
+        self.header_init.update_locale()
 
         self._safe_update()
 
