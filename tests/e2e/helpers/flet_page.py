@@ -77,7 +77,11 @@ class FletPage:
         el = self.page.get_by_role("textbox", name=label).first
         await el.wait_for(state="visible", timeout=timeout_ms)
         await el.click(timeout=timeout_ms)
-        await el.fill(value, timeout=timeout_ms)
+        try:
+            await el.fill(value, timeout=timeout_ms)
+        except Exception:
+            await el.clear()
+            await el.type(value, delay=30)
 
     async def select_dropdown(self, current_or_label: str, option_text: str, timeout_ms: int = 8000) -> None:
         norm_label = current_or_label.lower()
