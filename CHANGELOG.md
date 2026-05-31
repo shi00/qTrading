@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/shi00/qTrading/compare/v0.4.0...v0.4.1) (2026-05-31)
+
+
+### Bug Fixes
+
+* **e2e:** add fallback for fill_textbox when Playwright fill fails in Flet Web ([675adcd](https://github.com/shi00/qTrading/commit/675adcdab9b9f6f9499bb2c02b3a210a0bf9b0b2))
+* **e2e:** resolve test failures and configure windows playwright with postgresql ([c65b374](https://github.com/shi00/qTrading/commit/c65b374545502ec5ddaaae13e602b92f12a78423))
+
 ## [0.4.0](https://github.com/shi00/qTrading/compare/v0.3.0...v0.4.0) (2026-05-30)
 
 
