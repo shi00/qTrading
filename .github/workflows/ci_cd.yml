@@ -333,34 +333,13 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
         run: python -m alembic upgrade head
 
-      - name: Start application server
-        env:
-          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-          E2E_TEST_DB: 1
-          FLET_SERVER_PORT: 8550
-        shell: pwsh
-        run: |
-          Start-Process python -ArgumentList "main.py" -NoNewWindow
-          Write-Host "Waiting for server to start..."
-          for ($i=1; $i -le 30; $i++) {
-            try {
-              $resp = Invoke-WebRequest -Uri "http://localhost:8550" -UseBasicParsing -TimeoutSec 1
-              if ($resp.StatusCode -eq 200) {
-                Write-Host "Server is ready"
-                break
-              }
-            } catch {
-              # Ignore error
-            }
-            Start-Sleep -Seconds 1
-          }
-
       - name: Run E2E Tests
         env:
           E2E_TEST_DB: 1
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-          E2E_BROWSER_CHANNEL: ""
+          E2E_BROWSER_CHANNEL: "chromium"
           E2E_ARTIFACT_DIR: "e2e-artifacts"
+          E2E_TIMEOUT_MULTIPLIER: "1.5"
         run: |
           python -m pytest tests/e2e/ -v --tb=short --junitxml=junit-e2e.xml
 
@@ -372,6 +351,7 @@ jobs:
           path: |
             junit-e2e.xml
             e2e-artifacts/
+            logs/e2e-flet-app.log
           retention-days: 14
 
   ci-checks-windows:

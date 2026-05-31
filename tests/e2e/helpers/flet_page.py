@@ -7,9 +7,13 @@ logger = logging.getLogger(__name__)
 
 
 class FletPage:
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, timeout_multiplier: float = 1.0):
         self.page = page
         self._pw_context: tuple[Playwright, Browser, BrowserContext, Page, Any] | None = None
+        self._timeout_multiplier = timeout_multiplier
+
+    def _tm(self, base_ms: int) -> int:
+        return int(base_ms * self._timeout_multiplier)
 
     def bind_context(self, pw_tuple: tuple[Playwright, Browser, BrowserContext, Page, Any]) -> None:
         self._pw_context = pw_tuple
@@ -18,13 +22,14 @@ class FletPage:
         return self._pw_context
 
     async def open(self, url: str, timeout_ms: int = 45000) -> None:
+        scaled = self._tm(timeout_ms)
         await self.page.goto(url, wait_until="domcontentloaded")
-        await self.page.wait_for_selector("flutter-view, flt-glass-pane, flt-semantics-placeholder", timeout=timeout_ms)
+        await self.page.wait_for_selector("flutter-view, flt-glass-pane, flt-semantics-placeholder", timeout=scaled)
         ph = self.page.locator("flt-semantics-placeholder")
         if await ph.count() > 0:
             await ph.first.dispatch_event("click")
-            await self.page.wait_for_selector("flt-semantics", timeout=timeout_ms)
-        await self.page.wait_for_timeout(3000)
+            await self.page.wait_for_selector("flt-semantics", timeout=scaled)
+        await self.page.wait_for_timeout(int(3000 * self._timeout_multiplier))
         for _ in range(10):
             count = await self.page.locator("flt-semantics, [role]").count()
             if count >= 5:
@@ -32,11 +37,11 @@ class FletPage:
             await self.page.wait_for_timeout(1000)
 
     async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = 8000) -> None:
-        """使用多策略回退点击机制，兼容 Flet 0.28.3 因带 icon 拆分语义节点的问题。"""
+        scaled = self._tm(timeout_ms)
         btn = self.page.get_by_role(role, name=name)
         if await btn.count() > 0:
             try:
-                await btn.first.click(timeout=3000)
+                await btn.first.click(timeout=self._tm(3000))
                 return
             except Exception:
                 pass
@@ -44,13 +49,13 @@ class FletPage:
         by_label = self.page.locator(f'flt-semantics[aria-label="{name}"]')
         if await by_label.count() > 0:
             try:
-                await by_label.first.click(timeout=3000)
+                await by_label.first.click(timeout=self._tm(3000))
                 return
             except Exception:
                 pass
 
         text_loc = self.page.get_by_text(name, exact=True).first
-        await text_loc.wait_for(state="attached", timeout=timeout_ms)
+        await text_loc.wait_for(state="attached", timeout=scaled)
         box = await text_loc.bounding_box()
         if box:
             await self.page.mouse.click(
@@ -59,7 +64,7 @@ class FletPage:
             )
             return
 
-        await text_loc.click(force=True, timeout=timeout_ms)
+        await text_loc.click(force=True, timeout=scaled)
 
     async def click_button(self, name: str, timeout_ms: int = 8000) -> None:
         await self._click_with_fallback(name, "button", timeout_ms)
@@ -69,16 +74,18 @@ class FletPage:
         await self._click_with_fallback(text, "button", timeout_ms)
 
     async def click_text(self, text: str, timeout_ms: int = 8000) -> None:
+        scaled = self._tm(timeout_ms)
         loc = self.page.get_by_text(text, exact=False).first
-        await loc.wait_for(state="attached", timeout=timeout_ms)
-        await loc.click(timeout=timeout_ms)
+        await loc.wait_for(state="attached", timeout=scaled)
+        await loc.click(timeout=scaled)
 
     async def fill_textbox(self, label: str, value: str, timeout_ms: int = 8000) -> None:
+        scaled = self._tm(timeout_ms)
         el = self.page.get_by_role("textbox", name=label).first
-        await el.wait_for(state="visible", timeout=timeout_ms)
-        await el.click(timeout=timeout_ms)
+        await el.wait_for(state="visible", timeout=scaled)
+        await el.click(timeout=scaled)
         try:
-            await el.fill(value, timeout=timeout_ms)
+            await el.fill(value, timeout=scaled)
         except Exception:
             await el.clear()
             await el.type(value, delay=30)
@@ -152,7 +159,7 @@ class FletPage:
                                 desc["text"],
                                 desc["rect"],
                             )
-                        await loc.click(timeout=3000, force=True)
+                        await loc.click(timeout=self._tm(3000), force=True)
                         logger.debug("选项候选[%d]点击成功", idx)
                         return True
                 except Exception as ex:
@@ -190,7 +197,7 @@ class FletPage:
                                 desc["text"],
                                 desc["rect"],
                             )
-                        await target.click(timeout=3000, force=True)
+                        await target.click(timeout=self._tm(3000), force=True)
                         triggered = True
                         logger.debug("触发器候选[%d]点击成功", idx)
                         break
@@ -204,7 +211,7 @@ class FletPage:
                     if await check_option_visible():
                         break
 
-        wait_cycles = max(1, (timeout_ms // 2) // 200)
+        wait_cycles = max(1, (self._tm(timeout_ms) // 2) // 200)
         option_ready = False
         for _ in range(wait_cycles):
             if await check_option_visible():
@@ -223,21 +230,17 @@ class FletPage:
             raise RuntimeError(f"Failed to click option '{option_text}' (key: '{opt_match_key}')")
 
     async def expect_text(self, text: str, timeout_ms: int = 8000) -> None:
-        """期望页面上存在指定文本。
-
-        Flet 0.28.3 在列表/容器中可能将多个子控件的文本合并到父 group 节点的 aria-label 中。
-        本方法采用"文本节点匹配"与"aria-label 模糊匹配"双重策略。
-        """
+        scaled = self._tm(timeout_ms)
         loc = self.page.get_by_text(text, exact=False).first
         try:
-            await loc.wait_for(state="attached", timeout=2000)
+            await loc.wait_for(state="attached", timeout=self._tm(2000))
             return
         except Exception:
             pass
 
         loc_aria = self.page.locator(f'[aria-label*="{text}"]').first
         try:
-            await loc_aria.wait_for(state="attached", timeout=2000)
+            await loc_aria.wait_for(state="attached", timeout=self._tm(2000))
             return
         except Exception:
             pass
@@ -257,7 +260,7 @@ class FletPage:
             self._dump_dom_debug(text)
 
         loc_final = self.page.locator(f'[aria-label*="{text}"]').first
-        await loc_final.wait_for(state="attached", timeout=timeout_ms)
+        await loc_final.wait_for(state="attached", timeout=scaled)
 
     async def has_text(self, text: str) -> bool:
         """检查页面上是否存在指定文本。"""

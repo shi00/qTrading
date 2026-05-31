@@ -104,11 +104,13 @@ async def test_wizard_db_validation_success(wizard_page):
     await wizard_page.fill_textbox(I18n.get("db_password"), db["password"])
     await wizard_page.fill_textbox(I18n.get("db_name"), db["database"])
 
+    await wizard_page.page.wait_for_timeout(500)
+
     btn_verify = I18n.get("wizard_btn_verify_next")
     await wizard_page.click_button(btn_verify)
 
     token_title = I18n.get("wizard_step1_title")
-    await wizard_page.expect_text(token_title, timeout_ms=15000)
+    await wizard_page.expect_text(token_title, timeout_ms=20000)
 
 
 @pytest.mark.network

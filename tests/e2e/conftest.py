@@ -18,13 +18,14 @@ TEST_DATABASE_URL = os.environ.get(
     "E2E_DATABASE_URL",
     _get_test_db_url(),
 )
-BROWSER_CHANNEL = os.environ.get("E2E_BROWSER_CHANNEL", "msedge")
+BROWSER_CHANNEL = os.environ.get("E2E_BROWSER_CHANNEL", "chromium")
 if not BROWSER_CHANNEL:
     BROWSER_CHANNEL = None
 
 ARTIFACT_DIR = Path(os.environ.get("E2E_ARTIFACT_DIR", "e2e-artifacts"))
 
-# 强制将测试运行进程的 I18n 语言设为中文，以匹配 E2E 测试环境的语言
+TIMEOUT_MULTIPLIER = float(os.environ.get("E2E_TIMEOUT_MULTIPLIER", "1.0"))
+
 from core.i18n import I18n
 
 I18n.set_locale("zh")
@@ -66,8 +67,27 @@ def _terminate(proc):
         proc.kill()
 
 
-async def _make_page(url: str, request) -> FletPage:
+class AppServer:
+    def __init__(self, proc, url: str):
+        self.proc = proc
+        self.url = url
+
+    def is_alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def assert_alive(self) -> None:
+        if not self.is_alive():
+            retcode = self.proc.returncode
+            raise RuntimeError(
+                f"Flet app process (PID {self.proc.pid}) has exited with code {retcode}. "
+                f"URL was {self.url}. Check logs/e2e-flet-app.log for details."
+            )
+
+
+async def _make_page(app: AppServer, request) -> FletPage:
     from playwright.async_api import async_playwright
+
+    app.assert_alive()
 
     p = await async_playwright().start()
     browser = await p.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
@@ -76,8 +96,17 @@ async def _make_page(url: str, request) -> FletPage:
     page = await context.new_page()
     page.on("console", lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text))
     page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
-    fp = FletPage(page)
-    await fp.open(url)
+    fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
+    try:
+        await fp.open(app.url)
+    except Exception:
+        if not app.is_alive():
+            logger.error(
+                "[E2E] Flet app process died during page open. PID %d, exit code %s",
+                app.proc.pid,
+                app.proc.returncode,
+            )
+        raise
     fp.bind_context((p, browser, context, page, request))
     return fp
 
@@ -119,7 +148,8 @@ def flet_app(tmp_path_factory):
             "AI_API_KEY": "e2e-dummy-key",
         },
     )
-    yield url
+    app = AppServer(proc, url)
+    yield app
     _terminate(proc)
 
 
@@ -130,19 +160,20 @@ def wizard_app(tmp_path_factory):
         config={"locale": "zh"},
         env_overrides={"DATABASE_URL": TEST_DATABASE_URL},
     )
-    yield url
+    app = AppServer(proc, url)
+    yield app
     _terminate(proc)
 
 
 @pytest.fixture
-async def e2e_page(flet_app, request):
+async def e2e_page(flet_app: AppServer, request):
     fp = await _make_page(flet_app, request)
     yield fp
     await _teardown_page(fp)
 
 
 @pytest.fixture
-async def wizard_page(wizard_app, request):
+async def wizard_page(wizard_app: AppServer, request):
     fp = await _make_page(wizard_app, request)
     yield fp
     await _teardown_page(fp)

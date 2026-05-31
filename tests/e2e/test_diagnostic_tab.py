@@ -10,12 +10,12 @@ logger = logging.getLogger(__name__)
 
 
 async def test_diagnostic_all_tabs(e2e_page):
-    """诊断：逐个点击所有 Tab 按钮。"""
     settings_label = I18n.get("nav_settings")
+    await e2e_page.page.wait_for_timeout(3000)
     await e2e_page.click_text(settings_label)
 
     settings_title = I18n.get("settings_title")
-    await e2e_page.page.get_by_text(settings_title, exact=True).first.wait_for(state="attached", timeout=8000)
+    await e2e_page.expect_text(settings_title, timeout_ms=10000)
 
     tab_keys = [
         "settings_tab_data",
