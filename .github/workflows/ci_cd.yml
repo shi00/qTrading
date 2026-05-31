@@ -270,7 +270,10 @@ jobs:
       - name: Start PostgreSQL Service (Windows)
         shell: pwsh
         run: |
-          $service = Get-Service | Where-Object { $_.Name -like "postgresql*" }
+          $service = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue
+          if (-not $service) {
+            $service = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "postgresql*" }
+          }
           if ($service) {
             Set-Service -Name $service.Name -StartupType Automatic
             Start-Service $service.Name
