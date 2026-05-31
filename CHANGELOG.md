@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/shi00/qTrading/compare/v0.4.1...v0.4.2) (2026-05-31)
+
+
+### Bug Fixes
+
+* **ci:** use importlib.metadata to get playwright version ([348399f](https://github.com/shi00/qTrading/commit/348399f9ec29675b0aeda447c93327a8788d7d62))
+
 ## [0.4.1](https://github.com/shi00/qTrading/compare/v0.4.0...v0.4.1) (2026-05-31)
 
 
