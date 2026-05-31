@@ -17,4 +17,4 @@ NAV_KEYS = [
 async def test_app_boots_and_shows_nav(e2e_page):
     for key in NAV_KEYS:
         label = I18n.get(key)
-        assert await e2e_page.has_text(label), f"导航项缺失: {label} (key={key})"
+        await e2e_page.expect_text(label)

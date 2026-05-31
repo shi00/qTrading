@@ -59,9 +59,14 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             "head_rev": None,
         }
 
-    SchedulerService().start()
-    await NewsSubscriptionService().start()
-    await MarketDataService().start()
+    import os
+
+    if os.environ.get("E2E_TESTING") == "true":
+        logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
+    else:
+        SchedulerService().start()
+        await NewsSubscriptionService().start()
+        await MarketDataService().start()
 
     await _warmup_tushare_capabilities()
 
