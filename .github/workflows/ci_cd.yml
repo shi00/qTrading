@@ -250,7 +250,7 @@ jobs:
       - name: Get Playwright Version
         shell: bash
         run: |
-          PLAYWRIGHT_VERSION=$(python -c "import playwright; print(playwright.__version__)")
+          PLAYWRIGHT_VERSION=$(python -c "from importlib.metadata import version; print(version('playwright'))")
           echo "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" >> $GITHUB_ENV
 
       - name: Cache Playwright Browsers
