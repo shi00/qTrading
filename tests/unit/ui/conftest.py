@@ -106,6 +106,7 @@ def mock_config_handler():
     m.get_sync_max_concurrent_heavy.return_value = 4
     m.get_log_level.return_value = "INFO"
     m.get_theme_name.return_value = "dark"
+    m.get_tushare_point_tier.return_value = "custom"
     return m
 
 
