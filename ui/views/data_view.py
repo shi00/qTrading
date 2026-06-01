@@ -11,10 +11,10 @@ from data.persistence.database_manager import DatabaseManager
 from data.persistence.metadata_manager import MetaDataManager
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+from utils.correlation import ensure_correlation_id
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
-# Initialize logger properly
 logger = logging.getLogger(__name__)
 
 
@@ -645,12 +645,14 @@ class TableViewerTab(ft.Container):
                 )
 
     async def _on_query_click(self, e):  # pragma: no cover
+        ensure_correlation_id()
         self.current_page = 1
         await self._toggle_loading(True)
         await self._refresh_data_rows()
         await self._toggle_loading(False)
 
     async def _on_refresh_click(self, e):  # pragma: no cover
+        ensure_correlation_id()
         await self._toggle_loading(True)
         await self._refresh_data_rows()
         await self._toggle_loading(False)

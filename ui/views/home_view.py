@@ -11,6 +11,7 @@ from ui.components.news_feed import NewsFeed
 from ui.i18n import I18n
 from ui.theme import AppColors
 from ui.viewmodels.home_view_model import HomeViewModel
+from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,7 @@ class HomeView(ft.Container):
                 self.update()
 
     def _refresh_clicked(self, e):  # pragma: no cover — event routing; delegates to vm via run_task
+        ensure_correlation_id()
         UILogger.log_action("HomeView", "Click", "btn_refresh")
         if self.page:
             self.page.run_task(self._load_data)

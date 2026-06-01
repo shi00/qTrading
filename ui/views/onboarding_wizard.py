@@ -32,6 +32,7 @@ from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
+from utils.correlation import ensure_correlation_id
 
 logger = logging.getLogger(__name__)
 
@@ -1048,6 +1049,7 @@ class OnboardingWizard(ft.Container):
         return True
 
     async def _validate_and_persist_current_step(self) -> bool:
+        ensure_correlation_id()
         config = STEP_CONFIGS[self.current_step]
 
         if self.step_validated.get(config.id, False):
@@ -1115,6 +1117,7 @@ class OnboardingWizard(ft.Container):
         return self._data_processor
 
     async def _start_sync(self, quick=False):
+        ensure_correlation_id()
         self.sync_in_progress = True
         self.btn_quick_sync.disabled = True
         self.btn_full_sync.disabled = True
