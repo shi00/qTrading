@@ -1244,6 +1244,17 @@ class ConfigHandler:
     def set_tushare_api_limit(limit):
         return ConfigHandler.set_typed("tushare_api_rate_limit", int(limit))
 
+    @staticmethod
+    def get_tushare_point_tier():
+        return ConfigHandler.get_typed("tushare_point_tier", str, "custom")
+
+    @staticmethod
+    def set_tushare_point_tier(tier):
+        valid_tiers = {"free", "standard", "pro", "flagship", "custom"}
+        if tier not in valid_tiers:
+            return False
+        return ConfigHandler.set_typed("tushare_point_tier", str(tier))
+
     # === Localization ===
     @staticmethod
     def get_locale():

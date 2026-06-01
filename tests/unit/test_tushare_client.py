@@ -25,6 +25,7 @@ def tushare_client_mocks():
         mock_ch.get_tushare_timeout.return_value = 30
         mock_ch.get_request_max_retries.return_value = 3
         mock_ch.get_tushare_api_limit.return_value = 120
+        mock_ch.get_tushare_point_tier.return_value = "custom"
         client = TushareClient(token="test_token")
         yield client, mock_ts, mock_ch
 
@@ -44,6 +45,7 @@ class TestTushareClientInit:
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
             mock_ch.get_tushare_api_limit.return_value = 0
+            mock_ch.get_tushare_point_tier.return_value = "custom"
             client = TushareClient()
             assert client.pro is None
 
@@ -68,6 +70,7 @@ class TestTushareClientHandleApiCall:
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 1
             mock_ch.get_tushare_api_limit.return_value = 0
+            mock_ch.get_tushare_point_tier.return_value = "custom"
             client = TushareClient()
             with pytest.raises(Exception, match="Token not set"):
                 await client._handle_api_call(lambda: None)
@@ -129,6 +132,7 @@ class TestTushareClientGetTradeDates:
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
             mock_ch.get_tushare_api_limit.return_value = 0
+            mock_ch.get_tushare_point_tier.return_value = "custom"
             client = TushareClient()
             with pytest.raises(Exception, match="Tushare Token not set"):
                 client.get_trade_dates("20240101", "20240630")
@@ -238,6 +242,7 @@ class TestTushareClientApiMethods:
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "custom"
         mock_ch.get_tushare_api_limit.return_value = 120
         client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is not None
@@ -245,9 +250,52 @@ class TestTushareClientBuildRateLimiters:
 
     def test_without_limit(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "custom"
         mock_ch.get_tushare_api_limit.return_value = 0
         client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is None
+
+    def test_resolve_rate_limit_uses_tier_preset(self, tushare_client_mocks):
+        client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "pro"
+        mock_ch.get_tushare_api_limit.return_value = 999
+        limit = client._resolve_rate_limit()
+        assert limit == 500
+
+    def test_resolve_rate_limit_custom_falls_back_to_manual(self, tushare_client_mocks):
+        client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_api_limit.return_value = 333
+        limit = client._resolve_rate_limit()
+        assert limit == 333
+
+    def test_build_rate_limiters_honors_tier(self, tushare_client_mocks):
+        client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "flagship"
+        mock_ch.get_tushare_api_limit.return_value = 0
+        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
+        assert client._rate_limiter is not None
+
+    def test_reload_rate_limiters_updates_instance(self, tushare_client_mocks):
+        client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_api_limit.return_value = 120
+        assert client._rate_limiter is not None
+        old_rate = client._rate_limiter.rate
+        mock_ch.get_tushare_api_limit.return_value = 600
+        client.reload_rate_limiters()
+        assert client._rate_limiter is not None
+        assert client._rate_limiter.rate != old_rate
+
+    def test_reload_rate_limiters_with_tier_change(self, tushare_client_mocks):
+        client, mock_ts, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_api_limit.return_value = 120
+        client.reload_rate_limiters()
+        assert client._rate_limiter.rate * 60 == pytest.approx(120, abs=1)
+        mock_ch.get_tushare_point_tier.return_value = "pro"
+        client.reload_rate_limiters()
+        assert client._rate_limiter.rate * 60 == pytest.approx(500, abs=1)
 
 
 class TestTushareClientConstants:
@@ -268,6 +316,7 @@ class TestTushareClientConstants:
         assert "daily" in TushareClient._FAST_API_OVERRIDES
         assert "daily_basic" in TushareClient._FAST_API_OVERRIDES
         assert "trade_cal" in TushareClient._FAST_API_OVERRIDES
+        assert "index_dailybasic" in TushareClient._FAST_API_OVERRIDES
 
 
 class TestTushareClientReset:

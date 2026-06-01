@@ -348,3 +348,22 @@ class TestPromptDefaultsSingleSource:
     def test_ai_prompt_has_analysis_framework(self):
         assert "分析框架" in DEFAULT_AI_PROMPT
         assert "技术面" in DEFAULT_AI_PROMPT
+
+
+class TestTusharePointTier:
+    def test_point_tier_default_is_custom(self):
+        cfg = AppConfig()
+        assert cfg.tushare_point_tier == "custom"
+
+    def test_point_tier_accepts_known_tiers(self):
+        for tier in ["free", "standard", "pro", "flagship", "custom"]:
+            cfg = AppConfig(tushare_point_tier=tier)
+            assert cfg.tushare_point_tier == tier
+
+    def test_point_tier_rejects_unknown(self):
+        with pytest.raises(ValidationError):
+            AppConfig(tushare_point_tier="platinum")
+
+    def test_rate_limit_allows_high_tier_values(self):
+        cfg = AppConfig(tushare_api_rate_limit=8000)
+        assert cfg.tushare_api_rate_limit == 8000

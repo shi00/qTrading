@@ -97,7 +97,21 @@ class TushareClient:
         "trade_cal": 5.0,
         "stock_basic": 5.0,
         "index_daily": 2.5,
+        "index_dailybasic": 2.5,
         "index_weight": 2.5,
+    }
+
+    # 积分档位 → 推荐全局 req/min 预设。来源见 docs/tushare.md 校准表。
+    # 因子表（_SLOW/_FAST_API_OVERRIDES）按 standard=200/min 推导：
+    #   财报核心(income/balancesheet/cashflow/fina_indicator) 0.3 -> 60/min (2000分文档约60-80/min)
+    #   公告/预告(disclosure_date/forecast/fina_audit/fina_mainbz) 0.5 -> 100/min
+    #   行情类(daily/daily_basic/adj_factor/index_*) 2.5 -> 500/min
+    #   元数据(trade_cal/stock_basic) 5.0 -> 1000/min
+    _POINT_TIER_PRESETS: typing.ClassVar[dict[str, int]] = {
+        "free": 50,
+        "standard": 200,
+        "pro": 500,
+        "flagship": 800,
     }
 
     TABLE_TO_API_MAP: dict[str, str] = {
@@ -124,12 +138,35 @@ class TushareClient:
         with cls._lock:
             cls._instance = None
 
+    def _resolve_rate_limit(self) -> int:
+        """
+        Resolve effective rate limit based on point tier preset or manual config.
+
+        Priority:
+        1. If tier is in _POINT_TIER_PRESETS (free/standard/pro/flagship), use preset value.
+        2. Otherwise (custom tier), fall back to manual limit from config.
+
+        Returns:
+            Effective rate limit (requests per minute), or 0 if not configured.
+        """
+        tier = ConfigHandler.get_tushare_point_tier()
+        preset = self._POINT_TIER_PRESETS.get(tier)
+        if preset is not None:
+            return preset
+        return ConfigHandler.get_tushare_api_limit()
+
+    def reload_rate_limiters(self):
+        """Rebuild rate limiters from current config. Call after tier/limit change in settings."""
+        with self._lock:
+            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+        logger.info("[API] Rate limiters reloaded from config")
+
     def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket]]:
         """
         Build rate limiters based on config.
         Supports three tiers: default, slow APIs, and fast APIs.
         """
-        limit_per_min = ConfigHandler.get_tushare_api_limit()
+        limit_per_min = self._resolve_rate_limit()
         if not limit_per_min or limit_per_min <= 0:
             logger.info("[API] Rate Limiter disabled (No limit set)")
             return None, {}

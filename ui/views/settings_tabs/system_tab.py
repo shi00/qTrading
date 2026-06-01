@@ -153,6 +153,7 @@ class SystemTab(ft.Container):
 
         # Rate Limit Control
         val = ConfigHandler.get_tushare_api_limit()  # pragma: no cover
+        current_tier = ConfigHandler.get_tushare_point_tier()  # pragma: no cover
         self.rate_limit_input = ft.TextField(  # pragma: no cover
             label=I18n.get("settings_rate_limit"),  # pragma: no cover
             value=str(val) if val and val > 0 else "",  # pragma: no cover
@@ -163,6 +164,25 @@ class SystemTab(ft.Container):
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
             suffix_text=I18n.get("common_times_min"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
+            disabled=current_tier != "custom",  # pragma: no cover
+        )  # pragma: no cover
+
+        # Point Tier Dropdown
+        self.point_tier_dropdown = ft.Dropdown(  # pragma: no cover
+            label=I18n.get("sys_label_point_tier"),  # pragma: no cover
+            value=current_tier,  # pragma: no cover
+            width=AppStyles.CONTROL_WIDTH_SM,  # pragma: no cover
+            text_size=14,  # pragma: no cover
+            border_radius=8,  # pragma: no cover
+            content_padding=10,  # pragma: no cover
+            options=[  # pragma: no cover
+                ft.dropdown.Option("free", I18n.get("sys_tier_free")),  # pragma: no cover
+                ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),  # pragma: no cover
+                ft.dropdown.Option("pro", I18n.get("sys_tier_pro")),  # pragma: no cover
+                ft.dropdown.Option("flagship", I18n.get("sys_tier_flagship")),  # pragma: no cover
+                ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),  # pragma: no cover
+            ],  # pragma: no cover
+            on_change=self.save_point_tier,  # pragma: no cover
         )  # pragma: no cover
 
         # No-Proxy Domains
@@ -290,6 +310,7 @@ class SystemTab(ft.Container):
             subtitle=I18n.get("sys_tushare_limit_desc"),  # pragma: no cover
             control=ft.Row(  # pragma: no cover
                 [  # pragma: no cover
+                    self.point_tier_dropdown,  # pragma: no cover
                     self.rate_limit_input,  # pragma: no cover
                     ft.IconButton(  # pragma: no cover
                         icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
@@ -401,6 +422,15 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("INFO", I18n.get("sys_opt_info")),
                 ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
                 ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
+            ]
+
+            self.point_tier_dropdown.label = I18n.get("sys_label_point_tier")
+            self.point_tier_dropdown.options = [
+                ft.dropdown.Option("free", I18n.get("sys_tier_free")),
+                ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),
+                ft.dropdown.Option("pro", I18n.get("sys_tier_pro")),
+                ft.dropdown.Option("flagship", I18n.get("sys_tier_flagship")),
+                ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),
             ]
 
             self.concurrency_input.label = I18n.get("settings_concurrency")
@@ -549,6 +579,7 @@ class SystemTab(ft.Container):
             self.db_timeout_input,  # pragma: no cover
             self.io_workers_input,  # pragma: no cover
             self.cpu_workers_input,  # pragma: no cover
+            self.point_tier_dropdown,  # pragma: no cover
             self.rate_limit_input,  # pragma: no cover
             self.no_proxy_input,  # pragma: no cover
         ]  # pragma: no cover
@@ -610,12 +641,29 @@ class SystemTab(ft.Container):
                 exc_info=True,
             )
 
+    def save_point_tier(self, e):
+        """Save Tushare point tier setting."""
+        tier = self.point_tier_dropdown.value
+        if not tier:
+            return
+        ConfigHandler.set_tushare_point_tier(tier)
+        self.rate_limit_input.disabled = tier != "custom"
+        self.rate_limit_input.update()
+        self._reload_rate_limiters_safe()
+        self.show_snack(I18n.get("sys_snack_tier_set").format(tier=tier))
+        logger.info(f"[SystemTab] Tushare point tier set to {tier}")
+
     def save_rate_limit(self, e):
         """Save API rate limit setting."""
+        tier = ConfigHandler.get_tushare_point_tier()
+        if tier != "custom":
+            self.show_snack(I18n.get("sys_snack_tier_override_hint"))
+            return
         try:
             limit_str = self.rate_limit_input.value.strip()  # type: ignore[untyped]
             if not limit_str:
                 ConfigHandler.set_tushare_api_limit(0)
+                self._reload_rate_limiters_safe()
                 self.show_snack(I18n.get("sys_snack_limit_off"))
                 logger.info("Tushare API rate limit disabled (Unlimited)")
                 return
@@ -623,6 +671,7 @@ class SystemTab(ft.Container):
             limit = int(limit_str)
             if limit <= 0:
                 ConfigHandler.set_tushare_api_limit(0)
+                self._reload_rate_limiters_safe()
                 self.show_snack(I18n.get("sys_snack_limit_off"))
                 return
 
@@ -631,10 +680,19 @@ class SystemTab(ft.Container):
                 return
 
             ConfigHandler.set_tushare_api_limit(limit)
+            self._reload_rate_limiters_safe()
             self.show_snack(I18n.get("sys_snack_limit_set").format(limit=limit))
             logger.info(f"Tushare API rate limit updated to {limit}")
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+
+    def _reload_rate_limiters_safe(self):
+        try:
+            from data.external.tushare_client import TushareClient
+
+            TushareClient().reload_rate_limiters()
+        except Exception as exc:
+            logger.warning(f"[SystemTab] Rate limiter reload skipped: {exc}")
 
     def save_no_proxy_domains(self, e):
         """Save no-proxy domain list."""

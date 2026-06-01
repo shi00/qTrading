@@ -152,7 +152,8 @@ class AppConfig(BaseModel):
 
     request_max_retries: int = Field(default=3, ge=0, le=10)
     tushare_timeout: int = Field(default=30, ge=5, le=300)
-    tushare_api_rate_limit: int = Field(default=200, ge=1, le=1000)
+    tushare_api_rate_limit: int = Field(default=200, ge=1, le=10000)
+    tushare_point_tier: str = Field(default="custom", pattern="^(free|standard|pro|flagship|custom)$")
 
     theme_name: str = Field(default="dark", pattern="^(light|dark)$")
     locale: str = Field(default="zh", pattern="^(zh|zh_CN|en|en_US)$")

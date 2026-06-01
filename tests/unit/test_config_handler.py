@@ -1370,3 +1370,41 @@ class TestGetMaxConcurrentTasks:
     def test_configured_value(self, mock_get):
         result = cfg_mod.ConfigHandler.get_max_concurrent_tasks()
         assert result == 10
+
+
+class TestTusharePointTier:
+    """测试 get_tushare_point_tier / set_tushare_point_tier"""
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"tushare_point_tier": "pro"})
+    def test_get_tushare_point_tier_custom(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_tushare_point_tier()
+        assert result == "pro"
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_get_tushare_point_tier_default(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_tushare_point_tier()
+        assert result == "custom"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_tushare_point_tier(self, mock_set):
+        result = cfg_mod.ConfigHandler.set_tushare_point_tier("pro")
+        assert result is True
+        mock_set.assert_called_once_with("tushare_point_tier", "pro")
+
+    def test_point_tier_roundtrip(self):
+        with patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True):
+            cfg_mod.ConfigHandler._config_cache = {"tushare_point_tier": "pro"}
+            result = cfg_mod.ConfigHandler.get_tushare_point_tier()
+            assert result == "pro"
+            cfg_mod.ConfigHandler._config_cache = None
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_point_tier_default_when_unset(self, mock_load):
+        result = cfg_mod.ConfigHandler.get_tushare_point_tier()
+        assert result == "custom"
+
+    def test_set_tushare_point_tier_rejects_invalid(self):
+        with patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True) as mock_set:
+            result = cfg_mod.ConfigHandler.set_tushare_point_tier("platinum")
+            assert result is False
+            mock_set.assert_not_called()
