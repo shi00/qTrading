@@ -68,6 +68,7 @@ class AppTask:
     _asyncio_task: asyncio.Task | None = None
     _cancel_event: asyncio.Event | None = None
     unique_key: str | None = None  # For deduplication
+    correlation_id: str | None = None  # Inherited from caller context for full-chain tracing
 
 
 from utils.singleton_registry import register_singleton
@@ -240,6 +241,10 @@ class TaskManager:
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
         task.unique_key = unique_key
         task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
+
+        from utils.correlation import get_correlation_id as _get_cid
+
+        task.correlation_id = _get_cid()
 
         # Register placeholder immediately to close call_soon_threadsafe delay window
         self._tasks[task.id] = task
@@ -417,7 +422,8 @@ class TaskManager:
         # S5-3 fix: Set correlation_id for cross-module log tracing
         from utils.correlation import set_correlation_id, clear_correlation_id
 
-        set_correlation_id(task_id[:8])
+        cid = task.correlation_id or task.id[:8]
+        set_correlation_id(cid)
 
         # Ensure event exists on this loop
         if task._cancel_event is None:

@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 async def main(page: ft.Page):
     setup_logging()
 
+    from utils.correlation import ensure_correlation_id
+
+    ensure_correlation_id()
+
     try:
         loop = asyncio.get_running_loop()
         install_asyncio_handler_for_loop(loop)

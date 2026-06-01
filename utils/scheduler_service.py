@@ -334,6 +334,10 @@ class SchedulerService:
 
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         # Global enable check
         if not ConfigHandler.is_auto_update_enabled():
             logger.info("[Scheduler] Update skipped (Auto-update disabled)")
@@ -400,6 +404,10 @@ class SchedulerService:
         )
 
     async def _run_doubao_tagger(self):
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         if not ConfigHandler.is_doubao_schedule_enabled():
             return
 
@@ -434,6 +442,10 @@ class SchedulerService:
 
     async def _run_nightly_prediction(self):
         """Execute AI Strategy (20:30)"""
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         if not ConfigHandler.is_auto_update_enabled():
             return
 

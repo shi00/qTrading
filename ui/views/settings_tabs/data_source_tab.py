@@ -485,6 +485,10 @@ class DataSourceTab(ft.Container):
             )
 
     async def refresh_health_status(self, e):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         if e is not None:
             UILogger.log_action("DataSourceTab", "Click", "btn_check_health")
         if not self.page:
@@ -726,6 +730,10 @@ class DataSourceTab(ft.Container):
             self._safe_update()
 
     async def full_daily_sync(self, e):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         UILogger.log_action("DataSourceTab", "Click", "btn_full_sync")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
@@ -740,6 +748,10 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_full_daily_sync(self):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         self._set_sync_busy(True, self.action_full_sync)
 
         async def _daily_logic(task_id: str, **kwargs):
@@ -853,6 +865,10 @@ class DataSourceTab(ft.Container):
             )
 
     async def confirm_doubao_rebuild(self, e):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         UILogger.log_action("DataSourceTab", "Click", "btn_doubao_rebuild")
         if self.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
@@ -866,6 +882,10 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_doubao_rebuild(self):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         self._set_sync_busy(True, self.action_doubao_rebuild)
 
         async def _doubao_logic(task_id: str, **kwargs):
@@ -915,6 +935,10 @@ class DataSourceTab(ft.Container):
             self._active_btn_map["doubao_sync"] = self.action_doubao_rebuild
 
     async def confirm_clear_cache(self, e):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
         if self.is_syncing:
             logger.warning("[DataSourceTab] User action intercepted: is_syncing=True")
@@ -929,6 +953,10 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_clear_cache(self):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         if self.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
@@ -978,6 +1006,10 @@ class DataSourceTab(ft.Container):
             self._active_btn_map["cache_clear"] = self.action_clear_cache
 
     async def init_historical_data(self, e):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         if self.is_syncing and self._init_sync_cancellable:
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
             self.page.run_task(self._processor.request_cancel)  # type: ignore[untyped]
@@ -1003,6 +1035,10 @@ class DataSourceTab(ft.Container):
         )
 
     def _do_init_historical_data(self):  # pragma: no cover
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         self._set_sync_busy(True, self.sync_button)
         self._init_sync_cancellable = True
 

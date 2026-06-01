@@ -125,6 +125,10 @@ class BacktestViewModel:
         """
         运行回测（通过 TaskManager 异步执行）。
         """
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         if self._is_running:
             if self.on_status:
                 self.on_status(I18n.get("backtest_already_running"), "orange")

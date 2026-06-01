@@ -145,6 +145,10 @@ class ScreenerViewModel:
         params: dict = None,  # type: ignore[untyped]
     ):
         """Execute strategy screening via the global TaskManager."""
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
         strategy = self.strategy_mgr.get_strategy(strategy_key)
         if not strategy:
             logger.error(f"[ScreenerVM] Strategy not found: {strategy_key}")

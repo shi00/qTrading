@@ -29,6 +29,18 @@ def get_correlation_id() -> str | None:
     return correlation_id.get()
 
 
+def ensure_correlation_id() -> str:
+    """Return existing correlation_id or generate and set a new one.
+
+    Useful at entry points (UI handlers, scheduler jobs, bootstrap)
+    where you want a correlation_id but don't care if one already exists.
+    """
+    cid = correlation_id.get()
+    if cid is not None:
+        return cid
+    return set_correlation_id()
+
+
 def clear_correlation_id() -> None:
     """Clear the correlation_id for the current context."""
     correlation_id.set(None)

@@ -20,6 +20,10 @@ class InitResult(TypedDict):
 
 
 async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
+    from utils.correlation import ensure_correlation_id
+
+    ensure_correlation_id()
+
     try:
         await cache_manager.init_db()
     except DatabaseMigrationNeeded as e:

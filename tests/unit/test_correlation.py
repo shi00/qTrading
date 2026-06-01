@@ -88,6 +88,30 @@ class TestCorrelationId:
 
         clear_correlation_id()
 
+    def test_ensure_correlation_id_generates_when_none(self):
+        """ensure_correlation_id should generate a new ID when none exists"""
+        from utils.correlation import ensure_correlation_id, get_correlation_id, clear_correlation_id
+
+        clear_correlation_id()
+        cid = ensure_correlation_id()
+        assert cid is not None
+        assert len(cid) == 8
+        assert get_correlation_id() == cid
+
+        clear_correlation_id()
+
+    def test_ensure_correlation_id_returns_existing(self):
+        """ensure_correlation_id should return existing ID when set"""
+        from utils.correlation import ensure_correlation_id, set_correlation_id, clear_correlation_id
+
+        clear_correlation_id()
+        set_correlation_id("existing")
+
+        cid = ensure_correlation_id()
+        assert cid == "existing"
+
+        clear_correlation_id()
+
 
 class TestLoggerCorrelationIntegration:
     """Verify logger.py integrates CorrelationFilter into all handlers."""
