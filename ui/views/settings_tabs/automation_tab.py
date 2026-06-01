@@ -37,6 +37,7 @@ class AutomationTab(ft.Container):
         auto_update_time = ConfigHandler.get_auto_update_time()
 
         self.schedule_enabled = ft.Switch(
+            label=I18n.get("settings_auto_update"),
             value=auto_update_enabled,
             on_change=self.on_schedule_toggle,
         )
@@ -59,6 +60,7 @@ class AutomationTab(ft.Container):
         doubao_time = ConfigHandler.get_doubao_schedule_time()
 
         self.doubao_enabled = ft.Switch(
+            label=I18n.get("settings_doubao_update", "自动重建AI概念"),
             value=doubao_enabled,
             on_change=self.on_doubao_toggle,
         )

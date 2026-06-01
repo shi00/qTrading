@@ -204,6 +204,7 @@ class ScreenerView(ft.Container):
 
         # Page size dropdown
         self.page_size_dropdown = ft.Dropdown(  # pragma: no cover
+            label=I18n.get("screener_page_size"),  # pragma: no cover
             options=[  # pragma: no cover
                 ft.dropdown.Option(  # pragma: no cover
                     "10",  # pragma: no cover

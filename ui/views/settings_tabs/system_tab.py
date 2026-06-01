@@ -59,6 +59,7 @@ class SystemTab(ft.Container):
 
         # Concurrency  # pragma: no cover
         self.concurrency_input = ft.TextField(  # pragma: no cover
+            label=I18n.get("settings_concurrency"),  # pragma: no cover
             value=str(sync_concurrency),  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_SM,  # pragma: no cover
             text_size=14,  # pragma: no cover
@@ -71,6 +72,7 @@ class SystemTab(ft.Container):
 
         # Log Level  # pragma: no cover
         self.log_level_dropdown = ft.Dropdown(  # pragma: no cover
+            label=I18n.get("settings_log_level"),  # pragma: no cover
             value=ConfigHandler.get_log_level(),  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
             text_size=14,  # pragma: no cover
@@ -152,6 +154,7 @@ class SystemTab(ft.Container):
         # Rate Limit Control
         val = ConfigHandler.get_tushare_api_limit()  # pragma: no cover
         self.rate_limit_input = ft.TextField(  # pragma: no cover
+            label=I18n.get("settings_rate_limit"),  # pragma: no cover
             value=str(val) if val and val > 0 else "",  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_SM,  # pragma: no cover
             text_size=14,  # pragma: no cover
@@ -400,6 +403,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
             ]
 
+            self.concurrency_input.label = I18n.get("settings_concurrency")
             self.concurrency_input.suffix_text = I18n.get("sys_suffix_threads")
             self.pool_size_input.label = I18n.get("settings_db_pool")
             self.pool_size_input.suffix_text = I18n.get("common_items")
@@ -411,6 +415,7 @@ class SystemTab(ft.Container):
             self.io_workers_input.suffix_text = I18n.get("sys_suffix_threads")
             self.cpu_workers_input.label = I18n.get("sys_pool_cpu")
             self.cpu_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.rate_limit_input.label = I18n.get("settings_rate_limit")
             self.rate_limit_input.suffix_text = I18n.get("common_times_min")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
 
