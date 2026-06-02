@@ -133,7 +133,7 @@ class BacktestStrategyAdapter:
         ts_codes = df["ts_code"].to_list()
 
         score_col = None
-        for score_name in ["score", "signal_score", "rank_score"]:
+        for score_name in ["score", "signal_score", "rank_score", "ai_score"]:
             if score_name in df.columns:
                 score_col = df[score_name].to_list()
                 break

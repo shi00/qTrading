@@ -924,7 +924,7 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             ts_code=ts_code,
-            fields="ts_code,ann_date,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill",
+            fields="ts_code,ann_date,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int,goodwill,money_cap,accounts_receiv",
         )
 
     async def get_top_list(self, trade_date: str | None):  # type: ignore[untyped]

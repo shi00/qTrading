@@ -699,25 +699,38 @@ class AIStrategyMixin:
                 strategy_ctx = strategy_ctx + "\n\n" + "\n\n".join(custom_context_blocks)
 
             # 6. Capital Flow (filter pre-fetched batch data by ts_code)
+            capital_labels: list[str] = []
             capital_flow_text = self._build_capital_flow_text(
                 ts_code,
                 prefetched.capital or {},
+                labels_out=capital_labels,
             )
 
             # 7. Financials (extract from stock_info which already has screening data)
             base_financials = self._build_financials_text(row)
 
             # 7a. Multi-Period Financial Trends (Phase 1.2)
+            financial_labels: list[str] = ["ai_label_valuation"]
+            multi_period_labels: list[str] = []
             multi_period_text = await self._build_multi_period_financials(
-                ts_code, dp.cache, prefetched.auxiliary_data, as_of_date=prefetched.trade_date
+                ts_code,
+                dp.cache,
+                prefetched.auxiliary_data,
+                as_of_date=prefetched.trade_date,
+                labels_out=multi_period_labels,
             )
 
             # 7b. Auxiliary Data (Phase 1.2)
+            auxiliary_labels: list[str] = []
             auxiliary_text = await self._build_auxiliary_data_text(
-                ts_code, dp.cache, prefetched.auxiliary_data, as_of_date=prefetched.trade_date
+                ts_code,
+                dp.cache,
+                prefetched.auxiliary_data,
+                as_of_date=prefetched.trade_date,
+                labels_out=auxiliary_labels,
             )
 
-            # 7c. Macro Context — 已在 run_ai_analysis 预取阶段算好（D7），此处只读
+            # 7c. Macro Context
 
             # Combine all financial context
             financials_parts = [base_financials]
@@ -726,12 +739,15 @@ class AIStrategyMixin:
                 financials_parts.append(
                     f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_multi_period_trend'))}\n{multi_period_text}"
                 )
+                financial_labels.extend(multi_period_labels)
             if auxiliary_text and auxiliary_text != I18n.get("ai_no_auxiliary_data"):
                 financials_parts.append(
                     f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_auxiliary_data'))}\n{auxiliary_text}"
                 )
+                financial_labels.extend(auxiliary_labels)
             if prefetched.macro_context:
                 financials_parts.append(f"\n{prefetched.macro_context}")
+                financial_labels.append("ai_label_macro")
 
             financials_text = "\n".join(financials_parts)
 
@@ -763,6 +779,8 @@ class AIStrategyMixin:
                 include_learning_context=self.should_include_learning_context(),
                 ui_prompt_override=ui_prompt_override,
                 is_backtest=prefetched.is_backtest,
+                financial_labels=financial_labels,
+                capital_labels=capital_labels,
             )
             return ai_result
 
@@ -1068,9 +1086,14 @@ class AIStrategyMixin:
             return I18n.get("ai_history_extract_error")
 
     @staticmethod
-    def _build_capital_flow_text(ts_code: str, prefetched: dict) -> str:
+    def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[str] | None = None) -> str:
         """
         Build a human-readable capital flow summary from pre-fetched batch DataFrames.
+
+        Args:
+            ts_code: 股票代码
+            prefetched: 预取的资金数据
+            labels_out: 输出参数，收集成功注入的标签 key
         """
         sf = safe_float
         parts = []
@@ -1084,13 +1107,11 @@ class AIStrategyMixin:
                 return f"{amount_yuan / 1e4:.2f}{I18n.get('ai_unit_ten_thousand')}"
             return f"{amount_yuan:.0f}{I18n.get('ai_unit_yuan')}"
 
-        # 1. Moneyflow (主力资金)
         mf_df = prefetched.get("moneyflow_df")
         if mf_df is not None and not mf_df.empty:
             stock_mf = mf_df[mf_df["ts_code"] == ts_code]
             if not stock_mf.empty:
                 row = stock_mf.iloc[0]
-                # Large + Extra-large = Main Force
                 buy_lg = sf(row.get("buy_lg_amount"))
                 sell_lg = sf(row.get("sell_lg_amount"))
                 buy_elg = sf(row.get("buy_elg_amount"))
@@ -1101,12 +1122,13 @@ class AIStrategyMixin:
                     f"{I18n.get('ai_main_net_inflow')}: {format_amount(net_main, 'wan_yuan')} ({I18n.get('ai_large_extra_large')})"
                 )
                 parts.append(f"{I18n.get('ai_total_net_inflow')}: {format_amount(net_total, 'wan_yuan')}")
+                if labels_out is not None:
+                    labels_out.append("ai_label_main_flow")
             else:
                 parts.append(I18n.get("ai_stock_mf_no_record"))
         else:
             parts.append(I18n.get("ai_stock_mf_na"))
 
-        # 2. Top List (龙虎榜)
         tl_df = prefetched.get("top_list_df")
         if tl_df is not None and not tl_df.empty:
             stock_tl = tl_df[tl_df["ts_code"] == ts_code]
@@ -1119,12 +1141,13 @@ class AIStrategyMixin:
                 parts.append(
                     f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"  # type: ignore[arg-type]
                 )
+                if labels_out is not None:
+                    labels_out.append("ai_label_top_list")
             else:
                 parts.append(I18n.get("ai_top_list_no"))
         else:
             parts.append(I18n.get("ai_top_list_na"))
 
-        # 3. Northbound (北向资金)
         nb_df = prefetched.get("northbound_df")
         if nb_df is not None and not nb_df.empty:
             stock_nb = nb_df[nb_df["ts_code"] == ts_code]
@@ -1135,6 +1158,8 @@ class AIStrategyMixin:
                 parts.append(
                     f"{I18n.get('ai_north_holding')}: {vol:.0f}{I18n.get('ai_shares')}, {I18n.get('ai_circulating_ratio')}: {ratio:.2f}%"
                 )
+                if labels_out is not None:
+                    labels_out.append("ai_label_northbound")
             else:
                 parts.append(I18n.get("ai_north_no_record"))
         else:
@@ -1143,7 +1168,12 @@ class AIStrategyMixin:
         return "\n".join(parts)
 
     async def _build_multi_period_financials(
-        self, ts_code: str, cache: typing.Any, prefetched: dict | None = None, as_of_date=None
+        self,
+        ts_code: str,
+        cache: typing.Any,
+        prefetched: dict | None = None,
+        as_of_date=None,
+        labels_out: list[str] | None = None,
     ) -> str:
         """
         构建多期财务趋势数据。
@@ -1155,6 +1185,7 @@ class AIStrategyMixin:
             cache: 数据缓存实例
             prefetched: 预取的辅助数据
             as_of_date: 截止日期（含），None 表示不限制，防止前视偏差
+            labels_out: 输出参数，收集成功注入的标签 key
 
         Returns:
             财务趋势文本
@@ -1184,24 +1215,32 @@ class AIStrategyMixin:
                             values=roe_str,
                         )
                     )
+                    if labels_out is not None:
+                        labels_out.append("ai_label_roe_trend")
 
             if "grossprofit_margin" in df.columns:
                 margin_values = df["grossprofit_margin"].dropna().tolist()
                 if margin_values:
                     margin_str = ", ".join([f"{v:.2f}" for v in margin_values[:4]])
                     parts.append(f"{I18n.get('ai_gross_margin_trend')}: {margin_str}")
+                    if labels_out is not None:
+                        labels_out.append("ai_label_gross_margin_trend")
 
             if "or_yoy" in df.columns:
                 or_yoy_values = df["or_yoy"].dropna().tolist()
                 if or_yoy_values:
                     or_yoy_str = ", ".join([f"{v:.2f}" for v in or_yoy_values[:4]])
                     parts.append(f"{I18n.get('ai_revenue_growth_trend')}: {or_yoy_str}")
+                    if labels_out is not None:
+                        labels_out.append("ai_label_revenue_growth_trend")
 
             if "netprofit_yoy" in df.columns:
                 profit_yoy_values = df["netprofit_yoy"].dropna().tolist()
                 if profit_yoy_values:
                     profit_yoy_str = ", ".join([f"{v:.2f}" for v in profit_yoy_values[:4]])
                     parts.append(f"{I18n.get('ai_profit_growth_trend')}: {profit_yoy_str}")
+                    if labels_out is not None:
+                        labels_out.append("ai_label_profit_growth_trend")
 
             if "n_cashflow_act" in df.columns and "n_income_attr_p" in df.columns:
                 cf_values = df["n_cashflow_act"].dropna().tolist()
@@ -1212,11 +1251,42 @@ class AIStrategyMixin:
                     if latest_profit > 0:
                         cf_ratio = latest_cf / latest_profit
                         parts.append(f"{I18n.get('ai_cf_profit_ratio')}: {cf_ratio:.2f}")
+                        if labels_out is not None:
+                            labels_out.append("ai_label_cf_profit_ratio")
+
+            if "total_assets" in df.columns and "goodwill" in df.columns:
+                ta_values = df["total_assets"].dropna().tolist()
+                gw_values = df["goodwill"].dropna().tolist()
+                if ta_values and gw_values and ta_values[0] and ta_values[0] > 0:
+                    gw_ratio = (gw_values[0] / ta_values[0]) * 100
+                    parts.append(f"{I18n.get('ai_goodwill_ratio')}: {gw_ratio:.2f}%")
+                    if labels_out is not None:
+                        labels_out.append("ai_label_goodwill_ratio")
+
+            if "money_cap" in df.columns:
+                mc_values = df["money_cap"].dropna().tolist()
+                if mc_values:
+                    parts.append(
+                        f"{I18n.get('ai_monetary_capital')}: {mc_values[0] / 1e8:.2f}{I18n.get('ai_unit_billion')}"
+                    )
+                    if labels_out is not None:
+                        labels_out.append("ai_label_monetary_capital")
+
+            if "accounts_receiv" in df.columns:
+                ar_values = df["accounts_receiv"].dropna().tolist()
+                if ar_values:
+                    parts.append(
+                        f"{I18n.get('ai_accounts_receiv')}: {ar_values[0] / 1e8:.2f}{I18n.get('ai_unit_billion')}"
+                    )
+                    if labels_out is not None:
+                        labels_out.append("ai_label_accounts_receiv")
 
             return "\n".join(parts) if parts else I18n.get("ai_financial_insufficient")
 
         except Exception as e:
             logger.warning("[AIMixin] Failed to build multi-period financials for %s: %s", ts_code, e)
+            if labels_out is not None:
+                labels_out.clear()
             return I18n.get("ai_financial_fetch_failed")
 
     async def _build_auxiliary_data_text(
@@ -1225,6 +1295,7 @@ class AIStrategyMixin:
         cache: typing.Any,
         prefetched: dict | None = None,
         as_of_date=None,
+        labels_out: list[str] | None = None,
     ) -> str:
         """
         构建辅助数据文本。
@@ -1236,6 +1307,7 @@ class AIStrategyMixin:
             cache: 数据缓存实例
             prefetched: 预取的辅助数据（避免 N+1 查询）
             as_of_date: 截止日期（含），None 表示不限制，防止前视偏差
+            labels_out: 输出参数，收集成功注入的标签 key
 
         Returns:
             辅助数据文本
@@ -1245,7 +1317,6 @@ class AIStrategyMixin:
         has_data = False
 
         try:
-            # 审计意见
             if prefetched and ts_code in prefetched and "audit" in prefetched[ts_code]:
                 audit_df = prefetched[ts_code]["audit"]
             else:
@@ -1256,8 +1327,9 @@ class AIStrategyMixin:
                 audit_result = latest_audit.get("audit_result", I18n.get("ai_unknown"))
                 lines.append(f"- {I18n.get('ai_audit_opinion')}: {audit_result}")
                 has_data = True
+                if labels_out is not None:
+                    labels_out.append("ai_label_audit")
 
-            # 主营构成
             if prefetched and ts_code in prefetched and "mainbz" in prefetched[ts_code]:
                 top_business = prefetched[ts_code]["mainbz"]
             else:
@@ -1273,8 +1345,9 @@ class AIStrategyMixin:
                         biz_items.append(f"{bz_name}({ratio:.1f}%)")
                     lines.append(f"- {I18n.get('ai_main_business')}: {', '.join(biz_items)}")
                     has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_main_business")
 
-            # 分红记录
             if prefetched and ts_code in prefetched and "dividend" in prefetched[ts_code]:
                 dividend_df = prefetched[ts_code]["dividend"]
             else:
@@ -1289,8 +1362,9 @@ class AIStrategyMixin:
                     div_items.append(f"{end_date}{I18n.get('ai_year_suffix')}{div_proc}")
                 lines.append(f"- {I18n.get('ai_recent_dividend')}: {', '.join(div_items)}")
                 has_data = True
+                if labels_out is not None:
+                    labels_out.append("ai_label_dividend")
 
-            # 质押比例
             if prefetched and ts_code in prefetched and "pledge" in prefetched[ts_code]:
                 pledge_df = prefetched[ts_code]["pledge"]
             else:
@@ -1303,8 +1377,9 @@ class AIStrategyMixin:
                     warning = f" ⚠️ {I18n.get('ai_pledge_high_warning')}" if pledge_ratio > 30 else ""
                     lines.append(f"- {I18n.get('ai_pledge_ratio')}: {pledge_ratio:.1f}%{warning}")
                     has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_pledge")
 
-            # 第一大股东
             if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]
             else:
@@ -1322,8 +1397,9 @@ class AIStrategyMixin:
                         f"- {I18n.get('ai_top_holder')}: {top_holder} ({I18n.get('ai_holder_share')}{top_ratio:.2f}%)"
                     )
                     has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_top_holder")
 
-            # 股东人数
             if prefetched and ts_code in prefetched and "holdernumber" in prefetched[ts_code]:
                 holder_num = prefetched[ts_code]["holdernumber"]
             else:
@@ -1350,9 +1426,14 @@ class AIStrategyMixin:
                     else:
                         lines.append(f"- {I18n.get('ai_holder_count')}: {int(curr_num):,}{I18n.get('ai_households')}")
                     has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_holder_count")
 
         except Exception as e:
             logger.warning("[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, e)
+            if labels_out is not None:
+                labels_out.clear()
+            return I18n.get("ai_no_auxiliary_data")
 
         if has_data:
             return "\n".join(lines) + "\n"

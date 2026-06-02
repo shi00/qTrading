@@ -59,15 +59,12 @@ def test_oversold_prompt_matches_current_injected_data():
     """超跌反弹提示词应与当前代码真实注入的数据粒度对齐。"""
     prompt = STRATEGY_PROMPTS["oversold"]
 
-    # 正向断言：检查“摘要化注入”语义，而非绑定完整文案句子
-    assert "价格行为摘要" in prompt
-    assert ("近60个交易日" in prompt) or ("近60日" in prompt)
-    assert "北向持股" in prompt
-    assert "主力净流入" in prompt
-    assert "全市场净流入" in prompt
+    assert "【数据边界】" in prompt
+    assert "available_data" in prompt
+    assert "超跌" in prompt
 
-    assert "大宗交易" not in prompt
-    assert "散户净额" not in prompt
+    assert "【可用数据】" not in prompt
+    assert "【你将收到的分析材料】" not in prompt
     assert "MACD信号（金叉/死叉/背离）" not in prompt
     assert "北向资金动向" not in prompt
     assert "60日K线数据（开/高/低/收/成交量）" not in prompt

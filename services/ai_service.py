@@ -23,6 +23,64 @@ LITELLM_AVAILABLE = True
 VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
 STRATEGY_CONTEXT_MAX_LEN = 1600
 
+_AVAILABLE_DATA_LABEL_KEYS: set[str] = {
+    "ai_label_quote_snapshot",
+    "ai_label_tech",
+    "ai_label_global",
+    "ai_label_news",
+    "ai_label_kline",
+    "ai_label_learning",
+    "ai_label_strategy_ctx",
+    "ai_label_valuation",
+    "ai_label_macro",
+    "ai_label_roe_trend",
+    "ai_label_gross_margin_trend",
+    "ai_label_revenue_growth_trend",
+    "ai_label_profit_growth_trend",
+    "ai_label_cf_profit_ratio",
+    "ai_label_goodwill_ratio",
+    "ai_label_monetary_capital",
+    "ai_label_accounts_receiv",
+    "ai_label_audit",
+    "ai_label_main_business",
+    "ai_label_dividend",
+    "ai_label_pledge",
+    "ai_label_top_holder",
+    "ai_label_holder_count",
+    "ai_label_main_flow",
+    "ai_label_top_list",
+    "ai_label_northbound",
+}
+
+AVAILABLE_DATA_LABELS: set[str] = _AVAILABLE_DATA_LABEL_KEYS
+
+
+def build_available_data_block(labels: list[str]) -> str:
+    """Render <available_data> block from label key strings.
+
+    Design decision (deviates from issue #41 spec v5 §2.2):
+    The spec defines AVAILABLE_DATA_LABELS as translated strings
+    ``{I18n.get(k) for k in _AVAILABLE_DATA_LABEL_KEYS}``, but the
+    actual pipeline uses **key strings** throughout (ai_mixin →
+    ai_service → this function) and only translates at render time.
+    This is intentionally better because:
+    1. Keys are locale-independent — tests compare keys vs keys.
+    2. Translation happens once at render, avoiding stale cached
+       translations if locale ever changes at runtime.
+    Do NOT change AVAILABLE_DATA_LABELS to translated strings unless
+    the entire pipeline is updated accordingly.
+    """
+    if not labels:
+        return ""
+    from core.i18n import I18n
+
+    header = I18n.get("ai_available_data_header")
+    items = []
+    for label_key in labels:
+        display_text = I18n.get(label_key)
+        items.append(f"- {display_text}")
+    return f"<available_data>\n{header}\n" + "\n".join(items) + "\n</available_data>"
+
 
 class AIServiceUnavailableError(Exception):
     """P1-12: 所有 LLM 供应商都不可用时抛出"""
@@ -788,6 +846,8 @@ class AIService:
         include_learning_context: bool = True,
         ui_prompt_override: str | None = None,
         is_backtest: bool = False,
+        financial_labels: list[str] | None = None,
+        capital_labels: list[str] | None = None,
     ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
@@ -911,6 +971,13 @@ class AIService:
         # 1. 基础信息 (Top - 锚定分析实体)
         user_prompt_parts.append(f"<stock_info>\n{stock_xml}\n</stock_info>")
 
+        # 1.5 可用数据清单 (运行时注入，与各块同一入选条件派生)
+        labels: list[str] = ["ai_label_quote_snapshot", "ai_label_tech"]
+        if global_context and include_global_context:
+            labels.append("ai_label_global")
+        if news_text and news_text != "No recent news found.":
+            labels.append("ai_label_news")
+
         # 2. 技术指标 (重要参考)
         user_prompt_parts.append(
             f"<technical_indicators>\n{json.dumps(tech_info, ensure_ascii=False, indent=2, default=str)}\n</technical_indicators>"
@@ -925,22 +992,35 @@ class AIService:
             user_prompt_parts.append(f"<recent_news>\n{news_text}\n</recent_news>")
         if financials_content and "Data not available" not in financials_content:
             user_prompt_parts.append(f"<financials>\n{financials_content}\n</financials>")
+            labels.extend(financial_labels or [])
         if capital_flow_content and "Data not available" not in capital_flow_content:
             user_prompt_parts.append(f"<capital_flow>\n{capital_flow_content}\n</capital_flow>")
+            labels.extend(capital_labels or [])
 
         # 4. 历史价格序列 (Bottom-Mid)
         if history_text:
-            user_prompt_parts.append(f"<recent_price_action>\n{history_text}\n</recent_price_action>")
+            user_prompt_parts.append(f"<recent_price_action>\n{history_text}</recent_price_action>")
+            labels.append("ai_label_kline")
 
         # 5. Few-Shot 学习样例
         if history_context and include_learning_context:
             user_prompt_parts.append(self._safe_truncate(history_context, 3000))
+            labels.append("ai_label_learning")
 
         # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考)
         if strategy_context:
             user_prompt_parts.append(
                 f"<strategy_context>\n{self._safe_truncate(strategy_context, STRATEGY_CONTEXT_MAX_LEN)}\n</strategy_context>"
             )
+            labels.append("ai_label_strategy_ctx")
+
+        available_data_block = build_available_data_block(labels)
+        if available_data_block:
+            # insert(1) not insert(0): stock_info is at position 0 and must
+            # remain first so the LLM anchors on the stock identity before
+            # reading the available-data manifest.  Deviates from issue #41
+            # spec §2.2 which says insert(0), but insert(1) is more logical.
+            user_prompt_parts.insert(1, available_data_block)
 
         user_prompt = "\n\n".join(user_prompt_parts)
 

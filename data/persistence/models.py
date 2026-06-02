@@ -328,6 +328,8 @@ class FinancialReports(Base):
     goodwill = Column(Numeric(20, 4), info={"null_protected": True})
     audit_result = Column(String)
     n_cashflow_act = Column(Numeric(20, 4), info={"null_protected": True})
+    money_cap = Column(Numeric(20, 4), info={"null_protected": True})
+    accounts_receiv = Column(Numeric(20, 4), info={"null_protected": True})
     __table_args__ = (
         Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
         Index("ix_financial_reports_ann_date", "ann_date"),

@@ -290,7 +290,7 @@ def _init_declarations() -> list[DataDeclaration]:
         DataDeclaration(
             name="monetary_capital",
             prompt_claim="货币资金余额",
-            injector=lambda: check_field_exists("monetary_capital"),
+            injector=lambda: check_field_exists("money_cap"),
         ),
         DataDeclaration(
             name="accounts_receivable",

@@ -182,7 +182,7 @@ class FinancialDao(BaseDao):
                         total_assets, total_liab, total_hldr_eqy_exc_min_int,
                         roe, roe_dt, grossprofit_margin, netprofit_margin,
                         debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                        audit_result, n_cashflow_act
+                        audit_result, n_cashflow_act, money_cap, accounts_receiv
                     FROM financial_reports
                     WHERE ts_code = $1 AND ann_date <= $2
                     ORDER BY end_date DESC
@@ -199,7 +199,7 @@ class FinancialDao(BaseDao):
                         total_assets, total_liab, total_hldr_eqy_exc_min_int,
                         roe, roe_dt, grossprofit_margin, netprofit_margin,
                         debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                        audit_result, n_cashflow_act
+                        audit_result, n_cashflow_act, money_cap, accounts_receiv
                     FROM financial_reports
                     WHERE ts_code = $1
                     ORDER BY end_date DESC
@@ -235,7 +235,7 @@ class FinancialDao(BaseDao):
                                 total_assets, total_liab, total_hldr_eqy_exc_min_int,
                                 roe, roe_dt, grossprofit_margin, netprofit_margin,
                                 debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                                audit_result, n_cashflow_act,
+                                audit_result, n_cashflow_act, money_cap, accounts_receiv,
                                 ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
                             FROM financial_reports
                             WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
@@ -253,7 +253,7 @@ class FinancialDao(BaseDao):
                                 total_assets, total_liab, total_hldr_eqy_exc_min_int,
                                 roe, roe_dt, grossprofit_margin, netprofit_margin,
                                 debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                                audit_result, n_cashflow_act,
+                                audit_result, n_cashflow_act, money_cap, accounts_receiv,
                                 ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
                             FROM financial_reports
                             WHERE ts_code IN ({placeholders})

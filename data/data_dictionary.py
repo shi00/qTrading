@@ -164,7 +164,10 @@ TABLE_DEFINITIONS = {
         "desc": "财务报表(主表)",
         "sync_config": {"strategy": "specialized_financial"},
         "quality_config": {"tier": 3, "monitor": True, "critical": True},
-        "columns": {},
+        "columns": {
+            "money_cap": "col_money_cap",
+            "accounts_receiv": "col_accounts_receiv",
+        },
     },
     "daily_indicators": {
         "alias": "tab_daily_indicators",
