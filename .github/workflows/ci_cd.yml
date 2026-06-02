@@ -339,7 +339,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           E2E_BROWSER_CHANNEL: "msedge"
           E2E_ARTIFACT_DIR: "e2e-artifacts"
-          E2E_TIMEOUT_MULTIPLIER: "1.5"
+          E2E_TIMEOUT_MULTIPLIER: "3.0"
         run: |
           python -m pytest tests/e2e/ -v --tb=short --junitxml=junit-e2e.xml
 

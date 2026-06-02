@@ -23,7 +23,7 @@ class FletPage:
 
     async def open(self, url: str, timeout_ms: int = 45000) -> None:
         scaled = self._tm(timeout_ms)
-        await self.page.goto(url, wait_until="domcontentloaded")
+        await self.page.goto(url, wait_until="domcontentloaded", timeout=scaled)
         await self.page.wait_for_selector("flutter-view, flt-glass-pane, flt-semantics-placeholder", timeout=scaled)
         ph = self.page.locator("flt-semantics-placeholder")
         if await ph.count() > 0:
