@@ -54,7 +54,7 @@ class FletPage:
             except Exception:
                 pass
 
-        text_loc = self.page.get_by_text(name, exact=True).first
+        text_loc = self.page.get_by_text(name, exact=False).first
         await text_loc.wait_for(state="attached", timeout=scaled)
         box = await text_loc.bounding_box()
         if box:
