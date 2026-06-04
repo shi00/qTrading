@@ -1,23 +1,41 @@
-import typing
-
 """
 Database Migration Module.
 
-Encapsulates all Alembic-related schema initialization and migration logic.
-Provides automatic detection and handling of legacy database environments.
+Encapsulates schema initialization and migration logic.
+For fresh installations, uses SQLAlchemy metadata.create_all() for simplicity.
+For upgrades, delegates to Alembic for version-controlled migrations.
 """
 
 import logging
 import os
+import typing
 
+import asyncpg
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
+from data.persistence.models import Base
+from utils.error_classifier import classify_error, classify_severity
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
+
+# 连接级异常：这些异常表示数据库不可达或认证失败，
+# 必须上抛而不能被吞没为"全新数据库"。
+_CONNECTION_EXCEPTIONS: tuple[type[Exception], ...] = (
+    asyncpg.PostgresConnectionError,
+    asyncpg.CannotConnectNowError,
+    ConnectionError,
+    OSError,
+)
+
+# ProgrammingError 中表示"表/关系不存在"的关键词，
+# 仅这些情况才应返回 None（视为全新数据库）。
+# 其他 ProgrammingError（语法错误、权限不足等）必须上抛。
+_RELATION_NOT_FOUND_KEYWORDS = ("does not exist", "not found", "no such")
 
 
 class DatabaseMigrationNeeded(Exception):
@@ -30,12 +48,30 @@ class DatabaseMigrationNeeded(Exception):
 
 
 class DatabaseMigrator:
-    """Handles database schema initialization and migration via Alembic."""
+    """Handles database schema initialization and migration.
+
+    For fresh installations (no alembic_version table), uses SQLAlchemy
+    metadata.create_all() for fast schema creation, then records the version.
+
+    For existing databases needing upgrades, delegates to Alembic.
+    """
+
+    @classmethod
+    def _get_alembic_config(cls) -> Config:
+        """Create Alembic config with correct project paths.
+
+        Shared by _get_head_revision and _run_alembic_upgrade to avoid
+        duplicate path construction.
+        """
+        project_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        alembic_ini_path = os.path.join(project_root, "alembic.ini")
+        cfg = Config(alembic_ini_path)
+        cfg.set_main_option("script_location", os.path.join(project_root, "alembic"))
+        return cfg
 
     @classmethod
     def _should_auto_migrate(cls) -> bool:
-        """
-        Check if automatic migration should be performed.
+        """Check if automatic migration should be performed.
 
         Returns:
             True if AUTO_MIGRATE environment variable is "1" or "true" (case-insensitive)
@@ -45,18 +81,18 @@ class DatabaseMigrator:
 
     @classmethod
     async def init_db(cls, engine: typing.Any, auto_migrate: bool | None = None):
-        """
-        Initialize and optionally upgrade database schema.
+        """Initialize and optionally upgrade database schema.
 
-        By default, only checks schema state and does NOT perform automatic upgrades.
-        To enable automatic upgrades, set AUTO_MIGRATE=1 or pass auto_migrate=True.
+        For fresh databases, creates all tables via SQLAlchemy metadata
+        and records the schema version.
 
-        Handles backward compatibility for legacy databases that existed
-        before Alembic was introduced.
+        For existing databases, checks if migration is needed and optionally
+        runs Alembic upgrade.
 
         Args:
             engine: SQLAlchemy async engine instance
-            auto_migrate: Optional override for whether to auto-migrate (takes precedence over env var)
+            auto_migrate: Optional override for whether to auto-migrate
+                (takes precedence over env var)
 
         Raises:
             DatabaseMigrationNeeded: If schema needs migration and auto-migrate is disabled
@@ -66,58 +102,21 @@ class DatabaseMigrator:
         if auto_migrate is None:
             auto_migrate = cls._should_auto_migrate()
 
-        has_alembic, has_old_schema = False, False
-        current_rev = None
-        head_rev = None
+        current_rev = await cls._get_current_revision(engine)
 
-        try:
-            async with engine.connect() as conn:
-
-                def _sync_check(c: typing.Any):
-                    inspector = inspect(c)
-                    tables = inspector.get_table_names()
-                    return "alembic_version" in tables, "stock_basic" in tables
-
-                has_alembic, has_old_schema = await conn.run_sync(_sync_check)
-        except Exception as e:
-            logger.error(
-                f"[DatabaseMigrator] Database table inspection failed: {e}",
-                exc_info=True,
-            )
-
-        def get_head_revision() -> str:
-            """Get the latest Alembic revision."""
-            alembic_ini_path = os.path.join(
-                os.path.dirname(__file__),
-                "..",
-                "..",
-                "alembic.ini",
-            )
-            alembic_cfg = Config(alembic_ini_path)
-            alembic_cfg.set_main_option(
-                "script_location",
-                os.path.join(os.path.dirname(__file__), "..", "..", "alembic"),
-            )
-            script_dir = ScriptDirectory.from_config(alembic_cfg)
-            head = script_dir.get_current_head()
-            return head if head else ""
-
-        try:
-            head_rev = await ThreadPoolManager().run_async(TaskType.IO, get_head_revision)
-            current_rev = await cls._get_current_revision(engine)
-            logger.info(f"[DatabaseMigrator] Schema state: current={current_rev}, head={head_rev}")
-        except Exception as e:
-            logger.error(
-                f"[DatabaseMigrator] Failed to get schema revisions: {e}",
-                exc_info=True,
-            )
-            raise
-
-        needs_migration = current_rev != head_rev
-
-        if not needs_migration:
-            logger.info("[DatabaseMigrator] Database schema is up to date.")
+        # Fresh database: no alembic_version table
+        if current_rev is None:
+            await cls._init_fresh_database(engine)
             return
+
+        # Existing database: check for pending migrations
+        head_rev = await cls._get_head_revision()
+
+        if current_rev == head_rev:
+            logger.info(f"[DatabaseMigrator] Database schema is up to date (rev={current_rev}).")
+            return
+
+        logger.info(f"[DatabaseMigrator] Schema state: current={current_rev}, head={head_rev}")
 
         if not auto_migrate:
             logger.warning(
@@ -126,88 +125,118 @@ class DatabaseMigrator:
             )
             raise DatabaseMigrationNeeded(current_rev, head_rev)
 
-        logger.info(f"[DatabaseMigrator] Automatic migration enabled. Upgrading from {current_rev} to {head_rev}")
+        await cls._run_alembic_upgrade(engine)
 
-        def run_alembic_upgrade():
-            alembic_ini_path = os.path.join(
-                os.path.dirname(__file__),
-                "..",
-                "..",
-                "alembic.ini",
+    @classmethod
+    async def _init_fresh_database(cls, engine: typing.Any) -> None:
+        """Initialize a fresh database using SQLAlchemy metadata.
+
+        Creates all tables and records the schema version in a single
+        transaction to ensure atomicity. If the process crashes mid-way,
+        no partial state will be left in the database.
+        """
+        logger.info("[DatabaseMigrator] Initializing fresh database...")
+
+        head_rev = await cls._get_head_revision()
+
+        # Single transaction: create tables + record version atomically
+        async with engine.begin() as conn:
+
+            def _create_tables(sync_conn: typing.Any) -> None:
+                Base.metadata.create_all(sync_conn)
+
+            await conn.run_sync(_create_tables)
+
+            # Record schema version within the same transaction
+            await conn.execute(
+                text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
             )
-            alembic_cfg = Config(alembic_ini_path)
-            alembic_cfg.attributes["configure_logger"] = False
-            alembic_cfg.set_main_option(
-                "script_location",
-                os.path.join(os.path.dirname(__file__), "..", "..", "alembic"),
+            await conn.execute(
+                text(
+                    "INSERT INTO alembic_version (version_num) VALUES (:version) "
+                    "ON CONFLICT (version_num) DO UPDATE SET version_num = EXCLUDED.version_num"
+                ),
+                {"version": head_rev},
             )
 
-            if has_old_schema and not has_alembic:
-                logger.debug(
-                    "[DatabaseMigrator] Legacy database detected, computing baseline...",
-                )
+        logger.info(f"[DatabaseMigrator] Fresh database initialized with schema version {head_rev}")
 
-                script_dir = ScriptDirectory.from_config(alembic_cfg)
-                baseline_rev = None
+    @classmethod
+    async def _get_head_revision(cls) -> str:
+        """Get the latest Alembic revision."""
+        alembic_cfg = cls._get_alembic_config()
+        script_dir = ScriptDirectory.from_config(alembic_cfg)
+        head = script_dir.get_current_head()
+        return head if head else ""
 
-                for rev in script_dir.walk_revisions():
-                    if rev.down_revision is None:
-                        baseline_rev = rev.revision
-                        break
+    @classmethod
+    async def _run_alembic_upgrade(cls, engine: typing.Any) -> None:
+        """Run Alembic upgrade to head.
 
-                if baseline_rev:
-                    logger.debug(
-                        f"[DatabaseMigrator] Stamping legacy database with baseline: {baseline_rev}",
-                    )
-                    command.stamp(alembic_cfg, baseline_rev)
-                else:
-                    logger.warning(
-                        "[DatabaseMigrator] Could not find valid baseline revision, skipping stamp!",
-                    )
+        Uses standard error classification to distinguish system-level
+        failures from recoverable errors.
 
-            command.upgrade(alembic_cfg, "head")
+        Note: The caller is responsible for ensuring that Alembic's env.py
+        can resolve the correct database URL via ConfigHandler, config.DB_URL,
+        or DATABASE_URL environment variable. Use override_db_url() context
+        manager at the call site if needed (e.g., in tests).
+        """
+
+        def run_upgrade() -> None:
+            cfg = cls._get_alembic_config()
+            cfg.attributes["configure_logger"] = False
+            command.upgrade(cfg, "head")
 
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, run_alembic_upgrade)
+            await ThreadPoolManager().run_async(TaskType.IO, run_upgrade)
 
+            # 升级后验证版本是否到达 head
             new_rev = await cls._get_current_revision(engine)
+            head_rev = await cls._get_head_revision()
+            if new_rev and new_rev != head_rev:
+                raise RuntimeError(
+                    f"Migration completed but schema version mismatch: "
+                    f"current={new_rev}, expected={head_rev}. "
+                    f"Partial migration may have occurred."
+                )
             if new_rev:
                 logger.info(f"[DatabaseMigrator] Database schema updated. Current revision: {new_rev}")
             else:
-                logger.info("[DatabaseMigrator] Database schema updated to latest version.")
+                logger.warning("[DatabaseMigrator] Schema version is None after migration, this is unexpected.")
         except Exception as e:
-            logger.error(
-                f"[DatabaseMigrator] Schema upgrade failed: {e}",
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="db")
+            severity = classify_severity(e, context="db")
+            if severity == "system":
+                logger.critical(
+                    f"[DatabaseMigrator] SYSTEM-LEVEL migration failure ({error_info['code']}): {e}",
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    f"[DatabaseMigrator] Migration failed ({error_info['code']}): {e}",
+                    exc_info=True,
+                )
             raise
 
     @classmethod
     async def check_schema_status(cls, engine: typing.Any) -> tuple[str | None, str, bool]:
-        """
-        Check if schema needs migration.
+        """Check if schema needs migration.
 
         Returns:
             Tuple of (current_revision, head_revision, needs_migration)
         """
-
-        def get_head_rev():
-            alembic_ini_path = os.path.join(os.path.dirname(__file__), "..", "..", "alembic.ini")
-            alembic_cfg = Config(alembic_ini_path)
-            alembic_cfg.set_main_option(
-                "script_location",
-                os.path.join(os.path.dirname(__file__), "..", "..", "alembic"),
-            )
-            script_dir = ScriptDirectory.from_config(alembic_cfg)
-            head = script_dir.get_current_head()
-            return head if head else ""
-
-        head_rev = await ThreadPoolManager().run_async(TaskType.IO, get_head_rev)
+        head_rev = await cls._get_head_revision()
         current_rev = await cls._get_current_revision(engine)
         return current_rev, head_rev, current_rev != head_rev
 
     @classmethod
     async def _get_current_revision(cls, engine: typing.Any) -> str | None:
+        """Get current schema version from alembic_version table.
+
+        Returns None if alembic_version table doesn't exist (fresh database).
+        Raises connection-level exceptions instead of swallowing them,
+        so that callers can distinguish "table not found" from "database unreachable".
+        """
         try:
             async with engine.connect() as conn:
 
@@ -220,6 +249,24 @@ class DatabaseMigrator:
                     return row[0] if row else None
 
                 return await conn.run_sync(_sync_get_rev)
+        except _CONNECTION_EXCEPTIONS as exc:
+            # 连接级错误必须上抛，不能吞没为"全新数据库"
+            logger.error(f"[DBMigrator] Connection error getting revision: {exc}")
+            raise
+        except ProgrammingError as exc:
+            # ProgrammingError 需要区分：仅 "relation does not exist" 类错误
+            # 表示全新数据库，返回 None；其他（语法错误、权限等）必须上抛。
+            msg = str(exc).lower()
+            if any(kw in msg for kw in _RELATION_NOT_FOUND_KEYWORDS):
+                logger.debug(f"[DBMigrator] ProgrammingError (likely fresh DB): {exc}")
+                return None
+            logger.error(f"[DBMigrator] ProgrammingError (not relation-not-found): {exc}")
+            raise
+        except OperationalError as exc:
+            # OperationalError 可能是权限/结构损坏等严重问题，上抛
+            logger.error(f"[DBMigrator] OperationalError getting revision: {exc}")
+            raise
         except Exception as exc:
-            logger.debug(f"[DBMigrator] get_alembic_rev failed: {exc}")
-            return None
+            # 其他未知异常：记录 warning 并上抛，避免误判为全新数据库
+            logger.warning(f"[DBMigrator] Unexpected error getting revision, re-raising: {exc}")
+            raise

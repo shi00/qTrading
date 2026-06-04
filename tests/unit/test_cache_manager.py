@@ -215,6 +215,10 @@ class TestCacheManagerInitDb:
             with pytest.raises(DatabaseMigrationNeeded):
                 await mgr.init_db(force=True)
 
+            # DatabaseMigrationNeeded 不应设置 _schema_initialized=True，
+            # 允许后续 init_db() 重试
+            assert mgr._schema_initialized is False
+
 
 class TestCacheManagerClose:
     @pytest.mark.asyncio
@@ -1734,3 +1738,99 @@ class TestSuppressErrorsDefaultFalse:
         assert default is False, (
             f"E-P1-5: QuoteDao.save_daily_quotes suppress_errors should default to False, got {default!r}"
         )
+
+
+class TestConcurrentInitDb:
+    """Verify that CacheManager.init_db() is protected by _init_lock so concurrent
+    calls don't cause double initialization."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_init_db_calls_migrator_only_once(self):
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+
+        # Use a real asyncio.Lock so concurrent gather actually contends
+        real_lock = asyncio.Lock()
+
+        with (
+            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=real_lock),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock()
+
+            # Fire 5 concurrent init_db calls
+            results = await asyncio.gather(
+                *[mgr.init_db() for _ in range(5)],
+                return_exceptions=True,
+            )
+
+            # No exceptions should have been raised
+            for r in results:
+                assert not isinstance(r, Exception), f"Unexpected exception: {r}"
+
+            # The migrator's init_db should have been called exactly once
+            mock_migrator.init_db.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_init_db_with_force_is_serialized(self):
+        """When force=True, each call re-runs the migrator, but the lock
+        ensures they execute serially (no concurrent migration overlap)."""
+        mgr = _make_mgr()
+        mgr._schema_initialized = True
+
+        real_lock = asyncio.Lock()
+        call_order: list[int] = []
+
+        async def tracked_init_db(engine, auto_migrate=None):
+            call_order.append(len(call_order) + 1)
+
+        with (
+            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=real_lock),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=tracked_init_db)
+
+            results = await asyncio.gather(
+                *[mgr.init_db(force=True) for _ in range(5)],
+                return_exceptions=True,
+            )
+
+            for r in results:
+                assert not isinstance(r, Exception), f"Unexpected exception: {r}"
+
+            # force=True means each call runs the migrator
+            assert mock_migrator.init_db.call_count == 5
+            # But they ran serially (lock-protected), not concurrently
+            assert len(call_order) == 5
+
+    @pytest.mark.asyncio
+    async def test_concurrent_init_db_first_wins_second_skips(self):
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+
+        real_lock = asyncio.Lock()
+        call_count = 0
+
+        async def slow_init_db(engine, auto_migrate=None):
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.05)
+
+        with (
+            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=real_lock),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=slow_init_db)
+
+            results = await asyncio.gather(
+                mgr.init_db(),
+                mgr.init_db(),
+                mgr.init_db(),
+                return_exceptions=True,
+            )
+
+            for r in results:
+                assert not isinstance(r, Exception), f"Unexpected exception: {r}"
+
+            # Only the first call should execute the migrator; the rest see _schema_initialized=True
+            assert call_count == 1

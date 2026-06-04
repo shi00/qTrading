@@ -269,7 +269,7 @@ class CacheManager:
                 self._schema_initialized = True
                 logger.debug("[CacheManager] Schema | Init completed without errors.")
             except DatabaseMigrationNeeded:
-                self._schema_initialized = True
+                # 不设置 _schema_initialized = True，允许后续 init_db() 重试
                 logger.info(
                     "[CacheManager] Schema | Database needs migration but AUTO_MIGRATE is disabled. "
                     "Propagating to caller for UI handling."
@@ -295,19 +295,24 @@ class CacheManager:
             raise
 
     async def clear_all_cache(self):
-        """Drop all user tables using SQLAlchemy DDL API and re-initialize schema."""
+        """Drop all user tables using CASCADE and re-initialize schema.
+
+        Uses DROP SCHEMA ... CASCADE to ensure no residual tables remain,
+        including those not managed by SQLAlchemy ORM (e.g., manually created
+        tables, materialized views).
+        """
         self._maintenance_event.clear()
         from data.persistence.daos.base_dao import BaseDao
-        from data.persistence.models import metadata
 
         BaseDao._get_maintenance_event().clear()
         try:
             if self.engine is None:
                 raise RuntimeError("Database engine not initialized")
             async with self.engine.begin() as conn:
-                await conn.run_sync(metadata.drop_all)
-                await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
-                logger.debug("[CacheManager] Wipe | Dropped all tables via SQLAlchemy DDL API.")
+                # 使用 CASCADE 删除整个 public schema 并重建，确保无残留表
+                await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+                await conn.execute(sa.text("CREATE SCHEMA public"))
+                logger.debug("[CacheManager] Wipe | Dropped and recreated public schema via CASCADE.")
 
             self._schema_initialized = False
             await self.init_db(force=True, auto_migrate=True)
