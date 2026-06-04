@@ -65,7 +65,10 @@ def get_database_url() -> str:
 db_url = get_database_url()
 sync_db_url = db_url.replace("+asyncpg", "") if db_url else ""
 async_db_url = db_url if "+asyncpg" in db_url else db_url.replace("postgresql://", "postgresql+asyncpg://")
-alembic_config.set_main_option("sqlalchemy.url", sync_db_url)
+# Use attributes instead of set_main_option to avoid ConfigParser interpolation
+# issues with URL-encoded special characters like '%40' (URL-encoded '@')
+# This is consistent with db_migrator.py's approach
+alembic_config.attributes["database_url"] = sync_db_url
 
 if alembic_config.config_file_name is not None:
     if alembic_config.attributes.get("configure_logger", True):
@@ -75,7 +78,11 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = context.config.get_main_option("sqlalchemy.url")
+    # Get URL from attributes first (avoids ConfigParser interpolation issues),
+    # fallback to get_main_option for CLI usage
+    url = alembic_config.attributes.get("database_url")
+    if not url:
+        url = context.config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
