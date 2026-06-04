@@ -2,8 +2,10 @@
 #    uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
 aiohappyeyeballs==2.6.2
     # via aiohttp
-aiohttp==3.13.5
-    # via litellm
+aiohttp==3.14.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   litellm
 aiosignal==1.4.0
     # via aiohttp
 akracer==0.0.14 ; sys_platform == 'linux'
@@ -156,7 +158,7 @@ kiwisolver==1.5.0
     # via matplotlib
 korean-lunar-calendar==0.3.1
     # via exchange-calendars
-litellm==1.86.2
+litellm==1.87.0
     # via astockscreener (pyproject.toml)
 llama-cpp-python==0.3.23
     # via astockscreener (pyproject.toml)
