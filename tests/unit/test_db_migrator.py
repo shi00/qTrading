@@ -363,11 +363,11 @@ class TestRunAlembicUpgradeConfig:
                         with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
                             await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
-        captured_cfg.set_main_option.assert_called_once_with(
-            "sqlalchemy.url",
-            "postgresql://user:pass@localhost:5432/target_db",
-        )
+        # Verify that database_url is set in attributes (new implementation)
+        # The URL should have +asyncpg removed
         assert captured_cfg.attributes["database_url"] == "postgresql://user:pass@localhost:5432/target_db"
+        # Verify configure_logger is set to False
+        assert captured_cfg.attributes["configure_logger"] is False
         mock_upgrade.assert_called_once_with(captured_cfg, "head")
 
 
