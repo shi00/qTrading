@@ -134,3 +134,49 @@ def extract_fields_from_api_method(method) -> set:
         return set(f.strip() for f in fields_str.split(",") if f.strip())
 
     return set()
+
+
+# --- Integration test helpers for database migration tests ---
+
+import os
+from pathlib import Path
+
+from alembic.config import Config
+
+
+def get_pg_connection_params() -> dict:
+    """Get PostgreSQL connection parameters from environment or defaults.
+
+    Used by integration tests that need to create/drop isolated databases.
+    """
+    host = os.environ.get("TEST_DB_HOST", "localhost")
+    port = int(os.environ.get("TEST_DB_PORT", "5432"))
+    user = os.environ.get("TEST_DB_USER", "postgres")
+    password = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD", "")
+    return {"host": host, "port": port, "user": user, "password": password}
+
+
+def make_alembic_cfg(db_url: str) -> Config:
+    """Create Alembic config with correct project paths.
+
+    Used by integration tests that need to run Alembic commands directly.
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(project_root / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    cfg.set_main_option("script_location", str(project_root / "alembic"))
+    cfg.attributes["configure_logger"] = False
+    return cfg
+
+
+def build_db_urls(params: dict, db_name: str) -> tuple[str, str]:
+    """Build sync and async database URLs from connection params and db_name.
+
+    Returns:
+        (sync_url, async_url) tuple
+    """
+    sync_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+    async_url = (
+        f"postgresql+asyncpg://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+    )
+    return sync_url, async_url

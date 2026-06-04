@@ -26,15 +26,12 @@ alembic_config = context.config
 def get_database_url() -> str:
     """
     Get database URL from multiple sources.
-    Priority: config.DB_URL > ConfigHandler.get_db_url() > environment variable
+    Priority: ConfigHandler.get_db_url() > config.DB_URL > environment variable
+
+    This matches CacheManager._get_connection_string() priority to ensure
+    both modules connect to the same database when the user configures
+    via the onboarding wizard (stored in ConfigHandler).
     """
-    if config.DB_URL:
-        return config.DB_URL
-
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
-
     try:
         from utils.config_handler import ConfigHandler
 
@@ -43,6 +40,13 @@ def get_database_url() -> str:
             return url
     except Exception:
         pass
+
+    if config.DB_URL:
+        return config.DB_URL
+
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
 
     raise ValueError(
         "🛑 Database URL is not configured.\n"

@@ -268,6 +268,9 @@ class CacheManager:
 
                 self._schema_initialized = True
                 logger.debug("[CacheManager] Schema | Init completed without errors.")
+            except asyncio.CancelledError:
+                logger.warning("[CacheManager] Schema | Init cancelled during shutdown.")
+                raise  # R2: CancelledError must propagate for graceful shutdown
             except DatabaseMigrationNeeded:
                 # 不设置 _schema_initialized = True，允许后续 init_db() 重试
                 logger.info(
@@ -299,20 +302,32 @@ class CacheManager:
 
         Uses DROP SCHEMA ... CASCADE to ensure no residual tables remain,
         including those not managed by SQLAlchemy ORM (e.g., manually created
-        tables, materialized views).
+        tables, materialized views). Falls back to metadata.drop_all() if
+        the database user lacks OWNER/SUPERUSER privileges.
         """
         self._maintenance_event.clear()
         from data.persistence.daos.base_dao import BaseDao
+        from data.persistence.models import metadata
 
         BaseDao._get_maintenance_event().clear()
         try:
             if self.engine is None:
                 raise RuntimeError("Database engine not initialized")
             async with self.engine.begin() as conn:
-                # 使用 CASCADE 删除整个 public schema 并重建，确保无残留表
-                await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
-                await conn.execute(sa.text("CREATE SCHEMA public"))
-                logger.debug("[CacheManager] Wipe | Dropped and recreated public schema via CASCADE.")
+                try:
+                    # 优先使用 CASCADE 删除整个 public schema 并重建，确保无残留表
+                    await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+                    await conn.execute(sa.text("CREATE SCHEMA public"))
+                    logger.debug("[CacheManager] Wipe | Dropped and recreated public schema via CASCADE.")
+                except Exception as cascade_err:
+                    # 权限不足时降级到 metadata.drop_all()
+                    logger.warning(
+                        "[CacheManager] CASCADE drop failed (%s), falling back to metadata.drop_all()",
+                        cascade_err,
+                    )
+                    await conn.run_sync(metadata.drop_all)
+                    await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+                    logger.debug("[CacheManager] Wipe | Dropped all tables via SQLAlchemy DDL API (fallback).")
 
             self._schema_initialized = False
             await self.init_db(force=True, auto_migrate=True)

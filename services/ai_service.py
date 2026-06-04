@@ -987,7 +987,11 @@ class AIService:
         user_prompt_parts.append(f"<stock_info>\n{stock_xml}\n</stock_info>")
 
         # 1.5 可用数据清单 (运行时注入，与各块同一入选条件派生)
-        labels: list[str] = ["ai_label_quote_snapshot", "ai_label_tech"]
+        labels: list[str] = []
+        if stock_xml:
+            labels.append("ai_label_quote_snapshot")
+        if tech_info:
+            labels.append("ai_label_tech")
         if global_context and include_global_context:
             labels.append("ai_label_global")
         if news_text and news_text != "No recent news found.":

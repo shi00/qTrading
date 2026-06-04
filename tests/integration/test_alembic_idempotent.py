@@ -1,11 +1,17 @@
+"""Alembic idempotent upgrade tests.
+
+Uses the session-scoped PostgreSQL test database (via test_engine fixture)
+instead of a temporary SQLite database.
+"""
+
 import importlib.util
-import logging
 import os
 
+from sqlalchemy import inspect
 
 _spec = importlib.util.spec_from_file_location(
     "alembic_initial_schema",
-    os.path.join(os.path.dirname(__file__), "..", "..", "alembic", "versions", "f6586a3fccba_initial_schema_v1.py"),
+    os.path.join(os.path.dirname(__file__), "..", "..", "alembic", "versions", "0001_initial_schema.py"),
 )
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -34,12 +40,11 @@ class TestAlembicIdempotentUpgrade:
         missing = [t for t in _ALL_EXPECTED_TABLES if t not in existing]
         assert missing == []
 
-    def test_warning_logged_for_missing_tables(self, caplog):
-        existing = {"daily_quotes"}
-        missing = [t for t in _ALL_EXPECTED_TABLES if t not in existing]
-        with caplog.at_level(logging.WARNING, logger="alembic.runtime.migration"):
-            logging.getLogger("alembic.runtime.migration").warning(
-                "Legacy DB has daily_quotes but missing tables: %s.", missing
+    async def test_financial_reports_has_new_columns(self, test_engine):
+        """Verify the merged migration includes money_cap and accounts_receiv."""
+        async with test_engine.connect() as conn:
+            cols = await conn.run_sync(
+                lambda sync_conn: {col["name"] for col in inspect(sync_conn).get_columns("financial_reports")}
             )
-        assert "missing tables" in caplog.text
-        assert "stock_basic" in caplog.text
+        assert "money_cap" in cols, "money_cap column missing from financial_reports"
+        assert "accounts_receiv" in cols, "accounts_receiv column missing from financial_reports"

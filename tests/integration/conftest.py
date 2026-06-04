@@ -1,11 +1,12 @@
 import hashlib
 import os
-from contextlib import contextmanager
 
 import asyncpg
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from data.persistence.db_url_override import override_db_url
 
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
@@ -44,25 +45,6 @@ if TEST_DB_HOST not in _ALLOWED_HOSTS:
     raise ValueError(f"TEST_DB_HOST must be one of {_ALLOWED_HOSTS} for safety, got: {TEST_DB_HOST!r}")
 
 TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
-
-
-@contextmanager
-def override_db_url(target_url: str):
-    import config
-
-    original_db_url = config.DB_URL
-    config.DB_URL = target_url
-
-    original_env_db_url = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = target_url
-    try:
-        yield
-    finally:
-        config.DB_URL = original_db_url
-        if original_env_db_url is not None:
-            os.environ["DATABASE_URL"] = original_env_db_url
-        elif "DATABASE_URL" in os.environ:
-            del os.environ["DATABASE_URL"]
 
 
 def pytest_collection_modifyitems(items):

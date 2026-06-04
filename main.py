@@ -5,7 +5,6 @@ import os
 import flet as ft
 
 from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
-from data.persistence.db_migrator import DatabaseMigrator
 from data.cache.cache_manager import CacheManager
 from data.external.news_subscription import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
@@ -302,7 +301,9 @@ async def main(page: ft.Page):
                     _show_dialog(in_progress_dialog)
 
                     try:
-                        await DatabaseMigrator.init_db(cache_manager.engine, auto_migrate=True)
+                        # 通过 CacheManager.init_db 而非直接调用 DatabaseMigrator，
+                        # 确保 _schema_initialized 被正确设置
+                        await cache_manager.init_db(force=True, auto_migrate=True)
 
                         _hide_dialog(in_progress_dialog)
 

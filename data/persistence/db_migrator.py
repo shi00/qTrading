@@ -6,6 +6,7 @@ For fresh installations, uses SQLAlchemy metadata.create_all() for simplicity.
 For upgrades, delegates to Alembic for version-controlled migrations.
 """
 
+import asyncio
 import logging
 import os
 import typing
@@ -134,32 +135,70 @@ class DatabaseMigrator:
         Creates all tables and records the schema version in a single
         transaction to ensure atomicity. If the process crashes mid-way,
         no partial state will be left in the database.
+
+        Handles concurrent initialization by catching PostgreSQL
+        UniqueViolationError (pg_type conflict) and retrying after
+        checking if another process completed the init.
         """
         logger.info("[DatabaseMigrator] Initializing fresh database...")
 
         head_rev = await cls._get_head_revision()
 
-        # Single transaction: create tables + record version atomically
-        async with engine.begin() as conn:
+        try:
+            # Single transaction: create tables + record version atomically
+            async with engine.begin() as conn:
 
-            def _create_tables(sync_conn: typing.Any) -> None:
-                Base.metadata.create_all(sync_conn)
+                def _create_tables(sync_conn: typing.Any) -> None:
+                    Base.metadata.create_all(sync_conn)
 
-            await conn.run_sync(_create_tables)
+                await conn.run_sync(_create_tables)
 
-            # Record schema version within the same transaction
-            await conn.execute(
-                text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO alembic_version (version_num) VALUES (:version) "
-                    "ON CONFLICT (version_num) DO UPDATE SET version_num = EXCLUDED.version_num"
-                ),
-                {"version": head_rev},
-            )
+                # Record schema version within the same transaction
+                await conn.execute(
+                    text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO alembic_version (version_num) VALUES (:version) "
+                        "ON CONFLICT (version_num) DO UPDATE SET version_num = EXCLUDED.version_num"
+                    ),
+                    {"version": head_rev},
+                )
 
-        logger.info(f"[DatabaseMigrator] Fresh database initialized with schema version {head_rev}")
+            logger.info(f"[DatabaseMigrator] Fresh database initialized with schema version {head_rev}")
+
+        except Exception as e:
+            # Check if this is a concurrent initialization conflict
+            # PostgreSQL raises UniqueViolationError when two processes
+            # try to create tables with the same name simultaneously
+            # (pg_type.typname namespace conflict)
+            error_name = type(e).__name__
+            error_str = str(e)
+
+            if "UniqueViolationError" in error_name or "pg_type" in error_str or "typname" in error_str:
+                logger.warning(
+                    "[DatabaseMigrator] Concurrent initialization detected (pg_type conflict). "
+                    "Checking if schema was initialized by another process..."
+                )
+
+                # Wait a moment for the other process to complete its transaction
+                await asyncio.sleep(0.5)
+
+                # Re-check the schema status
+                current_rev = await cls._get_current_revision(engine)
+                if current_rev == head_rev:
+                    logger.info(
+                        "[DatabaseMigrator] Schema was successfully initialized by another process. "
+                        f"Current version: {current_rev}"
+                    )
+                    return
+
+                # If still not initialized, re-raise the original error
+                logger.error(
+                    f"[DatabaseMigrator] Schema still not initialized after concurrent conflict. Original error: {e}"
+                )
+
+            raise
 
     @classmethod
     async def _get_head_revision(cls) -> str:
@@ -189,20 +228,9 @@ class DatabaseMigrator:
 
         try:
             await ThreadPoolManager().run_async(TaskType.IO, run_upgrade)
-
-            # 升级后验证版本是否到达 head
-            new_rev = await cls._get_current_revision(engine)
-            head_rev = await cls._get_head_revision()
-            if new_rev and new_rev != head_rev:
-                raise RuntimeError(
-                    f"Migration completed but schema version mismatch: "
-                    f"current={new_rev}, expected={head_rev}. "
-                    f"Partial migration may have occurred."
-                )
-            if new_rev:
-                logger.info(f"[DatabaseMigrator] Database schema updated. Current revision: {new_rev}")
-            else:
-                logger.warning("[DatabaseMigrator] Schema version is None after migration, this is unexpected.")
+        except asyncio.CancelledError:
+            logger.warning("[DatabaseMigrator] Migration cancelled during shutdown.")
+            raise  # R2: CancelledError must propagate for graceful shutdown
         except Exception as e:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
@@ -217,6 +245,21 @@ class DatabaseMigrator:
                     exc_info=True,
                 )
             raise
+
+        # 升级后验证版本是否到达 head（不在 try/except 内，
+        # RuntimeError 表示内部一致性检查失败，不需要经过 classify_error）
+        new_rev = await cls._get_current_revision(engine)
+        head_rev = await cls._get_head_revision()
+        if new_rev and new_rev != head_rev:
+            raise RuntimeError(
+                f"Migration completed but schema version mismatch: "
+                f"current={new_rev}, expected={head_rev}. "
+                f"Partial migration may have occurred."
+            )
+        if new_rev:
+            logger.info(f"[DatabaseMigrator] Database schema updated. Current revision: {new_rev}")
+        else:
+            logger.warning("[DatabaseMigrator] Schema version is None after migration, this is unexpected.")
 
     @classmethod
     async def check_schema_status(cls, engine: typing.Any) -> tuple[str | None, str, bool]:

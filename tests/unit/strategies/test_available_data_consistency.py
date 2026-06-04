@@ -898,7 +898,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
 
 class TestInvariant6AnalyzeStockLabelAssembly:
     @pytest.mark.asyncio
-    async def test_always_present_labels(self):
+    async def test_base_labels_require_valid_content(self):
         with (
             patch("services.ai_service.build_available_data_block") as mock_build,
             patch.object(AIService, "_chat_completion_with_failover", new_callable=AsyncMock) as mock_llm,
@@ -915,10 +915,18 @@ class TestInvariant6AnalyzeStockLabelAssembly:
                 tech_info={"macd_signal": "bullish"},
                 news_list=[],
             )
+            labels_with_data = mock_build.call_args.args[0]
+            assert "ai_label_quote_snapshot" in labels_with_data
+            assert "ai_label_tech" in labels_with_data
 
-            labels = mock_build.call_args.args[0]
-            assert "ai_label_quote_snapshot" in labels
-            assert "ai_label_tech" in labels
+            await service.analyze_stock(
+                stock_info={},
+                tech_info={},
+                news_list=[],
+            )
+            labels_without_data = mock_build.call_args.args[0]
+            assert "ai_label_quote_snapshot" not in labels_without_data
+            assert "ai_label_tech" not in labels_without_data
 
     @pytest.mark.asyncio
     async def test_global_context_conditional(self):

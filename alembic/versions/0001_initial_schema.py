@@ -1,8 +1,8 @@
-"""initial_schema_v1
+"""initial_schema
 
-Revision ID: f6586a3fccba
+Revision ID: 0001
 Revises:
-Create Date: 2026-03-18 13:19:14.104707
+Create Date: 2026-06-03 00:00:00.000000
 
 """
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "f6586a3fccba"
+revision: str = "0001"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -45,38 +45,6 @@ def _index_exists(table_name: str, index_name: str) -> bool:
     return index_name in indexes
 
 
-def _column_exists(table_name: str, column_name: str) -> bool:
-    """Check if a column exists in a table."""
-    conn = op.get_bind()
-    inspector = sa.inspect(conn)
-    schema = _target_schema()
-    if table_name not in inspector.get_table_names(schema=schema):
-        return False
-    cols = [c["name"] for c in inspector.get_columns(table_name, schema=schema)]
-    return column_name in cols
-
-
-NEW_SH_COLUMNS: dict[str, sa.Column] = {
-    "t1_price": sa.Column("t1_price", sa.Numeric(12, 4), nullable=True),
-    "t1_pct": sa.Column("t1_pct", sa.Numeric(8, 4), nullable=True),
-    "t5_price": sa.Column("t5_price", sa.Numeric(12, 4), nullable=True),
-    "t5_pct": sa.Column("t5_pct", sa.Numeric(8, 4), nullable=True),
-    "index_pct": sa.Column("index_pct", sa.Numeric(8, 4), nullable=True),
-    "alpha": sa.Column("alpha", sa.Numeric(12, 4), nullable=True),
-    "ai_score": sa.Column("ai_score", sa.Numeric(12, 4), nullable=True),
-    "ai_reason": sa.Column("ai_reason", sa.String(), nullable=True),
-    "prediction_result": sa.Column("prediction_result", sa.String(), nullable=True),
-    "review_status": sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
-}
-
-
-def _get_params_snapshot_col() -> sa.Column:
-    return sa.Column("params_snapshot", _json_type(), nullable=True)
-
-
-LEGACY_QFQ_COLS = ("qfq_open", "qfq_high", "qfq_low", "qfq_close")
-
-
 def _is_postgresql() -> bool:
     bind = op.get_bind()
     return bind.dialect.name == "postgresql"
@@ -96,9 +64,42 @@ def _create_partial_index(table_name: str, index_name: str, column: str, where_c
             op.create_index(index_name, table_name, [column])
 
 
-def _create_all_tables_fresh() -> None:
-    """Create all tables for a brand-new database (original DDL)."""
-    op.create_table(
+def _create_table_if_not_exists(table_name: str, *args, **kwargs) -> None:
+    """Create a table only if it doesn't already exist.
+
+    Ensures idempotent migrations - safe to re-run on databases
+    that may already have some tables from partial migrations.
+    """
+    if not _table_exists(table_name):
+        op.create_table(table_name, *args, **kwargs)
+
+
+def _create_index_if_not_exists(
+    index_name: str,
+    table_name: str,
+    columns: list,
+    **kwargs,
+) -> None:
+    """Create an index only if it doesn't already exist."""
+    if not _index_exists(table_name, index_name):
+        op.create_index(index_name, table_name, columns, **kwargs)
+
+
+def _drop_table_if_exists(table_name: str) -> None:
+    """Drop a table only if it exists."""
+    if _table_exists(table_name):
+        op.drop_table(table_name)
+
+
+def _drop_index_if_exists(index_name: str, table_name: str) -> None:
+    """Drop an index only if it exists."""
+    if _index_exists(table_name, index_name):
+        op.drop_index(index_name, table_name=table_name)
+
+
+def _create_all_tables() -> None:
+    """Create all tables for a brand-new database."""
+    _create_table_if_not_exists(
         "block_trade",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -121,7 +122,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", "buyer", "seller", name=op.f("pk_block_trade")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "daily_indicators",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -154,13 +155,13 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_daily_indicators")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "ix_daily_indicators_date_code",
         "daily_indicators",
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "daily_quotes",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -188,13 +189,13 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_daily_quotes")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "ix_daily_quotes_date_code",
         "daily_quotes",
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "dividend",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -221,8 +222,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date", name=op.f("pk_dividend")),
     )
-    op.create_index(op.f("ix_dividend_ann_date"), "dividend", ["ann_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_dividend_ann_date"), "dividend", ["ann_date"], unique=False)
+    _create_table_if_not_exists(
         "fina_audit",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -245,7 +246,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_fina_audit")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "fina_forecast",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -269,8 +270,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date", name=op.f("pk_fina_forecast")),
     )
-    op.create_index(op.f("ix_fina_forecast_ann_date"), "fina_forecast", ["ann_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_fina_forecast_ann_date"), "fina_forecast", ["ann_date"], unique=False)
+    _create_table_if_not_exists(
         "fina_mainbz",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -295,8 +296,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "bz_item", name=op.f("pk_fina_mainbz")),
     )
-    op.create_index(op.f("ix_fina_mainbz_end_date"), "fina_mainbz", ["end_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_fina_mainbz_end_date"), "fina_mainbz", ["end_date"], unique=False)
+    _create_table_if_not_exists(
         "financial_reports",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -333,25 +334,25 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_financial_reports")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         op.f("ix_financial_reports_end_date"),
         "financial_reports",
         ["end_date"],
         unique=False,
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "ix_financial_reports_ts_code_ann_date",
         "financial_reports",
         ["ts_code", "ann_date"],
         unique=False,
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "ix_financial_reports_ann_date",
         "financial_reports",
         ["ann_date"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "index_daily",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -378,8 +379,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_daily")),
     )
-    op.create_index("idx_index_daily_date_code", "index_daily", ["trade_date", "ts_code"])
-    op.create_table(
+    _create_index_if_not_exists("idx_index_daily_date_code", "index_daily", ["trade_date", "ts_code"])
+    _create_table_if_not_exists(
         "index_dailybasic",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -407,7 +408,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_dailybasic")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "index_weight",
         sa.Column("index_code", sa.String(), nullable=False),
         sa.Column("con_code", sa.String(), nullable=False),
@@ -427,8 +428,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("index_code", "con_code", "trade_date", name=op.f("pk_index_weight")),
     )
-    op.create_index(op.f("ix_index_weight_trade_date"), "index_weight", ["trade_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_index_weight_trade_date"), "index_weight", ["trade_date"], unique=False)
+    _create_table_if_not_exists(
         "limit_list",
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -459,7 +460,7 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("trade_date", "ts_code", name=op.f("pk_limit_list")),
     )
     op.create_index(op.f("ix_limit_list_ts_code"), "limit_list", ["ts_code"], unique=False)
-    op.create_table(
+    _create_table_if_not_exists(
         "macro_economy",
         sa.Column("period", sa.Date(), nullable=False),
         sa.Column("m2", sa.Numeric(20, 4), nullable=True),
@@ -478,7 +479,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("period", name=op.f("pk_macro_economy")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "margin_daily",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -501,8 +502,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_margin_daily")),
     )
-    op.create_index(op.f("ix_margin_daily_trade_date"), "margin_daily", ["trade_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_margin_daily_trade_date"), "margin_daily", ["trade_date"], unique=False)
+    _create_table_if_not_exists(
         "market_news",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("content", sa.String(), nullable=True),
@@ -519,9 +520,9 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
         sa.UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_time"),
     )
-    op.create_index(op.f("ix_market_news_source"), "market_news", ["source"], unique=False)
-    op.create_index("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_market_news_source"), "market_news", ["source"], unique=False)
+    _create_index_if_not_exists("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
+    _create_table_if_not_exists(
         "moneyflow_daily",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -557,13 +558,13 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_moneyflow_daily")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "ix_moneyflow_daily_date_code",
         "moneyflow_daily",
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "moneyflow_hsgt",
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("ggt_ss", sa.Numeric(20, 4), nullable=True),
@@ -586,7 +587,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("trade_date", name=op.f("pk_moneyflow_hsgt")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "northbound_holding",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -614,7 +615,7 @@ def _create_all_tables_fresh() -> None:
         ["trade_date"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "pledge_stat",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -638,7 +639,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_pledge_stat")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "repurchase",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("ann_date", sa.Date(), nullable=False),
@@ -663,8 +664,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "ann_date", name=op.f("pk_repurchase")),
     )
-    op.create_index(op.f("ix_repurchase_ann_date"), "repurchase", ["ann_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_repurchase_ann_date"), "repurchase", ["ann_date"], unique=False)
+    _create_table_if_not_exists(
         "screening_history",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("run_id", sa.String(16), nullable=False),
@@ -713,19 +714,19 @@ def _create_all_tables_fresh() -> None:
             name="uq_screening_history_run_code",
         ),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "idx_sh_date_strategy",
         "screening_history",
         ["trade_date", "strategy_name"],
         unique=False,
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "idx_sh_date_code",
         "screening_history",
         ["trade_date", "ts_code"],
         unique=False,
     )
-    op.create_index(
+    _create_index_if_not_exists(
         "idx_sh_run_id",
         "screening_history",
         ["run_id"],
@@ -745,7 +746,7 @@ def _create_all_tables_fresh() -> None:
         op.execute(
             "CREATE INDEX IF NOT EXISTS idx_sh_params_gin ON screening_history USING gin (params_snapshot jsonb_path_ops)"
         )
-    op.create_table(
+    _create_table_if_not_exists(
         "screening_thinking",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("history_id", sa.Integer(), nullable=False),
@@ -760,7 +761,7 @@ def _create_all_tables_fresh() -> None:
             name=op.f("fk_screening_thinking_history_id_screening_history"),
         ),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "shibor_daily",
         sa.Column("date", sa.Date(), nullable=False),
         sa.Column("on", sa.Numeric(12, 4), nullable=True),
@@ -785,7 +786,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("date", name=op.f("pk_shibor_daily")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "stk_holdernumber",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -807,13 +808,13 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_stk_holdernumber")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         op.f("ix_stk_holdernumber_end_date"),
         "stk_holdernumber",
         ["end_date"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "stock_basic",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("symbol", sa.String(), nullable=True),
@@ -838,11 +839,11 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_basic")),
     )
-    op.create_index(op.f("ix_stock_basic_list_date"), "stock_basic", ["list_date"], unique=False)
-    op.create_index(op.f("ix_stock_basic_delist_date"), "stock_basic", ["delist_date"], unique=False)
-    op.create_index("idx_stock_basic_dates", "stock_basic", ["list_date", "delist_date"], unique=False)
-    op.create_index("idx_stock_basic_status", "stock_basic", ["list_status", "list_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_stock_basic_list_date"), "stock_basic", ["list_date"], unique=False)
+    _create_index_if_not_exists(op.f("ix_stock_basic_delist_date"), "stock_basic", ["delist_date"], unique=False)
+    _create_index_if_not_exists("idx_stock_basic_dates", "stock_basic", ["list_date", "delist_date"], unique=False)
+    _create_index_if_not_exists("idx_stock_basic_status", "stock_basic", ["list_status", "list_date"], unique=False)
+    _create_table_if_not_exists(
         "stock_concepts",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("concept_name", sa.String(), nullable=True),
@@ -862,11 +863,11 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("ts_code", "concept_id", name=op.f("pk_stock_concepts")),
     )
 
-    op.create_table(
+    _create_table_if_not_exists(
         "stock_sync_status",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("step4_completed_at", sa.DateTime(), nullable=True),
-        sa.Column("sync_version", sa.Integer(), nullable=True),
+        sa.Column("sync_version", sa.Integer(), server_default="1", nullable=True),
         sa.Column(
             "updated_at",
             sa.DateTime(),
@@ -881,7 +882,7 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_sync_status")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "suspend_d",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("trade_date", sa.Date(), nullable=False),
@@ -901,8 +902,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_suspend_d")),
     )
-    op.create_index(op.f("ix_suspend_d_trade_date"), "suspend_d", ["trade_date"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_suspend_d_trade_date"), "suspend_d", ["trade_date"], unique=False)
+    _create_table_if_not_exists(
         "sync_status",
         sa.Column("table_name", sa.String(), nullable=False),
         sa.Column("last_sync_date", sa.Date(), nullable=True),
@@ -926,13 +927,13 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("table_name", name=op.f("pk_sync_status")),
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "task_history",
         sa.Column("id", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("task_type", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
-        sa.Column("progress", sa.Numeric(5, 2), nullable=True),
+        sa.Column("progress", sa.Numeric(5, 2), server_default="0", nullable=True),
         sa.Column("description", sa.String(), nullable=True),
         sa.Column("error", sa.String(), nullable=True),
         sa.Column("result", sa.String(), nullable=True),
@@ -946,10 +947,12 @@ def _create_all_tables_fresh() -> None:
         sa.Column("completed_at", sa.DateTime(), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_task_history")),
     )
-    op.create_index(op.f("ix_task_history_created_at"), "task_history", ["created_at"], unique=False)
-    op.create_index("idx_task_history_status_created", "task_history", ["status", "created_at"], unique=False)
-    op.create_index("idx_task_history_completed", "task_history", ["completed_at"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_task_history_created_at"), "task_history", ["created_at"], unique=False)
+    _create_index_if_not_exists(
+        "idx_task_history_status_created", "task_history", ["status", "created_at"], unique=False
+    )
+    _create_index_if_not_exists("idx_task_history_completed", "task_history", ["completed_at"], unique=False)
+    _create_table_if_not_exists(
         "top10_holders",
         sa.Column("ts_code", sa.String(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -974,13 +977,13 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "holder_name", name=op.f("pk_top10_holders")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         op.f("ix_top10_holders_holder_name"),
         "top10_holders",
         ["holder_name"],
         unique=False,
     )
-    op.create_table(
+    _create_table_if_not_exists(
         "top_list",
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("ts_code", sa.String(), nullable=False),
@@ -1011,8 +1014,8 @@ def _create_all_tables_fresh() -> None:
         ),
         sa.PrimaryKeyConstraint("trade_date", "ts_code", name=op.f("pk_top_list")),
     )
-    op.create_index(op.f("ix_top_list_ts_code"), "top_list", ["ts_code"], unique=False)
-    op.create_table(
+    _create_index_if_not_exists(op.f("ix_top_list_ts_code"), "top_list", ["ts_code"], unique=False)
+    _create_table_if_not_exists(
         "trade_cal",
         sa.Column("cal_date", sa.Date(), nullable=False),
         sa.Column("exchange", sa.String(), nullable=True),
@@ -1033,7 +1036,7 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("cal_date", name=op.f("pk_trade_cal")),
     )
 
-    op.create_table(
+    _create_table_if_not_exists(
         "app_state",
         sa.Column("key", sa.String(), nullable=False),
         sa.Column("value", sa.String(), nullable=False),
@@ -1046,7 +1049,7 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("key", name=op.f("pk_app_state")),
     )
 
-    op.create_table(
+    _create_table_if_not_exists(
         "backtest_results",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("run_id", sa.String(16), nullable=False),
@@ -1086,109 +1089,18 @@ def _create_all_tables_fresh() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_backtest_results")),
         sa.UniqueConstraint("run_id", name=op.f("uq_backtest_results_run_id")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         op.f("ix_backtest_results_strategy"),
         "backtest_results",
         ["strategy_name"],
         unique=False,
     )
-    op.create_index(
+    _create_index_if_not_exists(
         op.f("ix_backtest_results_date"),
         "backtest_results",
         ["executed_at"],
         unique=False,
     )
-    # ### end Alembic commands ###
-
-
-def _create_table_screening_history() -> None:
-    """Create screening_history and screening_thinking tables (for legacy DBs missing them)."""
-    op.create_table(
-        "screening_history",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("run_id", sa.String(16), nullable=False),
-        sa.Column("trade_date", sa.Date(), nullable=False),
-        sa.Column("strategy_name", sa.String(), nullable=False),
-        sa.Column("ts_code", sa.String(), nullable=False),
-        sa.Column("name", sa.String(), nullable=True),
-        sa.Column("close", sa.Numeric(12, 4), nullable=True),
-        sa.Column("pct_chg", sa.Numeric(8, 4), nullable=True),
-        sa.Column("industry", sa.String(), nullable=True),
-        sa.Column("vol", sa.BigInteger(), nullable=True),
-        sa.Column("amount", sa.Numeric(20, 4), nullable=True),
-        sa.Column("turnover_rate", sa.Numeric(12, 4), nullable=True),
-        sa.Column("pe_ttm", sa.Numeric(12, 4), nullable=True),
-        sa.Column("pb", sa.Numeric(12, 4), nullable=True),
-        sa.Column("ps_ttm", sa.Numeric(12, 4), nullable=True),
-        sa.Column("dv_ttm", sa.Numeric(12, 4), nullable=True),
-        sa.Column("total_mv", sa.Numeric(20, 4), nullable=True),
-        sa.Column("circ_mv", sa.Numeric(20, 4), nullable=True),
-        sa.Column("roe", sa.Numeric(12, 4), nullable=True),
-        sa.Column("grossprofit_margin", sa.Numeric(12, 4), nullable=True),
-        sa.Column("debt_to_assets", sa.Numeric(12, 4), nullable=True),
-        sa.Column("or_yoy", sa.Numeric(12, 4), nullable=True),
-        sa.Column("netprofit_yoy", sa.Numeric(12, 4), nullable=True),
-        sa.Column("t1_price", sa.Numeric(12, 4), nullable=True),
-        sa.Column("t1_pct", sa.Numeric(8, 4), nullable=True),
-        sa.Column("t5_price", sa.Numeric(12, 4), nullable=True),
-        sa.Column("t5_pct", sa.Numeric(8, 4), nullable=True),
-        sa.Column("index_pct", sa.Numeric(8, 4), nullable=True),
-        sa.Column("alpha", sa.Numeric(12, 4), nullable=True),
-        sa.Column("ai_score", sa.Numeric(12, 4), nullable=True),
-        sa.Column("ai_reason", sa.String(), nullable=True),
-        sa.Column("prediction_result", sa.String(), nullable=True),
-        sa.Column("review_status", sa.String(), nullable=True, server_default="PENDING"),
-        sa.Column("params_snapshot", _json_type(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
-            nullable=True,
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_screening_history")),
-        sa.UniqueConstraint(
-            "run_id",
-            "ts_code",
-            name="uq_screening_history_run_code",
-        ),
-    )
-    op.create_index("idx_sh_date_strategy", "screening_history", ["trade_date", "strategy_name"], unique=False)
-    op.create_index("idx_sh_date_code", "screening_history", ["trade_date", "ts_code"], unique=False)
-    op.create_index("idx_sh_run_id", "screening_history", ["run_id"], unique=False)
-    _create_partial_index(
-        "screening_history", "idx_sh_prediction_result", "prediction_result", "prediction_result IS NOT NULL"
-    )
-    _create_partial_index(
-        "screening_history",
-        "idx_sh_pending",
-        "review_status",
-        "review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL",
-    )
-    if _is_postgresql():
-        op.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sh_params_gin ON screening_history USING gin (params_snapshot jsonb_path_ops)"
-        )
-    _create_table_screening_thinking()
-
-
-def _create_table_screening_thinking() -> None:
-    """Create screening_thinking table."""
-    if not _table_exists("screening_thinking"):
-        op.create_table(
-            "screening_thinking",
-            sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-            sa.Column("history_id", sa.Integer(), nullable=False),
-            sa.Column("thinking", sa.String(), nullable=True),
-            sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.func.now()),
-            sa.PrimaryKeyConstraint("id"),
-            sa.UniqueConstraint("history_id", name=op.f("uq_screening_thinking_history_id")),
-            sa.ForeignKeyConstraint(
-                ["history_id"],
-                ["screening_history.id"],
-                ondelete="CASCADE",
-                name=op.f("fk_screening_thinking_history_id_screening_history"),
-            ),
-        )
 
 
 _ALL_EXPECTED_TABLES = [
@@ -1231,141 +1143,75 @@ _ALL_EXPECTED_TABLES = [
 
 
 def upgrade() -> None:
-    """Idempotent upgrade: works for both fresh DBs and pre-fix legacy DBs."""
-    bind = op.get_bind()
-    insp = sa.inspect(bind)
-
-    if not _table_exists("daily_quotes"):
-        _create_all_tables_fresh()
-        return
-
-    existing_tables = set(insp.get_table_names(schema=_target_schema()))
-    missing_tables = [t for t in _ALL_EXPECTED_TABLES if t not in existing_tables]
-    if missing_tables:
-        import logging as _logging
-
-        _logging.getLogger("alembic.runtime.migration").warning(
-            "Legacy DB has daily_quotes but missing tables: %s. "
-            "Consider running 'alembic stamp head' on a fully-initialized DB, "
-            "or create a fresh DB to avoid schema drift.",
-            missing_tables,
-        )
-
-    existing_dq = {c["name"] for c in insp.get_columns("daily_quotes")}
-    for legacy in LEGACY_QFQ_COLS:
-        if legacy in existing_dq:
-            op.drop_column("daily_quotes", legacy)
-
-    if _table_exists("screening_history"):
-        existing_sh = {c["name"] for c in insp.get_columns("screening_history")}
-        for col_name, sa_col in NEW_SH_COLUMNS.items():
-            if col_name not in existing_sh:
-                op.add_column("screening_history", sa_col)
-        if "params_snapshot" not in existing_sh:
-            op.add_column("screening_history", _get_params_snapshot_col())
-        if not _index_exists("screening_history", "idx_sh_pending"):
-            _create_partial_index(
-                "screening_history",
-                "idx_sh_pending",
-                "review_status",
-                "review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL",
-            )
-        if not _index_exists("screening_history", "idx_sh_prediction_result"):
-            _create_partial_index(
-                "screening_history", "idx_sh_prediction_result", "prediction_result", "prediction_result IS NOT NULL"
-            )
-        if _is_postgresql() and not _index_exists("screening_history", "idx_sh_params_gin"):
-            op.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sh_params_gin ON screening_history USING gin (params_snapshot jsonb_path_ops)"
-            )
-    else:
-        _create_table_screening_history()
-
-    _create_table_screening_thinking()
-
-    # Handle market_news constraint migration (legacy → composite unique on content_hash + publish_time)
-    if _table_exists("market_news"):
-        schema = _target_schema()
-        uq_names = {c["name"] for c in insp.get_unique_constraints("market_news", schema=schema)}
-        if "uq_market_news_hash" in uq_names:
-            op.drop_constraint("uq_market_news_hash", "market_news", type_="unique")
-        if "uq_market_news_hash_pub" in uq_names:
-            op.drop_constraint("uq_market_news_hash_pub", "market_news", type_="unique")
-        if "uq_market_news_hash_time" not in uq_names:
-            op.execute("UPDATE market_news SET publish_time = CURRENT_TIMESTAMP WHERE publish_time IS NULL")
-            op.alter_column("market_news", "publish_time", nullable=False)
-            op.create_unique_constraint("uq_market_news_hash_time", "market_news", ["content_hash", "publish_time"])
-        if not _index_exists("market_news", "idx_market_news_pub_source"):
-            op.create_index("idx_market_news_pub_source", "market_news", ["publish_time", "source"], unique=False)
+    """Create all tables for a fresh database."""
+    _create_all_tables()
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index(op.f("ix_backtest_results_date"), table_name="backtest_results")
-    op.drop_index(op.f("ix_backtest_results_strategy"), table_name="backtest_results")
-    op.drop_table("backtest_results")
-    op.drop_table("app_state")
-    op.drop_table("trade_cal")
-    op.drop_index(op.f("ix_top_list_ts_code"), table_name="top_list")
-    op.drop_table("top_list")
-    op.drop_index(op.f("ix_top10_holders_holder_name"), table_name="top10_holders")
-    op.drop_table("top10_holders")
-    op.drop_index(op.f("ix_task_history_created_at"), table_name="task_history")
-    op.drop_index("idx_task_history_completed", table_name="task_history")
-    op.drop_index("idx_task_history_status_created", table_name="task_history")
-    op.drop_table("task_history")
-    op.drop_table("sync_status")
-    op.drop_index(op.f("ix_suspend_d_trade_date"), table_name="suspend_d")
-    op.drop_table("suspend_d")
-    op.drop_table("stock_sync_status")
+    """Drop all tables."""
+    _drop_index_if_exists(op.f("ix_backtest_results_date"), table_name="backtest_results")
+    _drop_index_if_exists(op.f("ix_backtest_results_strategy"), table_name="backtest_results")
+    _drop_table_if_exists("backtest_results")
+    _drop_table_if_exists("app_state")
+    _drop_table_if_exists("trade_cal")
+    _drop_index_if_exists(op.f("ix_top_list_ts_code"), table_name="top_list")
+    _drop_table_if_exists("top_list")
+    _drop_index_if_exists(op.f("ix_top10_holders_holder_name"), table_name="top10_holders")
+    _drop_table_if_exists("top10_holders")
+    _drop_index_if_exists(op.f("ix_task_history_created_at"), table_name="task_history")
+    _drop_index_if_exists("idx_task_history_completed", table_name="task_history")
+    _drop_index_if_exists("idx_task_history_status_created", table_name="task_history")
+    _drop_table_if_exists("task_history")
+    _drop_table_if_exists("sync_status")
+    _drop_index_if_exists(op.f("ix_suspend_d_trade_date"), table_name="suspend_d")
+    _drop_table_if_exists("suspend_d")
+    _drop_table_if_exists("stock_sync_status")
 
-    op.drop_table("stock_concepts")
-    op.drop_index("idx_stock_basic_status", table_name="stock_basic")
-    op.drop_index("idx_stock_basic_dates", table_name="stock_basic")
-    op.drop_index(op.f("ix_stock_basic_delist_date"), table_name="stock_basic")
-    op.drop_index(op.f("ix_stock_basic_list_date"), table_name="stock_basic")
-    op.drop_table("stock_basic")
-    op.drop_index(op.f("ix_stk_holdernumber_end_date"), table_name="stk_holdernumber")
-    op.drop_table("stk_holdernumber")
-    op.drop_table("shibor_daily")
-    op.drop_index("idx_sh_run_id", table_name="screening_history")
-    op.drop_index("idx_sh_date_code", table_name="screening_history")
-    op.drop_index("idx_sh_date_strategy", table_name="screening_history")
-    op.drop_table("screening_thinking")
-    op.drop_table("screening_history")
-    op.drop_index(op.f("ix_repurchase_ann_date"), table_name="repurchase")
-    op.drop_table("repurchase")
-    op.drop_table("pledge_stat")
-    op.drop_index(op.f("ix_northbound_holding_trade_date"), table_name="northbound_holding")
-    op.drop_table("northbound_holding")
-    op.drop_table("moneyflow_hsgt")
-    op.drop_index("ix_moneyflow_daily_date_code", table_name="moneyflow_daily")
-    op.drop_table("moneyflow_daily")
-    op.drop_table("market_news")
-    op.drop_index(op.f("ix_margin_daily_trade_date"), table_name="margin_daily")
-    op.drop_table("margin_daily")
-    op.drop_table("macro_economy")
-    op.drop_index(op.f("ix_limit_list_ts_code"), table_name="limit_list")
-    op.drop_table("limit_list")
-    op.drop_index(op.f("ix_index_weight_trade_date"), table_name="index_weight")
-    op.drop_table("index_weight")
-    op.drop_table("index_dailybasic")
-    op.drop_table("index_daily")
-    op.drop_index("ix_financial_reports_ann_date", table_name="financial_reports")
-    op.drop_index("ix_financial_reports_ts_code_ann_date", table_name="financial_reports")
-    op.drop_index(op.f("ix_financial_reports_end_date"), table_name="financial_reports")
-    op.drop_table("financial_reports")
-    op.drop_index(op.f("ix_fina_mainbz_end_date"), table_name="fina_mainbz")
-    op.drop_table("fina_mainbz")
-    op.drop_index(op.f("ix_fina_forecast_ann_date"), table_name="fina_forecast")
-    op.drop_table("fina_forecast")
-    op.drop_table("fina_audit")
-    op.drop_index(op.f("ix_dividend_ann_date"), table_name="dividend")
-    op.drop_table("dividend")
-    op.drop_index("ix_daily_quotes_date_code", table_name="daily_quotes")
-    op.drop_table("daily_quotes")
-    op.drop_index("ix_daily_indicators_date_code", table_name="daily_indicators")
-    op.drop_table("daily_indicators")
-    op.drop_table("block_trade")
-    # ### end Alembic commands ###
+    _drop_table_if_exists("stock_concepts")
+    _drop_index_if_exists("idx_stock_basic_status", table_name="stock_basic")
+    _drop_index_if_exists("idx_stock_basic_dates", table_name="stock_basic")
+    _drop_index_if_exists(op.f("ix_stock_basic_delist_date"), table_name="stock_basic")
+    _drop_index_if_exists(op.f("ix_stock_basic_list_date"), table_name="stock_basic")
+    _drop_table_if_exists("stock_basic")
+    _drop_index_if_exists(op.f("ix_stk_holdernumber_end_date"), table_name="stk_holdernumber")
+    _drop_table_if_exists("stk_holdernumber")
+    _drop_table_if_exists("shibor_daily")
+    _drop_index_if_exists("idx_sh_run_id", table_name="screening_history")
+    _drop_index_if_exists("idx_sh_date_code", table_name="screening_history")
+    _drop_index_if_exists("idx_sh_date_strategy", table_name="screening_history")
+    _drop_table_if_exists("screening_thinking")
+    _drop_table_if_exists("screening_history")
+    _drop_index_if_exists(op.f("ix_repurchase_ann_date"), table_name="repurchase")
+    _drop_table_if_exists("repurchase")
+    _drop_table_if_exists("pledge_stat")
+    _drop_index_if_exists(op.f("ix_northbound_holding_trade_date"), table_name="northbound_holding")
+    _drop_table_if_exists("northbound_holding")
+    _drop_table_if_exists("moneyflow_hsgt")
+    _drop_index_if_exists("ix_moneyflow_daily_date_code", table_name="moneyflow_daily")
+    _drop_table_if_exists("moneyflow_daily")
+    _drop_table_if_exists("market_news")
+    _drop_index_if_exists(op.f("ix_margin_daily_trade_date"), table_name="margin_daily")
+    _drop_table_if_exists("margin_daily")
+    _drop_table_if_exists("macro_economy")
+    _drop_index_if_exists(op.f("ix_limit_list_ts_code"), table_name="limit_list")
+    _drop_table_if_exists("limit_list")
+    _drop_index_if_exists(op.f("ix_index_weight_trade_date"), table_name="index_weight")
+    _drop_table_if_exists("index_weight")
+    _drop_table_if_exists("index_dailybasic")
+    _drop_table_if_exists("index_daily")
+    _drop_index_if_exists("ix_financial_reports_ann_date", table_name="financial_reports")
+    _drop_index_if_exists("ix_financial_reports_ts_code_ann_date", table_name="financial_reports")
+    _drop_index_if_exists(op.f("ix_financial_reports_end_date"), table_name="financial_reports")
+    _drop_table_if_exists("financial_reports")
+    _drop_index_if_exists(op.f("ix_fina_mainbz_end_date"), table_name="fina_mainbz")
+    _drop_table_if_exists("fina_mainbz")
+    _drop_index_if_exists(op.f("ix_fina_forecast_ann_date"), table_name="fina_forecast")
+    _drop_table_if_exists("fina_forecast")
+    _drop_table_if_exists("fina_audit")
+    _drop_index_if_exists(op.f("ix_dividend_ann_date"), table_name="dividend")
+    _drop_table_if_exists("dividend")
+    _drop_index_if_exists("ix_daily_quotes_date_code", table_name="daily_quotes")
+    _drop_table_if_exists("daily_quotes")
+    _drop_index_if_exists("ix_daily_indicators_date_code", table_name="daily_indicators")
+    _drop_table_if_exists("daily_indicators")
+    _drop_table_if_exists("block_trade")

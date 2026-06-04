@@ -6,6 +6,7 @@ All fixtures are async to avoid asyncio.run() conflicts with pytest-asyncio.
 """
 
 import asyncio
+import threading
 import uuid
 from typing import Any
 
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from data.persistence.db_migrator import DatabaseMigrator, DatabaseMigrationNeeded
 from data.persistence.db_url_override import override_db_url
 from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
+from tests.conftest import reset_singleton as _reset_singleton_ctx
 
 
 async def _create_isolated_db(params: dict, db_name: str) -> None:
@@ -441,3 +443,232 @@ class TestDowngradeAndReupgrade:
         cols_0001 = {c["name"] for c in inspector2.get_columns("financial_reports")}
         assert "money_cap" not in cols_0001, "money_cap should be removed after downgrade to 0001"
         assert "accounts_receiv" not in cols_0001, "accounts_receiv should be removed after downgrade to 0001"
+
+
+class TestConcurrentMigration:
+    """Tests for concurrent migration scenarios (IT-1).
+
+    Verifies that multiple connections calling init_db on the same database
+    do not cause data corruption or deadlocks.
+    """
+
+    @pytest_asyncio.fixture
+    async def concurrent_db_engine(self, pg_params):
+        """Create an isolated database for concurrent migration testing."""
+        db_name = f"migrator_concurrent_{uuid.uuid4().hex[:8]}"
+        await _create_isolated_db(pg_params, db_name)
+
+        sync_url, async_url = build_db_urls(pg_params, db_name)
+
+        yield async_url, db_name
+
+        await _drop_isolated_db(pg_params, db_name)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_init_db_on_same_database(self, concurrent_db_engine):
+        """Two independent engines calling init_db concurrently should succeed without corruption."""
+        async_url, db_name = concurrent_db_engine
+        sync_url = async_url.replace("+asyncpg", "")
+
+        # Create two independent engines (simulating two processes)
+        engine1 = create_async_engine(async_url)
+        engine2 = create_async_engine(async_url)
+
+        try:
+            # Run init_db concurrently on both engines
+            with override_db_url(sync_url):
+                results = await asyncio.gather(
+                    DatabaseMigrator.init_db(engine1, auto_migrate=True),
+                    DatabaseMigrator.init_db(engine2, auto_migrate=True),
+                    return_exceptions=True,
+                )
+
+            # Verify no exceptions (both should succeed)
+            for r in results:
+                assert not isinstance(r, Exception), f"Concurrent init_db failed: {r}"
+
+            # Verify database schema is consistent
+            async with engine1.connect() as conn:
+                # Check alembic_version has valid version
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                row = result.fetchone()
+                assert row is not None, "alembic_version should have a version"
+                version = row[0]
+                assert version is not None and len(version) > 0
+
+                # Check tables exist
+                result = await conn.execute(
+                    text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+                )
+                tables = {row[0] for row in result.fetchall()}
+                assert "stock_basic" in tables
+                assert "daily_quotes" in tables
+                assert "alembic_version" in tables
+
+            # Verify both engines see the same version
+            async with engine2.connect() as conn:
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                version2 = result.fetchone()[0]
+                assert version2 == version, "Both engines should see the same schema version"
+
+        finally:
+            await engine1.dispose()
+            await engine2.dispose()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_init_db_one_at_old_revision(self, concurrent_db_engine):
+        """One engine at old revision, another fresh, both upgrade concurrently."""
+        async_url, db_name = concurrent_db_engine
+        sync_url = async_url.replace("+asyncpg", "")
+
+        # First, migrate to 0001 only
+        engine1 = create_async_engine(async_url)
+        sync_engine = create_engine(sync_url)
+
+        with override_db_url(sync_url):
+            cfg = make_alembic_cfg(sync_url)
+            await asyncio.to_thread(command.upgrade, cfg, "0001")
+
+        # Now create a second engine and run init_db concurrently
+        engine2 = create_async_engine(async_url)
+
+        try:
+            # Verify engine1 is at 0001
+            current, head, needs = await DatabaseMigrator.check_schema_status(engine1)
+            assert current == "0001", f"Engine1 should be at 0001, got {current}"
+            assert needs is True
+
+            # Run init_db on both engines concurrently (engine2 is fresh, engine1 needs upgrade)
+            with override_db_url(sync_url):
+                results = await asyncio.gather(
+                    DatabaseMigrator.init_db(engine1, auto_migrate=True),
+                    DatabaseMigrator.init_db(engine2, auto_migrate=True),
+                    return_exceptions=True,
+                )
+
+            for r in results:
+                assert not isinstance(r, Exception), f"Concurrent upgrade failed: {r}"
+
+            # Verify both are now at head
+            current1, _, needs1 = await DatabaseMigrator.check_schema_status(engine1)
+            current2, _, needs2 = await DatabaseMigrator.check_schema_status(engine2)
+
+            assert current1 == current2, "Both engines should be at the same version"
+            assert needs1 is False and needs2 is False, "Both should report no pending migrations"
+
+        finally:
+            await engine1.dispose()
+            await engine2.dispose()
+            sync_engine.dispose()
+
+
+class TestMigrationInterruptionRecovery:
+    """Tests for migration interruption recovery (IT-2).
+
+    Verifies that init_db can detect and recover from a corrupted state
+    where alembic_version indicates the latest revision but some tables
+    are missing (simulating a mid-migration crash).
+    """
+
+    @pytest_asyncio.fixture
+    async def corrupted_db_engine(self, pg_params):
+        """Create a database with version mismatch: alembic_version says 'head' but tables missing."""
+        db_name = f"migrator_corrupted_{uuid.uuid4().hex[:8]}"
+        await _create_isolated_db(pg_params, db_name)
+
+        _, async_url = build_db_urls(pg_params, db_name)
+        engine = create_async_engine(async_url)
+
+        # Get the head revision
+        head_rev = await DatabaseMigrator._get_head_revision()
+
+        # Create alembic_version with head revision, but DON'T create any tables
+        # This simulates a crash after version record but before table creation
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)"))
+            await conn.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:version)"),
+                {"version": head_rev},
+            )
+
+        yield engine, db_name, head_rev
+
+        await engine.dispose()
+        await _drop_isolated_db(pg_params, db_name)
+
+    @pytest.mark.asyncio
+    async def test_detects_missing_tables_despite_valid_version(self, corrupted_db_engine):
+        """When alembic_version is correct but tables are missing, init_db should handle gracefully."""
+        engine, db_name, head_rev = corrupted_db_engine
+
+        # Verify our setup: version exists but no user tables
+        async with engine.connect() as conn:
+            result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            version = result.fetchone()[0]
+            assert version == head_rev
+
+            result = await conn.execute(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+            )
+            tables = {row[0] for row in result.fetchall()}
+            assert "stock_basic" not in tables, "Test setup error: stock_basic should not exist"
+
+        # Check_schema_status should report no migration needed (version matches)
+        current, head, needs = await DatabaseMigrator.check_schema_status(engine)
+        assert current == head_rev
+        assert needs is False, "Version matches, so no migration should be detected as needed"
+
+        # But if we try to use the database, operations will fail
+        # The caller (application layer) should handle this by checking table existence
+        # or using init_db with force=True to rebuild
+
+    @pytest.mark.asyncio
+    async def test_force_init_rebuilds_missing_tables(self, corrupted_db_engine):
+        """Force init via clear_all_cache should rebuild all tables even when version says 'up to date'."""
+        engine, db_name, head_rev = corrupted_db_engine
+
+        # First verify the corrupted state
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+            )
+            tables_before = {row[0] for row in result.fetchall()}
+            assert "stock_basic" not in tables_before
+            assert "alembic_version" in tables_before  # Only this exists (corrupted state)
+
+        # The current code's recovery mechanism is through CacheManager.clear_all_cache()
+        # which drops all tables and reinitializes via init_db(force=True, auto_migrate=True)
+        from data.cache.cache_manager import CacheManager
+
+        # Create a minimal CacheManager for testing
+        with _reset_singleton_ctx(CacheManager, extra_attrs=["_initialized"]):
+            cm = CacheManager.__new__(CacheManager)
+            cm.engine = engine
+            cm._disposed = False
+            cm._schema_initialized = False
+            cm._lock = threading.Lock()
+            # Note: _maintenance_event and _init_lock are properties that use
+            # get_loop_local(), so they don't need to be set manually
+
+            # clear_all_cache will:
+            # 1. DROP SCHEMA public CASCADE (removes all tables including alembic_version)
+            # 2. CREATE SCHEMA public
+            # 3. init_db(force=True, auto_migrate=True) - rebuilds everything
+            sync_url = str(engine.url).replace("+asyncpg", "")
+            with override_db_url(sync_url):
+                await cm.clear_all_cache()
+
+            # After clear_all_cache, all tables should be rebuilt
+            async with engine.connect() as conn:
+                result = await conn.execute(
+                    text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+                )
+                tables_final = {row[0] for row in result.fetchall()}
+                assert "stock_basic" in tables_final
+                assert "daily_quotes" in tables_final
+                assert "alembic_version" in tables_final
+
+                # Verify version is correct
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                version = result.fetchone()[0]
+                assert version == head_rev

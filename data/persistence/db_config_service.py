@@ -346,14 +346,16 @@ class DatabaseConfigService:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         from data.persistence.db_migrator import DatabaseMigrator
+        from data.persistence.db_url_override import override_db_url
 
         url = cls.build_url(host, port, user, password, database, async_driver=True)
 
         try:
             engine = create_async_engine(url, echo=False)
             try:
-                # Onboarding should automatically create/migrate tables
-                await DatabaseMigrator.init_db(engine, auto_migrate=True)
+                # Ensure Alembic env.py can find the correct database URL
+                with override_db_url(url):
+                    await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
                 logger.info(f"Database migrations completed successfully for '{database}'")
                 return True, I18n.get("db_migrations_success")
@@ -361,7 +363,7 @@ class DatabaseConfigService:
                 await engine.dispose()
         except Exception as e:
             logger.error(f"Failed to run migrations: {e}", exc_info=True)
-            return False, f"Failed to create tables: {str(e)}"
+            return False, f"{type(e).__name__}: {e}"
 
     @classmethod
     async def ensure_tables_exist(
