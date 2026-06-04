@@ -641,7 +641,7 @@
     "db_err_refused": "Cannot connect to database, please ensure database service is running",
     "db_err_network": "Network error, please check network settings",
     "db_err_proxy": "Network adapter/Proxy state changed, try using 127.0.0.1 instead of localhost",
-    "db_err_interrupted": "Connection interrupted. If you recently closed a proxy/VPN, try using 127.0.0.1",
+    "db_err_interrupted": "Connection failed (wrong password, network issue, or proxy problem). Please check and retry",
     "db_err_db_error": "Database error, please check configuration",
     "db_err_unknown": "Connection failed, please check logs for details",
     "db_err_invalid_name": "Invalid database name: '{database}'",

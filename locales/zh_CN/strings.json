@@ -553,7 +553,7 @@
     "db_err_refused": "无法连接数据库，请确认数据库服务已启动",
     "db_err_network": "网络连接异常，请检查网络设置",
     "db_err_proxy": "网络适配器/代理状态变化，建议使用 127.0.0.1 替代 localhost",
-    "db_err_interrupted": "连接中断，若刚关闭代理/VPN属正常现象，建议使用 127.0.0.1",
+    "db_err_interrupted": "连接失败（可能是密码错误、网络中断或代理问题），请检查后重试",
     "db_err_db_error": "数据库错误，请检查配置",
     "db_err_unknown": "连接失败，请查看日志获取详细信息",
     "db_err_invalid_name": "数据库名称无效：'{database}'",
