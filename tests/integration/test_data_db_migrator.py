@@ -6,40 +6,19 @@ All fixtures are async to avoid asyncio.run() conflicts with pytest-asyncio.
 """
 
 import asyncio
-import os
 import uuid
-from pathlib import Path
 from typing import Any
 
 import asyncpg
 import pytest
 import pytest_asyncio
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from data.persistence.db_migrator import DatabaseMigrator, DatabaseMigrationNeeded
 from data.persistence.db_url_override import override_db_url
-
-
-def _get_pg_connection_params() -> dict:
-    """Get PostgreSQL connection parameters from environment or defaults."""
-    host = os.environ.get("TEST_DB_HOST", "localhost")
-    port = int(os.environ.get("TEST_DB_PORT", "5432"))
-    user = os.environ.get("TEST_DB_USER", "postgres")
-    password = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD", "")
-    return {"host": host, "port": port, "user": user, "password": password}
-
-
-def _make_alembic_cfg(db_url: str) -> Config:
-    """Create Alembic config."""
-    project_root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(project_root / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", db_url)
-    cfg.set_main_option("script_location", str(project_root / "alembic"))
-    cfg.attributes["configure_logger"] = False
-    return cfg
+from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
 
 
 async def _create_isolated_db(params: dict, db_name: str) -> None:
@@ -73,19 +52,10 @@ async def _drop_isolated_db(params: dict, db_name: str) -> None:
         await conn.close()
 
 
-def _build_db_urls(params: dict, db_name: str) -> tuple[str, str]:
-    """Build sync and async database URLs from params and db_name."""
-    sync_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-    async_url = (
-        f"postgresql+asyncpg://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-    )
-    return sync_url, async_url
-
-
 @pytest.fixture
 def pg_params():
     """Provide PostgreSQL connection parameters."""
-    return _get_pg_connection_params()
+    return get_pg_connection_params()
 
 
 class TestGetHeadRevision:
@@ -112,7 +82,7 @@ class TestFreshInstall:
 
         await _create_isolated_db(params, db_name)
 
-        _, async_url = _build_db_urls(params, db_name)
+        _, async_url = build_db_urls(params, db_name)
         engine = create_async_engine(async_url)
 
         yield engine, db_name
@@ -190,11 +160,11 @@ async def _migrated_db_fixture(
     db_name = f"{db_name_prefix}_{uuid.uuid4().hex[:8]}"
     await _create_isolated_db(params, db_name)
 
-    sync_url, async_url = _build_db_urls(params, db_name)
+    sync_url, async_url = build_db_urls(params, db_name)
     sync_engine = create_engine(sync_url)
 
     with override_db_url(sync_url):
-        cfg = _make_alembic_cfg(sync_url)
+        cfg = make_alembic_cfg(sync_url)
         await asyncio.to_thread(command.upgrade, cfg, target_revision)
 
     async_engine = create_async_engine(async_url)
@@ -253,7 +223,7 @@ class TestCheckSchemaStatus:
         db_name = f"migrator_empty_status_{uuid.uuid4().hex[:8]}"
         await _create_isolated_db(pg_params, db_name)
 
-        _, async_url = _build_db_urls(pg_params, db_name)
+        _, async_url = build_db_urls(pg_params, db_name)
         engine = create_async_engine(async_url)
 
         yield engine, db_name
@@ -388,7 +358,7 @@ class TestDowngradeAndReupgrade:
         with override_db_url(sync_db_url):
 
             def _do_downgrade_base():
-                cfg = _make_alembic_cfg(sync_db_url)
+                cfg = make_alembic_cfg(sync_db_url)
                 command.downgrade(cfg, "base")
 
             await asyncio.to_thread(_do_downgrade_base)
@@ -410,7 +380,7 @@ class TestDowngradeAndReupgrade:
         with override_db_url(sync_db_url):
 
             def _do_downgrade():
-                cfg = _make_alembic_cfg(sync_db_url)
+                cfg = make_alembic_cfg(sync_db_url)
                 command.downgrade(cfg, "base")
 
             await asyncio.to_thread(_do_downgrade)
@@ -419,7 +389,7 @@ class TestDowngradeAndReupgrade:
         with override_db_url(sync_db_url):
 
             def _do_upgrade():
-                cfg = _make_alembic_cfg(sync_db_url)
+                cfg = make_alembic_cfg(sync_db_url)
                 command.upgrade(cfg, "head")
 
             await asyncio.to_thread(_do_upgrade)
@@ -461,7 +431,7 @@ class TestDowngradeAndReupgrade:
         with override_db_url(sync_db_url):
 
             def _do_downgrade():
-                cfg = _make_alembic_cfg(sync_db_url)
+                cfg = make_alembic_cfg(sync_db_url)
                 command.downgrade(cfg, "0001")
 
             await asyncio.to_thread(_do_downgrade)

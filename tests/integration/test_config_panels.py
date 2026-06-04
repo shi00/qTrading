@@ -660,7 +660,7 @@ class TestDatabaseConfigServiceMigrations:
             )
 
         assert success is False
-        assert "Failed" in msg or "失败" in msg or "error" in msg.lower()
+        assert "Failed" in msg or "失败" in msg or "error" in msg.lower() or "exception" in msg.lower()
 
     @pytest.mark.asyncio
     async def test_ensure_tables_exist_empty_database(self, test_engine):

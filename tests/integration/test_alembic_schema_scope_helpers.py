@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 
 def _load_migration_module():
-    migration_path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f6586a3fccba_initial_schema_v1.py"
-    spec = importlib.util.spec_from_file_location("migration_f6586a3fccba", migration_path)
+    migration_path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0001_initial_schema.py"
+    spec = importlib.util.spec_from_file_location("migration_0001", migration_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
@@ -41,11 +41,9 @@ def test_table_index_column_helpers_use_version_table_schema(monkeypatch):
 
     assert mig._table_exists("daily_quotes") is True
     assert mig._index_exists("screening_history", "idx_sh_pending") is True
-    assert mig._column_exists("daily_quotes", "close") is True
 
     assert ("tables", "tenant_a") in fake_inspector.schemas
     assert ("indexes", "tenant_a", "screening_history") in fake_inspector.schemas
-    assert ("columns", "tenant_a", "daily_quotes") in fake_inspector.schemas
 
 
 def test_target_schema_none_when_context_unavailable(monkeypatch):

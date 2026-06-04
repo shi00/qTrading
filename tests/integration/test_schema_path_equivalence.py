@@ -7,39 +7,18 @@
 """
 
 import asyncio
-import os
 import uuid
-from pathlib import Path
 
 import asyncpg
 import pytest
 import pytest_asyncio
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, inspect as sa_inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.db_migrator import DatabaseMigrator
 from data.persistence.db_url_override import override_db_url
-
-
-def _get_pg_connection_params() -> dict:
-    """从环境变量获取 PostgreSQL 连接参数。"""
-    host = os.environ.get("TEST_DB_HOST", "localhost")
-    port = int(os.environ.get("TEST_DB_PORT", "5432"))
-    user = os.environ.get("TEST_DB_USER", "postgres")
-    password = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD", "")
-    return {"host": host, "port": port, "user": user, "password": password}
-
-
-def _make_alembic_cfg(db_url: str) -> Config:
-    """创建 Alembic 配置。"""
-    project_root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(project_root / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", db_url)
-    cfg.set_main_option("script_location", str(project_root / "alembic"))
-    cfg.attributes["configure_logger"] = False
-    return cfg
+from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
 
 
 def _reflect_schema(sync_db_url: str) -> dict[str, dict[str, str]]:
@@ -64,7 +43,7 @@ def _reflect_schema(sync_db_url: str) -> dict[str, dict[str, str]]:
 @pytest.fixture
 def pg_params():
     """提供 PostgreSQL 连接参数。"""
-    return _get_pg_connection_params()
+    return get_pg_connection_params()
 
 
 class TestSchemaPathEquivalence:
@@ -86,10 +65,7 @@ class TestSchemaPathEquivalence:
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
 
-        async_db_url = (
-            f"postgresql+asyncpg://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-        )
-        sync_db_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+        sync_db_url, async_db_url = build_db_urls(params, db_name)
 
         engine = create_async_engine(async_db_url)
 
@@ -126,11 +102,11 @@ class TestSchemaPathEquivalence:
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
 
-        sync_db_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+        sync_db_url, _ = build_db_urls(params, db_name)
 
         # 路径 B: 直接使用 Alembic upgrade
         with override_db_url(sync_db_url):
-            cfg = _make_alembic_cfg(sync_db_url)
+            cfg = make_alembic_cfg(sync_db_url)
             await asyncio.to_thread(command.upgrade, cfg, "head")
 
         yield sync_db_url

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -63,8 +65,9 @@ class TestGetAlembicConfig:
 
     def test_returns_config_with_correct_paths(self):
         cfg = DatabaseMigrator._get_alembic_config()
-        assert cfg.get_main_option("script_location") is not None
-        assert "alembic" in cfg.get_main_option("script_location")
+        script_location = cfg.get_main_option("script_location")
+        assert script_location is not None
+        assert "alembic" in script_location
 
     def test_config_file_name_set(self):
         cfg = DatabaseMigrator._get_alembic_config()
@@ -478,3 +481,42 @@ class TestRunAlembicUpgradePostVerification:
             with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0002")):
                 with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
                     await DatabaseMigrator._run_alembic_upgrade(mock_engine)
+
+
+class TestRunAlembicUpgradeCancelledError:
+    """Tests for CancelledError propagation in _run_alembic_upgrade (R2 compliance).
+
+    R2: CancelledError must propagate for graceful shutdown.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """CancelledError must propagate for graceful shutdown."""
+        mock_engine = MagicMock()
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+            mock_instance = MagicMock()
+            mock_tp.return_value = mock_instance
+            # Simulate CancelledError from run_async
+            mock_instance.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+
+            with pytest.raises(asyncio.CancelledError):
+                await DatabaseMigrator._run_alembic_upgrade(mock_engine)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_logs_warning(self):
+        """CancelledError should log a warning before propagating."""
+        mock_engine = MagicMock()
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+            mock_instance = MagicMock()
+            mock_tp.return_value = mock_instance
+            mock_instance.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+
+            with patch("data.persistence.db_migrator.logger") as mock_logger:
+                with pytest.raises(asyncio.CancelledError):
+                    await DatabaseMigrator._run_alembic_upgrade(mock_engine)
+
+                # Verify warning was logged
+                mock_logger.warning.assert_called_once()
+                assert "cancelled" in mock_logger.warning.call_args[0][0].lower()

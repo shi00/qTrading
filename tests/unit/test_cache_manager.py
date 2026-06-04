@@ -219,6 +219,43 @@ class TestCacheManagerInitDb:
             # 允许后续 init_db() 重试
             assert mgr._schema_initialized is False
 
+    @pytest.mark.asyncio
+    async def test_init_db_cancelled_error_propagates(self):
+        """CancelledError must propagate for graceful shutdown (R2 compliance)."""
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+        mock_lock = AsyncMock()
+        mock_lock.__aenter__ = AsyncMock(return_value=None)
+        mock_lock.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError):
+                await mgr.init_db(force=True)
+
+    @pytest.mark.asyncio
+    async def test_init_db_cancelled_error_logs_warning(self):
+        """CancelledError should log a warning before propagating."""
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+        mock_lock = AsyncMock()
+        mock_lock.__aenter__ = AsyncMock(return_value=None)
+        mock_lock.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+            patch("data.cache.cache_manager.logger") as mock_logger,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError):
+                await mgr.init_db(force=True)
+
+            # Verify warning was logged
+            mock_logger.warning.assert_called_once()
+            assert "cancelled" in mock_logger.warning.call_args[0][0].lower()
+
 
 class TestCacheManagerClose:
     @pytest.mark.asyncio
