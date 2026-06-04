@@ -215,6 +215,8 @@ class DatabaseConfigService:
                         )
                     except (asyncpg.exceptions.PostgresError, TimeoutError, OSError) as verify_err:
                         # 二次验证也失败（含 ConnectionDoesNotExistError = 密码错误），按认证错误处理
+                        # 注意：TimeoutError/OSError 可能是瞬态网络问题，但第一次连接已证明网络可达，
+                        # 所以大概率是认证问题；返回 AUTHENTICATION_ERROR 比误判 DATABASE_NOT_FOUND 更安全
                         logger.warning(
                             "[DBConfigService] Auth verification failed for user '%s'@%s:%s: %s",
                             user,
