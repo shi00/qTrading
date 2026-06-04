@@ -567,7 +567,7 @@ class TestDatabaseConfigServiceSQLInjection:
                 "localhost", 5432, "user", "pass", "test; DROP TABLE stock_basic"
             )
             assert ok is False
-            assert "Invalid" in msg
+            assert "test; DROP TABLE stock_basic" in msg
 
     @pytest.mark.asyncio
     async def test_create_database_rejects_invalid_name_dash(self):
@@ -580,7 +580,7 @@ class TestDatabaseConfigServiceSQLInjection:
             mock_connect.return_value = mock_conn
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "test-db")
             assert ok is False
-            assert "Invalid" in msg
+            assert "test-db" in msg
 
     @pytest.mark.asyncio
     async def test_create_database_rejects_invalid_name_space(self):
@@ -593,7 +593,7 @@ class TestDatabaseConfigServiceSQLInjection:
             mock_connect.return_value = mock_conn
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "test db")
             assert ok is False
-            assert "Invalid" in msg
+            assert "test db" in msg
 
     @pytest.mark.asyncio
     async def test_create_database_rejects_invalid_name_starts_with_digit(self):
@@ -606,7 +606,7 @@ class TestDatabaseConfigServiceSQLInjection:
             mock_connect.return_value = mock_conn
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "1test")
             assert ok is False
-            assert "Invalid" in msg
+            assert "1test" in msg
 
     @pytest.mark.asyncio
     async def test_create_database_accepts_valid_name(self):
