@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import asyncpg
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from data.persistence.db_migrator import (
@@ -100,60 +101,61 @@ class TestCheckSchemaStatus:
 
 
 class TestInitDbFreshDatabase:
-    """Tests for fresh database initialization using metadata.create_all()."""
+    """Tests for fresh database initialization through Alembic."""
 
     @pytest.mark.asyncio
-    async def test_fresh_database_creates_tables_and_records_version(self):
-        """Fresh database (no alembic_version) should use metadata.create_all() and record version in single transaction."""
+    async def test_fresh_database_runs_alembic_upgrade(self):
+        """Fresh database (no alembic_version) should run Alembic from base to head."""
         mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.run_sync = AsyncMock(return_value=None)
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_conn.execute = AsyncMock(return_value=None)
-        mock_engine.begin = MagicMock(return_value=mock_conn)
 
         with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=None)):
-            with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
-                with patch("data.persistence.db_migrator.Base"):
-                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+            with patch.object(DatabaseMigrator, "_run_alembic_upgrade", AsyncMock(return_value=None)) as mock_upgrade:
+                await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
-                    # Verify metadata.create_all was called
-                    assert mock_conn.run_sync.call_count >= 1
-                    # Verify version was recorded in same transaction (CREATE TABLE + UPSERT)
-                    assert mock_conn.execute.call_count >= 2
+                mock_upgrade.assert_awaited_once_with(mock_engine)
 
     @pytest.mark.asyncio
-    async def test_fresh_database_uses_upsert_not_delete_insert(self):
-        """Fresh database should use ON CONFLICT UPSERT, not DELETE+INSERT."""
+    async def test_fresh_database_does_not_require_auto_migrate_flag(self):
+        """Fresh database creation is required bootstrap work even when auto_migrate is disabled."""
         mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.run_sync = AsyncMock(return_value=None)
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_conn.execute = AsyncMock(return_value=None)
-        mock_engine.begin = MagicMock(return_value=mock_conn)
 
         with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=None)):
-            with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
-                with patch("data.persistence.db_migrator.Base"):
-                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+            with patch.object(DatabaseMigrator, "_run_alembic_upgrade", AsyncMock(return_value=None)) as mock_upgrade:
+                await DatabaseMigrator.init_db(mock_engine, auto_migrate=False)
 
-                    # Verify no DELETE FROM alembic_version was called
-                    for call in mock_conn.execute.call_args_list:
-                        args, kwargs = call
-                        sql_str = str(args[0])
-                        assert "DELETE FROM alembic_version" not in sql_str
+                mock_upgrade.assert_awaited_once_with(mock_engine)
 
-                    # Verify UPSERT was used
-                    upsert_found = False
-                    for call in mock_conn.execute.call_args_list:
-                        args, kwargs = call
-                        sql_str = str(args[0])
-                        if "ON CONFLICT" in sql_str and "INSERT" in sql_str:
-                            upsert_found = True
-                            break
-                    assert upsert_found, "Should use ON CONFLICT UPSERT"
+
+class TestSyncDatabaseUrl:
+    def test_converts_asyncpg_url_to_sync_url(self):
+        mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/app_db"
+
+        result = DatabaseMigrator._get_sync_database_url(mock_engine)
+
+        assert result == "postgresql://user:pass@localhost:5432/app_db"
+
+    def test_converts_sqlalchemy_url_without_hiding_password(self):
+        mock_engine = MagicMock()
+        mock_engine.url = URL.create(
+            "postgresql+asyncpg",
+            username="user",
+            password="secret",
+            host="localhost",
+            port=5432,
+            database="app_db",
+        )
+
+        result = DatabaseMigrator._get_sync_database_url(mock_engine)
+
+        assert result == "postgresql://user:secret@localhost:5432/app_db"
+
+    def test_raises_when_engine_has_no_url(self):
+        mock_engine = MagicMock()
+        del mock_engine.url
+
+        with pytest.raises(RuntimeError, match="does not expose a URL"):
+            DatabaseMigrator._get_sync_database_url(mock_engine)
 
 
 class TestInitDbExistingDatabase:
@@ -337,66 +339,36 @@ class TestDatabaseMigratorGetRevision:
         assert OSError in _CONNECTION_EXCEPTIONS
 
 
-class TestFreshDbRecordsHeadRevision:
-    """Tests for fresh database initialization with dynamic head revision."""
+class TestRunAlembicUpgradeConfig:
+    """Tests for Alembic URL binding."""
 
     @pytest.mark.asyncio
-    async def test_fresh_db_records_head_revision(self):
-        """Fresh database should record the current Alembic head revision."""
+    async def test_upgrade_passes_engine_url_to_alembic_config(self):
         mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.run_sync = AsyncMock(return_value=None)
-        mock_conn.execute = AsyncMock(return_value=None)
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=mock_conn)
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/target_db"
+        captured_cfg = MagicMock()
+        captured_cfg.attributes = {}  # Use real dict to allow __setitem__/__getitem__ to work
 
-        with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")) as mock_get_head:
-            with patch("data.persistence.db_migrator.Base"):
-                await DatabaseMigrator._init_fresh_database(mock_engine)
+        async def run_task(_task_type, func):
+            func()
 
-                # Verify _get_head_revision was called
-                mock_get_head.assert_called_once()
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+            mock_instance = MagicMock()
+            mock_tp.return_value = mock_instance
+            mock_instance.run_async = AsyncMock(side_effect=run_task)
 
-    @pytest.mark.asyncio
-    async def test_fresh_db_handles_empty_head_revision(self):
-        """Fresh database should handle empty head revision gracefully."""
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.run_sync = AsyncMock(return_value=None)
-        mock_conn.execute = AsyncMock(return_value=None)
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=mock_conn)
+            with patch.object(DatabaseMigrator, "_get_alembic_config", return_value=captured_cfg):
+                with patch("data.persistence.db_migrator.command.upgrade") as mock_upgrade:
+                    with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0002")):
+                        with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
+                            await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
-        with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="")) as mock_get_head:
-            with patch("data.persistence.db_migrator.Base"):
-                await DatabaseMigrator._init_fresh_database(mock_engine)
-
-                # Should record empty string as version (edge case)
-                mock_get_head.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_fresh_db_uses_single_transaction(self):
-        """Fresh database should create tables and record version in a single transaction."""
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        mock_conn.run_sync = AsyncMock(return_value=None)
-        mock_conn.execute = AsyncMock(return_value=None)
-        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_conn.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=mock_conn)
-
-        with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
-            with patch("data.persistence.db_migrator.Base"):
-                await DatabaseMigrator._init_fresh_database(mock_engine)
-
-                # engine.begin() should be called exactly once (single transaction)
-                assert mock_engine.begin.call_count == 1
-
-                # Both run_sync (create_all) and execute (version) in same transaction
-                assert mock_conn.run_sync.call_count >= 1
-                assert mock_conn.execute.call_count >= 2  # CREATE TABLE + UPSERT
+        captured_cfg.set_main_option.assert_called_once_with(
+            "sqlalchemy.url",
+            "postgresql://user:pass@localhost:5432/target_db",
+        )
+        assert captured_cfg.attributes["database_url"] == "postgresql://user:pass@localhost:5432/target_db"
+        mock_upgrade.assert_called_once_with(captured_cfg, "head")
 
 
 class TestRunAlembicUpgradeErrorClassification:
@@ -406,6 +378,7 @@ class TestRunAlembicUpgradeErrorClassification:
     async def test_upgrade_failure_uses_error_classifier(self):
         """Migration failure should use classify_error and classify_severity."""
         mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
             with patch.object(
@@ -441,6 +414,7 @@ class TestRunAlembicUpgradePostVerification:
     async def test_upgrade_raises_on_version_mismatch(self):
         """If upgrade completes but version doesn't match head, raise RuntimeError."""
         mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
             mock_instance = MagicMock()
@@ -456,6 +430,7 @@ class TestRunAlembicUpgradePostVerification:
     async def test_upgrade_warns_on_none_revision(self):
         """If revision is None after upgrade, log a warning (not crash)."""
         mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
             mock_instance = MagicMock()
@@ -472,6 +447,7 @@ class TestRunAlembicUpgradePostVerification:
     async def test_upgrade_succeeds_when_version_matches_head(self):
         """If upgrade completes and version matches head, no error."""
         mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
             mock_instance = MagicMock()
@@ -493,6 +469,7 @@ class TestRunAlembicUpgradeCancelledError:
     async def test_cancelled_error_propagates(self):
         """CancelledError must propagate for graceful shutdown."""
         mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
             mock_instance = MagicMock()
@@ -507,6 +484,7 @@ class TestRunAlembicUpgradeCancelledError:
     async def test_cancelled_error_logs_warning(self):
         """CancelledError should log a warning before propagating."""
         mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
             mock_instance = MagicMock()

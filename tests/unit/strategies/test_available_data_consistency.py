@@ -1024,6 +1024,52 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             labels_without = mock_build.call_args.args[0]
             assert "ai_label_valuation" not in labels_without
 
+            await service.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                financials_text=I18n.get("ai_financial_insufficient"),
+                financial_labels=["ai_label_valuation"],
+            )
+            labels_sentinel = mock_build.call_args.args[0]
+            assert "ai_label_valuation" not in labels_sentinel
+
+    @pytest.mark.asyncio
+    async def test_financial_sentinel_not_injected_into_prompt(self):
+        with (
+            patch.object(AIService, "_chat_completion_with_failover", new_callable=AsyncMock) as mock_llm,
+            patch.object(AIService, "is_cloud_available", return_value=True),
+        ):
+            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+
+            service = AIService.__new__(AIService)
+            service._initialized = True
+
+            await service.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                financials_text=I18n.get("ai_financial_insufficient"),
+                financial_labels=["ai_label_valuation"],
+            )
+            messages = mock_llm.call_args.args[0]
+            user_content = next(m["content"] for m in messages if m["role"] == "user")
+            assert "<financials>" not in user_content
+            assert I18n.get("ai_label_valuation") not in user_content
+
+            mock_llm.reset_mock()
+            await service.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                financials_text=I18n.get("ai_financial_fetch_failed"),
+                financial_labels=["ai_label_valuation"],
+            )
+            messages2 = mock_llm.call_args.args[0]
+            user_content2 = next(m["content"] for m in messages2 if m["role"] == "user")
+            assert "<financials>" not in user_content2
+            assert I18n.get("ai_label_valuation") not in user_content2
+
     @pytest.mark.asyncio
     async def test_capital_labels_conditional(self):
         with (

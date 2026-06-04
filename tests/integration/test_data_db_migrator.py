@@ -181,6 +181,47 @@ async def _cleanup_migrated_db(params: dict, async_engine: AsyncEngine, sync_eng
     await _drop_isolated_db(params, db_name)
 
 
+class TestEngineBoundMigration:
+    """Tests that application migrations use the checked engine URL."""
+
+    @pytest.mark.asyncio
+    async def test_init_db_uses_engine_url_even_when_config_points_elsewhere(self, pg_params):
+        """init_db should migrate the engine database, not a URL resolved from ambient config."""
+        target_db = f"migrator_target_{uuid.uuid4().hex[:8]}"
+        wrong_db = f"migrator_wrong_{uuid.uuid4().hex[:8]}"
+        await _create_isolated_db(pg_params, target_db)
+        await _create_isolated_db(pg_params, wrong_db)
+
+        _, target_async_url = build_db_urls(pg_params, target_db)
+        wrong_sync_url, _ = build_db_urls(pg_params, wrong_db)
+        engine = create_async_engine(target_async_url)
+
+        try:
+            with override_db_url(wrong_sync_url):
+                await DatabaseMigrator.init_db(engine, auto_migrate=True)
+
+            async with engine.connect() as conn:
+                result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+                target_version = result.fetchone()
+                assert target_version is not None
+
+            wrong_engine = create_engine(wrong_sync_url)
+            try:
+                with wrong_engine.connect() as conn:
+                    result = conn.execute(
+                        text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+                    )
+                    wrong_tables = {row[0] for row in result.fetchall()}
+                assert "alembic_version" not in wrong_tables
+                assert "stock_basic" not in wrong_tables
+            finally:
+                wrong_engine.dispose()
+        finally:
+            await engine.dispose()
+            await _drop_isolated_db(pg_params, target_db)
+            await _drop_isolated_db(pg_params, wrong_db)
+
+
 class TestUpToDateSchema:
     """Tests for database that is already at latest schema version."""
 
@@ -290,10 +331,8 @@ class TestIncrementalUpgrade:
         assert "money_cap" not in cols_0001, "money_cap should not exist at revision 0001"
         assert "accounts_receiv" not in cols_0001, "accounts_receiv should not exist at revision 0001"
 
-        # Run init_db with auto_migrate=True to trigger upgrade
-        # override_db_url 确保 env.py 的 get_database_url() 返回正确的 URL
-        with override_db_url(sync_db_url):
-            await DatabaseMigrator.init_db(engine, auto_migrate=True)
+        # Run init_db with auto_migrate=True to trigger upgrade.
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         # Verify version is now at head
         new_current, new_head, new_needs = await DatabaseMigrator.check_schema_status(engine)
@@ -468,20 +507,18 @@ class TestConcurrentMigration:
     async def test_concurrent_init_db_on_same_database(self, concurrent_db_engine):
         """Two independent engines calling init_db concurrently should succeed without corruption."""
         async_url, db_name = concurrent_db_engine
-        sync_url = async_url.replace("+asyncpg", "")
 
         # Create two independent engines (simulating two processes)
         engine1 = create_async_engine(async_url)
         engine2 = create_async_engine(async_url)
 
         try:
-            # Run init_db concurrently on both engines
-            with override_db_url(sync_url):
-                results = await asyncio.gather(
-                    DatabaseMigrator.init_db(engine1, auto_migrate=True),
-                    DatabaseMigrator.init_db(engine2, auto_migrate=True),
-                    return_exceptions=True,
-                )
+            # Run init_db concurrently on both engines.
+            results = await asyncio.gather(
+                DatabaseMigrator.init_db(engine1, auto_migrate=True),
+                DatabaseMigrator.init_db(engine2, auto_migrate=True),
+                return_exceptions=True,
+            )
 
             # Verify no exceptions (both should succeed)
             for r in results:
@@ -538,13 +575,12 @@ class TestConcurrentMigration:
             assert current == "0001", f"Engine1 should be at 0001, got {current}"
             assert needs is True
 
-            # Run init_db on both engines concurrently (engine2 is fresh, engine1 needs upgrade)
-            with override_db_url(sync_url):
-                results = await asyncio.gather(
-                    DatabaseMigrator.init_db(engine1, auto_migrate=True),
-                    DatabaseMigrator.init_db(engine2, auto_migrate=True),
-                    return_exceptions=True,
-                )
+            # Run init_db on both engines concurrently.
+            results = await asyncio.gather(
+                DatabaseMigrator.init_db(engine1, auto_migrate=True),
+                DatabaseMigrator.init_db(engine2, auto_migrate=True),
+                return_exceptions=True,
+            )
 
             for r in results:
                 assert not isinstance(r, Exception), f"Concurrent upgrade failed: {r}"

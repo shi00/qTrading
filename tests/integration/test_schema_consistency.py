@@ -277,8 +277,8 @@ class TestFreshDatabaseInitialization:
             db_url = f"postgresql+asyncpg://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
             schema_engine = create_async_engine(db_url)
 
-            # Initialize fresh database
-            await DatabaseMigrator._init_fresh_database(schema_engine)
+            # Initialize fresh database via init_db (handles fresh DB detection internally)
+            await DatabaseMigrator.init_db(schema_engine, auto_migrate=True)
 
             # Get expected head revision
             head_rev = await DatabaseMigrator._get_head_revision()
