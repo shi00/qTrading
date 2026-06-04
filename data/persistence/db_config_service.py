@@ -214,19 +214,20 @@ class DatabaseConfigService:
                             message=I18n.get("db_err_auth"),
                         )
                     except (asyncpg.exceptions.PostgresError, TimeoutError, OSError) as verify_err:
-                        # 二次验证也失败（含 ConnectionDoesNotExistError = 密码错误），按认证错误处理
-                        # 注意：TimeoutError/OSError 可能是瞬态网络问题，但第一次连接已证明网络可达，
-                        # 所以大概率是认证问题；返回 AUTHENTICATION_ERROR 比误判 DATABASE_NOT_FOUND 更安全
+                        # 二次验证也失败，无法确定是密码错误还是瞬态连接问题
+                        # asyncpg 在 Windows 上对密码错误和瞬态连接问题都抛 ConnectionDoesNotExistError，
+                        # 无法区分。返回 CONNECTION_ERROR 并建议用户重试，避免误判 AUTHENTICATION_ERROR
+                        # 导致用户困惑（密码正确却提示认证失败）
                         logger.warning(
-                            "[DBConfigService] Auth verification failed for user '%s'@%s:%s: %s",
+                            "[DBConfigService] Verification connection failed for user '%s'@%s:%s: %s",
                             user,
                             host,
                             port,
                             verify_err,
                         )
                         return ConnectionResult(
-                            status=ConnectionStatus.AUTHENTICATION_ERROR,
-                            message=I18n.get("db_err_auth"),
+                            status=ConnectionStatus.CONNECTION_ERROR,
+                            message=I18n.get("db_err_interrupted"),
                         )
 
                 # target_db == "postgres"，无法二次验证，按认证错误处理
