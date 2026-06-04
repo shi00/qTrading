@@ -26,12 +26,19 @@ alembic_config = context.config
 def get_database_url() -> str:
     """
     Get database URL from multiple sources.
-    Priority: ConfigHandler.get_db_url() > config.DB_URL > environment variable
+    Priority: Alembic config/attributes > ConfigHandler.get_db_url() > config.DB_URL > environment variable
 
-    This matches CacheManager._get_connection_string() priority to ensure
-    both modules connect to the same database when the user configures
-    via the onboarding wizard (stored in ConfigHandler).
+    This lets application code bind migrations to the same engine it has already
+    checked, while keeping CLI Alembic and onboarding configuration working.
     """
+    attr_url = alembic_config.attributes.get("database_url")
+    if attr_url:
+        return attr_url
+
+    configured_url = alembic_config.get_main_option("sqlalchemy.url")
+    if configured_url and configured_url != "driver://user:pass@localhost/dbname":
+        return configured_url
+
     try:
         from utils.config_handler import ConfigHandler
 
@@ -49,7 +56,7 @@ def get_database_url() -> str:
         return url
 
     raise ValueError(
-        "🛑 Database URL is not configured.\n"
+        "Database URL is not configured.\n"
         "Please run the astock UI wizard to configure PostgreSQL, "
         "or set 'DATABASE_URL' environment variable manually to run Alembic."
     )

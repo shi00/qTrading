@@ -2,23 +2,24 @@
 Database Migration Module.
 
 Encapsulates schema initialization and migration logic.
-For fresh installations, uses SQLAlchemy metadata.create_all() for simplicity.
-For upgrades, delegates to Alembic for version-controlled migrations.
+All schema creation and upgrades go through Alembic so fresh installs and
+incremental upgrades use the same version-controlled DDL path.
 """
 
 import asyncio
 import logging
 import os
+import threading
 import typing
 
 import asyncpg
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
-from data.persistence.models import Base
 from utils.error_classifier import classify_error, classify_severity
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -51,11 +52,12 @@ class DatabaseMigrationNeeded(Exception):
 class DatabaseMigrator:
     """Handles database schema initialization and migration.
 
-    For fresh installations (no alembic_version table), uses SQLAlchemy
-    metadata.create_all() for fast schema creation, then records the version.
-
-    For existing databases needing upgrades, delegates to Alembic.
+    For fresh installations (no alembic_version table), runs Alembic from
+    base to head. Existing databases with pending revisions also run Alembic
+    to head.
     """
+
+    _alembic_lock = threading.Lock()
 
     @classmethod
     def _get_alembic_config(cls) -> Config:
@@ -84,11 +86,8 @@ class DatabaseMigrator:
     async def init_db(cls, engine: typing.Any, auto_migrate: bool | None = None):
         """Initialize and optionally upgrade database schema.
 
-        For fresh databases, creates all tables via SQLAlchemy metadata
-        and records the schema version.
-
-        For existing databases, checks if migration is needed and optionally
-        runs Alembic upgrade.
+        For fresh databases and existing databases with pending revisions,
+        runs Alembic upgrade to head.
 
         Args:
             engine: SQLAlchemy async engine instance
@@ -105,9 +104,9 @@ class DatabaseMigrator:
 
         current_rev = await cls._get_current_revision(engine)
 
-        # Fresh database: no alembic_version table
+        # Fresh database: run the full Alembic chain from base to head.
         if current_rev is None:
-            await cls._init_fresh_database(engine)
+            await cls._run_alembic_upgrade(engine)
             return
 
         # Existing database: check for pending migrations
@@ -129,76 +128,17 @@ class DatabaseMigrator:
         await cls._run_alembic_upgrade(engine)
 
     @classmethod
-    async def _init_fresh_database(cls, engine: typing.Any) -> None:
-        """Initialize a fresh database using SQLAlchemy metadata.
+    def _get_sync_database_url(cls, engine: typing.Any) -> str:
+        """Build a sync SQLAlchemy URL for Alembic from the checked async engine."""
+        engine_url = getattr(engine, "url", None)
+        if engine_url is None:
+            raise RuntimeError("Database engine does not expose a URL for Alembic migration.")
 
-        Creates all tables and records the schema version in a single
-        transaction to ensure atomicity. If the process crashes mid-way,
-        no partial state will be left in the database.
+        if isinstance(engine_url, URL):
+            driver_name = engine_url.drivername.replace("+asyncpg", "")
+            return engine_url.set(drivername=driver_name).render_as_string(hide_password=False)
 
-        Handles concurrent initialization by catching PostgreSQL
-        UniqueViolationError (pg_type conflict) and retrying after
-        checking if another process completed the init.
-        """
-        logger.info("[DatabaseMigrator] Initializing fresh database...")
-
-        head_rev = await cls._get_head_revision()
-
-        try:
-            # Single transaction: create tables + record version atomically
-            async with engine.begin() as conn:
-
-                def _create_tables(sync_conn: typing.Any) -> None:
-                    Base.metadata.create_all(sync_conn)
-
-                await conn.run_sync(_create_tables)
-
-                # Record schema version within the same transaction
-                await conn.execute(
-                    text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
-                )
-                await conn.execute(
-                    text(
-                        "INSERT INTO alembic_version (version_num) VALUES (:version) "
-                        "ON CONFLICT (version_num) DO UPDATE SET version_num = EXCLUDED.version_num"
-                    ),
-                    {"version": head_rev},
-                )
-
-            logger.info(f"[DatabaseMigrator] Fresh database initialized with schema version {head_rev}")
-
-        except Exception as e:
-            # Check if this is a concurrent initialization conflict
-            # PostgreSQL raises UniqueViolationError when two processes
-            # try to create tables with the same name simultaneously
-            # (pg_type.typname namespace conflict)
-            error_name = type(e).__name__
-            error_str = str(e)
-
-            if "UniqueViolationError" in error_name or "pg_type" in error_str or "typname" in error_str:
-                logger.warning(
-                    "[DatabaseMigrator] Concurrent initialization detected (pg_type conflict). "
-                    "Checking if schema was initialized by another process..."
-                )
-
-                # Wait a moment for the other process to complete its transaction
-                await asyncio.sleep(0.5)
-
-                # Re-check the schema status
-                current_rev = await cls._get_current_revision(engine)
-                if current_rev == head_rev:
-                    logger.info(
-                        "[DatabaseMigrator] Schema was successfully initialized by another process. "
-                        f"Current version: {current_rev}"
-                    )
-                    return
-
-                # If still not initialized, re-raise the original error
-                logger.error(
-                    f"[DatabaseMigrator] Schema still not initialized after concurrent conflict. Original error: {e}"
-                )
-
-            raise
+        return str(engine_url).replace("+asyncpg", "")
 
     @classmethod
     async def _get_head_revision(cls) -> str:
@@ -215,16 +155,19 @@ class DatabaseMigrator:
         Uses standard error classification to distinguish system-level
         failures from recoverable errors.
 
-        Note: The caller is responsible for ensuring that Alembic's env.py
-        can resolve the correct database URL via ConfigHandler, config.DB_URL,
-        or DATABASE_URL environment variable. Use override_db_url() context
-        manager at the call site if needed (e.g., in tests).
+        Uses the URL from the already-checked engine instead of letting env.py
+        resolve configuration again. This keeps schema status checks and Alembic
+        writes bound to the same database.
         """
+        sync_database_url = cls._get_sync_database_url(engine)
 
         def run_upgrade() -> None:
             cfg = cls._get_alembic_config()
+            cfg.set_main_option("sqlalchemy.url", sync_database_url)
+            cfg.attributes["database_url"] = sync_database_url
             cfg.attributes["configure_logger"] = False
-            command.upgrade(cfg, "head")
+            with cls._alembic_lock:
+                command.upgrade(cfg, "head")
 
         try:
             await ThreadPoolManager().run_async(TaskType.IO, run_upgrade)
