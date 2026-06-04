@@ -172,16 +172,14 @@ class DatabaseConfigService:
             )
 
         except asyncpg.exceptions.PostgresError as e:
-            error_str = str(e).lower()
             error_type_name = type(e).__name__
 
             if error_type_name == "ConnectionDoesNotExistError":
-                # asyncpg 对数据库不存在也会抛 ConnectionDoesNotExistError
-                # 需要先连接 postgres 确认认证是否成功，再判断是否是数据库不存在
+                # asyncpg 对数据库不存在也抛 ConnectionDoesNotExistError
+                # 需要先连接 postgres 验证认证，再判断是否是数据库不存在
                 if target_db != "postgres":
                     try:
-                        # 先用 postgres 数据库测试认证
-                        conn = await asyncio.wait_for(
+                        verify_conn = await asyncio.wait_for(
                             asyncpg.connect(
                                 host=host,
                                 port=port,
@@ -191,7 +189,7 @@ class DatabaseConfigService:
                             ),
                             timeout=cls.CONNECTION_TIMEOUT,
                         )
-                        await conn.close()
+                        await verify_conn.close()
                         # 认证成功，说明是目标数据库不存在
                         logger.warning(
                             "[DBConfigService] Database '%s' not found on %s:%s (auth verified)",
@@ -215,10 +213,21 @@ class DatabaseConfigService:
                             status=ConnectionStatus.AUTHENTICATION_ERROR,
                             message=I18n.get("db_err_auth"),
                         )
-                    except Exception:
-                        pass  # 继续下面的默认处理
+                    except (asyncpg.exceptions.PostgresError, TimeoutError, OSError) as verify_err:
+                        # 二次验证也失败（含 ConnectionDoesNotExistError = 密码错误），按认证错误处理
+                        logger.warning(
+                            "[DBConfigService] Auth verification failed for user '%s'@%s:%s: %s",
+                            user,
+                            host,
+                            port,
+                            verify_err,
+                        )
+                        return ConnectionResult(
+                            status=ConnectionStatus.AUTHENTICATION_ERROR,
+                            message=I18n.get("db_err_auth"),
+                        )
 
-                # target_db == "postgres" 或二次验证失败，按认证错误处理
+                # target_db == "postgres"，无法二次验证，按认证错误处理
                 logger.warning(
                     "[DBConfigService] Authentication failed (%s) for user '%s'@%s:%s: %s",
                     error_type_name,

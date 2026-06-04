@@ -90,24 +90,58 @@ class TestTestConnection:
 
     @pytest.mark.asyncio
     async def test_postgres_error_connection_does_not_exist_with_password(self):
+        """ConnectionDoesNotExistError + target_db=postgres → auth error (no retry possible)"""
         exc = asyncpg.exceptions.ConnectionDoesNotExistError("password authentication failed")
         with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=exc):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
         assert result.status == ConnectionStatus.AUTHENTICATION_ERROR
 
     @pytest.mark.asyncio
-    async def test_postgres_error_connection_does_not_exist_was_closed(self):
-        exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed unexpectedly")
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=exc):
-            result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
+    async def test_connection_not_exist_db_missing_auth_ok(self):
+        """ConnectionDoesNotExistError for non-postgres db, but auth to postgres succeeds → DATABASE_NOT_FOUND"""
+        exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed in the middle of operation")
+        mock_verify_conn = _make_mock_conn()
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=[exc, mock_verify_conn],
+        ):
+            result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass", "missing_db")
+        assert result.status == ConnectionStatus.DATABASE_NOT_FOUND
+        assert result.database_exists is False
+
+    @pytest.mark.asyncio
+    async def test_connection_not_exist_auth_also_fails(self):
+        """ConnectionDoesNotExistError for non-postgres db, auth to postgres also fails → AUTHENTICATION_ERROR"""
+        exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed in the middle of operation")
+        verify_exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed in the middle of operation")
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=[exc, verify_exc],
+        ):
+            result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "wrong", "missing_db")
         assert result.status == ConnectionStatus.AUTHENTICATION_ERROR
 
     @pytest.mark.asyncio
-    async def test_postgres_error_connection_does_not_exist_other(self):
-        exc = asyncpg.exceptions.ConnectionDoesNotExistError("network timeout")
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=exc):
-            result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
-        assert result.status == ConnectionStatus.CONNECTION_ERROR
+    async def test_connection_not_exist_verify_timeout(self):
+        """ConnectionDoesNotExistError for non-postgres db, verify connection times out → AUTHENTICATION_ERROR"""
+        exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed")
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=[exc, TimeoutError()],
+        ):
+            result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass", "missing_db")
+        assert result.status == ConnectionStatus.AUTHENTICATION_ERROR
+
+    @pytest.mark.asyncio
+    async def test_connection_not_exist_verify_os_error(self):
+        """ConnectionDoesNotExistError for non-postgres db, verify connection gets OSError → AUTHENTICATION_ERROR"""
+        exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed")
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=[exc, OSError("Connection refused")],
+        ):
+            result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass", "missing_db")
+        assert result.status == ConnectionStatus.AUTHENTICATION_ERROR
 
     @pytest.mark.asyncio
     async def test_postgres_error_invalid_password_via_type_name(self):
