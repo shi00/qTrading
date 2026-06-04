@@ -99,12 +99,25 @@ class DatabaseConfigService:
             )
 
         except asyncpg.InvalidPasswordError:
+            logger.warning(
+                "[DBConfigService] Authentication failed for user '%s'@%s:%s (database: %s)",
+                user,
+                host,
+                port,
+                target_db,
+            )
             return ConnectionResult(
                 status=ConnectionStatus.AUTHENTICATION_ERROR,
                 message=I18n.get("db_err_auth"),
             )
 
         except asyncpg.InvalidCatalogNameError:
+            logger.warning(
+                "[DBConfigService] Database '%s' not found on %s:%s",
+                database,
+                host,
+                port,
+            )
             return ConnectionResult(
                 status=ConnectionStatus.DATABASE_NOT_FOUND,
                 message=I18n.get("db_err_not_found").format(database=database),
@@ -112,6 +125,13 @@ class DatabaseConfigService:
             )
 
         except TimeoutError:
+            logger.warning(
+                "[DBConfigService] Connection timeout to %s:%s (database: %s) after %.1fs",
+                host,
+                port,
+                target_db,
+                cls.CONNECTION_TIMEOUT,
+            )
             return ConnectionResult(
                 status=ConnectionStatus.TIMEOUT,
                 message=I18n.get("db_err_timeout"),
@@ -119,15 +139,33 @@ class DatabaseConfigService:
 
         except OSError as e:
             if "Connection refused" in str(e) or "No route to host" in str(e):
+                logger.warning(
+                    "[DBConfigService] Connection refused: %s:%s (error: %s)",
+                    host,
+                    port,
+                    e,
+                )
                 return ConnectionResult(
                     status=ConnectionStatus.CONNECTION_ERROR,
                     message=I18n.get("db_err_refused").format(host=host, port=port),
                 )
             if "WinError 64" in str(e):
+                logger.warning(
+                    "[DBConfigService] Network error (WinError 64) connecting to %s:%s: %s",
+                    host,
+                    port,
+                    e,
+                )
                 return ConnectionResult(
                     status=ConnectionStatus.CONNECTION_ERROR,
                     message=I18n.get("db_err_proxy"),
                 )
+            logger.warning(
+                "[DBConfigService] OS error connecting to %s:%s: %s",
+                host,
+                port,
+                e,
+            )
             return ConnectionResult(
                 status=ConnectionStatus.CONNECTION_ERROR,
                 message=I18n.get("db_err_network"),
@@ -138,20 +176,80 @@ class DatabaseConfigService:
             error_type_name = type(e).__name__
 
             if error_type_name == "ConnectionDoesNotExistError":
-                if "password" in error_str or "authentication" in error_str or "was closed" in error_str:
-                    return ConnectionResult(
-                        status=ConnectionStatus.AUTHENTICATION_ERROR,
-                        message=I18n.get("db_err_auth"),
-                    )
-                return ConnectionResult(
-                    status=ConnectionStatus.CONNECTION_ERROR,
-                    message=I18n.get("db_err_interrupted"),
+                # asyncpg 对数据库不存在也会抛 ConnectionDoesNotExistError
+                # 需要先连接 postgres 确认认证是否成功，再判断是否是数据库不存在
+                if target_db != "postgres":
+                    try:
+                        # 先用 postgres 数据库测试认证
+                        conn = await asyncio.wait_for(
+                            asyncpg.connect(
+                                host=host,
+                                port=port,
+                                user=user,
+                                password=password,
+                                database="postgres",
+                            ),
+                            timeout=cls.CONNECTION_TIMEOUT,
+                        )
+                        await conn.close()
+                        # 认证成功，说明是目标数据库不存在
+                        logger.warning(
+                            "[DBConfigService] Database '%s' not found on %s:%s (auth verified)",
+                            target_db,
+                            host,
+                            port,
+                        )
+                        return ConnectionResult(
+                            status=ConnectionStatus.DATABASE_NOT_FOUND,
+                            message=I18n.get("db_err_not_found").format(database=target_db),
+                            database_exists=False,
+                        )
+                    except asyncpg.InvalidPasswordError:
+                        logger.warning(
+                            "[DBConfigService] Authentication failed for user '%s'@%s:%s",
+                            user,
+                            host,
+                            port,
+                        )
+                        return ConnectionResult(
+                            status=ConnectionStatus.AUTHENTICATION_ERROR,
+                            message=I18n.get("db_err_auth"),
+                        )
+                    except Exception:
+                        pass  # 继续下面的默认处理
+
+                # target_db == "postgres" 或二次验证失败，按认证错误处理
+                logger.warning(
+                    "[DBConfigService] Authentication failed (%s) for user '%s'@%s:%s: %s",
+                    error_type_name,
+                    user,
+                    host,
+                    port,
+                    e,
                 )
-            if error_type_name == "InvalidPasswordError":
                 return ConnectionResult(
                     status=ConnectionStatus.AUTHENTICATION_ERROR,
                     message=I18n.get("db_err_auth"),
                 )
+            if error_type_name == "InvalidPasswordError":
+                logger.warning(
+                    "[DBConfigService] Authentication failed (%s) for user '%s'@%s:%s",
+                    error_type_name,
+                    user,
+                    host,
+                    port,
+                )
+                return ConnectionResult(
+                    status=ConnectionStatus.AUTHENTICATION_ERROR,
+                    message=I18n.get("db_err_auth"),
+                )
+            logger.warning(
+                "[DBConfigService] PostgreSQL error (%s) on %s:%s: %s",
+                error_type_name,
+                host,
+                port,
+                e,
+            )
             return ConnectionResult(
                 status=ConnectionStatus.CONNECTION_ERROR,
                 message=I18n.get("db_err_db_error"),
