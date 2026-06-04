@@ -489,7 +489,7 @@ class OnboardingWizard(ft.Container):
         self.wizard_language_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get_language_label(),  # pragma: no cover
             tooltip=I18n.get_language_label(),  # pragma: no cover
-            value=ConfigHandler.get_locale(),  # pragma: no cover
+            value=I18n.current_locale(),  # pragma: no cover
             width=200,  # pragma: no cover
             text_size=14,  # pragma: no cover
             border_radius=8,  # pragma: no cover
