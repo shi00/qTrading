@@ -350,23 +350,23 @@ class DatabaseConfigService:
             )
 
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", database):
-                return False, f"Invalid database name: '{database}'"
+                return False, I18n.get("db_err_invalid_name").format(database=database)
             safe_name = database.replace('"', '""')
             await conn.execute(f'CREATE DATABASE "{safe_name}"')
             await conn.close()
 
             logger.info(f"Database '{database}' created successfully")
-            return True, f"Database '{database}' created successfully"
+            return True, I18n.get("db_msg_created").format(database=database)
 
         except asyncpg.DuplicateDatabaseError:
-            return False, f"Database '{database}' already exists"
+            return False, I18n.get("db_err_already_exists").format(database=database)
 
         except asyncpg.InsufficientPrivilegeError:
-            return False, "Insufficient privileges to create database"
+            return False, I18n.get("db_err_no_privilege")
 
         except Exception as e:
             logger.error(f"Failed to create database: {e}", exc_info=True)
-            return False, f"Failed to create database: {str(e)}"
+            return False, I18n.get("db_err_create_failed").format(error=str(e))
 
     @classmethod
     def build_url(
@@ -472,7 +472,7 @@ class DatabaseConfigService:
                 await engine.dispose()
         except Exception as e:
             logger.error(f"Failed to run migrations: {e}", exc_info=True)
-            return False, f"{type(e).__name__}: {e}"
+            return False, I18n.get("db_err_migration_failed").format(error=f"{type(e).__name__}: {e}")
 
     @classmethod
     async def ensure_tables_exist(
