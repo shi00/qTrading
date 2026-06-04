@@ -975,7 +975,12 @@ class AIService:
             if capital_flow_text and capital_flow_text != _capital_flow_sentinel
             else "(Data not available yet, assume neutral)"
         )
-        financials_content = financials_text if financials_text else "(Data not available yet, assume neutral)"
+        _financial_sentinels = {I18n.get("ai_financial_insufficient"), I18n.get("ai_financial_fetch_failed")}
+        financials_content = (
+            financials_text
+            if financials_text and financials_text not in _financial_sentinels
+            else "(Data not available yet, assume neutral)"
+        )
         _history_sentinels = {I18n.get("ai_history_insufficient"), I18n.get("ai_history_extract_error")}
         history_content = history_text if history_text and history_text not in _history_sentinels else ""
 
