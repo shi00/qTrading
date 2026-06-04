@@ -14,6 +14,8 @@ from urllib.parse import quote_plus, unquote_plus, urlparse
 import asyncpg
 
 from core.i18n import I18n
+from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class DatabaseConfigService:
     CONNECTION_TIMEOUT = 5.0
 
     @classmethod
+    @log_async_operation(operation_name="db_test_connection", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def test_connection(
         cls,
         host: str,
@@ -87,9 +90,10 @@ class DatabaseConfigService:
                 ),
                 timeout=cls.CONNECTION_TIMEOUT,
             )
-
-            version = await conn.fetchval("SELECT version()")
-            await conn.close()
+            try:
+                version = await conn.fetchval("SELECT version()")
+            finally:
+                await conn.close()
 
             return ConnectionResult(
                 status=ConnectionStatus.SUCCESS,
@@ -281,13 +285,14 @@ class DatabaseConfigService:
                     status=ConnectionStatus.CONNECTION_ERROR,
                     message=I18n.get("db_err_interrupted"),
                 )
-            logger.error(f"Unexpected error testing connection: {e}", exc_info=True)
+            logger.error("Unexpected error testing connection: %s", e, exc_info=True)
             return ConnectionResult(
                 status=ConnectionStatus.UNKNOWN_ERROR,
                 message=I18n.get("db_err_unknown"),
             )
 
     @classmethod
+    @log_async_operation(operation_name="db_database_exists", threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def database_exists(
         cls,
         host: str,
@@ -313,17 +318,19 @@ class DatabaseConfigService:
                 ),
                 timeout=cls.CONNECTION_TIMEOUT,
             )
-
-            exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database)
-            await conn.close()
+            try:
+                exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", database)
+            finally:
+                await conn.close()
 
             return exists is not None
 
         except Exception as exc:
-            logger.debug(f"[DBConfigService] db_exists check failed: {exc}")
+            logger.debug("[DBConfigService] db_exists check failed: %s", exc)
             return False
 
     @classmethod
+    @log_async_operation(operation_name="db_create_database", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def create_database(
         cls,
         host: str,
@@ -349,14 +356,15 @@ class DatabaseConfigService:
                 ),
                 timeout=cls.CONNECTION_TIMEOUT,
             )
+            try:
+                if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", database):
+                    return False, I18n.get("db_err_invalid_name").format(database=database)
+                safe_name = database.replace('"', '""')
+                await conn.execute(f'CREATE DATABASE "{safe_name}"')
+            finally:
+                await conn.close()
 
-            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", database):
-                return False, I18n.get("db_err_invalid_name").format(database=database)
-            safe_name = database.replace('"', '""')
-            await conn.execute(f'CREATE DATABASE "{safe_name}"')
-            await conn.close()
-
-            logger.info(f"Database '{database}' created successfully")
+            logger.info("Database '%s' created successfully", database)
             return True, I18n.get("db_msg_created").format(database=database)
 
         except asyncpg.DuplicateDatabaseError:
@@ -366,8 +374,8 @@ class DatabaseConfigService:
             return False, I18n.get("db_err_no_privilege")
 
         except Exception as e:
-            logger.error(f"Failed to create database: {e}", exc_info=True)
-            return False, I18n.get("db_err_create_failed").format(error=str(e))
+            logger.error("Failed to create database: %s", e, exc_info=True)
+            return False, I18n.get("db_err_create_failed").format(error=DataSanitizer.sanitize_error(e))
 
     @classmethod
     def build_url(
@@ -425,10 +433,11 @@ class DatabaseConfigService:
             return None
 
         except Exception as exc:
-            logger.debug(f"[DBConfigService] get_db_info failed: {exc}")
+            logger.debug("[DBConfigService] get_db_info failed: %s", exc)
             return None
 
     @classmethod
+    @log_async_operation(operation_name="db_run_migrations", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_migrations(
         cls,
         host: str,
@@ -467,15 +476,16 @@ class DatabaseConfigService:
                 with override_db_url(url):
                     await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
-                logger.info(f"Database migrations completed successfully for '{database}'")
+                logger.info("Database migrations completed successfully for '%s'", database)
                 return True, I18n.get("db_migrations_success")
             finally:
                 await engine.dispose()
         except Exception as e:
-            logger.error(f"Failed to run migrations: {e}", exc_info=True)
-            return False, I18n.get("db_err_migration_failed").format(error=f"{type(e).__name__}: {e}")
+            logger.error("Failed to run migrations: %s", e, exc_info=True)
+            return False, I18n.get("db_err_migration_failed").format(error=DataSanitizer.sanitize_error(e))
 
     @classmethod
+    @log_async_operation(operation_name="db_ensure_tables", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def ensure_tables_exist(
         cls,
         host: str,
@@ -506,13 +516,14 @@ class DatabaseConfigService:
             return False, I18n.get("db_err_connection")
 
         if info.table_count > 0:
-            logger.info(f"Database '{database}' already has {info.table_count} tables")
+            logger.info("Database '%s' already has %s tables", database, info.table_count)
             return True, I18n.get("db_tables_exist")
 
-        logger.info(f"Database '{database}' is empty, creating tables...")
+        logger.info("Database '%s' is empty, creating tables...", database)
         return await cls.run_migrations(host, port, user, password, database)
 
     @classmethod
+    @log_async_operation(operation_name="db_get_info", threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_database_info(
         cls,
         host: str,
@@ -535,17 +546,17 @@ class DatabaseConfigService:
                 ),
                 timeout=cls.CONNECTION_TIMEOUT,
             )
+            try:
+                version = await conn.fetchval("SELECT version()")
+                version_short = version.split(",")[0] if version else "Unknown"
 
-            version = await conn.fetchval("SELECT version()")
-            version_short = version.split(",")[0] if version else "Unknown"
+                size = await conn.fetchval("SELECT pg_size_pretty(pg_database_size($1))", database)
 
-            size = await conn.fetchval("SELECT pg_size_pretty(pg_database_size($1))", database)
-
-            table_count = await conn.fetchval(
-                "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
-            )
-
-            await conn.close()
+                table_count = await conn.fetchval(
+                    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+                )
+            finally:
+                await conn.close()
 
             return DatabaseInfo(
                 version=version_short,
@@ -554,5 +565,5 @@ class DatabaseConfigService:
             )
 
         except Exception as exc:
-            logger.debug(f"[DBConfigService] get_db_stats failed: {exc}")
+            logger.debug("[DBConfigService] get_db_stats failed: %s", exc)
             return None

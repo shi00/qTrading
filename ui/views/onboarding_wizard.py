@@ -967,34 +967,7 @@ class OnboardingWizard(ft.Container):
         self._safe_update()
 
         try:
-            result = await self.database_panel.test_connection()
-            if result:
-                config = self.database_panel.get_config()
-
-                from data.persistence.db_config_service import DatabaseConfigService
-
-                success, msg = await DatabaseConfigService.ensure_tables_exist(
-                    host=config["host"],
-                    port=config["port"],
-                    user=config["user"],
-                    password=config["password"],
-                    database=config["database"],
-                )
-
-                if not success:
-                    self.database_panel.status_text.value = f"✗ {msg}"
-                    self.database_panel.status_text.color = AppColors.ERROR
-                    self.database_panel._safe_update()
-                    return False
-
-                ConfigHandler.save_db_config(
-                    host=config["host"],
-                    port=config["port"],
-                    user=config["user"],
-                    password=config["password"],
-                    database=config["database"],
-                )
-            return result
+            return await self.database_panel.save_config()
         finally:
             self._show_loading_overlay(False)
             self._safe_update()

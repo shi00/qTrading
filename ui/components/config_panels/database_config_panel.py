@@ -274,9 +274,13 @@ class DatabaseConfigPanel(ft.Container):
             self.page.run_task(self.save_config)
 
     def get_config(self) -> dict:
+        try:
+            port = int((self.db_port_input.value or "").strip() or 5432)
+        except (ValueError, TypeError):
+            port = 5432
         return {
             "host": (self.db_host_input.value or "").strip(),
-            "port": int((self.db_port_input.value or "").strip() or 5432),
+            "port": port,
             "user": (self.db_user_input.value or "").strip(),
             "password": self.db_password_input.value,
             "database": (self.db_name_input.value or "").strip(),
