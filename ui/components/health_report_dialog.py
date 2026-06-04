@@ -622,7 +622,7 @@ class HealthScanDialog(ft.AlertDialog):
             )
             self.show_results(result)
         except Exception as e:
-            self.status_text.value = f"Error: {e}"
+            self.status_text.value = I18n.get("db_err_format").format(error=e)
             self.page_ref.update()
 
     def show_results(self, result):  # pragma: no cover

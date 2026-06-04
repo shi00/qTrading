@@ -355,7 +355,11 @@ class DatabaseConfigPanel(ft.Container):
                     database=config["database"],
                 )
                 if info:
-                    self.db_info_text.value = f"Version: {info.version}\nSize: {info.size}\nTables: {info.table_count}"
+                    self.db_info_text.value = I18n.get("db_info_format").format(
+                        version=info.version,
+                        size=info.size,
+                        tables=info.table_count,
+                    )
 
                 if self.on_test_success_callback:
                     self.on_test_success_callback(config)
