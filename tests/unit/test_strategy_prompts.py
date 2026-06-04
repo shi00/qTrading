@@ -1,4 +1,4 @@
-from strategies.strategy_prompts import STRATEGY_PROMPTS, get_base_prompt, resolve_prompt
+from strategies.strategy_prompts import STRATEGY_PROMPTS, get_base_prompt, resolve_prompt, FORBIDDEN_STATIC_HEADERS
 
 
 class TestStrategyPromptsKeyConsistency:
@@ -65,7 +65,6 @@ class TestPromptDataBoundary:
             )
 
     def test_no_static_available_data_list(self):
-        forbidden_headers = ["【可用数据】", "【你将收到的分析材料】"]
         for key, prompt in STRATEGY_PROMPTS.items():
-            for header in forbidden_headers:
+            for header in FORBIDDEN_STATIC_HEADERS:
                 assert header not in prompt, f"Strategy '{key}' still has static data enumeration '{header}'"

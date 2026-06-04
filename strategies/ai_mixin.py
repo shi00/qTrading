@@ -707,10 +707,10 @@ class AIStrategyMixin:
             )
 
             # 7. Financials (extract from stock_info which already has screening data)
-            base_financials = self._build_financials_text(row)
+            financial_labels: list[str] = []
+            base_financials = self._build_financials_text(row, labels_out=financial_labels)
 
             # 7a. Multi-Period Financial Trends (Phase 1.2)
-            financial_labels: list[str] = ["ai_label_valuation"]
             multi_period_labels: list[str] = []
             multi_period_text = await self._build_multi_period_financials(
                 ts_code,
@@ -740,6 +740,8 @@ class AIStrategyMixin:
                     f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_multi_period_trend'))}\n{multi_period_text}"
                 )
                 financial_labels.extend(multi_period_labels)
+            # Note: 使用 I18n.get 翻译文本做哨兵比较，依赖运行时 locale 不变的前提。
+            # 若需支持运行时 locale 切换，应改为 builder 返回空串 + 布尔标记。
             if auxiliary_text and auxiliary_text != I18n.get("ai_no_auxiliary_data"):
                 financials_parts.append(
                     f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_auxiliary_data'))}\n{auxiliary_text}"
@@ -752,11 +754,13 @@ class AIStrategyMixin:
             financials_text = "\n".join(financials_parts)
 
             # 7d. History Feature Summary (Level-3: Factor Extraction + Summarization)
+            history_labels: list[str] = []
             history_text = self._build_history_text(
                 history_df,  # type: ignore[arg-type]
                 ts_code=ts_code,
                 stock_name=row.get("name", ""),
                 vol_ratio_threshold=vol_ratio_threshold,
+                labels_out=history_labels,
             )
 
             # 8. Build stock_info and call AI
@@ -781,6 +785,7 @@ class AIStrategyMixin:
                 is_backtest=prefetched.is_backtest,
                 financial_labels=financial_labels,
                 capital_labels=capital_labels,
+                history_labels=history_labels,
             )
             return ai_result
 
@@ -921,6 +926,7 @@ class AIStrategyMixin:
         ts_code: str = "",
         stock_name: str = "",
         vol_ratio_threshold: float = 1.5,
+        labels_out: list[str] | None = None,
     ) -> str:
         """
         Build a semantic summary of recent price action using quantitative factor extraction.
@@ -928,9 +934,12 @@ class AIStrategyMixin:
 
         NOTE: Output intentionally excludes XML wrapper tags because the caller
               (ai_service.py) already wraps this in <recent_price_action>.
+
+        Args:
+            labels_out: 输出参数，收集成功注入的标签 key；哨兵/异常时不注册
         """
         if history_df is None or history_df.empty:
-            return ""
+            return I18n.get("ai_history_insufficient")
 
         try:
             # D11: Apply Forward Adjusted Prices (QFQ) to avoid split/dividend gaps fooling the AI
@@ -954,10 +963,15 @@ class AIStrategyMixin:
                 df = df.tail(60).reset_index(drop=True)
 
             if len(df) < 5:
+                # 哨兵：数据不足，不注册标签
                 return I18n.get("ai_history_insufficient")
 
             # 1. Extract Base Series
             close = df["close"]
+
+            # 全 NaN close → 无有效价格数据，返回哨兵不注册标签
+            if close.isna().all():
+                return I18n.get("ai_history_insufficient")
             has_vol = "vol" in df.columns
             has_pct_chg = "pct_chg" in df.columns
 
@@ -1079,10 +1093,16 @@ class AIStrategyMixin:
 
                 lines.append(f"{d} | {c} | {p}{limit_tag} | {v}")
 
+            # 实际数据产出，注册标签
+            if labels_out is not None:
+                labels_out.append("ai_label_kline")
+
             return "\n".join(lines)
 
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to build history text: %s", e)
+            if labels_out is not None:
+                labels_out.clear()
             return I18n.get("ai_history_extract_error")
 
     @staticmethod
@@ -1093,79 +1113,88 @@ class AIStrategyMixin:
         Args:
             ts_code: 股票代码
             prefetched: 预取的资金数据
-            labels_out: 输出参数，收集成功注入的标签 key
+            labels_out: 输出参数，收集成功注入的标签 key；异常时自动清空
         """
-        sf = safe_float
-        parts = []
+        try:
+            sf = safe_float
+            parts = []
 
-        def format_amount(amount: float, source_unit: str) -> str:
-            amount_yuan = amount * 10000 if source_unit == "wan_yuan" else amount
-            abs_amount = abs(amount_yuan)
-            if abs_amount >= 1e8:
-                return f"{amount_yuan / 1e8:.2f}{I18n.get('ai_unit_billion')}"
-            if abs_amount >= 1e4:
-                return f"{amount_yuan / 1e4:.2f}{I18n.get('ai_unit_ten_thousand')}"
-            return f"{amount_yuan:.0f}{I18n.get('ai_unit_yuan')}"
+            def format_amount(amount: float, source_unit: str) -> str:
+                amount_yuan = amount * 10000 if source_unit == "wan_yuan" else amount
+                abs_amount = abs(amount_yuan)
+                if abs_amount >= 1e8:
+                    return f"{amount_yuan / 1e8:.2f}{I18n.get('ai_unit_billion')}"
+                if abs_amount >= 1e4:
+                    return f"{amount_yuan / 1e4:.2f}{I18n.get('ai_unit_ten_thousand')}"
+                return f"{amount_yuan:.0f}{I18n.get('ai_unit_yuan')}"
 
-        mf_df = prefetched.get("moneyflow_df")
-        if mf_df is not None and not mf_df.empty:
-            stock_mf = mf_df[mf_df["ts_code"] == ts_code]
-            if not stock_mf.empty:
-                row = stock_mf.iloc[0]
-                buy_lg = sf(row.get("buy_lg_amount"))
-                sell_lg = sf(row.get("sell_lg_amount"))
-                buy_elg = sf(row.get("buy_elg_amount"))
-                sell_elg = sf(row.get("sell_elg_amount"))
-                net_main = (buy_lg + buy_elg) - (sell_lg + sell_elg)
-                net_total = sf(row.get("net_mf_amount"))
-                parts.append(
-                    f"{I18n.get('ai_main_net_inflow')}: {format_amount(net_main, 'wan_yuan')} ({I18n.get('ai_large_extra_large')})"
-                )
-                parts.append(f"{I18n.get('ai_total_net_inflow')}: {format_amount(net_total, 'wan_yuan')}")
-                if labels_out is not None:
-                    labels_out.append("ai_label_main_flow")
+            mf_df = prefetched.get("moneyflow_df")
+            if mf_df is not None and not mf_df.empty:
+                stock_mf = mf_df[mf_df["ts_code"] == ts_code]
+                if not stock_mf.empty:
+                    row = stock_mf.iloc[0]
+                    buy_lg = sf(row.get("buy_lg_amount"))
+                    sell_lg = sf(row.get("sell_lg_amount"))
+                    buy_elg = sf(row.get("buy_elg_amount"))
+                    sell_elg = sf(row.get("sell_elg_amount"))
+                    net_main = (buy_lg + buy_elg) - (sell_lg + sell_elg)
+                    net_total = sf(row.get("net_mf_amount"))
+                    parts.append(
+                        f"{I18n.get('ai_main_net_inflow')}: {format_amount(net_main, 'wan_yuan')} ({I18n.get('ai_large_extra_large')})"
+                    )
+                    parts.append(f"{I18n.get('ai_total_net_inflow')}: {format_amount(net_total, 'wan_yuan')}")
+                    if labels_out is not None:
+                        labels_out.append("ai_label_main_flow")
+                else:
+                    parts.append(I18n.get("ai_stock_mf_no_record"))
             else:
-                parts.append(I18n.get("ai_stock_mf_no_record"))
-        else:
-            parts.append(I18n.get("ai_stock_mf_na"))
+                parts.append(I18n.get("ai_stock_mf_na"))
 
-        tl_df = prefetched.get("top_list_df")
-        if tl_df is not None and not tl_df.empty:
-            stock_tl = tl_df[tl_df["ts_code"] == ts_code]
-            if not stock_tl.empty:
-                row = stock_tl.iloc[0]
-                reason = row.get("reason")
-                reason = reason if reason and not (isinstance(reason, (float, Decimal)) and reason != reason) else "N/A"
-                net_amt = sf(row.get("net_amount"))
-                net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
-                parts.append(
-                    f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"  # type: ignore[arg-type]
-                )
-                if labels_out is not None:
-                    labels_out.append("ai_label_top_list")
+            tl_df = prefetched.get("top_list_df")
+            if tl_df is not None and not tl_df.empty:
+                stock_tl = tl_df[tl_df["ts_code"] == ts_code]
+                if not stock_tl.empty:
+                    row = stock_tl.iloc[0]
+                    reason = row.get("reason")
+                    reason = (
+                        reason if reason and not (isinstance(reason, (float, Decimal)) and reason != reason) else "N/A"
+                    )
+                    net_amt = sf(row.get("net_amount"))
+                    net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
+                    parts.append(
+                        f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"  # type: ignore[arg-type]
+                    )
+                    if labels_out is not None:
+                        labels_out.append("ai_label_top_list")
+                else:
+                    parts.append(I18n.get("ai_top_list_no"))
             else:
-                parts.append(I18n.get("ai_top_list_no"))
-        else:
-            parts.append(I18n.get("ai_top_list_na"))
+                parts.append(I18n.get("ai_top_list_na"))
 
-        nb_df = prefetched.get("northbound_df")
-        if nb_df is not None and not nb_df.empty:
-            stock_nb = nb_df[nb_df["ts_code"] == ts_code]
-            if not stock_nb.empty:
-                row = stock_nb.iloc[0]
-                vol = sf(row.get("vol"))
-                ratio = sf(row.get("ratio"))
-                parts.append(
-                    f"{I18n.get('ai_north_holding')}: {vol:.0f}{I18n.get('ai_shares')}, {I18n.get('ai_circulating_ratio')}: {ratio:.2f}%"
-                )
-                if labels_out is not None:
-                    labels_out.append("ai_label_northbound")
+            nb_df = prefetched.get("northbound_df")
+            if nb_df is not None and not nb_df.empty:
+                stock_nb = nb_df[nb_df["ts_code"] == ts_code]
+                if not stock_nb.empty:
+                    row = stock_nb.iloc[0]
+                    vol = sf(row.get("vol"))
+                    ratio = sf(row.get("ratio"))
+                    parts.append(
+                        f"{I18n.get('ai_north_holding')}: {vol:.0f}{I18n.get('ai_shares')}, {I18n.get('ai_circulating_ratio')}: {ratio:.2f}%"
+                    )
+                    if labels_out is not None:
+                        labels_out.append("ai_label_northbound")
+                else:
+                    parts.append(I18n.get("ai_north_no_record"))
             else:
-                parts.append(I18n.get("ai_north_no_record"))
-        else:
-            parts.append(I18n.get("ai_north_na"))
+                parts.append(I18n.get("ai_north_na"))
 
-        return "\n".join(parts)
+            return "\n".join(parts)
+
+        except Exception as e:
+            logger.warning("[AIStrategyMixin] Failed to build capital flow text for %s: %s", ts_code, e)
+            if labels_out is not None:
+                labels_out.clear()
+            return I18n.get("ai_capital_flow_fetch_failed")
 
     async def _build_multi_period_financials(
         self,
@@ -1503,36 +1532,50 @@ class AIStrategyMixin:
         return ""
 
     @staticmethod
-    def _build_financials_text(row: dict) -> str:
+    def _build_financials_text(row: dict, labels_out: list[str] | None = None) -> str:
         """
         Build a human-readable financials summary from the stock_info data.
         The screening data already contains key financial metrics from the join.
+
+        Args:
+            row: 筛选数据行（含 PE/PB/ROE 等估值指标）
+            labels_out: 输出参数，收集成功注入的标签 key；异常时自动清空
         """
-        parts = []
+        try:
+            parts = []
 
-        parts.append(f"{I18n.get('ai_pe_ttm')}: {fmt_val(row.get('pe_ttm'))}")
-        parts.append(f"{I18n.get('ai_pb')}: {fmt_val(row.get('pb'))}")
-        parts.append(f"{I18n.get('ai_roe')}: {fmt_val(row.get('roe'), suffix='%')}")
-        parts.append(f"{I18n.get('ai_gross_margin')}: {fmt_val(row.get('grossprofit_margin'), suffix='%')}")
-        parts.append(f"{I18n.get('ai_debt_ratio')}: {fmt_val(row.get('debt_to_assets'), suffix='%')}")
-        parts.append(f"{I18n.get('ai_revenue_yoy')}: {fmt_val(row.get('or_yoy'), suffix='%')}")
-        parts.append(f"{I18n.get('ai_profit_yoy')}: {fmt_val(row.get('netprofit_yoy'), suffix='%')}")
+            parts.append(f"{I18n.get('ai_pe_ttm')}: {fmt_val(row.get('pe_ttm'))}")
+            parts.append(f"{I18n.get('ai_pb')}: {fmt_val(row.get('pb'))}")
+            parts.append(f"{I18n.get('ai_roe')}: {fmt_val(row.get('roe'), suffix='%')}")
+            parts.append(f"{I18n.get('ai_gross_margin')}: {fmt_val(row.get('grossprofit_margin'), suffix='%')}")
+            parts.append(f"{I18n.get('ai_debt_ratio')}: {fmt_val(row.get('debt_to_assets'), suffix='%')}")
+            parts.append(f"{I18n.get('ai_revenue_yoy')}: {fmt_val(row.get('or_yoy'), suffix='%')}")
+            parts.append(f"{I18n.get('ai_profit_yoy')}: {fmt_val(row.get('netprofit_yoy'), suffix='%')}")
 
-        tmv = safe_float(row.get("total_mv"), default=None)  # type: ignore[union-attr]
-        if tmv is not None:
-            tmv_str = f"{tmv / 10000:.2f}{I18n.get('ai_billion_yuan')}"
-        else:
-            tmv_str = "N/A"
-        parts.append(f"{I18n.get('ai_total_mv')}: {tmv_str}")
+            tmv = safe_float(row.get("total_mv"), default=None)  # type: ignore[union-attr]
+            if tmv is not None:
+                tmv_str = f"{tmv / 10000:.2f}{I18n.get('ai_billion_yuan')}"
+            else:
+                tmv_str = "N/A"
+            parts.append(f"{I18n.get('ai_total_mv')}: {tmv_str}")
 
-        parts.append(f"{I18n.get('ai_dividend_yield_ttm')}: {fmt_val(row.get('dv_ttm'), suffix='%')}")
+            parts.append(f"{I18n.get('ai_dividend_yield_ttm')}: {fmt_val(row.get('dv_ttm'), suffix='%')}")
 
-        pe_val = safe_float(row.get("pe_ttm"), default=None)  # type: ignore[union-attr]
-        growth_val = safe_float(row.get("netprofit_yoy"), default=None)  # type: ignore[union-attr]
-        if pe_val is not None and growth_val is not None and growth_val > 0:
-            peg = pe_val / growth_val
-            parts.append(f"{I18n.get('ai_peg')}: {peg:.2f} ({I18n.get('ai_peg_pe_profit_growth')})")
-        else:
-            parts.append(I18n.get("ai_peg_na"))
+            pe_val = safe_float(row.get("pe_ttm"), default=None)  # type: ignore[union-attr]
+            growth_val = safe_float(row.get("netprofit_yoy"), default=None)  # type: ignore[union-attr]
+            if pe_val is not None and growth_val is not None and growth_val > 0:
+                peg = pe_val / growth_val
+                parts.append(f"{I18n.get('ai_peg')}: {peg:.2f} ({I18n.get('ai_peg_pe_profit_growth')})")
+            else:
+                parts.append(I18n.get("ai_peg_na"))
 
-        return "\n".join(parts)
+            if parts and labels_out is not None:
+                labels_out.append("ai_label_valuation")
+
+            return "\n".join(parts)
+
+        except Exception as e:
+            logger.warning("[AIMixin] Failed to build financials text: %s", e)
+            if labels_out is not None:
+                labels_out.clear()
+            return I18n.get("ai_financial_insufficient")

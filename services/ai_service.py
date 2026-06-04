@@ -10,6 +10,7 @@ import time
 
 import httpx
 
+from core.i18n import I18n
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
@@ -52,7 +53,7 @@ _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_northbound",
 }
 
-AVAILABLE_DATA_LABELS: set[str] = _AVAILABLE_DATA_LABEL_KEYS
+AVAILABLE_DATA_LABELS: frozenset[str] = frozenset(_AVAILABLE_DATA_LABEL_KEYS)
 
 
 def build_available_data_block(labels: list[str]) -> str:
@@ -72,13 +73,17 @@ def build_available_data_block(labels: list[str]) -> str:
     """
     if not labels:
         return ""
-    from core.i18n import I18n
 
     header = I18n.get("ai_available_data_header")
     items = []
     for label_key in labels:
+        if label_key not in _AVAILABLE_DATA_LABEL_KEYS:
+            logger.warning("[AIService] Unknown label key '%s' not in AVAILABLE_DATA_LABELS, skipping", label_key)
+            continue
         display_text = I18n.get(label_key)
         items.append(f"- {display_text}")
+    if not items:
+        return ""
     return f"<available_data>\n{header}\n" + "\n".join(items) + "\n</available_data>"
 
 
@@ -846,8 +851,10 @@ class AIService:
         include_learning_context: bool = True,
         ui_prompt_override: str | None = None,
         is_backtest: bool = False,
+        *,
         financial_labels: list[str] | None = None,
         capital_labels: list[str] | None = None,
+        history_labels: list[str] | None = None,
     ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
@@ -864,6 +871,7 @@ class AIService:
 
         # Build Prompt
         import pandas as pd
+        from core.i18n import I18n
 
         # Format news
         news_text = "\n".join(
@@ -960,9 +968,16 @@ class AIService:
             base_prompt = ConfigHandler.get_ai_system_prompt() or ""
             sanitized_override = None
 
-        # Capital flow and financials: use real data or fallback
-        capital_flow_content = capital_flow_text if capital_flow_text else "(Data not available yet, assume neutral)"
+        # Capital flow, financials, and history: use real data or fallback
+        _capital_flow_sentinel = I18n.get("ai_capital_flow_fetch_failed")
+        capital_flow_content = (
+            capital_flow_text
+            if capital_flow_text and capital_flow_text != _capital_flow_sentinel
+            else "(Data not available yet, assume neutral)"
+        )
         financials_content = financials_text if financials_text else "(Data not available yet, assume neutral)"
+        _history_sentinels = {I18n.get("ai_history_insufficient"), I18n.get("ai_history_extract_error")}
+        history_content = history_text if history_text and history_text not in _history_sentinels else ""
 
         # 倒金字塔结构：核心策略指令置于最末尾，贴近生成区
         # 解决 "Lost in the Middle" 注意力衰减问题
@@ -998,9 +1013,9 @@ class AIService:
             labels.extend(capital_labels or [])
 
         # 4. 历史价格序列 (Bottom-Mid)
-        if history_text:
-            user_prompt_parts.append(f"<recent_price_action>\n{history_text}</recent_price_action>")
-            labels.append("ai_label_kline")
+        if history_content:
+            user_prompt_parts.append(f"<recent_price_action>\n{history_content}</recent_price_action>")
+            labels.extend(history_labels or [])
 
         # 5. Few-Shot 学习样例
         if history_context and include_learning_context:
@@ -1016,10 +1031,10 @@ class AIService:
 
         available_data_block = build_available_data_block(labels)
         if available_data_block:
-            # insert(1) not insert(0): stock_info is at position 0 and must
-            # remain first so the LLM anchors on the stock identity before
-            # reading the available-data manifest.  Deviates from issue #41
-            # spec §2.2 which says insert(0), but insert(1) is more logical.
+            # insert(1): stock_info is at position 0 and must remain first so
+            # the LLM anchors on the stock identity before reading the
+            # available-data manifest.  This is a deliberate deviation from
+            # issue #41 spec §2.2 (insert(0)) — insert(1) is more logical.
             user_prompt_parts.insert(1, available_data_block)
 
         user_prompt = "\n\n".join(user_prompt_parts)

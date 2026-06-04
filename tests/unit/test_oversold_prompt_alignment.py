@@ -10,7 +10,7 @@ from services.ai_service import AIService, STRATEGY_CONTEXT_MAX_LEN
 from strategies.all_strategies import StrategyManager
 from strategies.ai_mixin import PreFetchedContext
 from strategies.oversold_strategy import OversoldStrategy
-from strategies.strategy_prompts import STRATEGY_PROMPTS
+from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADERS
 
 
 def _build_test_ai_service():
@@ -63,8 +63,8 @@ def test_oversold_prompt_matches_current_injected_data():
     assert "available_data" in prompt
     assert "超跌" in prompt
 
-    assert "【可用数据】" not in prompt
-    assert "【你将收到的分析材料】" not in prompt
+    for header in FORBIDDEN_STATIC_HEADERS:
+        assert header not in prompt, f"oversold prompt 仍含静态数据枚举表头「{header}」"
     assert "MACD信号（金叉/死叉/背离）" not in prompt
     assert "北向资金动向" not in prompt
     assert "60日K线数据（开/高/低/收/成交量）" not in prompt

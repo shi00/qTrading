@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from data.constants import attach_column_units
+from core.i18n import I18n
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import safe_float
 
@@ -236,11 +237,11 @@ class TestGetLimitPct:
 class TestBuildHistoryText:
     def test_empty_df(self):
         result = AIStrategyMixin._build_history_text(pd.DataFrame())
-        assert result == ""
+        assert result == I18n.get("ai_history_insufficient")
 
     def test_none_history(self):
         result = AIStrategyMixin._build_history_text(None)
-        assert result == ""
+        assert result == I18n.get("ai_history_insufficient")
 
     def test_insufficient_data(self):
         df = pd.DataFrame(
@@ -250,7 +251,7 @@ class TestBuildHistoryText:
             }
         )
         result = AIStrategyMixin._build_history_text(df)
-        assert "不足" in result
+        assert result == I18n.get("ai_history_insufficient")
 
     def test_with_data(self):
         df = pd.DataFrame(
@@ -1544,3 +1545,219 @@ class TestRunAiAnalysisConcurrency:
             with patch.object(s, "_mixin_analyze_single", cancel_one):
                 with pytest.raises(asyncio.CancelledError):
                     await s.run_ai_analysis(candidates, context)
+
+
+class TestBuilderLabelsOut:
+    """验证 builder 方法的 labels_out 参数行为（Issue #41）。"""
+
+    @pytest.mark.asyncio
+    async def test_multi_period_financials_labels_out_with_data(self):
+        s = ConcreteStrategy()
+        df = pd.DataFrame(
+            {
+                "roe": [10.0, 12.0],
+                "grossprofit_margin": [30.0, 28.0],
+                "or_yoy": [15.0, 20.0],
+                "netprofit_yoy": [25.0, 30.0],
+                "n_cashflow_act": [5e8, 4e8],
+                "n_income_attr_p": [3e8, 2.5e8],
+                "total_assets": [1e10, 9e9],
+                "goodwill": [5e8, 4e8],
+                "money_cap": [2e9, 1.8e9],
+                "accounts_receiv": [1e9, 9e8],
+            }
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        labels: list[str] = []
+        result = await s._build_multi_period_financials("000001.SZ", cache, labels_out=labels)
+        assert result  # 非空
+        assert len(labels) == 8  # 8 个子项全部注册
+
+    @pytest.mark.asyncio
+    async def test_multi_period_financials_labels_out_empty_df(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
+        labels: list[str] = []
+        await s._build_multi_period_financials("000001.SZ", cache, labels_out=labels)
+        assert labels == []
+
+    @pytest.mark.asyncio
+    async def test_multi_period_financials_labels_out_exception(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(side_effect=RuntimeError("DB error"))
+        labels: list[str] = []
+        await s._build_multi_period_financials("000001.SZ", cache, labels_out=labels)
+        assert labels == []
+
+    @pytest.mark.asyncio
+    async def test_multi_period_financials_no_labels_out_backward_compat(self):
+        """不传 labels_out 时行为不变。"""
+        s = ConcreteStrategy()
+        df = pd.DataFrame({"roe": [10.0, 12.0]})
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        result = await s._build_multi_period_financials("000001.SZ", cache)
+        assert "ROE" in result
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_labels_out_with_data(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "audit_result": ["标准无保留"]})
+        )
+        cache.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "bz_item": ["白酒"], "bz_sales": [1e9]})
+        )
+        cache.get_dividend = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20231231"], "div_proc": ["实施"]})
+        )
+        cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [15.0]}))
+        cache.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame(
+                {"ts_code": ["000001.SZ"], "end_date": ["20231231"], "holder_name": ["某公司"], "hold_ratio": [30.0]}
+            )
+        )
+        cache.get_stk_holdernumber = AsyncMock(
+            return_value=pd.DataFrame(
+                {"ts_code": ["000001.SZ"], "ann_date": ["20240101"], "holder_num": [100000], "holder_num_ratio": [-3.5]}
+            )
+        )
+        labels: list[str] = []
+        result = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        assert result  # 非空
+        assert len(labels) == 6  # 6 个子项全部注册
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_labels_out_no_data(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
+        cache.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
+        cache.get_dividend = AsyncMock(return_value=pd.DataFrame())
+        cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
+        cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
+        labels: list[str] = []
+        await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        assert labels == []
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_labels_out_exception(self):
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(side_effect=RuntimeError("DB error"))
+        labels: list[str] = []
+        await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        assert labels == []
+
+    def test_capital_flow_labels_out_with_data(self):
+        mf_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "buy_lg_amount": [1000],
+                "sell_lg_amount": [500],
+                "buy_elg_amount": [200],
+                "sell_elg_amount": [100],
+                "net_mf_amount": [600],
+            }
+        )
+        tl_df = pd.DataFrame({"ts_code": ["000001.SZ"], "reason": ["涨停"], "net_amount": [5000]})
+        nb_df = pd.DataFrame({"ts_code": ["000001.SZ"], "vol": [100000], "ratio": [2.5]})
+        labels: list[str] = []
+        AIStrategyMixin._build_capital_flow_text(
+            "000001.SZ",
+            {"moneyflow_df": mf_df, "top_list_df": tl_df, "northbound_df": nb_df},
+            labels_out=labels,
+        )
+        assert len(labels) == 3  # 主力/龙虎榜/北向
+
+    def test_capital_flow_labels_out_no_data(self):
+        labels: list[str] = []
+        AIStrategyMixin._build_capital_flow_text("000001.SZ", {}, labels_out=labels)
+        assert labels == []
+
+    def test_capital_flow_labels_out_no_record(self):
+        mf_df = pd.DataFrame(
+            {
+                "ts_code": ["999999.SZ"],
+                "buy_lg_amount": [0],
+                "sell_lg_amount": [0],
+                "buy_elg_amount": [0],
+                "sell_elg_amount": [0],
+                "net_mf_amount": [0],
+            }
+        )
+        labels: list[str] = []
+        AIStrategyMixin._build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df}, labels_out=labels)
+        assert labels == []
+
+    def test_capital_flow_labels_out_exception(self):
+        labels: list[str] = ["ai_label_main_flow"]
+        with patch("strategies.ai_mixin.safe_float", side_effect=RuntimeError("unexpected")):
+            AIStrategyMixin._build_capital_flow_text(
+                "000001.SZ",
+                {"moneyflow_df": pd.DataFrame({"ts_code": ["000001.SZ"], "buy_lg_amount": [100]})},
+                labels_out=labels,
+            )
+        assert labels == []
+
+    def test_history_text_labels_out_with_data(self):
+        dates = pd.date_range("2024-01-01", periods=35, freq="B")
+        df = pd.DataFrame(
+            {
+                "trade_date": dates.strftime("%Y%m%d"),
+                "close": [10.0 + i * 0.1 for i in range(35)],
+                "high": [11.0 + i * 0.1 for i in range(35)],
+                "low": [9.0 + i * 0.1 for i in range(35)],
+                "open": [10.0 + i * 0.1 for i in range(35)],
+                "vol": [1e6] * 35,
+                "amount": [1e7] * 35,
+            }
+        )
+        labels: list[str] = []
+        AIStrategyMixin._build_history_text(df, ts_code="000001.SZ", labels_out=labels)
+        assert "ai_label_kline" in labels
+
+    def test_history_text_labels_out_empty(self):
+        labels: list[str] = []
+        AIStrategyMixin._build_history_text(pd.DataFrame(), ts_code="000001.SZ", labels_out=labels)
+        assert labels == []
+
+    def test_history_text_labels_out_none(self):
+        labels: list[str] = []
+        AIStrategyMixin._build_history_text(None, ts_code="000001.SZ", labels_out=labels)
+        assert labels == []
+
+    def test_financials_text_labels_out_with_data(self):
+        """正常数据：labels_out 应包含 ai_label_valuation。"""
+        labels: list[str] = []
+        result = AIStrategyMixin._build_financials_text(
+            {"pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6},
+            labels_out=labels,
+        )
+        assert "ai_label_valuation" in labels
+        assert result  # 非空
+
+    def test_financials_text_labels_out_empty_row(self):
+        """空 dict：fmt_val(None) 返回 N/A，parts 非空，仍注册 ai_label_valuation。"""
+        labels: list[str] = []
+        result = AIStrategyMixin._build_financials_text({}, labels_out=labels)
+        assert "ai_label_valuation" in labels
+        assert result
+
+    def test_financials_text_labels_out_no_labels_out_backward_compat(self):
+        """不传 labels_out：返回值不变，向后兼容。"""
+        result = AIStrategyMixin._build_financials_text({"pe_ttm": 10, "pb": 1})
+        assert result  # 非空，无异常
+
+    def test_financials_text_labels_out_exception_clears(self):
+        """异常路径：labels_out 应被清空，返回哨兵。"""
+        labels: list[str] = ["ai_label_valuation"]  # 模拟部分注册后被异常清空
+        with patch("strategies.ai_mixin.fmt_val", side_effect=RuntimeError("unexpected")):
+            result = AIStrategyMixin._build_financials_text({"pe_ttm": 10}, labels_out=labels)
+        assert result == I18n.get("ai_financial_insufficient")
+        assert labels == []
