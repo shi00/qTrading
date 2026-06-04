@@ -1,5 +1,6 @@
 import hashlib
 import os
+from urllib.parse import quote_plus
 
 import asyncpg
 import pytest
@@ -44,7 +45,9 @@ _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "postgres"}
 if TEST_DB_HOST not in _ALLOWED_HOSTS:
     raise ValueError(f"TEST_DB_HOST must be one of {_ALLOWED_HOSTS} for safety, got: {TEST_DB_HOST!r}")
 
-TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
+# URL-encode password to handle special characters like '@', ':', '/' etc.
+_ENCODED_PASSWORD = quote_plus(TEST_DB_PASSWORD) if TEST_DB_PASSWORD else ""
+TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{_ENCODED_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
 
 
 def pytest_collection_modifyitems(items):

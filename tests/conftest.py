@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
+from urllib.parse import quote_plus
 from unittest.mock import MagicMock
 
 try:
@@ -162,7 +163,9 @@ def _get_test_db_url():
         _user = os.environ.get("TEST_DB_USER", "postgres")
         _pwd = os.environ.get("TEST_DB_PASSWORD", os.environ.get("CI_PG_PASSWORD", ""))
         _name = os.environ.get("TEST_DB_NAME", "test_astock")
-        return f"postgresql+asyncpg://{_user}:{_pwd}@{_host}:{_port}/{_name}"
+        # URL-encode password to handle special characters
+        _encoded_pwd = quote_plus(_pwd) if _pwd else ""
+        return f"postgresql+asyncpg://{_user}:{_encoded_pwd}@{_host}:{_port}/{_name}"
 
 
 def pytest_configure(config):

@@ -140,6 +140,7 @@ def extract_fields_from_api_method(method) -> set:
 
 import os
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from alembic.config import Config
 
@@ -160,10 +161,15 @@ def make_alembic_cfg(db_url: str) -> Config:
     """Create Alembic config with correct project paths.
 
     Used by integration tests that need to run Alembic commands directly.
+
+    Note: Uses attributes['database_url'] to pass URL, bypassing ConfigParser
+    interpolation which would fail on URLs containing percent-encoded characters.
     """
     project_root = Path(__file__).resolve().parents[1]
     cfg = Config(str(project_root / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", db_url)
+    # Use attributes to pass URL directly, avoiding ConfigParser interpolation issues
+    # with special characters like '%40' (URL-encoded '@')
+    cfg.attributes["database_url"] = db_url
     cfg.set_main_option("script_location", str(project_root / "alembic"))
     cfg.attributes["configure_logger"] = False
     return cfg
@@ -175,8 +181,8 @@ def build_db_urls(params: dict, db_name: str) -> tuple[str, str]:
     Returns:
         (sync_url, async_url) tuple
     """
-    sync_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-    async_url = (
-        f"postgresql+asyncpg://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-    )
+    # URL-encode password to handle special characters like '@', ':', '/' etc.
+    encoded_pwd = quote_plus(params["password"]) if params.get("password") else ""
+    sync_url = f"postgresql://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
+    async_url = f"postgresql+asyncpg://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
     return sync_url, async_url

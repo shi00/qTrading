@@ -163,7 +163,8 @@ class DatabaseMigrator:
 
         def run_upgrade() -> None:
             cfg = cls._get_alembic_config()
-            cfg.set_main_option("sqlalchemy.url", sync_database_url)
+            # Use attributes to pass URL directly, avoiding ConfigParser interpolation issues
+            # with special characters like '%40' (URL-encoded '@')
             cfg.attributes["database_url"] = sync_database_url
             cfg.attributes["configure_logger"] = False
             with cls._alembic_lock:

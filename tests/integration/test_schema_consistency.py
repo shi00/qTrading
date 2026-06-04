@@ -13,6 +13,7 @@ import asyncio
 import os
 import uuid
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import asyncpg
 import pytest
@@ -35,10 +36,16 @@ def _get_pg_connection_params() -> dict:
 
 
 def _make_alembic_cfg(db_url: str) -> Config:
-    """Create Alembic config."""
+    """Create Alembic config.
+
+    Note: Uses attributes['database_url'] to pass URL, bypassing ConfigParser
+    interpolation which would fail on URLs containing percent-encoded characters.
+    """
     project_root = Path(__file__).resolve().parents[2]
     cfg = Config(str(project_root / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", db_url)
+    # Use attributes to pass URL directly, avoiding ConfigParser interpolation issues
+    # with special characters like '%40' (URL-encoded '@')
+    cfg.attributes["database_url"] = db_url
     cfg.set_main_option("script_location", str(project_root / "alembic"))
     cfg.attributes["configure_logger"] = False
     return cfg
@@ -130,7 +137,9 @@ def alembic_db_engine(pg_params):
     asyncio.run(_create_db())
 
     # Create engine and run Alembic migration
-    db_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+    # URL-encode password to handle special characters like '@', ':', '/' etc.
+    encoded_pwd = quote_plus(params["password"]) if params.get("password") else ""
+    db_url = f"postgresql://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
     engine = create_engine(db_url)
 
     # Set DATABASE_URL environment variable so Alembic env.py picks it up
