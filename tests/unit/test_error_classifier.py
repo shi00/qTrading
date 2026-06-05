@@ -28,10 +28,30 @@ class TestClassifyErrorTokenContext:
         assert result["code"] == "server"
         assert result["message_key"] == "wizard_err_token_server"
 
-    def test_token_unknown(self):
+    def test_token_unknown_falls_back_to_invalid(self):
         result = classify_error(Exception("something unexpected"), context="token")
-        assert result["code"] == "unknown"
-        assert result["message_key"] == "wizard_err_token_unknown"
+        assert result["code"] == "invalid"
+        assert result["message_key"] == "wizard_err_token_invalid"
+
+    def test_token_http_403(self):
+        result = classify_error(Exception("403 forbidden: api error"), context="token")
+        assert result["code"] == "invalid"
+        assert result["message_key"] == "wizard_err_token_invalid"
+
+    def test_token_http_401(self):
+        result = classify_error(Exception("401 unauthorized"), context="token")
+        assert result["code"] == "invalid"
+        assert result["message_key"] == "wizard_err_token_invalid"
+
+    def test_token_chinese_auth_error(self):
+        result = classify_error(Exception("权限不足，请检查token"), context="token")
+        assert result["code"] == "invalid"
+        assert result["message_key"] == "wizard_err_token_invalid"
+
+    def test_token_unauthorized_keyword(self):
+        result = classify_error(Exception("unauthorized access"), context="token")
+        assert result["code"] == "invalid"
+        assert result["message_key"] == "wizard_err_token_invalid"
 
 
 class TestClassifyErrorLLMContext:

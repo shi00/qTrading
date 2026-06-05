@@ -139,13 +139,22 @@ def classify_error(e: Exception, context: str = "general") -> dict:
     if context == "token":
         if "token" in error_str and ("invalid" in error_str or "not set" in error_str):
             return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
+        # HTTP auth failure status codes (Tushare returns 403 for bad token)
+        if "401" in error_str or "403" in error_str:
+            return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
+        # Common Tushare Chinese auth error messages
+        if any(kw in error_str for kw in ("权限不足", "鉴权失败", "认证失败", "未授权", "非法token", "无效token")):
+            return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
+        # English auth-related keywords
+        if any(kw in error_str for kw in ("unauthorized", "forbidden", "auth", "permission denied")):
+            return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
         if "timeout" in error_str or "timed out" in error_str:
             return {"code": "timeout", "message_key": "wizard_err_token_timeout"}
         if "connection" in error_str or "network" in error_str or "connect" in error_str:
             return {"code": "network", "message_key": "wizard_err_token_network"}
         if "抱歉" in error_str or "每分钟" in error_str or "限制" in error_str:
             return {"code": "server", "message_key": "wizard_err_token_server"}
-        return {"code": "unknown", "message_key": "wizard_err_token_unknown"}
+        return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
 
     if context == "llm":
         if _LITELLM_AVAILABLE and isinstance(e, LITELLM_PERMANENT_EXCEPTIONS):

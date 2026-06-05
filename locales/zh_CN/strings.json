@@ -587,7 +587,7 @@
     "wizard_err_token_network": "❌ 网络连接失败，请检查网络后重试",
     "wizard_err_token_timeout": "❌ 连接超时，请稍后重试",
     "wizard_err_token_server": "❌ 服务器繁忙，请稍后重试",
-    "wizard_err_token_unknown": "❌ 验证失败，请查看日志获取详细信息",
+    "wizard_err_token_unknown": "❌ Token 验证失败，请检查 Token 是否正确",
     "wizard_ai_key_label": "AI API Key (DeepSeek/OpenAI)",
     "wizard_ai_model_label": "模型名称",
     "wizard_ai_prompt_label": "系统提示词 (专家设定)",

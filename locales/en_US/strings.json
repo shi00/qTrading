@@ -675,7 +675,7 @@
     "wizard_err_token_network": "❌ Network connection failed, please check network",
     "wizard_err_token_timeout": "❌ Connection timeout, please try again later",
     "wizard_err_token_server": "❌ Server busy, please try again later",
-    "wizard_err_token_unknown": "❌ Verification failed, please check logs for details",
+    "wizard_err_token_unknown": "❌ Token verification failed, please check your Token",
     "wizard_ai_key_label": "AI API Key",
     "wizard_ai_model_label": "Model Name",
     "wizard_ai_prompt_label": "System Prompt",
