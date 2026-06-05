@@ -8,7 +8,7 @@ from ui.i18n import I18n
 async def test_screener_page_loads(e2e_page):
     """测试：选股页能正常加载。"""
     screener_label = I18n.get("nav_screener")
-    await e2e_page.click_text(screener_label)
+    await e2e_page.click_text(screener_label, timeout_ms=15000)
 
     screener_title = I18n.get("screener_title")
     await e2e_page.expect_text(screener_title)

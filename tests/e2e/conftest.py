@@ -140,12 +140,12 @@ def flet_app(tmp_path_factory):
         tmp_path_factory,
         config={
             "onboarding_complete": True,
-            "db_url": TEST_DATABASE_URL,
             "locale": "zh",
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
+            "DATABASE_URL": TEST_DATABASE_URL,
         },
     )
     app = AppServer(proc, url)

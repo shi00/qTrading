@@ -890,48 +890,24 @@ class TestOnboardingWizardDatabaseValidation:
 
     @pytest.mark.asyncio
     async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, test_engine):
-        """Test _validate_and_save_database calls ensure_tables_exist"""
-        from data.persistence.db_config_service import DatabaseConfigService
-        from data.persistence.models import Base
+        """Test _validate_and_save_database delegates to database_panel.save_config"""
         from ui.views.onboarding_wizard import OnboardingWizard
-
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
 
         wizard = OnboardingWizard(mock_page)
         wizard._show_loading_overlay = MagicMock()
         wizard._safe_update = MagicMock()
 
         wizard.database_panel = MagicMock()
-        wizard.database_panel.test_connection = AsyncMock(return_value=True)
-        wizard.database_panel.get_config = MagicMock(
-            return_value={
-                "host": TEST_DB_HOST,
-                "port": TEST_DB_PORT,
-                "user": TEST_DB_USER,
-                "password": TEST_DB_PASSWORD,
-                "database": TEST_DB_NAME,
-            }
-        )
-        wizard.database_panel.status_text = MagicMock()
-        wizard.database_panel._safe_update = MagicMock()
+        wizard.database_panel.save_config = AsyncMock(return_value=True)
 
-        with (
-            patch.object(DatabaseConfigService, "ensure_tables_exist") as mock_ensure,
-            patch("utils.config_handler.ConfigHandler.save_db_config") as mock_save,
-        ):
-            mock_ensure.return_value = (True, "Tables created")
-
-            result = await wizard._validate_and_save_database()
+        result = await wizard._validate_and_save_database()
 
         assert result is True
-        mock_ensure.assert_called_once()
-        mock_save.assert_called_once()
+        wizard.database_panel.save_config.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_validate_and_save_database_handles_failure(self, mock_page, isolated_config):
-        """Test _validate_and_save_database returns False on table creation failure"""
-        from data.persistence.db_config_service import DatabaseConfigService
+        """Test _validate_and_save_database returns False when save_config fails"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         wizard = OnboardingWizard(mock_page)
@@ -939,30 +915,12 @@ class TestOnboardingWizardDatabaseValidation:
         wizard._safe_update = MagicMock()
 
         wizard.database_panel = MagicMock()
-        wizard.database_panel.test_connection = AsyncMock(return_value=True)
-        wizard.database_panel.get_config = MagicMock(
-            return_value={
-                "host": "localhost",
-                "port": 5432,
-                "user": "postgres",
-                "password": "password",
-                "database": "testdb",
-            }
-        )
-        wizard.database_panel.status_text = MagicMock()
-        wizard.database_panel._safe_update = MagicMock()
+        wizard.database_panel.save_config = AsyncMock(return_value=False)
 
-        with (
-            patch.object(DatabaseConfigService, "ensure_tables_exist") as mock_ensure,
-            patch("utils.config_handler.ConfigHandler.save_db_config") as mock_save,
-        ):
-            mock_ensure.return_value = (False, "Table creation failed")
-
-            result = await wizard._validate_and_save_database()
+        result = await wizard._validate_and_save_database()
 
         assert result is False
-        mock_ensure.assert_called_once()
-        mock_save.assert_not_called()
+        wizard.database_panel.save_config.assert_called_once()
 
 
 class TestLocalModelConfigPanelVerificationState:

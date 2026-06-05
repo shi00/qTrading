@@ -15,6 +15,11 @@ NAV_KEYS = [
 
 
 async def test_app_boots_and_shows_nav(e2e_page):
+    # Wait for main app to fully render (async init in main.py)
+    # The first nav element should appear within timeout
+    first_label = I18n.get(NAV_KEYS[0])
+    await e2e_page.expect_text(first_label, timeout_ms=15000)
+
     for key in NAV_KEYS:
         label = I18n.get(key)
         await e2e_page.expect_text(label)

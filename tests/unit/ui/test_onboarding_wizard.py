@@ -306,6 +306,7 @@ class TestOnboardingWizard:
         set_page(wizard, mock_page)
         wizard.current_step = 1
         wizard.database_panel.test_connection = AsyncMock(return_value=True)
+        wizard.database_panel.save_config = AsyncMock(return_value=True)
         wizard.database_panel.get_config = MagicMock(
             return_value={
                 "host": "localhost",
@@ -327,6 +328,7 @@ class TestOnboardingWizard:
         set_page(wizard, mock_page)
         wizard.current_step = 1
         wizard.database_panel.test_connection = AsyncMock(return_value=False)
+        wizard.database_panel.save_config = AsyncMock(return_value=False)
         result = await wizard._validate_and_persist_current_step()
         assert result is False
 
@@ -411,6 +413,7 @@ class TestOnboardingWizard:
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         wizard.database_panel.test_connection = AsyncMock(return_value=True)
+        wizard.database_panel.save_config = AsyncMock(return_value=True)
         wizard.database_panel.get_config = MagicMock(
             return_value={
                 "host": "localhost",
@@ -430,6 +433,7 @@ class TestOnboardingWizard:
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         wizard.database_panel.test_connection = AsyncMock(return_value=False)
+        wizard.database_panel.save_config = AsyncMock(return_value=False)
         result = await wizard._validate_and_save_database()
         assert result is False
 
@@ -438,6 +442,7 @@ class TestOnboardingWizard:
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         wizard.database_panel.test_connection = AsyncMock(return_value=True)
+        wizard.database_panel.save_config = AsyncMock(return_value=False)
         wizard.database_panel.get_config = MagicMock(
             return_value={
                 "host": "localhost",

@@ -437,6 +437,7 @@ class LLMConfigPanel(ft.Container):
         stored_base_url = stored_cred.get("base_url", "")
 
         self.api_key_input.value = stored_key
+        # Do NOT mark as modified when loading stored key - only user edits should trigger modification
         self._api_key_modified = False
 
         if provider_id == "azure":
@@ -561,6 +562,13 @@ class LLMConfigPanel(ft.Container):
             self._show_warning(I18n.get("llm_test_need_key"))
             return
 
+        # Check if model is blank (whitespace-only counts as blank)
+        model_raw = self.model_dropdown.value or self.custom_model_input.value
+        model = (model_raw or "").strip()
+        if not model:
+            self._show_warning(I18n.get("llm_test_need_model"))
+            return
+
         self._is_verifying = True
         self._show_info(I18n.get("llm_testing"))
         self.test_button.disabled = True
@@ -582,7 +590,6 @@ class LLMConfigPanel(ft.Container):
                 kwargs["azure_resource_name"] = resource_name
                 base_url = ""
             else:
-                model = self.model_dropdown.value or self.custom_model_input.value
                 base_url = self.base_url_input.value
 
             if self.on_test_connection:
@@ -637,7 +644,7 @@ class LLMConfigPanel(ft.Container):
             base_url = ""
         else:
             model = self.model_dropdown.value or self.custom_model_input.value
-            base_url = self.base_url_input.value
+            base_url = self._normalize_base_url(self.base_url_input.value)
             kwargs = {}
 
         api_key = self.api_key_input.value
@@ -834,7 +841,9 @@ class LLMConfigPanel(ft.Container):
 
     async def _save_config(self):
         provider = self._current_provider
-        api_key = self.api_key_input.value if self._api_key_modified else None
+        # Strip whitespace from api_key; if modified, use stripped value, else None
+        api_key_raw = self.api_key_input.value
+        api_key = api_key_raw.strip() if self._api_key_modified else None
 
         kwargs = {}
 
@@ -851,7 +860,7 @@ class LLMConfigPanel(ft.Container):
             kwargs["azure_deployment_name"] = deployment_name
         else:
             model = self.model_dropdown.value or self.custom_model_input.value
-            base_url = self.base_url_input.value
+            base_url = self._normalize_base_url(self.base_url_input.value)
 
             custom_models_update = self._build_custom_models_update(provider, model, is_azure=False)
             if custom_models_update is not None:

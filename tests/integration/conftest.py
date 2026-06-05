@@ -152,8 +152,25 @@ def _reset_thread_pool():
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def db_schema_ready(test_engine):
-    from data.persistence.db_migrator import DatabaseMigrator
+async def db_schema_ready(request, test_engine):
+    """Ensure database schema is ready before each test.
 
-    with override_db_url(TEST_DB_URL):
-        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+    Skip for tests that use isolated database fixtures (migrated_db_engine,
+    partial_db_engine, empty_status_db_engine, fresh_db_engine) to avoid
+    conflicting with their own database setup.
+    """
+    # Skip for tests that use isolated database fixtures
+    isolated_fixtures = {
+        "migrated_db_engine",
+        "partial_db_engine",
+        "empty_status_db_engine",
+        "fresh_db_engine",
+    }
+    fixture_names = set(request.fixturenames)
+    if not (isolated_fixtures & fixture_names):
+        from data.persistence.db_migrator import DatabaseMigrator
+
+        with override_db_url(TEST_DB_URL):
+            await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+
+    yield

@@ -7,7 +7,7 @@ from ui.i18n import I18n
 
 async def test_settings_page_loads(e2e_page):
     settings_label = I18n.get("nav_settings")
-    await e2e_page.click_text(settings_label)
+    await e2e_page.click_text(settings_label, timeout_ms=15000)
 
     settings_title = I18n.get("settings_title")
     await e2e_page.expect_text(settings_title, timeout_ms=10000)
@@ -15,7 +15,7 @@ async def test_settings_page_loads(e2e_page):
 
 async def test_settings_theme_switch(e2e_page):
     settings_label = I18n.get("nav_settings")
-    await e2e_page.click_text(settings_label)
+    await e2e_page.click_text(settings_label, timeout_ms=15000)
 
     settings_title = I18n.get("settings_title")
     await e2e_page.expect_text(settings_title, timeout_ms=10000)

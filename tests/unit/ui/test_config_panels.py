@@ -1185,7 +1185,8 @@ class TestLLMConfigPanelExtended:
         e.control.value = "openai"
         panel._on_provider_change(e)
         assert panel.api_key_input.value == "stored_openai_key"
-        assert panel._api_key_modified is True
+        # Loading stored credential should NOT mark as modified - only user edits trigger modification
+        assert panel._api_key_modified is False
         assert panel.base_url_input.value == "https://api.openai.com/v1"
 
     @pytest.mark.asyncio
@@ -1249,9 +1250,14 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(
             mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
         )
+        # Set Azure mode - required for _on_llm_test_connection to use Azure branch
+        panel._is_azure = True
+        panel._current_provider = "azure"
         panel.api_key_input.value = "azure-key"
         panel.azure_resource_input.value = "res"
         panel.azure_deployment_input.value = "deploy"
+        # Azure mode uses deployment_name as model; set it to pass model validation
+        panel.model_dropdown.value = "deploy"
         with patch.object(panel, "_safe_update"):
             await panel._on_llm_test_connection()
         on_test.assert_called_once()

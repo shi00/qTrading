@@ -1138,7 +1138,7 @@ class TestGetProviderCredentialFallback:
         assert result["api_key"] == "global_key"
 
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
-    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_from_config")
+    @patch.object(cfg_mod.SecurityManager, "decrypt_data", return_value="decrypted_from_config")
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_api_key": "ENCRYPTED_GLOBAL"})
     def test_fallback_to_global_encrypted(self, mock_load, mock_decrypt, mock_kr):
         result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")

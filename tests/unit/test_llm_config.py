@@ -237,8 +237,8 @@ class TestConfigHandlerLLM:
         config = ConfigHandler.load_config()
         assert config.get("llm_provider_extras") == {}
 
-    def test_get_provider_credential_does_not_fallback_to_primary_key(self, isolated_config):
-        """Test: provider-specific credential lookup must not reuse primary API key."""
+    def test_get_provider_credential_fallback_to_primary_key(self, isolated_config):
+        """Test: provider-specific credential lookup falls back to primary API key if not found."""
         from utils.config_handler import ConfigHandler
 
         ConfigHandler.save_llm_config(
@@ -250,7 +250,8 @@ class TestConfigHandlerLLM:
 
         cred = ConfigHandler.get_provider_credential("qwen")
 
-        assert cred["api_key"] is None
+        # When no provider-specific key exists, it falls back to the global primary key
+        assert cred["api_key"] == "primary-key"
         assert cred["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     def test_save_llm_config_strips_values_and_clears_blank_key(self, isolated_config, mock_keyring):

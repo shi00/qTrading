@@ -1023,6 +1023,23 @@ class ConfigHandler:
             except Exception:
                 pass
 
+        # Fallback to global api_key if provider-specific key not found
+        if not api_key:
+            # Try keyring global key first
+            try:
+                api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+            except Exception:
+                pass
+
+            # Then try encrypted global key in config
+            if not api_key:
+                global_encrypted = config.get("ai_api_key")
+                if global_encrypted:
+                    try:
+                        api_key = SecurityManager.decrypt_data(global_encrypted)
+                    except Exception:
+                        pass
+
         base_url = cred.get("base_url", "")
         if not base_url:
             from utils.llm_providers import LLM_PROVIDERS
