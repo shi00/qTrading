@@ -977,7 +977,9 @@ class OnboardingWizard(ft.Container):
 
     async def _validate_and_save_cloud_ai(self) -> bool:
         if await self.llm_config_panel.async_verify_connection():
-            self.llm_config_panel.save_current_config()
+            if not self.llm_config_panel.save_current_config():
+                logger.error("[OnboardingWizard] Failed to save LLM config")
+                return False
             return True
 
         self._safe_update()
@@ -990,7 +992,9 @@ class OnboardingWizard(ft.Container):
             return True
 
         if await self.local_model_panel.async_verify_model():
-            self.local_model_panel.save_config()
+            if not self.local_model_panel.save_config():
+                logger.error("[OnboardingWizard] Failed to save local model config")
+                return False
             return True
 
         self._safe_update()

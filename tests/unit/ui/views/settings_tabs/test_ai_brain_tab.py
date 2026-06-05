@@ -157,10 +157,17 @@ class TestAIBrainTabSaveAISettings:
     ):
         tab.show_snack = MagicMock()
         tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {"api_key": api_key} if api_key else {}
-        tab.llm_config_panel.save_current_config = MagicMock()
+        tab.llm_config_panel.get_current_config.return_value = (
+            {"provider": "openai", "model": "gpt-4", "base_url": "https://api.openai.com", "api_key": api_key}
+            if api_key
+            else {"provider": "openai", "model": "gpt-4", "base_url": "https://api.openai.com", "api_key": ""}
+        )
+        tab.llm_config_panel._is_azure = False
+        tab.llm_config_panel._api_key_modified = bool(api_key)
+        tab.llm_config_panel._build_custom_models_update.return_value = None
+        tab.llm_config_panel._remove_primary_from_failover = MagicMock()
+        tab.llm_config_panel._sync_provider_credential_to_failover = MagicMock()
         tab.local_model_panel = MagicMock()
-        tab.local_model_panel.save_config = MagicMock()
         tab.local_model_panel.get_current_config.return_value = (
             local_model_config if local_model_config is not None else {}
         )
@@ -177,6 +184,12 @@ class TestAIBrainTabSaveAISettings:
         tab.ai_news_prompt_input = MagicMock()
         tab.ai_news_prompt_input.value = news_prompt
         tab._safe_update = MagicMock()
+
+    def _make_thread_pool_mock(self):
+        """创建一个 ThreadPoolManager mock，使 run_async 直接执行函数"""
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=lambda task_type, func, *args, **kwargs: func(*args, **kwargs))
+        return mock_tpm
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_empty_fields(self):
@@ -215,7 +228,10 @@ class TestAIBrainTabSaveAISettings:
         tab = self._make_tab()
         self._setup_save_mocks(tab, max_cand="50", min_turn="2.0", concurrency="999")
 
-        with patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"):
+        with (
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
+        ):
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called()
 
@@ -224,7 +240,10 @@ class TestAIBrainTabSaveAISettings:
         tab = self._make_tab()
         self._setup_save_mocks(tab, max_cand="50", min_turn="2.0", concurrency="abc")
 
-        with patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"):
+        with (
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
+        ):
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called()
 
@@ -233,7 +252,10 @@ class TestAIBrainTabSaveAISettings:
         tab = self._make_tab()
         self._setup_save_mocks(tab, max_cand="50", min_turn="2.0", concurrency="5", news_concurrency="999")
 
-        with patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"):
+        with (
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
+        ):
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called()
 
@@ -242,7 +264,10 @@ class TestAIBrainTabSaveAISettings:
         tab = self._make_tab()
         self._setup_save_mocks(tab, max_cand="50", min_turn="2.0", concurrency="5", news_concurrency="abc")
 
-        with patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"):
+        with (
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
+        ):
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called()
 
@@ -256,7 +281,8 @@ class TestAIBrainTabSaveAISettings:
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_injection")),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(False, "prompt_err_injection")),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             await tab._save_ai_settings(None)
@@ -274,14 +300,49 @@ class TestAIBrainTabSaveAISettings:
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_length")),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(False, "prompt_err_length")),
             patch("utils.prompt_guard.MAX_PROMPT_LENGTH", 8000),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called()
             call_args = tab.show_snack.call_args[0][0]
             assert "prompt_err_length" in call_args
+
+    @pytest.mark.asyncio
+    async def test_save_ai_settings_news_prompt_validation_fail(self):
+        tab = self._make_tab()
+        self._setup_save_mocks(
+            tab,
+            max_cand="50",
+            min_turn="2.0",
+            concurrency="5",
+            news_concurrency="1",
+            prompt="valid prompt",
+            news_prompt="bad news prompt",
+        )
+
+        call_count = [0]
+
+        def mock_validate(prompt, **kwargs):
+            call_count[0] += 1
+            # AI prompt (first call) passes, news prompt (second call) fails
+            if call_count[0] == 1:
+                return (True, None)
+            return (False, "prompt_err_injection")
+
+        with (
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
+            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", side_effect=mock_validate),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
+        ):
+            mock_ai.return_value.reload_config = AsyncMock()
+            await tab._save_ai_settings(None)
+            tab.show_snack.assert_called()
+            call_args = tab.show_snack.call_args[0][0]
+            assert "prompt_err_injection" in call_args
 
     @pytest.mark.asyncio
     async def test_save_success_no_local_model(self):
@@ -299,14 +360,22 @@ class TestAIBrainTabSaveAISettings:
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             await tab._save_ai_settings(None)
-            mock_ch.set_ai_max_candidates.assert_called_once_with(50)
-            mock_ch.set_strategy_min_turnover.assert_called_once_with(2.0)
-            mock_ch.set_ai_max_concurrent_analysis.assert_called_once_with(5)
-            mock_ch.set_ai_news_max_concurrent.assert_called_once_with(1)
+            # 验证直接调用 ConfigHandler.save_llm_config（而非 panel.save_current_config）
+            mock_ch.save_llm_config.assert_called_once()
+            mock_ch.save_local_ai_config.assert_called_once()
+            mock_ch.save_config.assert_any_call(
+                {
+                    "ai_max_candidates": 50,
+                    "strategy_min_turnover": 2.0,
+                    "ai_max_concurrent_analysis": 5,
+                    "ai_news_max_concurrent": 1,
+                }
+            )
             mock_ch.save_ai_system_prompt.assert_called_once_with("valid prompt")
             mock_ch.set_ai_news_prompt.assert_called_once_with("news prompt")
             mock_ai.return_value.reload_config.assert_awaited_once()
@@ -328,12 +397,17 @@ class TestAIBrainTabSaveAISettings:
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             await tab._save_ai_settings(None)
-            tab.llm_config_panel.save_current_config.assert_called_once()
-            mock_ch.set_ai_max_candidates.assert_called_once_with(50)
+            # 验证 save_llm_config 被调用且 api_key 传入（因为 _api_key_modified=True）
+            mock_ch.save_llm_config.assert_called_once()
+            call_kwargs = mock_ch.save_llm_config.call_args
+            assert call_kwargs.kwargs.get("api_key") == "sk-test" or call_kwargs[1].get("api_key") == "sk-test"
+            # 验证 _api_key_modified 被重置
+            assert tab.llm_config_panel._api_key_modified is False
 
     @pytest.mark.asyncio
     async def test_save_success_local_model_file_not_found(self):
@@ -348,15 +422,34 @@ class TestAIBrainTabSaveAISettings:
             local_model_config={"model_path": "/nonexistent/model.gguf"},
         )
 
+        # 创建 mock 使 run_async 调用 os.path.exists 时返回 False
+        mock_tpm = MagicMock()
+
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
-            patch("os.path.exists", return_value=False),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
+
+            async def mock_run_async(task_type, func, *args, **kwargs):
+                func_name = getattr(func, "__name__", "")
+                if func_name in ("exists", "_path_exists"):
+                    return False
+                return func(*args, **kwargs)
+
+            mock_tpm.run_async = AsyncMock(side_effect=mock_run_async)
+
             await tab._save_ai_settings(None)
-            mock_ch.set_ai_max_candidates.assert_called_once_with(50)
+            mock_ch.save_config.assert_any_call(
+                {
+                    "ai_max_candidates": 50,
+                    "strategy_min_turnover": 2.0,
+                    "ai_max_concurrent_analysis": 5,
+                    "ai_news_max_concurrent": 1,
+                }
+            )
             tab.show_snack.assert_called()
             last_call_arg = tab.show_snack.call_args_list[-1][0][0]
             assert "ai_model_file_not_found" in last_call_arg
@@ -377,23 +470,37 @@ class TestAIBrainTabSaveAISettings:
         mock_local_mgr = MagicMock()
         mock_local_mgr.get_loaded_model_md5.return_value = "old_md5"
 
+        mock_tpm = MagicMock()
+
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
-            patch("os.path.exists", return_value=True),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
             patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager") as mock_lmm,
-            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager") as mock_tpm,
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             mock_lmm.get_instance = AsyncMock(return_value=mock_local_mgr)
-            mock_lmm.calculate_file_md5 = MagicMock(return_value="new_md5")
-            mock_tpm_inst = MagicMock()
-            mock_tpm_inst.run_async = AsyncMock(return_value="new_md5")
-            mock_tpm.return_value = mock_tpm_inst
+
+            async def mock_run_async(task_type, func, *args, **kwargs):
+                func_name = getattr(func, "__name__", "")
+                if func_name in ("exists", "_path_exists"):
+                    return True
+                if func is mock_lmm.calculate_file_md5:
+                    return "new_md5"
+                return func(*args, **kwargs)
+
+            mock_tpm.run_async = AsyncMock(side_effect=mock_run_async)
 
             await tab._save_ai_settings(None)
-            mock_ch.set_ai_max_candidates.assert_called_once_with(50)
+            mock_ch.save_config.assert_any_call(
+                {
+                    "ai_max_candidates": 50,
+                    "strategy_min_turnover": 2.0,
+                    "ai_max_concurrent_analysis": 5,
+                    "ai_news_max_concurrent": 1,
+                }
+            )
             tab.show_snack.assert_called()
             last_call_arg = tab.show_snack.call_args_list[-1][0][0]
             assert "ai_local_model_changed" in last_call_arg
@@ -414,23 +521,37 @@ class TestAIBrainTabSaveAISettings:
         mock_local_mgr = MagicMock()
         mock_local_mgr.get_loaded_model_md5.return_value = "same_md5"
 
+        mock_tpm = MagicMock()
+
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
-            patch("os.path.exists", return_value=True),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
             patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager") as mock_lmm,
-            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager") as mock_tpm,
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             mock_lmm.get_instance = AsyncMock(return_value=mock_local_mgr)
-            mock_lmm.calculate_file_md5 = MagicMock(return_value="same_md5")
-            mock_tpm_inst = MagicMock()
-            mock_tpm_inst.run_async = AsyncMock(return_value="same_md5")
-            mock_tpm.return_value = mock_tpm_inst
+
+            async def mock_run_async(task_type, func, *args, **kwargs):
+                func_name = getattr(func, "__name__", "")
+                if func_name in ("exists", "_path_exists"):
+                    return True
+                if func is mock_lmm.calculate_file_md5:
+                    return "same_md5"
+                return func(*args, **kwargs)
+
+            mock_tpm.run_async = AsyncMock(side_effect=mock_run_async)
 
             await tab._save_ai_settings(None)
-            mock_ch.set_ai_max_candidates.assert_called_once_with(50)
+            mock_ch.save_config.assert_any_call(
+                {
+                    "ai_max_candidates": 50,
+                    "strategy_min_turnover": 2.0,
+                    "ai_max_concurrent_analysis": 5,
+                    "ai_news_max_concurrent": 1,
+                }
+            )
             tab.show_snack.assert_called()
             last_call_arg = tab.show_snack.call_args_list[-1][0][0]
             assert "settings_snack_ai_saved" in last_call_arg
@@ -451,23 +572,37 @@ class TestAIBrainTabSaveAISettings:
         mock_local_mgr = MagicMock()
         mock_local_mgr.get_loaded_model_md5.return_value = None
 
+        mock_tpm = MagicMock()
+
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
             patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
-            patch("os.path.exists", return_value=True),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
             patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager") as mock_lmm,
-            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager") as mock_tpm,
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             mock_lmm.get_instance = AsyncMock(return_value=mock_local_mgr)
-            mock_lmm.calculate_file_md5 = MagicMock(return_value="some_md5")
-            mock_tpm_inst = MagicMock()
-            mock_tpm_inst.run_async = AsyncMock(return_value="some_md5")
-            mock_tpm.return_value = mock_tpm_inst
+
+            async def mock_run_async(task_type, func, *args, **kwargs):
+                func_name = getattr(func, "__name__", "")
+                if func_name in ("exists", "_path_exists"):
+                    return True
+                if func is mock_lmm.calculate_file_md5:
+                    return "some_md5"
+                return func(*args, **kwargs)
+
+            mock_tpm.run_async = AsyncMock(side_effect=mock_run_async)
 
             await tab._save_ai_settings(None)
-            mock_ch.set_ai_max_candidates.assert_called_once_with(50)
+            mock_ch.save_config.assert_any_call(
+                {
+                    "ai_max_candidates": 50,
+                    "strategy_min_turnover": 2.0,
+                    "ai_max_concurrent_analysis": 5,
+                    "ai_news_max_concurrent": 1,
+                }
+            )
             tab.show_snack.assert_called()
             last_call_arg = tab.show_snack.call_args_list[-1][0][0]
             assert "settings_snack_ai_saved" in last_call_arg
@@ -479,9 +614,18 @@ class TestAIBrainTabSaveAISettings:
             tab, max_cand="50", min_turn="2.0", concurrency="5", news_concurrency="1", prompt="valid prompt"
         )
 
+        # 创建 mock 使 run_async 直接执行函数（会在执行时抛出异常）
+        mock_tpm = MagicMock()
+
+        async def mock_run_async(task_type, func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        mock_tpm.run_async = AsyncMock(side_effect=mock_run_async)
+
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("utils.prompt_guard.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
+            patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ch.save_ai_system_prompt.side_effect = RuntimeError("disk full")
             await tab._save_ai_settings(None)

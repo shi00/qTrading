@@ -455,30 +455,37 @@ class LocalModelConfigPanel(ft.Container):
         timeout_str = self.timeout_input.value.strip()
         timeout = int(timeout_str) if timeout_str else 300
 
-        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value)
+        # 限制 timeout 范围
+        timeout = max(1, min(timeout, 3600))
 
-        ConfigHandler.save_local_ai_config(
-            model_path=model_path,
-            timeout=timeout,
-            n_threads=int(self.threads_input.value),
-            n_batch=int(self.batch_input.value),
-            n_ctx=int(self.ctx_input.value),
-            flash_attn=self.flash_attn_switch.value,
-            n_gpu_layers=gpu_layers,
-        )
+        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value or 0)
+
+        try:
+            ConfigHandler.save_local_ai_config(
+                model_path=model_path,
+                timeout=timeout,
+                n_threads=int(self.threads_input.value or 4),
+                n_batch=int(self.batch_input.value or 512),
+                n_ctx=int(self.ctx_input.value or 2048),
+                flash_attn=self.flash_attn_switch.value,
+                n_gpu_layers=gpu_layers,
+            )
+        except (ValueError, TypeError) as e:
+            logger.error(f"[LocalModelConfigPanel] Invalid config values: {e}")
+            return False
 
         return True
 
     def get_current_config(self) -> dict:
-        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value)
+        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value or 0)
 
         return {
             "model_path": self.model_path_input.value.strip(),
             "timeout": int(self.timeout_input.value) if self.timeout_input.value.strip() else 300,
-            "n_threads": int(self.threads_input.value),
+            "n_threads": int(self.threads_input.value or 4),
             "n_gpu_layers": gpu_layers,
-            "n_batch": int(self.batch_input.value),
-            "n_ctx": int(self.ctx_input.value),
+            "n_batch": int(self.batch_input.value or 512),
+            "n_ctx": int(self.ctx_input.value or 2048),
             "flash_attn": self.flash_attn_switch.value,
         }
 
@@ -559,7 +566,15 @@ class LocalModelConfigPanel(ft.Container):
                 "batch": self.batch_input.value,
                 "ctx": self.ctx_input.value,
                 "flash_attn": self.flash_attn_switch.value,
+                "advanced_expanded": getattr(self, "advanced_tile", None) and self.advanced_tile.expanded,
+                "status_visible": getattr(self, "status_icon", None) and self.status_icon.visible,
+                "status_text": getattr(self, "status_text", None) and self.status_text.value or "",
+                "status_color": getattr(self, "status_text", None) and self.status_text.color,
+                "status_icon_name": getattr(self, "status_icon", None) and self.status_icon.icon,
             }
+
+            # 保存旧的 file_picker 引用，用于从 overlay 中移除
+            old_file_picker = getattr(self, "file_picker", None)
 
             self._build_ui()
 
@@ -574,6 +589,25 @@ class LocalModelConfigPanel(ft.Container):
             self.batch_input.value = saved_values["batch"]
             self.ctx_input.value = saved_values["ctx"]
             self.flash_attn_switch.value = saved_values["flash_attn"]
+
+            # 恢复高级设置展开状态
+            if saved_values["advanced_expanded"] and hasattr(self, "advanced_tile"):
+                self.advanced_tile.expanded = True
+
+            # 恢复状态提示
+            if saved_values["status_visible"]:
+                self.status_icon.visible = True
+                self.status_text.value = saved_values["status_text"]
+                self.status_text.color = saved_values["status_color"]
+                self.status_icon.icon = saved_values["status_icon_name"]
+                self.status_icon.color = saved_values["status_color"]
+
+            # 更新 page.overlay 中的 file_picker：移除旧的，添加新的
+            if self.page:
+                if old_file_picker and old_file_picker in self.page.overlay:
+                    self.page.overlay.remove(old_file_picker)
+                self.page.overlay.append(self.file_picker)
+                self.page.update()
 
             self._safe_update()
         except Exception as e:

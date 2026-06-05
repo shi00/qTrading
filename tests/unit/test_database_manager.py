@@ -21,19 +21,25 @@ class TestDatabaseManagerInit:
 
 
 class TestEnsureEngine:
-    @patch("data.persistence.database_manager.config")
     @patch("data.persistence.database_manager.ConfigHandler")
-    def test_no_db_url(self, mock_ch, mock_config):
-        mock_config.DB_URL_SYNC = None
+    def test_no_db_url(self, mock_ch):
+        mock_ch.get_db_url.return_value = None
+        dm = DatabaseManager()
+        with pytest.raises(RuntimeError, match="not configured"):
+            dm._ensure_engine()
+
+    @patch("data.persistence.database_manager.ConfigHandler")
+    def test_empty_string_db_url(self, mock_ch):
+        """get_db_url() 返回空字符串（非 None）也应抛 RuntimeError"""
+        mock_ch.get_db_url.return_value = ""
         dm = DatabaseManager()
         with pytest.raises(RuntimeError, match="not configured"):
             dm._ensure_engine()
 
     @patch("data.persistence.database_manager.sa.create_engine")
-    @patch("data.persistence.database_manager.config")
     @patch("data.persistence.database_manager.ConfigHandler")
-    def test_success(self, mock_ch, mock_config, mock_create):
-        mock_config.DB_URL_SYNC = "sqlite:///test.db"
+    def test_success(self, mock_ch, mock_create):
+        mock_ch.get_db_url.return_value = "postgresql+asyncpg://user:pass@host/db"
         mock_ch.get_db_connection_pool_size.return_value = 10
         mock_ch.get_db_max_overflow.return_value = 5
         mock_ch.get_db_pool_timeout.return_value = 30
@@ -43,12 +49,15 @@ class TestEnsureEngine:
         dm = DatabaseManager()
         dm._ensure_engine()
         assert dm._initialized is True
+        # Verify sync URL is used (asyncpg driver stripped)
+        mock_create.assert_called_once()
+        call_url = mock_create.call_args[0][0]
+        assert "+asyncpg" not in call_url
 
     @patch("data.persistence.database_manager.sa.create_engine")
-    @patch("data.persistence.database_manager.config")
     @patch("data.persistence.database_manager.ConfigHandler")
-    def test_invalid_pool_size(self, mock_ch, mock_config, mock_create):
-        mock_config.DB_URL_SYNC = "sqlite:///test.db"
+    def test_invalid_pool_size(self, mock_ch, mock_create):
+        mock_ch.get_db_url.return_value = "postgresql+asyncpg://user:pass@host/db"
         mock_ch.get_db_connection_pool_size.return_value = "invalid"
         mock_ch.get_db_max_overflow.return_value = "invalid"
         mock_ch.get_db_pool_timeout.return_value = "invalid"

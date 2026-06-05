@@ -265,6 +265,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if not provider or not model:
             return
 
+        # 新增模式下要求 API Key 非空
+        if not self._is_edit and not api_key:
+            self._show_snack(I18n.get("llm_test_need_key"), AppColors.WARNING)
+            return
+
         primary_provider = ConfigHandler.load_config().get("llm_provider", "")
         if provider == primary_provider:
             self._show_snack(I18n.get("failover_primary_in_list"), AppColors.WARNING)

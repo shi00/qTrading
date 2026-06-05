@@ -111,29 +111,68 @@ class TestConfigHandlerGetLocalAiConfig:
 
 
 class TestDbUrlPasswordMasking:
-    """db_url 明文口令落盘防护"""
+    """get_db_url() 从组件重建 URL，正确 URL-encode 密码"""
 
-    def test_get_db_url_restores_password(self):
+    def test_get_db_url_rebuilds_from_components(self):
+        """当 db_host 已配置时，从组件重建 URL 而非读取 db_url 字段"""
         with (
             patch.object(
-                cfg_mod.ConfigHandler, "load_config", return_value={"db_url": "postgresql://user:****@host/db"}
+                cfg_mod.ConfigHandler,
+                "get_typed",
+                side_effect=lambda key, typ, default: {
+                    "db_host": "myhost",
+                    "db_port": 5433,
+                    "db_user": "admin",
+                    "db_name": "testdb",
+                }.get(key, default),
             ),
             patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="secret123"),
         ):
             url = cfg_mod.ConfigHandler.get_db_url()
-            assert "****" not in url
             assert "secret123" in url
-            assert url == "postgresql://user:secret123@host/db"
+            assert "myhost" in url
+            assert "5433" in url
+            assert "admin" in url
+            assert "testdb" in url
+            assert "+asyncpg" in url
 
-    def test_get_db_url_no_mask_returns_as_is(self):
+    def test_get_db_url_encodes_special_chars(self):
+        """密码含特殊字符时正确 URL-encode"""
         with (
             patch.object(
-                cfg_mod.ConfigHandler, "load_config", return_value={"db_url": "postgresql://user:pass@host/db"}
+                cfg_mod.ConfigHandler,
+                "get_typed",
+                side_effect=lambda key, typ, default: {
+                    "db_host": "localhost",
+                    "db_port": 5432,
+                    "db_user": "postgres",
+                    "db_name": "astock",
+                }.get(key, default),
             ),
-            patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="secret123"),
+            patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="p@ss:word/123"),
         ):
             url = cfg_mod.ConfigHandler.get_db_url()
-            assert url == "postgresql://user:pass@host/db"
+            # quote_plus encodes @ : /
+            assert "p%40ss%3Aword%2F123" in url
+            assert "@localhost" in url  # @ before host, not in password
+
+    def test_get_db_url_falls_back_to_config_when_no_host(self):
+        """当 db_host 未配置时（pre-onboarding），回退到 config.DB_URL"""
+        with (
+            patch.object(
+                cfg_mod.ConfigHandler,
+                "get_typed",
+                side_effect=lambda key, typ, default: {
+                    "db_host": "",
+                    "db_port": 5432,
+                    "db_user": "postgres",
+                    "db_name": "astock",
+                }.get(key, default),
+            ),
+            patch.object(cfg_mod.config, "DB_URL", "postgresql+asyncpg://env:pass@envhost/db"),
+        ):
+            url = cfg_mod.ConfigHandler.get_db_url()
+            assert url == "postgresql+asyncpg://env:pass@envhost/db"
 
 
 class TestSaveDbPasswordEncryptFallback:
@@ -146,6 +185,30 @@ class TestSaveDbPasswordEncryptFallback:
             patch.object(
                 cfg_mod.SecurityManager, "encrypt_data", side_effect=cfg_mod.DecryptionError("encrypt failed")
             ),
+            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
+        ):
+            result = cfg_mod.ConfigHandler.save_db_password("my_password")
+            assert result is False
+
+    def test_security_error_returns_false(self):
+        """SecurityManager.encrypt_data 抛 SecurityError → 返回 False"""
+        from utils.security_utils import SecurityError
+
+        with (
+            patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable")),
+            patch.object(cfg_mod.keyring, "delete_password", MagicMock()),
+            patch.object(cfg_mod.SecurityManager, "encrypt_data", side_effect=SecurityError("security error")),
+            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
+        ):
+            result = cfg_mod.ConfigHandler.save_db_password("my_password")
+            assert result is False
+
+    def test_generic_exception_returns_false(self):
+        """SecurityManager.encrypt_data 抛普通 Exception → 返回 False"""
+        with (
+            patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable")),
+            patch.object(cfg_mod.keyring, "delete_password", MagicMock()),
+            patch.object(cfg_mod.SecurityManager, "encrypt_data", side_effect=RuntimeError("unexpected")),
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
@@ -188,6 +251,21 @@ class TestConfigHandlerGetDbPassword:
 
     @patch.object(cfg_mod.keyring, "get_password", return_value="keyring_pw")
     def test_from_keyring(self, mock_kr):
+        result = cfg_mod.ConfigHandler.get_db_password()
+        assert result == "keyring_pw"
+
+    @patch.dict(cfg_mod.os.environ, {"DB_PASSWORD": "env_pw"}, clear=False)
+    @patch.object(cfg_mod.keyring, "get_password", return_value="keyring_pw")
+    def test_env_variable_highest_priority(self, mock_kr):
+        """DB_PASSWORD 环境变量优先级最高，覆盖 keyring"""
+        result = cfg_mod.ConfigHandler.get_db_password()
+        assert result == "env_pw"
+        mock_kr.assert_not_called()
+
+    @patch.dict(cfg_mod.os.environ, {"DB_PASSWORD": ""}, clear=False)
+    @patch.object(cfg_mod.keyring, "get_password", return_value="keyring_pw")
+    def test_empty_env_variable_skipped(self, mock_kr):
+        """空字符串的环境变量不视为有效密码，回退到 keyring"""
         result = cfg_mod.ConfigHandler.get_db_password()
         assert result == "keyring_pw"
 
@@ -1323,9 +1401,11 @@ class TestSaveDbConfig:
     def test_save_full_config(self, mock_save, mock_pw):
         from data.persistence.db_config_service import DatabaseConfigService
 
-        with patch.object(DatabaseConfigService, "build_url", return_value="postgresql://user:pass@host:5432/db"):
+        with patch.object(
+            DatabaseConfigService, "build_url", return_value="postgresql+asyncpg://user:pass@host:5432/db"
+        ):
             result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "password", "mydb")
-            assert result is True
+        assert result is True
 
     @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
@@ -1334,8 +1414,47 @@ class TestSaveDbConfig:
 
         with patch.object(DatabaseConfigService, "build_url", return_value="postgresql://user:@host:5432/db"):
             result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "", "mydb")
-            assert result is True
-            mock_pw.assert_not_called()
+        assert result is True
+        mock_pw.assert_not_called()
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_syncs_config_db_url(self, mock_save, mock_pw):
+        """save_db_config 必须同步更新 config.DB_URL / DB_URL_SYNC"""
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        built_url = "postgresql+asyncpg://admin:secret@dbhost:5433/testdb"
+        with patch.object(DatabaseConfigService, "build_url", return_value=built_url):
+            cfg_mod.ConfigHandler.save_db_config("dbhost", 5433, "admin", "secret", "testdb")
+        # save_db_config() assigns config.DB_URL directly; verify it was set
+        assert built_url == cfg_mod.config.DB_URL
+        assert cfg_mod.config.DB_URL_SYNC == "postgresql://admin:secret@dbhost:5433/testdb"
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_password_masked_in_saved_url(self, mock_save, mock_pw):
+        """保存到 user_settings.json 的 db_url 中密码必须被掩码"""
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        built_url = "postgresql+asyncpg://admin:secret@dbhost:5433/testdb"
+        with patch.object(DatabaseConfigService, "build_url", return_value=built_url):
+            cfg_mod.ConfigHandler.save_db_config("dbhost", 5433, "admin", "secret", "testdb")
+        saved_data = mock_save.call_args[0][0]
+        assert "secret" not in saved_data["db_url"]
+        assert "****" in saved_data["db_url"]
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_password_with_at_sign_masked_correctly(self, mock_save, mock_pw):
+        """密码含 @ 时掩码正则仍能正确匹配"""
+        from data.persistence.db_config_service import DatabaseConfigService
+
+        built_url = "postgresql+asyncpg://admin:p%40ssword@dbhost:5432/db"
+        with patch.object(DatabaseConfigService, "build_url", return_value=built_url):
+            cfg_mod.ConfigHandler.save_db_config("dbhost", 5432, "admin", "p@ssword", "db")
+        saved_data = mock_save.call_args[0][0]
+        assert "p%40ssword" not in saved_data["db_url"]
+        assert "****" in saved_data["db_url"]
 
 
 class TestGetLlmConfigForProviderWarning:
@@ -1408,3 +1527,69 @@ class TestTusharePointTier:
             result = cfg_mod.ConfigHandler.set_tushare_point_tier("platinum")
             assert result is False
             mock_set.assert_not_called()
+
+
+class TestSaveProviderCredentialClearSemantics:
+    """测试 save_provider_credential 的清空语义 (Fix 7)
+
+    api_key/base_url 参数语义：
+    - None 表示不修改该字段
+    - "" 表示清除该字段
+    - 其他值表示更新该字段
+    """
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    def test_empty_api_key_deletes_keyring(self, mock_del, mock_save):
+        """空字符串 api_key 应删除 keyring 条目"""
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        assert result is True
+        mock_del.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key_qwen")
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_provider_credentials": {"qwen": {}}})
+    def test_empty_base_url_clears_config(self, mock_load, mock_save):
+        """空字符串 base_url 应清除配置中的 base_url 字段"""
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="test_key",
+            base_url="",
+        )
+        assert result is True
+        saved_config = mock_save.call_args[0][0]
+        qwen_cred = saved_config["llm_provider_credentials"]["qwen"]
+        assert "base_url" not in qwen_cred
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_none_api_key_does_not_modify_keyring(self, mock_set, mock_save):
+        """None api_key 不应修改 keyring"""
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key=None,
+            base_url="https://api.qwen.com/v1",
+        )
+        assert result is True
+        mock_set.assert_not_called()
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_provider_credentials": {"qwen": {"base_url": "https://old.url"}}},
+    )
+    def test_none_base_url_preserves_existing(self, mock_load, mock_save):
+        """None base_url 应保留配置中的已有值"""
+        result = cfg_mod.ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="test_key",
+            base_url=None,
+        )
+        assert result is True
+        saved_config = mock_save.call_args[0][0]
+        qwen_cred = saved_config["llm_provider_credentials"]["qwen"]
+        assert qwen_cred.get("base_url") == "https://old.url"

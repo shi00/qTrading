@@ -451,17 +451,86 @@ class TestLLMConfigPanel:
         assert result is True
         mock_config_handler_llm.save_llm_config.assert_called_once()
 
-    def test_normalize_base_url_strips_path(self):
+    def test_normalize_base_url_strips_endpoint_suffix(self):
+        """只剥离 API 端点后缀，保留基础路径 (Fix 2)"""
+        # 剥离 /chat/completions 后缀
         assert (
             LLMConfigPanel._normalize_base_url("https://api.deepseek.com/v1/chat/completions")
-            == "https://api.deepseek.com"
+            == "https://api.deepseek.com/v1"
+        )
+        # 剥离 /completions 后缀
+        assert (
+            LLMConfigPanel._normalize_base_url("https://api.openai.com/v1/completions") == "https://api.openai.com/v1"
+        )
+
+    def test_normalize_base_url_preserves_base_path(self):
+        """保留供应商特有的基础路径 (Fix 2)"""
+        # Qwen 兼容模式路径
+        assert (
+            LLMConfigPanel._normalize_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1")
+            == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        # Zhipu 智谱路径
+        assert (
+            LLMConfigPanel._normalize_base_url("https://open.bigmodel.cn/api/paas/v4")
+            == "https://open.bigmodel.cn/api/paas/v4"
+        )
+        # Google Gemini 路径
+        assert (
+            LLMConfigPanel._normalize_base_url("https://generativelanguage.googleapis.com/v1beta")
+            == "https://generativelanguage.googleapis.com/v1beta"
         )
 
     def test_normalize_base_url_empty_returns_empty(self):
         assert LLMConfigPanel._normalize_base_url("") == ""
 
-    def test_normalize_base_url_adds_https(self):
-        assert LLMConfigPanel._normalize_base_url("api.example.com/v1") == "https://api.example.com"
+    def test_provider_change_loads_key_without_marking_modified(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
+        mock_config_handler_llm.get_provider_credential.return_value = {
+            "api_key": "sk-stored",
+            "base_url": "https://api.deepseek.com",
+        }
+
+        panel._on_provider_change(MagicMock(control=MagicMock(value="deepseek")))
+
+        assert panel.api_key_input.value == "sk-stored"
+        assert panel.api_key_modified is False
+
+    @pytest.mark.asyncio
+    async def test_save_config_blank_modified_key_clears_key(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
+        panel._api_key_modified = True
+        panel.api_key_input.value = "   "
+        panel.model_dropdown.value = "deepseek-chat"
+        panel.base_url_input.value = " https://api.deepseek.com/v1/chat/completions "
+
+        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "update"):
+            mock_ai.return_value.reload_config = AsyncMock()
+            await panel._save_config()
+
+        call_kwargs = mock_config_handler_llm.save_llm_config.call_args.kwargs
+        assert call_kwargs["api_key"] == ""
+        assert call_kwargs["base_url"] == "https://api.deepseek.com/v1"
+
+    @pytest.mark.asyncio
+    async def test_test_connection_blank_model_returns_without_calling_callback(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        on_test = AsyncMock(return_value={"success": True})
+        panel = _make_llm_panel(
+            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+        )
+        panel.api_key_input.value = " sk-test "
+        panel.model_dropdown.value = "  "
+        panel.custom_model_input.value = ""
+
+        await panel._on_llm_test_connection()
+
+        on_test.assert_not_called()
 
 
 class TestLocalModelConfigPanel:
@@ -1090,14 +1159,34 @@ class TestLLMConfigPanelExtended:
     def test_on_provider_change_resets_api_key(
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
+        """切换到新供应商（无已存储凭证）时清空 API Key"""
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel._api_key_modified = True
         panel.api_key_input.value = "old-key"
+        # 模拟该供应商无已存储凭证
+        mock_config_handler_llm.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
         e = MagicMock()
         e.control.value = "openai"
         panel._on_provider_change(e)
         assert panel.api_key_input.value == ""
         assert panel._api_key_modified is False
+
+    def test_on_provider_change_loads_stored_credential(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        """切换到已配置过的供应商时加载已存储的凭证 (Fix 3)"""
+        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
+        # 模拟该供应商之前作为 failover 配置过
+        mock_config_handler_llm.get_provider_credential.return_value = {
+            "api_key": "stored_openai_key",
+            "base_url": "https://api.openai.com/v1",
+        }
+        e = MagicMock()
+        e.control.value = "openai"
+        panel._on_provider_change(e)
+        assert panel.api_key_input.value == "stored_openai_key"
+        assert panel._api_key_modified is True
+        assert panel.base_url_input.value == "https://api.openai.com/v1"
 
     @pytest.mark.asyncio
     async def test_on_llm_test_connection_azure_missing_resource(
@@ -1256,9 +1345,10 @@ class TestLLMConfigPanelExtended:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_async_verify_connection_no_api_key_uses_saved(
+    async def test_async_verify_connection_no_api_key_returns_false(
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
+        """空 API Key 时直接返回 False，不回退到已存 key (Fix 9)"""
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel.api_key_input.value = ""
         panel.model_dropdown.value = "deepseek-chat"
@@ -1266,10 +1356,10 @@ class TestLLMConfigPanelExtended:
             "api_key": "saved-key",
             "base_url": "https://api.deepseek.com",
         }
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "_safe_update"):
-            mock_ai.test_connection = AsyncMock(return_value={"success": True})
+        with patch.object(panel, "_safe_update"):
             result = await panel.async_verify_connection()
-        assert result is True
+        # 空输入应直接返回 False，而非用已存 key 验证成功
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_async_verify_connection_no_api_key_no_saved(

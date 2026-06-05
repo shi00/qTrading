@@ -6,7 +6,6 @@ import asyncpg
 from data.persistence.db_config_service import (
     DatabaseConfigService,
     ConnectionStatus,
-    DatabaseInfo,
 )
 
 
@@ -243,6 +242,16 @@ class TestCreateDatabase:
         assert ok is False
         assert "disk full" in msg
 
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """成功创建数据库的正常路径"""
+        mock_conn = _make_mock_conn()
+        with patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn):
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "mydb")
+        assert ok is True
+        mock_conn.execute.assert_awaited_once()
+        mock_conn.close.assert_awaited_once()
+
 
 class TestBuildUrl:
     def test_async_driver_true(self):
@@ -259,6 +268,12 @@ class TestBuildUrl:
         url = DatabaseConfigService.build_url("localhost", 5432, "user", "p@ss:word", "mydb")
         assert "p%40ss%3Aword" in url
         assert "@" not in url.split("://")[1].split("user")[0]
+
+    def test_empty_password(self):
+        """空密码时 URL 格式应为 user:@host（quote_plus('') = ''）"""
+        url = DatabaseConfigService.build_url("localhost", 5432, "user", "", "mydb")
+        assert "user:@localhost" in url
+        assert "+asyncpg" in url
 
 
 class TestParseUrl:
@@ -321,35 +336,69 @@ class TestRunMigrations:
         assert ok is False
         assert "boom" in msg
 
+    @pytest.mark.asyncio
+    async def test_migrator_init_db_failure(self):
+        """引擎创建成功但迁移执行失败"""
+        mock_engine = MagicMock()
+        mock_engine.dispose = AsyncMock()
+        with (
+            patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=mock_engine),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=RuntimeError("migration failed"))
+            ok, msg = await DatabaseConfigService.run_migrations("localhost", 5432, "user", "pass", "mydb")
+        assert ok is False
+        mock_engine.dispose.assert_awaited_once()
+
 
 class TestEnsureTablesExist:
     @pytest.mark.asyncio
-    async def test_info_none_returns_connection_error(self):
-        with patch.object(DatabaseConfigService, "get_database_info", return_value=None):
-            ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_existing_tables_skips_migration(self):
-        info = DatabaseInfo(version="16.2", size="100 MB", table_count=5)
+    async def test_alembic_version_exists_skips_migration(self):
+        """alembic_version 表存在 → 不运行迁移"""
+        mock_conn = _make_mock_conn(fetchval_return=True)
         with (
-            patch.object(DatabaseConfigService, "get_database_info", return_value=info),
+            patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn),
             patch.object(DatabaseConfigService, "run_migrations") as mock_migrate,
         ):
             ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
         assert ok is True
         mock_migrate.assert_not_called()
+        mock_conn.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_empty_database_runs_migration(self):
-        info = DatabaseInfo(version="16.2", size="0 MB", table_count=0)
+    async def test_no_alembic_version_runs_migration(self):
+        """alembic_version 表不存在 → 运行迁移"""
+        mock_conn = _make_mock_conn(fetchval_return=False)
         with (
-            patch.object(DatabaseConfigService, "get_database_info", return_value=info),
+            patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn),
             patch.object(DatabaseConfigService, "run_migrations", return_value=(True, "ok")) as mock_migrate,
         ):
             ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
         assert ok is True
         mock_migrate.assert_awaited_once()
+        mock_conn.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_connection_failure_returns_error(self):
+        """连接失败 → 返回连接错误"""
+        with (
+            patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("Connection refused")),
+            patch.object(DatabaseConfigService, "run_migrations") as mock_migrate,
+        ):
+            ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
+        assert ok is False
+        mock_migrate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_migration_failure_propagates(self):
+        """alembic_version 不存在 + 迁移失败 → 返回失败"""
+        mock_conn = _make_mock_conn(fetchval_return=False)
+        with (
+            patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn),
+            patch.object(DatabaseConfigService, "run_migrations", return_value=(False, "migration error")),
+        ):
+            ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
+        assert ok is False
 
 
 class TestGetDatabaseInfo:

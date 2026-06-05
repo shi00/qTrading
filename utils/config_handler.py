@@ -506,14 +506,27 @@ class ConfigHandler:
 
     @staticmethod
     def get_db_url():
-        """Get PostgreSQL connection URL from user config or system config."""
-        user_config = ConfigHandler.load_config()
-        url = user_config.get("db_url", config.DB_URL)
-        if url and "****" in url:
+        """Get PostgreSQL connection URL by rebuilding from components.
+
+        Reconstructs the URL from stored host/port/user/database + password
+        via DatabaseConfigService.build_url(), which properly URL-encodes
+        credentials. Falls back to config.DB_URL (from DATABASE_URL env var)
+        only when no db_host is configured (pre-onboarding).
+        """
+        host = ConfigHandler.get_typed("db_host", str, "")
+        if host:
+            from data.persistence.db_config_service import DatabaseConfigService
+
             password = ConfigHandler.get_db_password()
-            if password:
-                url = url.replace("****", password, 1)
-        return url
+            return DatabaseConfigService.build_url(
+                host=host,
+                port=ConfigHandler.get_typed("db_port", int, 5432),
+                user=ConfigHandler.get_typed("db_user", str, "postgres"),
+                password=password,
+                database=ConfigHandler.get_typed("db_name", str, "astock"),
+                async_driver=True,
+            )
+        return config.DB_URL
 
     @staticmethod
     def get_db_password():
@@ -574,7 +587,7 @@ class ConfigHandler:
         password: str,
         database: str,
     ) -> bool:
-        """Save database configuration."""
+        """Save database configuration and sync config.DB_URL for downstream consumers."""
         from data.persistence.db_config_service import DatabaseConfigService
 
         db_url = DatabaseConfigService.build_url(
@@ -586,6 +599,8 @@ class ConfigHandler:
             async_driver=True,
         )
 
+        # db_url in user_settings.json is kept for informational/debug purposes only;
+        # password is masked. Actual URL is always rebuilt by get_db_url() from components.
         ConfigHandler.save_config(
             {
                 "db_host": host,
@@ -598,6 +613,12 @@ class ConfigHandler:
 
         if password:
             ConfigHandler.save_db_password(password)
+
+        # Sync config.DB_URL / DB_URL_SYNC so that code reading these module-level
+        # variables directly (e.g. DatabaseManager before this fix, Alembic env.py
+        # fallback) gets the correct value after onboarding.
+        config.DB_URL = db_url
+        config.DB_URL_SYNC = db_url.replace("+asyncpg", "")
 
         return True
 
@@ -696,6 +717,12 @@ class ConfigHandler:
         """
         from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
+        provider = provider.strip()
+        model = model.strip()
+        base_url = base_url.strip()
+        if api_key is not None:
+            api_key = api_key.strip()
+
         config_update = {
             "llm_provider": provider,
             "llm_model": model,
@@ -728,11 +755,12 @@ class ConfigHandler:
             config_update["llm_custom_models"] = kwargs["custom_models"]
 
         if provider_extras:
-            config_update["llm_provider_extras"] = provider_extras  # type: ignore[assignment]
+            config_update["llm_provider_extras"] = provider_extras
         else:
-            config_update["llm_provider_extras"] = {}  # type: ignore[assignment]
+            config_update["llm_provider_extras"] = {}
 
-        ConfigHandler.save_config(config_update)
+        if not ConfigHandler.save_config(config_update):
+            return False
 
         if api_key is not None:
             if api_key:
@@ -748,8 +776,10 @@ class ConfigHandler:
                             f"Cannot securely store ai_api_key: {se}\n"
                             "Please use environment variable AI_API_KEY instead.",
                         )
+                        return False
                     except Exception as enc_err:
                         logger.error(f"Failed to encrypt ai_api_key: {enc_err}")
+                        return False
             else:
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
@@ -878,8 +908,8 @@ class ConfigHandler:
     @staticmethod
     def save_provider_credential(
         provider: str,
-        api_key: str = "",
-        base_url: str = "",
+        api_key: str | None = None,
+        base_url: str | None = None,
         models: list[str] | None = None,
     ) -> bool:
         """
@@ -887,9 +917,9 @@ class ConfigHandler:
 
         Args:
             provider: 供应商 ID (如 "qwen", "deepseek", "openai")
-            api_key: API Key (加密存储到 Keyring)
-            base_url: API 基础 URL
-            models: 该供应商的自定义模型列表
+            api_key: API Key。None 表示不修改，空字符串表示清除，非空表示更新。
+            base_url: API 基础 URL。None 表示不修改，空字符串表示清除，非空表示更新。
+            models: 该供应商的自定义模型列表。None 表示不修改。
 
         Returns:
             bool: 保存是否成功
@@ -904,8 +934,12 @@ class ConfigHandler:
 
         config_update = {}
 
-        if base_url:
-            cred["base_url"] = base_url
+        # base_url: None=不修改, ""=清除, 其他=更新
+        if base_url is not None:
+            if base_url:
+                cred["base_url"] = base_url
+            elif "base_url" in cred:
+                del cred["base_url"]
 
         provider_credentials[provider] = cred
         config_update["llm_provider_credentials"] = provider_credentials
@@ -922,21 +956,35 @@ class ConfigHandler:
             custom_models[provider] = updated_models
             config_update["llm_custom_models"] = custom_models
 
-        if api_key:
-            try:
-                keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", api_key)
-            except Exception as e:
-                logger.warning(
-                    f"[ConfigHandler] Keyring save failed for {provider}: {e}. Falling back to encrypted storage."
-                )
+        # api_key: None=不修改, ""=清除, 其他=更新
+        if api_key is not None:
+            if api_key:
                 try:
-                    encrypted_key = SecurityManager.encrypt_data(api_key)
-                    cred["api_key_encrypted"] = encrypted_key
+                    keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", api_key)
+                except Exception as e:
+                    logger.warning(
+                        f"[ConfigHandler] Keyring save failed for {provider}: {e}. Falling back to encrypted storage."
+                    )
+                    try:
+                        encrypted_key = SecurityManager.encrypt_data(api_key)
+                        cred["api_key_encrypted"] = encrypted_key
+                        provider_credentials[provider] = cred
+                        config_update["llm_provider_credentials"] = provider_credentials
+                    except Exception as enc_err:
+                        logger.error(f"[ConfigHandler] Failed to encrypt api_key for {provider}: {enc_err}")
+                        return False
+            else:
+                # 用户主动清空密钥，清除 keyring 和加密存储
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception:
+                    pass
+                if "api_key_encrypted" in cred:
+                    del cred["api_key_encrypted"]
                     provider_credentials[provider] = cred
                     config_update["llm_provider_credentials"] = provider_credentials
-                except Exception as enc_err:
-                    logger.error(f"[ConfigHandler] Failed to encrypt api_key for {provider}: {enc_err}")
-                    return False
 
         ConfigHandler.save_config(config_update)
 
@@ -974,16 +1022,6 @@ class ConfigHandler:
                 api_key = SecurityManager.decrypt_data(cred["api_key_encrypted"])
             except Exception:
                 pass
-
-        if not api_key:
-            try:
-                api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
-            except Exception:
-                pass
-            if not api_key:
-                encrypted = config.get("ai_api_key", "")
-                if encrypted:
-                    api_key = ConfigHandler._try_decrypt(encrypted)
 
         base_url = cred.get("base_url", "")
         if not base_url:
@@ -1160,6 +1198,14 @@ class ConfigHandler:
 
     @staticmethod
     def set_ai_news_prompt(prompt):
+        """Save news classification prompt with validation and sanitization."""
+        if prompt:
+            from utils.prompt_guard import sanitize_prompt, validate_prompt
+
+            is_valid, _ = validate_prompt(prompt)
+            if not is_valid:
+                return False
+            prompt = sanitize_prompt(prompt)
         return ConfigHandler.save_config({"ai_news_prompt": prompt})
 
     # === New AI Tuning Parameters ===

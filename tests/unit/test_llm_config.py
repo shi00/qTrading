@@ -237,6 +237,47 @@ class TestConfigHandlerLLM:
         config = ConfigHandler.load_config()
         assert config.get("llm_provider_extras") == {}
 
+    def test_get_provider_credential_does_not_fallback_to_primary_key(self, isolated_config):
+        """Test: provider-specific credential lookup must not reuse primary API key."""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_llm_config(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="primary-key",
+        )
+
+        cred = ConfigHandler.get_provider_credential("qwen")
+
+        assert cred["api_key"] is None
+        assert cred["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def test_save_llm_config_strips_values_and_clears_blank_key(self, isolated_config, mock_keyring):
+        """Test: save_llm_config normalizes user input and treats blank key as clear."""
+        from utils.config_handler import ConfigHandler, KEYRING_SERVICE_NAME
+
+        ConfigHandler.save_llm_config(
+            provider=" deepseek ",
+            model=" deepseek-v4-flash ",
+            base_url=" https://api.deepseek.com ",
+            api_key=" sk-test ",
+        )
+        assert mock_keyring[(KEYRING_SERVICE_NAME, "ai_api_key")] == "sk-test"
+
+        ConfigHandler.save_llm_config(
+            provider=" deepseek ",
+            model=" deepseek-v4-flash ",
+            base_url=" https://api.deepseek.com ",
+            api_key="   ",
+        )
+
+        config = ConfigHandler.load_config()
+        assert config.get("llm_provider") == "deepseek"
+        assert config.get("llm_model") == "deepseek-v4-flash"
+        assert config.get("llm_base_url") == "https://api.deepseek.com"
+        assert (KEYRING_SERVICE_NAME, "ai_api_key") not in mock_keyring
+
 
 class TestAIServiceLiteLLM:
     """Tests for AIService LiteLLM integration"""
@@ -596,6 +637,219 @@ class TestIntegration:
             assert config["azure_resource_name"] == "myresource"
             assert config["azure_deployment_name"] == "gpt-5.4-deployment"
             assert config["api_version"] == "2024-08-01-preview"
+
+
+class TestCustomModelsStructureConsistency:
+    """验证 custom_models 返回结构与 Mock 一致，防止 Mock 与真实行为偏差"""
+
+    def test_get_llm_config_returns_list_not_dict(self, isolated_config):
+        """custom_models 应返回 list[str] 而非嵌套 dict"""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_custom_models": {"qwen": ["qwen-max", "qwen-plus"]},
+                "llm_provider": "deepseek",
+            }
+        )
+
+        llm_config = ConfigHandler.get_llm_config()
+        custom_models = llm_config.get("custom_models", {})
+
+        assert isinstance(custom_models.get("qwen"), list)
+        assert all(isinstance(m, str) for m in custom_models.get("qwen", []))
+
+    def test_get_llm_config_custom_models_is_deep_copy(self, isolated_config):
+        """custom_models 应返回深拷贝，修改不影响缓存"""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_custom_models": {"qwen": ["qwen-max"]},
+            }
+        )
+
+        config1 = ConfigHandler.get_llm_config()
+        config1["custom_models"]["qwen"].append("qwen-turbo")
+
+        config2 = ConfigHandler.get_llm_config()
+        assert "qwen-turbo" not in config2["custom_models"]["qwen"]
+
+
+class TestProviderCredentialRoundtrip:
+    """验证 provider_credential 读写一致性"""
+
+    def test_save_and_get_provider_credential_roundtrip(self, isolated_config, mock_keyring):
+        """保存后读取应返回相同凭证"""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="sk-test-key",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            models=["qwen-max"],
+        )
+
+        cred = ConfigHandler.get_provider_credential("qwen")
+
+        assert cred["api_key"] == "sk-test-key"
+        assert cred["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert "qwen-max" in cred.get("models", [])
+
+    def test_get_provider_credential_fallback_to_default_base_url(self, isolated_config):
+        """未配置 base_url 时返回供应商默认值"""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_provider_credential(provider="qwen", api_key="sk-test")
+
+        cred = ConfigHandler.get_provider_credential("qwen")
+
+        assert cred["base_url"] is not None
+        assert "dashscope" in cred["base_url"] or cred["base_url"] == ""
+
+    def test_validate_failover_credentials_with_real_config(self, isolated_config, mock_keyring):
+        """使用真实 ConfigHandler 验证 failover 凭证校验"""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["qwen/qwen-max"],
+            }
+        )
+        ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="sk-valid-key",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            models=["qwen-max"],
+        )
+
+        missing = ConfigHandler.validate_failover_credentials()
+        assert "qwen" not in missing
+
+    def test_validate_failover_credentials_missing_key(self, isolated_config, mock_keyring):
+        """缺少 API Key 的供应商应出现在 missing 列表中"""
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["openai/gpt-4o"],
+            }
+        )
+
+        missing = ConfigHandler.validate_failover_credentials()
+        assert "openai" in missing
+
+
+class TestSyncProviderCredentialToFailover:
+    """验证 LLMConfigPanel._sync_provider_credential_to_failover 逻辑"""
+
+    def test_sync_writes_credential_when_provider_in_failover(self, isolated_config, mock_keyring):
+        """主供应商在 failover 列表中时，自动同步凭证"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["qwen/qwen-max"],
+                "llm_provider": "deepseek",
+            }
+        )
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        panel._sync_provider_credential_to_failover(
+            provider="qwen",
+            api_key="sk-synced-key",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            models=["qwen-max"],
+        )
+
+        cred = ConfigHandler.get_provider_credential("qwen")
+        assert cred["api_key"] == "sk-synced-key"
+
+    def test_sync_skips_when_provider_not_in_failover(self, isolated_config, mock_keyring):
+        """主供应商不在 failover 列表中时，不写入凭证"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["openai/gpt-4o"],
+                "llm_provider": "deepseek",
+            }
+        )
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        panel._sync_provider_credential_to_failover(
+            provider="qwen",
+            api_key="sk-should-not-sync",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+
+        cred = ConfigHandler.get_provider_credential("qwen")
+        assert cred["api_key"] != "sk-should-not-sync"
+
+    def test_sync_with_none_api_key_reads_existing(self, isolated_config, mock_keyring):
+        """api_key=None 时应读取现有凭证避免覆盖"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["qwen/qwen-max"],
+            }
+        )
+        ConfigHandler.save_provider_credential(
+            provider="qwen",
+            api_key="sk-existing-key",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        panel._sync_provider_credential_to_failover(
+            provider="qwen",
+            api_key=None,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+
+        cred = ConfigHandler.get_provider_credential("qwen")
+        assert cred["api_key"] == "sk-existing-key"
+
+
+class TestRemovePrimaryFromFailover:
+    """验证 LLMConfigPanel._remove_primary_from_failover 逻辑"""
+
+    def test_removes_primary_provider_entries(self, isolated_config, mock_keyring):
+        """保存主供应商时自动从 failover 列表移除"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["qwen/qwen-max", "openai/gpt-4o"],
+            }
+        )
+
+        LLMConfigPanel._remove_primary_from_failover("qwen")
+
+        config = ConfigHandler.load_config()
+        assert "qwen/qwen-max" not in config["llm_failover_models"]
+        assert "openai/gpt-4o" in config["llm_failover_models"]
+
+    def test_no_change_when_primary_not_in_failover(self, isolated_config, mock_keyring):
+        """主供应商不在 failover 列表中时不修改"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        from utils.config_handler import ConfigHandler
+
+        ConfigHandler.save_config(
+            {
+                "llm_failover_models": ["openai/gpt-4o"],
+            }
+        )
+
+        LLMConfigPanel._remove_primary_from_failover("qwen")
+
+        config = ConfigHandler.load_config()
+        assert config["llm_failover_models"] == ["openai/gpt-4o"]
 
 
 if __name__ == "__main__":

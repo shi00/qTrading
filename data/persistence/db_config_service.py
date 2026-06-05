@@ -497,8 +497,10 @@ class DatabaseConfigService:
         """
         Ensure all required tables exist in the database.
 
-        This is a convenience method that checks if tables exist and
-        creates them if needed.
+        Checks for the alembic_version table (the authoritative marker that
+        Alembic has initialized this database). If missing, runs migrations
+        regardless of whether other tables exist — the database may contain
+        unrelated tables from another application.
 
         Args:
             host: Database host
@@ -510,16 +512,32 @@ class DatabaseConfigService:
         Returns:
             Tuple of (success, message)
         """
-        info = await cls.get_database_info(host, port, user, password, database)
-
-        if info is None:
+        try:
+            conn = await asyncio.wait_for(
+                asyncpg.connect(
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=password,
+                    database=database,
+                ),
+                timeout=cls.CONNECTION_TIMEOUT,
+            )
+            try:
+                has_alembic = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='alembic_version')"
+                )
+            finally:
+                await conn.close()
+        except Exception as exc:
+            logger.warning("[DBConfigService] Failed to check alembic_version: %s", exc)
             return False, I18n.get("db_err_connection")
 
-        if info.table_count > 0:
-            logger.info("Database '%s' already has %s tables", database, info.table_count)
+        if has_alembic:
+            logger.info("Database '%s' already managed by Alembic", database)
             return True, I18n.get("db_tables_exist")
 
-        logger.info("Database '%s' is empty, creating tables...", database)
+        logger.info("Database '%s' has no alembic_version table, running migrations...", database)
         return await cls.run_migrations(host, port, user, password, database)
 
     @classmethod

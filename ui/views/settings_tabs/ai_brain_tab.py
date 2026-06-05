@@ -20,6 +20,7 @@ from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
 from utils.log_decorators import UILogger
+from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -52,13 +53,14 @@ class AIBrainTab(ft.Container):
         self.show_snack = show_snack_callback
         self.expand = True
         self._locale_subscription_id = None
+        self._mounted = False
 
         # Build UI
         try:
             self._build_controls()
             self._build_content()
         except Exception as e:
-            logger.error(f"[AIBrainTab] Initialization failed: {e}", exc_info=True)
+            logger.error("[AIBrainTab] Initialization failed: %s", e, exc_info=True)
             self.content = ft.Text(f"Error loading AI Tab: {e}", color=ft.Colors.RED)
 
     def _build_controls(self):  # pragma: no cover
@@ -386,7 +388,7 @@ class AIBrainTab(ft.Container):
             if self.page:  # pragma: no cover
                 self.update()  # pragma: no cover
         except Exception as e:  # pragma: no cover
-            logger.debug(f"Safe update skipped: {e}")  # pragma: no cover
+            logger.debug("Safe update skipped: %s", e)  # pragma: no cover
 
     def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
         """语言变更回调 - 重建整个 UI"""  # pragma: no cover
@@ -395,6 +397,7 @@ class AIBrainTab(ft.Container):
                 "max_cand": self.ai_max_candidates_input.value,  # pragma: no cover
                 "min_turn": self.strategy_min_turnover_input.value,  # pragma: no cover
                 "concurrency": self.ai_concurrency_input.value,  # pragma: no cover
+                "news_concurrency": self.ai_news_concurrency_input.value,  # pragma: no cover
                 "prompt": self.ai_prompt_input.value,  # pragma: no cover
                 "news_prompt": self.ai_news_prompt_input.value,  # pragma: no cover
             }  # pragma: no cover
@@ -404,13 +407,14 @@ class AIBrainTab(ft.Container):
             self.ai_max_candidates_input.value = saved_values["max_cand"]  # pragma: no cover
             self.strategy_min_turnover_input.value = saved_values["min_turn"]  # pragma: no cover
             self.ai_concurrency_input.value = saved_values["concurrency"]  # pragma: no cover
+            self.ai_news_concurrency_input.value = saved_values["news_concurrency"]  # pragma: no cover
             self.ai_prompt_input.value = saved_values["prompt"]  # pragma: no cover
             self.ai_news_prompt_input.value = saved_values["news_prompt"]  # pragma: no cover
 
             self._build_content()  # pragma: no cover
             self._safe_update()  # pragma: no cover
         except Exception as e:  # pragma: no cover
-            logger.warning(f"[AIBrainTab] Failed to update locale: {e}")  # pragma: no cover
+            logger.warning("[AIBrainTab] Failed to update locale: %s", e)  # pragma: no cover
 
     # =========================================================================
     # Event Handlers
@@ -441,15 +445,26 @@ class AIBrainTab(ft.Container):
         """本地模型配置保存回调"""
         self.show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
 
+    def _validate_prompt_or_warn(self, prompt: str) -> bool:
+        """验证 Prompt 安全性，不合法时显示警告并返回 False"""
+        is_valid, warning = validate_prompt(prompt)
+        if not is_valid:
+            msg = I18n.get(warning, warning)
+            if warning == "prompt_err_length":
+                msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+            self.show_snack(f"⚠ {msg}", color=AppColors.WARNING)
+            return False
+        return True
+
     async def _save_ai_settings(self, e):
-        """保存 AI 配置 (云端 LLM + 本地模型 + 调优参数)"""
+        """保存 AI 配置 (云端 LLM + 本地模型 + 调优参数)
+
+        采用三阶段模式：先验证所有输入 → 再统一保存 → 最后统一重载。
+        避免部分保存导致磁盘与内存不一致。
+        """
         UILogger.log_action("AIBrainTab", "Click", "btn_save_ai")
         try:
-            llm_config = self.llm_config_panel.get_current_config()
-            if llm_config.get("api_key"):
-                self.llm_config_panel.save_current_config()
-
-            self.local_model_panel.save_config()
+            # ========== 阶段 1: 验证所有输入（不写入任何配置） ==========
 
             ai_prompt = self.ai_prompt_input.value
 
@@ -488,9 +503,6 @@ class AIBrainTab(ft.Container):
                         color=AppColors.ERROR,
                     )
                     return
-
-                ConfigHandler.set_ai_max_candidates(max_cand)
-                ConfigHandler.set_strategy_min_turnover(min_turn)
             except ValueError:
                 self.show_snack(I18n.get("ai_snack_param_err"), color=AppColors.ERROR)
                 return
@@ -500,7 +512,6 @@ class AIBrainTab(ft.Container):
                 concurrency = int(concurrency_str)
                 if not (_CONCURRENCY_MIN <= concurrency <= _CONCURRENCY_MAX):
                     raise ValueError("Range")
-                ConfigHandler.set_ai_max_concurrent_analysis(concurrency)
             except ValueError:
                 self.show_snack(
                     I18n.get("ai_snack_invalid_range").format(
@@ -517,7 +528,6 @@ class AIBrainTab(ft.Container):
                 news_concurrency = int(news_concurrency_str)
                 if not (_NEWS_CONCURRENCY_MIN <= news_concurrency <= _NEWS_CONCURRENCY_MAX):
                     raise ValueError("Range")
-                ConfigHandler.set_ai_news_max_concurrent(news_concurrency)
             except ValueError:
                 self.show_snack(
                     I18n.get("ai_snack_invalid_range").format(
@@ -529,31 +539,115 @@ class AIBrainTab(ft.Container):
                 )
                 return
 
-            from utils.prompt_guard import validate_prompt, MAX_PROMPT_LENGTH
-
-            is_valid, warning = validate_prompt(ai_prompt)
-            if not is_valid:
-                msg = I18n.get(warning, warning)
-                if warning == "prompt_err_length":
-                    msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                self.show_snack(
-                    f"⚠ {msg}",
-                    color=AppColors.WARNING,
-                )
+            if not self._validate_prompt_or_warn(ai_prompt):
                 return
 
-            ConfigHandler.save_ai_system_prompt(ai_prompt)
-            ConfigHandler.set_ai_news_prompt(self.ai_news_prompt_input.value)
+            # 验证新闻 Prompt
+            news_prompt = self.ai_news_prompt_input.value
+            if not self._validate_prompt_or_warn(news_prompt):
+                return
 
-            self.ai_client = AIService()
-            await self.ai_client.reload_config()
+            # ========== 阶段 2: 提取 UI 值（必须在事件循环中，避免跨线程 UI 访问） ==========
+
+            llm_config = self.llm_config_panel.get_current_config()
+            local_config = self.local_model_panel.get_current_config()
+            is_azure = self.llm_config_panel._is_azure
+            api_key_modified = self.llm_config_panel._api_key_modified
+
+            # 构建 LLM 保存参数
+            llm_kwargs: dict = {}
+            if is_azure:
+                from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+
+                llm_kwargs["api_version"] = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
+                llm_kwargs["azure_resource_name"] = llm_config.get("azure_resource_name", "")
+                llm_kwargs["azure_deployment_name"] = llm_config.get("azure_deployment_name", "")
+
+            custom_models_update = self.llm_config_panel._build_custom_models_update(
+                llm_config["provider"], llm_config["model"], is_azure=is_azure
+            )
+            if custom_models_update is not None:
+                llm_kwargs["custom_models"] = custom_models_update
+
+            # 未修改 API Key 时传 None，避免不必要的重加密
+            api_key_to_save = llm_config["api_key"] if api_key_modified else None
+
+            # 构建 LocalModel 保存参数
+            local_save_kwargs = {
+                "model_path": local_config.get("model_path", ""),
+                "timeout": local_config.get("timeout", 300),
+                "n_threads": local_config.get("n_threads", 4),
+                "n_batch": local_config.get("n_batch", 512),
+                "n_ctx": local_config.get("n_ctx", 2048),
+                "flash_attn": local_config.get("flash_attn", False),
+                "n_gpu_layers": local_config.get("n_gpu_layers", 0),
+            }
+
+            # ========== 阶段 3: 统一保存所有配置（异步化 IO，纯 ConfigHandler 操作） ==========
+
+            def _save_configs_sync():
+                """所有配置保存操作，在 IO 线程池执行（不访问 UI 控件）"""
+                if not ConfigHandler.save_llm_config(
+                    provider=llm_config["provider"],
+                    model=llm_config["model"],
+                    base_url=llm_config["base_url"],
+                    api_key=api_key_to_save,
+                    **llm_kwargs,
+                ):
+                    return False
+                if not ConfigHandler.save_local_ai_config(**local_save_kwargs):
+                    return False
+                if not ConfigHandler.save_config(
+                    {
+                        "ai_max_candidates": max_cand,
+                        "strategy_min_turnover": min_turn,
+                        "ai_max_concurrent_analysis": concurrency,
+                        "ai_news_max_concurrent": news_concurrency,
+                    }
+                ):
+                    return False
+                if not ConfigHandler.save_ai_system_prompt(ai_prompt):
+                    return False
+                if not ConfigHandler.set_ai_news_prompt(news_prompt):
+                    return False
+
+                # failover 同步逻辑（纯 ConfigHandler IO，在线程池中执行）
+                LLMConfigPanel._remove_primary_from_failover(llm_config["provider"])
+                custom_models = llm_kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
+                LLMConfigPanel._sync_provider_credential_to_failover(
+                    llm_config["provider"],
+                    api_key_to_save,
+                    llm_config["base_url"],
+                    custom_models.get(llm_config["provider"]),
+                )
+                return True
+
+            success = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                _save_configs_sync,
+            )
+            if not success:
+                self.show_snack(I18n.get("settings_save_failed"), color=AppColors.ERROR)
+                return
+
+            # 保存成功后更新 panel 状态标志（在事件循环中安全访问 UI 属性）
+            self.llm_config_panel._api_key_modified = False
+
+            # ========== 阶段 4: 统一重载 AIService 配置 ==========
+
+            await AIService().reload_config()
 
             self.show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
 
-            local_config = self.local_model_panel.get_current_config()
             local_path = local_config.get("model_path", "")
             if local_path:
-                if not os.path.exists(local_path):
+                # 文件存在性检查异步化
+                exists = await ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    os.path.exists,
+                    local_path,
+                )
+                if not exists:
                     self.show_snack(
                         I18n.get("ai_model_file_not_found"),
                         color=AppColors.ERROR,
@@ -583,10 +677,17 @@ class AIBrainTab(ft.Container):
                 self.show_snack(I18n.get("settings_snack_ai_saved"))
 
         except Exception as e:
-            logger.error(f"Error saving config: {e}", exc_info=True)
+            from utils.error_classifier import classify_error, classify_severity
+
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[AIBrainTab] SYSTEM-LEVEL failure saving config: %s", e, exc_info=True)
+            else:
+                logger.error("[AIBrainTab] Error saving config (%s): %s", error_info["code"], e, exc_info=True)
             self.show_snack(
                 I18n.get("settings_snack_ai_error").format(
-                    error="配置保存失败，请检查文件权限或日志。",
+                    error=I18n.get("settings_save_failed"),
                 ),
                 color=AppColors.ERROR,
             )

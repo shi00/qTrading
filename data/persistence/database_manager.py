@@ -6,7 +6,6 @@ import pandas as pd
 import sqlalchemy as sa
 import sqlparse
 
-import config
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
@@ -46,8 +45,11 @@ class DatabaseManager:
         if self._engine is not None:
             return
 
-        if not config.DB_URL_SYNC:
+        db_url_async = ConfigHandler.get_db_url()
+        if not db_url_async:
             raise RuntimeError("Database URL is not configured. Please complete the onboarding wizard first.")
+
+        db_url_sync = db_url_async.replace("+asyncpg", "")
 
         try:
             pool_size = int(ConfigHandler.get_db_connection_pool_size())
@@ -75,7 +77,7 @@ class DatabaseManager:
             pool_pre_ping = True
 
         self._engine = sa.create_engine(
-            config.DB_URL_SYNC,
+            db_url_sync,
             echo=False,
             pool_size=pool_size,
             max_overflow=max_overflow,

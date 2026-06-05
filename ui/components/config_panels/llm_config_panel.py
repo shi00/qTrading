@@ -10,6 +10,7 @@ Provides a unified UI for configuring multiple LLM providers with:
 """
 
 import logging
+import re
 from collections.abc import Callable
 
 import flet as ft
@@ -83,7 +84,6 @@ class LLMConfigPanel(ft.Container):
 
     def _build_ui(self):  # pragma: no cover
         input_width = 360
-        refresh_icon_offset = input_width + 5
         container_width = input_width + 60
 
         self.provider_dropdown = ft.Dropdown(
@@ -176,17 +176,14 @@ class LLMConfigPanel(ft.Container):
             alignment=ft.MainAxisAlignment.START,
         )
 
-        self.model_row = ft.Stack(
+        self.model_row = ft.Row(
             controls=[
                 self.model_dropdown,
                 self.custom_model_input,
-                ft.Container(
-                    content=self.refresh_models_button,
-                    left=refresh_icon_offset,
-                    top=10,
-                ),
+                self.refresh_models_button,
             ],
-            clip_behavior=ft.ClipBehavior.NONE,
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.END,
         )
 
         self.azure_row = ft.Column(
@@ -199,7 +196,7 @@ class LLMConfigPanel(ft.Container):
             horizontal_alignment=ft.CrossAxisAlignment.START,
         )
 
-        links_row = self._build_links_row()
+        self._links_row = self._build_links_row()
 
         action_buttons = ft.Row(
             controls=[
@@ -226,7 +223,7 @@ class LLMConfigPanel(ft.Container):
                     alignment=ft.MainAxisAlignment.CENTER,
                     spacing=5,
                 ),
-                links_row,
+                self._links_row,
             ],
             spacing=10 if not self._compact else 6,
             horizontal_alignment=ft.CrossAxisAlignment.START,
@@ -434,7 +431,12 @@ class LLMConfigPanel(ft.Container):
         self.model_dropdown.options = self._build_model_options(provider_id)
         self.model_dropdown.value = None
 
-        self.api_key_input.value = ""
+        # 尝试加载该供应商已存储的凭证（如之前作为 failover 配置过）
+        stored_cred = ConfigHandler.get_provider_credential(provider_id)
+        stored_key = stored_cred.get("api_key", "")
+        stored_base_url = stored_cred.get("base_url", "")
+
+        self.api_key_input.value = stored_key
         self._api_key_modified = False
 
         if provider_id == "azure":
@@ -450,7 +452,7 @@ class LLMConfigPanel(ft.Container):
             self.custom_model_input.visible = True
             self.model_dropdown.visible = False
             self.refresh_models_button.visible = True
-            self.base_url_input.value = ""
+            self.base_url_input.value = stored_base_url
             self.base_url_input.read_only = False
             self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
             self._load_custom_model_history(provider_id)
@@ -460,7 +462,7 @@ class LLMConfigPanel(ft.Container):
             self.custom_model_input.visible = False
             self.model_dropdown.visible = True
             self.refresh_models_button.visible = provider_id in MODELS_API_COMPATIBLE
-            self.base_url_input.value = provider.get("base_url", "")
+            self.base_url_input.value = stored_base_url or provider.get("base_url", "")
             self.base_url_input.read_only = True
             self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
 
@@ -512,9 +514,7 @@ class LLMConfigPanel(ft.Container):
                 )
             )
 
-        content_col = self.content.content if isinstance(self.content, ft.Container) else self.content
-        links_row = content_col.controls[-1]
-        links_row.controls = links
+        self._links_row.controls = links
 
     def _load_custom_model_history(self, provider_id: str):  # pragma: no cover
         """Load custom model history for the given provider."""
@@ -535,8 +535,27 @@ class LLMConfigPanel(ft.Container):
 
         self.page.run_task(self._on_llm_test_connection)
 
+    def _validate_azure_fields(self) -> tuple[bool, str, str, str]:
+        """
+        验证 Azure 专用字段，返回 (is_valid, resource_name, deployment_name, api_version)。
+
+        验证失败时自动显示警告提示。
+        """
+        resource_name = self.azure_resource_input.value
+        deployment_name = self.azure_deployment_input.value
+        api_version = self.azure_version_input.value
+
+        if not resource_name:
+            self._show_warning(I18n.get("llm_azure_need_resource"))
+            return False, "", "", ""
+        if not deployment_name:
+            self._show_warning(I18n.get("llm_azure_need_deployment"))
+            return False, "", "", ""
+
+        return True, resource_name, deployment_name, api_version
+
     async def _on_llm_test_connection(self):
-        api_key = self.api_key_input.value
+        api_key = (self.api_key_input.value or "").strip()
 
         if not api_key:
             self._show_warning(I18n.get("llm_test_need_key"))
@@ -554,15 +573,8 @@ class LLMConfigPanel(ft.Container):
 
             kwargs = {}
             if self._is_azure:
-                resource_name = self.azure_resource_input.value
-                deployment_name = self.azure_deployment_input.value
-                api_version = self.azure_version_input.value
-
-                if not resource_name:
-                    self._show_warning(I18n.get("llm_azure_need_resource"))
-                    return
-                if not deployment_name:
-                    self._show_warning(I18n.get("llm_azure_need_deployment"))
+                is_valid, resource_name, deployment_name, api_version = self._validate_azure_fields()
+                if not is_valid:
                     return
 
                 model = deployment_name
@@ -595,16 +607,14 @@ class LLMConfigPanel(ft.Container):
             if result.get("success"):
                 self._show_success(I18n.get("llm_test_success"))
             else:
-                self._show_error(
-                    f"{I18n.get('llm_test_failed')}: {I18n.get(result.get('message', 'common_err_unknown'))}"
-                )
+                self._show_error(I18n.get(result.get("message", "common_err_unknown")))
 
         except Exception as ex:
             from services.ai_service import _classify_api_error
             from utils.error_classifier import get_error_message
 
             error_info = _classify_api_error(ex)
-            self._show_error(f"{I18n.get('llm_test_failed')}: {get_error_message(error_info)}")
+            self._show_error(get_error_message(error_info))
             logger.error(f"[LLMConfigPanel] Test connection error: {ex}")
 
         finally:
@@ -618,15 +628,8 @@ class LLMConfigPanel(ft.Container):
         provider = self._current_provider
 
         if self._is_azure:
-            resource_name = self.azure_resource_input.value
-            deployment_name = self.azure_deployment_input.value
-            api_version = self.azure_version_input.value
-
-            if not resource_name:
-                self._show_warning(I18n.get("llm_azure_need_resource"))
-                return False
-            if not deployment_name:
-                self._show_warning(I18n.get("llm_azure_need_deployment"))
+            is_valid, resource_name, deployment_name, api_version = self._validate_azure_fields()
+            if not is_valid:
                 return False
 
             model = deployment_name
@@ -640,14 +643,8 @@ class LLMConfigPanel(ft.Container):
         api_key = self.api_key_input.value
 
         if not api_key:
-            existing_config = ConfigHandler.get_llm_config()
-            existing_key = existing_config.get("api_key", "")
-            if not existing_key:
-                self._show_warning(I18n.get("llm_test_need_key"))
-                return False
-            api_key = existing_key
-            if not base_url:
-                base_url = existing_config.get("base_url", "")
+            self._show_warning(I18n.get("llm_test_need_key"))
+            return False
 
         if not provider or not model:
             self._show_error(I18n.get("wizard_err_provider_model_required"))
@@ -676,7 +673,7 @@ class LLMConfigPanel(ft.Container):
                 self._show_success(I18n.get("llm_test_success"))
                 return True
 
-            self._show_error(f"{I18n.get('llm_test_failed')}: {result.get('message', '')}")
+            self._show_error(I18n.get(result.get("message", "common_err_unknown")))
             return False
 
         except Exception as ex:
@@ -684,7 +681,7 @@ class LLMConfigPanel(ft.Container):
             from utils.error_classifier import get_error_message
 
             error_info = _classify_api_error(ex)
-            self._show_error(f"{I18n.get('llm_test_failed')}: {get_error_message(error_info)}")
+            self._show_error(get_error_message(error_info))
             logger.error(f"[LLMConfigPanel] Verify connection error: {ex}")
             return False
 
@@ -761,7 +758,7 @@ class LLMConfigPanel(ft.Container):
             from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(ex, context="llm")
-            self._show_error(f"{I18n.get('llm_refresh_failed')}: {get_error_message(error_info)}")
+            self._show_error(get_error_message(error_info))
             logger.error(f"[LLMConfigPanel] Refresh models error: {ex}")
 
         finally:
@@ -773,27 +770,31 @@ class LLMConfigPanel(ft.Container):
     @staticmethod
     def _normalize_base_url(url: str) -> str:
         """
-        Normalize base URL to a clean API endpoint.
+        Normalize base URL by stripping known API endpoint suffixes while preserving base path.
+
+        Only removes trailing API endpoint paths (e.g., /chat/completions, /v1/chat/completions)
+        that users might paste, but keeps essential base paths like /compatible-mode/v1, /api/paas/v4.
 
         Examples:
-            https://api.deepseek.com/v1/chat/completions -> https://api.deepseek.com
-            https://api.openai.com/v1 -> https://api.openai.com
+            https://api.deepseek.com/v1/chat/completions -> https://api.deepseek.com/v1
+            https://api.openai.com/v1 -> https://api.openai.com/v1
             https://api.example.com/ -> https://api.example.com
+            https://dashscope.aliyuncs.com/compatible-mode/v1 -> https://dashscope.aliyuncs.com/compatible-mode/v1
         """
         if not url:
             return ""
 
-        url = url.strip()
+        url = url.strip().rstrip("/")
 
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
 
-        from urllib.parse import urlparse
+        # Strip known API endpoint suffixes that users might paste
+        url = re.sub(r"/chat/completions$", "", url)
+        url = re.sub(r"/completions$", "", url)
+        url = re.sub(r"/embeddings$", "", url)
 
-        parsed = urlparse(url)
-        base = f"{parsed.scheme}://{parsed.netloc}"
-
-        return base
+        return url
 
     def _get_current_base_url(self) -> str:
         if self._is_azure:
@@ -838,15 +839,8 @@ class LLMConfigPanel(ft.Container):
         kwargs = {}
 
         if self._is_azure:
-            resource_name = self.azure_resource_input.value
-            deployment_name = self.azure_deployment_input.value
-            api_version = self.azure_version_input.value
-
-            if not resource_name:
-                self._show_warning(I18n.get("llm_azure_need_resource"))
-                return
-            if not deployment_name:
-                self._show_warning(I18n.get("llm_azure_need_deployment"))
+            is_valid, resource_name, deployment_name, api_version = self._validate_azure_fields()
+            if not is_valid:
                 return
 
             model = deployment_name
@@ -910,8 +904,8 @@ class LLMConfigPanel(ft.Container):
             dict with provider, model, base_url, api_key, and Azure fields
         """
         provider = self._current_provider
-        base_url = self.base_url_input.value
-        api_key = self.api_key_input.value
+        base_url = self._normalize_base_url(self.base_url_input.value or "")
+        api_key = (self.api_key_input.value or "").strip()
 
         result = {
             "provider": provider,
@@ -955,19 +949,23 @@ class LLMConfigPanel(ft.Container):
         if custom_models_update is not None:
             kwargs["custom_models"] = custom_models_update
 
+        # 未修改 API Key 时传 None，避免不必要的重加密
+        api_key_to_save = config["api_key"] if self._api_key_modified else None
+
         try:
             ConfigHandler.save_llm_config(
                 provider=config["provider"],
                 model=config["model"],
                 base_url=config["base_url"],
-                api_key=config["api_key"],
+                api_key=api_key_to_save,
                 **kwargs,
             )
+            self._api_key_modified = False
             self._remove_primary_from_failover(config["provider"])
             custom_models = kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
             self._sync_provider_credential_to_failover(
                 config["provider"],
-                config["api_key"],
+                api_key_to_save,
                 config["base_url"],
                 custom_models.get(config["provider"]),
             )
@@ -976,8 +974,8 @@ class LLMConfigPanel(ft.Container):
             logger.error(f"[LLMConfigPanel] Save current config error: {e}")
             return False
 
+    @staticmethod
     def _sync_provider_credential_to_failover(
-        self,
         provider: str,
         api_key: str | None,
         base_url: str,
@@ -987,21 +985,30 @@ class LLMConfigPanel(ft.Container):
         如果当前 provider 在 failover_models 中，自动同步凭证到 llm_provider_credentials。
 
         这样用户配置主供应商时，failover 凭证自动同步，无需额外配置。
+
+        注意: api_key 为 None 表示用户未修改密钥，此时应读取现有凭证中的 key，
+        避免用空字符串覆盖已存储的有效密钥。
         """
         try:
             failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
             for model in failover_models:
                 if model.startswith(f"{provider}/"):
+                    # api_key 为 None 表示未修改，读取现有凭证避免覆盖
+                    effective_key = api_key
+                    if effective_key is None:
+                        existing_cred = ConfigHandler.get_provider_credential(provider)
+                        effective_key = existing_cred.get("api_key", "")
+
                     ConfigHandler.save_provider_credential(
                         provider=provider,
-                        api_key=api_key or "",
+                        api_key=effective_key,
                         base_url=base_url,
                         models=models,
                     )
-                    logger.debug(f"[LLMConfigPanel] Synced credential and models to failover provider: {provider}")
+                    logger.debug("[LLMConfigPanel] Synced credential to failover provider: %s", provider)
                     break
         except Exception as e:
-            logger.debug(f"[LLMConfigPanel] Failed to sync failover credential: {e}")
+            logger.debug("[LLMConfigPanel] Failed to sync failover credential: %s", e)
 
     def _show_success(self, message: str):  # pragma: no cover
         self.status_text.value = message
