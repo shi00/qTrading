@@ -382,6 +382,14 @@ class LocalModelManager:
         if config is None:
             config = ConfigHandler.get_local_ai_config()
 
+        # Resolve load timeout: prefer panel's "timeout", then persisted "local_model_timeout", default 180s
+        raw_timeout = config.get("timeout")
+        if raw_timeout is None:
+            raw_timeout = config.get("local_model_timeout")
+        if raw_timeout is None:
+            raw_timeout = 180
+        load_timeout = max(1, min(int(raw_timeout), 3600))
+
         core_config = {
             "n_threads": config.get("n_threads", 4),
             "n_batch": config.get("n_batch", 1024),
@@ -410,6 +418,7 @@ class LocalModelManager:
             )
 
             self._is_loading = True
+            self._cancel_event.clear()
             start_time = asyncio.get_running_loop().time()
 
             try:
@@ -423,14 +432,13 @@ class LocalModelManager:
                 logger.info("[LocalModel] Starting persistent subprocess worker...")
                 if not self._ensure_worker(model_path, core_config):
                     return False
-                if not await self._await_worker_ready():
+                if not await self._await_worker_ready(timeout=float(load_timeout)):
                     return False
 
                 self._model_path = model_path
                 self._model_md5 = target_md5
                 self._model_stat = current_stat
                 self._last_config = core_config
-                self._cancel_event.clear()
 
                 elapsed = asyncio.get_running_loop().time() - start_time
                 logger.info(

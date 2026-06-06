@@ -684,6 +684,93 @@ class TestLocalModelManagerUnloadSetsCancel:
         assert mgr._cancel_event.is_set()
 
 
+class TestLocalModelManagerLoadModelTimeout:
+    """Verify load_model() passes the resolved timeout to _await_worker_ready()."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_from_panel_config(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                result = await mgr.load_model("/path/to/model.gguf", config={"timeout": 60, "n_threads": 4})
+                assert result is True
+                mock_await.assert_called_once_with(timeout=60.0)
+
+    @pytest.mark.asyncio
+    async def test_timeout_from_persisted_config(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                result = await mgr.load_model(
+                    "/path/to/model.gguf",
+                    config={"local_model_timeout": 120, "n_threads": 4},
+                )
+                assert result is True
+                mock_await.assert_called_once_with(timeout=120.0)
+
+    @pytest.mark.asyncio
+    async def test_timeout_default_when_missing(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 4})
+                assert result is True
+                mock_await.assert_called_once_with(timeout=180.0)
+
+
+class TestLocalModelManagerLoadModelClearsCancel:
+    """Verify load_model() clears _cancel_event before starting worker."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_cleared_before_worker_start(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._cancel_event.set()
+            assert mgr._cancel_event.is_set()
+
+            async def _assert_cancel_cleared_then_return(*args, **kwargs):
+                assert not mgr._cancel_event.is_set(), (
+                    "cancel_event should be cleared before _await_worker_ready is called"
+                )
+                return True
+
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", side_effect=_assert_cancel_cleared_then_return),
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 4})
+                assert result is True
+
+
 class TestLocalModelManagerGetLoadLock:
     @pytest.mark.asyncio
     async def test_get_load_lock_returns_lock(self):
