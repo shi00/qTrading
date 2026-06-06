@@ -723,7 +723,7 @@ class ConfigHandler:
         if api_key is not None:
             api_key = api_key.strip()
 
-        config_update = {
+        config_update: dict[str, object] = {
             "llm_provider": provider,
             "llm_model": model,
         }
@@ -977,7 +977,7 @@ class ConfigHandler:
                 # 用户主动清空密钥，清除 keyring 和加密存储
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
-                except keyring.errors.PasswordDeleteError:
+                except keyring.errors.PasswordDeleteError:  # type: ignore[reportAttributeAccessIssue]  # keyring.errors is available at runtime
                     pass
                 except Exception:
                     pass

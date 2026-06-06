@@ -525,7 +525,7 @@ class AIStrategyMixin:
             if isinstance(res, Exception):
                 error_info = classify_error(res, context="general")
                 logger.error("[AIStrategyMixin] Task error (%s): %s", error_info["code"], res)
-            elif res is not None:
+            elif isinstance(res, dict):
                 final_rows.append(res)
                 if on_result:
                     on_result(res)

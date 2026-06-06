@@ -129,6 +129,7 @@ class TestDbUrlPasswordMasking:
             patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="secret123"),
         ):
             url = cfg_mod.ConfigHandler.get_db_url()
+            assert url is not None
             assert "secret123" in url
             assert "myhost" in url
             assert "5433" in url
@@ -153,6 +154,7 @@ class TestDbUrlPasswordMasking:
         ):
             url = cfg_mod.ConfigHandler.get_db_url()
             # quote_plus encodes @ : /
+            assert url is not None
             assert "p%40ss%3Aword%2F123" in url
             assert "@localhost" in url  # @ before host, not in password
 

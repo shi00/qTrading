@@ -157,20 +157,18 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
 
     if context == "llm":
-        if _LITELLM_AVAILABLE and isinstance(e, LITELLM_PERMANENT_EXCEPTIONS):
-            if isinstance(e, LiteLLMAuthenticationError):
+        if _LITELLM_AVAILABLE:
+            if LiteLLMAuthenticationError is not None and isinstance(e, LiteLLMAuthenticationError):
                 return {"code": "auth_failed", "message_key": "llm_err_auth_failed", "should_retry": False}
-            if isinstance(e, ContentPolicyViolationError):
+            if ContentPolicyViolationError is not None and isinstance(e, ContentPolicyViolationError):
                 return {"code": "content_policy", "message_key": "llm_err_content_policy", "should_retry": False}
-            if isinstance(e, PermissionDeniedError):
+            if PermissionDeniedError is not None and isinstance(e, PermissionDeniedError):
                 return {"code": "forbidden", "message_key": "llm_err_forbidden", "should_retry": False}
-            if isinstance(e, LiteLLMNotFoundError):
+            if LiteLLMNotFoundError is not None and isinstance(e, LiteLLMNotFoundError):
                 return {"code": "not_found", "message_key": "llm_err_not_found", "should_retry": False}
-
-        if _LITELLM_AVAILABLE and isinstance(e, LITELLM_TRANSIENT_EXCEPTIONS):
-            if isinstance(e, RateLimitError):
+            if RateLimitError is not None and isinstance(e, RateLimitError):
                 return {"code": "rate_limit", "message_key": "llm_err_rate_limit", "should_retry": True}
-            if isinstance(e, ServiceUnavailableError):
+            if ServiceUnavailableError is not None and isinstance(e, ServiceUnavailableError):
                 return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
 
         if "insufficient_quota" in error_str or "quota" in error_str or "402" in error_str:

@@ -553,7 +553,7 @@ class LLMConfigPanel(ft.Container):
             self._show_warning(I18n.get("llm_azure_need_deployment"))
             return False, "", "", ""
 
-        return True, resource_name, deployment_name, api_version
+        return True, resource_name, deployment_name, api_version or ""
 
     async def _on_llm_test_connection(self):
         api_key = (self.api_key_input.value or "").strip()
@@ -590,7 +590,7 @@ class LLMConfigPanel(ft.Container):
                 kwargs["azure_resource_name"] = resource_name
                 base_url = ""
             else:
-                base_url = self.base_url_input.value
+                base_url = self.base_url_input.value or ""
 
             if self.on_test_connection:
                 result = await self.on_test_connection(
@@ -643,8 +643,8 @@ class LLMConfigPanel(ft.Container):
             kwargs = {"api_version": api_version, "azure_resource_name": resource_name}
             base_url = ""
         else:
-            model = self.model_dropdown.value or self.custom_model_input.value
-            base_url = self._normalize_base_url(self.base_url_input.value)
+            model = self.model_dropdown.value or self.custom_model_input.value or ""
+            base_url = self._normalize_base_url(self.base_url_input.value or "")
             kwargs = {}
 
         api_key = self.api_key_input.value
@@ -713,7 +713,7 @@ class LLMConfigPanel(ft.Container):
     async def _refresh_models(self):  # pragma: no cover
         api_key = self.api_key_input.value
         raw_base_url = self.base_url_input.value
-        base_url = self._normalize_base_url(raw_base_url)
+        base_url = self._normalize_base_url(raw_base_url or "")
 
         if not api_key:
             self._show_warning(I18n.get("llm_refresh_need_key"))
@@ -843,7 +843,7 @@ class LLMConfigPanel(ft.Container):
         provider = self._current_provider
         # Strip whitespace from api_key; if modified, use stripped value, else None
         api_key_raw = self.api_key_input.value
-        api_key = api_key_raw.strip() if self._api_key_modified else None
+        api_key = (api_key_raw or "").strip() if self._api_key_modified else None
 
         kwargs = {}
 
@@ -859,19 +859,19 @@ class LLMConfigPanel(ft.Container):
             kwargs["azure_resource_name"] = resource_name
             kwargs["azure_deployment_name"] = deployment_name
         else:
-            model = self.model_dropdown.value or self.custom_model_input.value
-            base_url = self._normalize_base_url(self.base_url_input.value)
+            model = self.model_dropdown.value or self.custom_model_input.value or ""
+            base_url = self._normalize_base_url(self.base_url_input.value or "")
 
-            custom_models_update = self._build_custom_models_update(provider, model, is_azure=False)
+            custom_models_update = self._build_custom_models_update(provider or "", model, is_azure=False)
             if custom_models_update is not None:
                 kwargs["custom_models"] = custom_models_update
 
         try:
             ConfigHandler.save_llm_config(
                 provider=provider,
-                model=model,
+                model=model or "",
                 base_url=base_url,
-                api_key=api_key,
+                api_key=api_key or "",
                 **kwargs,
             )
 
@@ -966,7 +966,7 @@ class LLMConfigPanel(ft.Container):
                 provider=config["provider"],
                 model=config["model"],
                 base_url=config["base_url"],
-                api_key=api_key_to_save,
+                api_key=api_key_to_save,  # type: ignore[reportArgumentType]  # api_key accepts None when unchanged
                 **kwargs,
             )
             self._api_key_modified = False
@@ -1022,7 +1022,7 @@ class LLMConfigPanel(ft.Container):
     def _show_success(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.SUCCESS
-        self.status_icon.icon = ft.Icons.CHECK_CIRCLE
+        self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.SUCCESS
         self.status_icon.visible = True
         self._safe_update()
@@ -1030,7 +1030,7 @@ class LLMConfigPanel(ft.Container):
     def _show_error(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.ERROR
-        self.status_icon.icon = ft.Icons.ERROR
+        self.status_icon.icon = ft.Icons.ERROR  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.ERROR
         self.status_icon.visible = True
         self._safe_update()
@@ -1038,7 +1038,7 @@ class LLMConfigPanel(ft.Container):
     def _show_warning(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.WARNING
+        self.status_icon.icon = ft.Icons.WARNING  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.WARNING
         self.status_icon.visible = True
         self._safe_update()
@@ -1046,7 +1046,7 @@ class LLMConfigPanel(ft.Container):
     def _show_info(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.PRIMARY
-        self.status_icon.icon = ft.Icons.INFO
+        self.status_icon.icon = ft.Icons.INFO  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.PRIMARY
         self.status_icon.visible = True
         self._safe_update()
@@ -1064,7 +1064,7 @@ class LLMConfigPanel(ft.Container):
     def will_unmount(self):  # pragma: no cover
         I18n.unsubscribe(self._on_locale_change)
 
-    def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
         self.provider_dropdown.label = I18n.get("llm_select_provider")
         self.model_dropdown.label = I18n.get("llm_select_model")
         self.custom_model_input.label = I18n.get("llm_custom_model")

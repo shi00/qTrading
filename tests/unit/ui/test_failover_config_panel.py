@@ -206,7 +206,9 @@ class TestFailoverConfigPanelLoadAndRender:
             "llm_provider": "deepseek",
         }
         mock_config_handler.get_provider_credential.side_effect = lambda p: (
-            {"api_key": "sk-1234567890abcdef", "base_url": ""} if p == "deepseek" else {"api_key": "", "base_url": ""}
+            {"api_key": "test_token_deepseek_mock", "base_url": ""}
+            if p == "deepseek"
+            else {"api_key": "", "base_url": ""}
         )
         panel = _make_panel(
             mock_config_handler,
@@ -220,7 +222,7 @@ class TestFailoverConfigPanelLoadAndRender:
         assert len(panel._failover_items) == 2
         assert panel._failover_items[0].provider == "deepseek"
         assert panel._failover_items[0].has_credential is True
-        assert panel._failover_items[0].api_key_masked == "sk-1...cdef"
+        assert panel._failover_items[0].api_key_masked == "test...mock"
         assert panel._failover_items[1].provider == "openai"
         assert panel._failover_items[1].has_credential is False
 
@@ -345,7 +347,7 @@ class TestFailoverConfigPanelAddEditDelete:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "openai",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "sk-test", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_mock", "base_url": ""}
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -375,7 +377,7 @@ class TestFailoverConfigPanelAddEditDelete:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "deepseek",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "sk-test", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_mock", "base_url": ""}
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -839,6 +841,7 @@ class TestProviderCredentialDialog:
             mock_page,
         )
         # custom 被排除，剩余 deepseek / openai / zhipu
+        assert dialog.provider_dropdown.options is not None
         provider_keys = [opt.key for opt in dialog.provider_dropdown.options]
         assert "deepseek" in provider_keys
         assert "openai" in provider_keys
@@ -860,7 +863,7 @@ class TestProviderCredentialDialog:
             display_name="DeepSeek",
             has_credential=True,
         )
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "sk-test", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_mock", "base_url": ""}
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -888,7 +891,7 @@ class TestProviderCredentialDialog:
             has_credential=True,
         )
         mock_config_handler.get_provider_credential.return_value = {
-            "api_key": "sk-1234567890abcdef",
+            "api_key": "test_token_deepseek_mock",
             "base_url": "https://api.deepseek.com",
         }
         dialog = _make_dialog(
@@ -902,7 +905,7 @@ class TestProviderCredentialDialog:
         )
         assert dialog.provider_dropdown.value == "deepseek"
         assert dialog.model_dropdown.value == "deepseek-chat"
-        assert dialog.api_key_input.value == "sk-1234567890abcdef"
+        assert dialog.api_key_input.value == "test_token_deepseek_mock"
         assert dialog.base_url_input.value == "https://api.deepseek.com"
 
     def test_on_cancel_closes_dialog(
@@ -945,6 +948,7 @@ class TestProviderCredentialDialog:
         e = MagicMock()
         e.control.value = "deepseek"
         dialog._on_provider_change(e)
+        assert dialog.model_dropdown.options is not None
         model_keys = [opt.key for opt in dialog.model_dropdown.options]
         assert "deepseek-chat" in model_keys
         assert "deepseek-reasoner" in model_keys
@@ -1014,7 +1018,7 @@ class TestProviderCredentialDialog:
         )
         dialog._provider = "openai"
         dialog.model_dropdown.value = "gpt-4o"
-        dialog.api_key_input.value = "sk-openai-key"
+        dialog.api_key_input.value = "test_token_openai_key"
         dialog.base_url_input.value = "https://api.openai.com/v1"
         # load_config 返回当前 failover 列表
         mock_config_handler.load_config.return_value = {
@@ -1024,7 +1028,7 @@ class TestProviderCredentialDialog:
         dialog._on_confirm_click(MagicMock())
         mock_config_handler.save_provider_credential.assert_called_once_with(
             provider="openai",
-            api_key="sk-openai-key",
+            api_key="test_token_openai_key",
             base_url="https://api.openai.com/v1",
             models=["gpt-4o"],
         )
@@ -1076,7 +1080,7 @@ class TestProviderCredentialDialog:
         )
         dialog._provider = "deepseek"
         dialog.model_dropdown.value = "deepseek-chat"
-        dialog.api_key_input.value = "sk-test"
+        dialog.api_key_input.value = "test_token_mock"
         mock_config_handler.load_config.return_value = {
             "llm_failover_models": [],
             "llm_provider": "deepseek",
@@ -1102,7 +1106,7 @@ class TestProviderCredentialDialog:
             display_name="OpenAI",
             has_credential=True,
         )
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "sk-old", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_old", "base_url": ""}
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -1115,7 +1119,7 @@ class TestProviderCredentialDialog:
         # 修改模型
         dialog.custom_model_input.value = "gpt-4o-mini"
         dialog.model_dropdown.value = None
-        dialog.api_key_input.value = "sk-new"
+        dialog.api_key_input.value = "test_token_new"
         dialog.base_url_input.value = "https://api.openai.com/v1"
         mock_config_handler.load_config.return_value = {
             "llm_failover_models": ["openai/gpt-4o"],
@@ -1144,7 +1148,7 @@ class TestProviderCredentialDialog:
         )
         dialog._provider = ""
         dialog.model_dropdown.value = "gpt-4o"
-        dialog.api_key_input.value = "sk-test"
+        dialog.api_key_input.value = "test_token_mock"
         dialog._on_confirm_click(MagicMock())
         mock_config_handler.save_provider_credential.assert_not_called()
 
@@ -1182,7 +1186,7 @@ class TestProviderCredentialDialogTestConnection:
         )
         dialog._provider = "deepseek"
         dialog.model_dropdown.value = "deepseek-chat"
-        dialog.api_key_input.value = "sk-test"
+        dialog.api_key_input.value = "test_token_mock"
         dialog.base_url_input.value = "https://api.deepseek.com"
 
         with patch("services.ai_service.AIService") as mock_ai:
@@ -1212,7 +1216,7 @@ class TestProviderCredentialDialogTestConnection:
         )
         dialog._provider = "deepseek"
         dialog.model_dropdown.value = "deepseek-chat"
-        dialog.api_key_input.value = "sk-test"
+        dialog.api_key_input.value = "test_token_mock"
         dialog.base_url_input.value = "https://api.deepseek.com"
 
         with patch("services.ai_service.AIService") as mock_ai:

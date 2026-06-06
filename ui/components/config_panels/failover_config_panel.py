@@ -135,6 +135,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
         ]
 
     def _populate_edit_data(self):
+        if self._edit_item is None:
+            return
         self.provider_dropdown.value = self._edit_item.provider
         self._on_provider_change_internal(self._edit_item.provider)
 
@@ -221,7 +223,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
     async def _on_test_connection(self, e):
         provider = self._provider
         model = self.custom_model_input.value or self.model_dropdown.value
-        base_url = self.base_url_input.value
+        base_url = self.base_url_input.value or ""
         api_key = self.api_key_input.value
 
         if not provider or not model or not api_key:
@@ -259,7 +261,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
     def _on_confirm_click(self, e):
         provider = self._provider
         model = self.custom_model_input.value or self.model_dropdown.value
-        base_url = self.base_url_input.value
+        base_url = self.base_url_input.value or ""
         api_key = self.api_key_input.value
 
         if not provider or not model:
@@ -285,7 +287,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
         new_entry = f"{provider}/{model}"
 
-        if self._is_edit:
+        if self._is_edit and self._edit_item is not None:
             old_entry = self._edit_item.to_config_string()
             failover_models = [new_entry if m == old_entry else m for m in failover_models]
         else:
@@ -592,7 +594,7 @@ class FailoverConfigPanel(ft.Container):
     def will_unmount(self):
         I18n.unsubscribe(self._on_locale_change)
 
-    def _on_locale_change(self, new_locale: str = None):
+    def _on_locale_change(self, new_locale: str | None = None):
         self._build_ui()
         self._load_config()
         self._safe_update()

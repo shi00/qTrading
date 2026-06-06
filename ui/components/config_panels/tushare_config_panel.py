@@ -235,7 +235,7 @@ class TushareConfigPanel(ft.Container):
             if loading:
                 self.status_text.value = I18n.get("tushare_verifying")
                 self.status_text.color = AppColors.WARNING
-                self.status_icon.icon = ft.Icons.HOURGLASS_TOP
+                self.status_icon.icon = ft.Icons.HOURGLASS_TOP  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
                 self.status_icon.color = AppColors.WARNING
                 self.status_icon.visible = True
 
@@ -244,7 +244,7 @@ class TushareConfigPanel(ft.Container):
     def _show_success(self, message: str):
         self.status_text.value = message
         self.status_text.color = AppColors.SUCCESS
-        self.status_icon.icon = ft.Icons.CHECK_CIRCLE
+        self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.SUCCESS
         self.status_icon.visible = True
         self._safe_update()
@@ -252,7 +252,7 @@ class TushareConfigPanel(ft.Container):
     def _show_error(self, message: str):
         self.status_text.value = message
         self.status_text.color = AppColors.ERROR
-        self.status_icon.icon = ft.Icons.ERROR
+        self.status_icon.icon = ft.Icons.ERROR  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.ERROR
         self.status_icon.visible = True
         self._safe_update()
@@ -260,7 +260,7 @@ class TushareConfigPanel(ft.Container):
     def _show_warning(self, message: str):
         self.status_text.value = message
         self.status_text.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.WARNING
+        self.status_icon.icon = ft.Icons.WARNING  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.WARNING
         self.status_icon.visible = True
         self._safe_update()
@@ -273,7 +273,7 @@ class TushareConfigPanel(ft.Container):
             logger.debug(f"[TushareConfig] UI update skipped: {exc}")
 
     async def verify_token(self) -> bool:
-        token = self.token_input.value.strip()
+        token = (self.token_input.value or "").strip()
 
         if not token:
             self._show_error(I18n.get("tushare_token_required"))
@@ -352,7 +352,7 @@ class TushareConfigPanel(ft.Container):
 
     def get_current_config(self) -> dict:
         return {
-            "token": self.token_input.value.strip(),
+            "token": (self.token_input.value or "").strip(),
         }
 
     def set_config(self, config: dict):

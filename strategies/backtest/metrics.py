@@ -58,6 +58,7 @@ class BacktestMetrics:
         std_val = daily_returns.std()
         if std_val is None:
             return 0.0
+        assert isinstance(std_val, (int, float))
         return float(std_val * math.sqrt(trading_days_per_year))
 
     @staticmethod
@@ -75,6 +76,7 @@ class BacktestMetrics:
         excess_std = excess_returns.std()
         if excess_std is None:
             return 0.0
+        assert isinstance(excess_std, (int, float))
         excess_std_float = float(excess_std)
         if excess_std_float == 0:
             return 0.0
@@ -82,6 +84,7 @@ class BacktestMetrics:
         excess_mean = excess_returns.mean()
         if excess_mean is None:
             return 0.0
+        assert isinstance(excess_mean, (int, float))
 
         return float(excess_mean) / excess_std_float * math.sqrt(trading_days_per_year)
 
@@ -157,10 +160,12 @@ class BacktestMetrics:
     def calc_ir(ic_series: pl.Series) -> float:
         if len(ic_series) < 2:
             return 0.0
-        ic_mean = float(ic_series.mean()) if ic_series.mean() is not None else 0.0
+        ic_mean_raw = ic_series.mean()
+        ic_mean = float(ic_mean_raw) if ic_mean_raw is not None else 0.0
         ic_std_val = ic_series.std()
         if ic_std_val is None:
             return 0.0
+        assert isinstance(ic_std_val, (int, float))
         ic_std_float = float(ic_std_val)
         if ic_std_float < 1e-10:
             return 0.0
@@ -180,6 +185,7 @@ class BacktestMetrics:
         tracking_error = excess_returns.std()
         if tracking_error is None:
             return 0.0, 0.0
+        assert isinstance(tracking_error, (int, float))
         tracking_error_float = float(tracking_error)
         if tracking_error_float == 0:
             return 0.0, 0.0
@@ -187,6 +193,7 @@ class BacktestMetrics:
         excess_mean = excess_returns.mean()
         if excess_mean is None:
             return 0.0, 0.0
+        assert isinstance(excess_mean, (int, float))
 
         tracking_error_annual = tracking_error_float * math.sqrt(trading_days_per_year)
         information_ratio = float(excess_mean) * trading_days_per_year / tracking_error_annual
@@ -211,6 +218,7 @@ class BacktestMetrics:
 
         information_ratio, tracking_error = BacktestMetrics.calc_information_ratio(daily_returns, benchmark_returns)
 
+        _ic_mean_raw = ic_series.mean() if len(ic_series) > 0 else None
         return {
             "total_return": total_return,
             "annualized_return": ann_return,
@@ -221,7 +229,7 @@ class BacktestMetrics:
             "win_rate": BacktestMetrics.calc_win_rate(trades),
             "profit_factor": BacktestMetrics.calc_profit_factor(trades),
             "total_trades": len(trades),
-            "ic_mean": float(ic_series.mean()) if len(ic_series) > 0 else 0.0,
+            "ic_mean": float(_ic_mean_raw) if isinstance(_ic_mean_raw, (int, float)) else 0.0,
             "ic_ir": BacktestMetrics.calc_ir(ic_series),
             "information_ratio": information_ratio,
             "tracking_error": tracking_error,

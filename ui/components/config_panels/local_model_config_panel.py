@@ -372,7 +372,7 @@ class LocalModelConfigPanel(ft.Container):
         return False
 
     async def async_verify_model(self) -> bool:
-        model_path = self.model_path_input.value.strip()
+        model_path = (self.model_path_input.value or "").strip()
 
         if not model_path:
             self._show_error(I18n.get("wizard_err_model_required"))
@@ -386,7 +386,7 @@ class LocalModelConfigPanel(ft.Container):
             self._show_error(I18n.get("wizard_err_model_format"))
             return False
 
-        timeout_str = self.timeout_input.value.strip()
+        timeout_str = (self.timeout_input.value or "").strip()
         try:
             timeout = int(timeout_str) if timeout_str else 300
             if not (0 < timeout <= 3600):
@@ -451,8 +451,8 @@ class LocalModelConfigPanel(ft.Container):
             self.on_loading_change(loading)
 
     def save_config(self) -> bool:
-        model_path = self.model_path_input.value.strip()
-        timeout_str = self.timeout_input.value.strip()
+        model_path = (self.model_path_input.value or "").strip()
+        timeout_str = (self.timeout_input.value or "").strip()
         timeout = int(timeout_str) if timeout_str else 300
 
         # 限制 timeout 范围
@@ -480,8 +480,8 @@ class LocalModelConfigPanel(ft.Container):
         gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value or 0)
 
         return {
-            "model_path": self.model_path_input.value.strip(),
-            "timeout": int(self.timeout_input.value) if self.timeout_input.value.strip() else 300,
+            "model_path": (self.model_path_input.value or "").strip(),
+            "timeout": int(self.timeout_input.value or 0) if (self.timeout_input.value or "").strip() else 300,
             "n_threads": int(self.threads_input.value or 4),
             "n_gpu_layers": gpu_layers,
             "n_batch": int(self.batch_input.value or 512),
@@ -509,7 +509,7 @@ class LocalModelConfigPanel(ft.Container):
     def _show_success(self, message: str):
         self.status_text.value = message
         self.status_text.color = AppColors.SUCCESS
-        self.status_icon.icon = ft.Icons.CHECK_CIRCLE
+        self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.SUCCESS
         self.status_icon.visible = True
         self._safe_update()
@@ -517,7 +517,7 @@ class LocalModelConfigPanel(ft.Container):
     def _show_error(self, message: str):
         self.status_text.value = message
         self.status_text.color = AppColors.ERROR
-        self.status_icon.icon = ft.Icons.ERROR
+        self.status_icon.icon = ft.Icons.ERROR  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.ERROR
         self.status_icon.visible = True
         self._safe_update()
@@ -525,7 +525,7 @@ class LocalModelConfigPanel(ft.Container):
     def _show_warning(self, message: str):  # pragma: no cover
         self.status_text.value = message
         self.status_text.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.WARNING
+        self.status_icon.icon = ft.Icons.WARNING  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
         self.status_icon.color = AppColors.WARNING
         self.status_icon.visible = True
         self._safe_update()
@@ -555,7 +555,7 @@ class LocalModelConfigPanel(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[LocalModelConfigPanel] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
         try:
             saved_values = {
                 "model_path": self.model_path_input.value,
@@ -566,11 +566,12 @@ class LocalModelConfigPanel(ft.Container):
                 "batch": self.batch_input.value,
                 "ctx": self.ctx_input.value,
                 "flash_attn": self.flash_attn_switch.value,
-                "advanced_expanded": getattr(self, "advanced_tile", None) and self.advanced_tile.expanded,
+                "advanced_expanded": getattr(self, "advanced_tile", None)
+                and getattr(self.advanced_tile, "expanded", False),
                 "status_visible": getattr(self, "status_icon", None) and self.status_icon.visible,
                 "status_text": getattr(self, "status_text", None) and self.status_text.value or "",
                 "status_color": getattr(self, "status_text", None) and self.status_text.color,
-                "status_icon_name": getattr(self, "status_icon", None) and self.status_icon.icon,
+                "status_icon_name": getattr(self, "status_icon", None) and getattr(self.status_icon, "icon", None),
             }
 
             # 保存旧的 file_picker 引用，用于从 overlay 中移除
@@ -592,14 +593,14 @@ class LocalModelConfigPanel(ft.Container):
 
             # 恢复高级设置展开状态
             if saved_values["advanced_expanded"] and hasattr(self, "advanced_tile"):
-                self.advanced_tile.expanded = True
+                self.advanced_tile.expanded = True  # type: ignore[reportAttributeAccessIssue]  # Flet ExpansionTile.expanded is writable at runtime
 
             # 恢复状态提示
             if saved_values["status_visible"]:
                 self.status_icon.visible = True
                 self.status_text.value = saved_values["status_text"]
                 self.status_text.color = saved_values["status_color"]
-                self.status_icon.icon = saved_values["status_icon_name"]
+                self.status_icon.icon = saved_values["status_icon_name"]  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
                 self.status_icon.color = saved_values["status_color"]
 
             # 更新 page.overlay 中的 file_picker：移除旧的，添加新的

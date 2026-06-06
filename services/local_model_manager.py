@@ -261,9 +261,12 @@ class LocalModelManager:
 
     async def _await_worker_ready(self, timeout: float = 180.0) -> bool:
         """Wait for the persistent worker to become ready without blocking the event loop."""
+        if self._result_queue is None:
+            logger.error("[LocalModel] Result queue not initialized.")
+            return False
         loop = asyncio.get_running_loop()
         try:
-            status, payload = await loop.run_in_executor(None, self._result_queue.get, timeout)
+            status, payload = await loop.run_in_executor(None, lambda: self._result_queue.get(timeout=timeout))
         except (queue.Empty, TimeoutError, OSError) as e:
             logger.error(f"[LocalModel] Persistent worker failed to become ready within {timeout}s: {e}")
             self._shutdown_worker()
@@ -439,9 +442,12 @@ class LocalModelManager:
 
         try:
             loop = asyncio.get_running_loop()
+            if self._request_queue is None:
+                raise RuntimeError("Request queue not initialized")
+            request_queue = self._request_queue
             await loop.run_in_executor(
                 None,
-                lambda: self._request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5),
+                lambda: request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5),
             )
         except Exception as e:
             logger.error(f"[LocalModel] Failed to send request to worker: {e}")
@@ -461,13 +467,15 @@ class LocalModelManager:
                 if remaining <= 0:
                     break
                 try:
-                    result = self._result_queue.get_nowait()  # type: ignore[union-attr]
+                    if self._result_queue is not None:
+                        result = self._result_queue.get_nowait()
                     break
                 except queue.Empty:
                     pass
                 if self._worker_proc is not None and not self._worker_proc.is_alive():
                     try:
-                        result = self._result_queue.get_nowait()  # type: ignore[union-attr]
+                        if self._result_queue is not None:
+                            result = self._result_queue.get_nowait()
                     except queue.Empty:
                         pass
                     worker_died = True
@@ -476,7 +484,8 @@ class LocalModelManager:
 
             if result is None:
                 try:
-                    result = self._result_queue.get_nowait()
+                    if self._result_queue is not None:
+                        result = self._result_queue.get_nowait()
                 except queue.Empty:
                     pass
 
