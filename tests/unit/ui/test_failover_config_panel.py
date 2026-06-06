@@ -841,6 +841,7 @@ class TestProviderCredentialDialog:
             mock_page,
         )
         # custom 被排除，剩余 deepseek / openai / zhipu
+        assert dialog.provider_dropdown.options is not None
         provider_keys = [opt.key for opt in dialog.provider_dropdown.options]
         assert "deepseek" in provider_keys
         assert "openai" in provider_keys
@@ -947,6 +948,7 @@ class TestProviderCredentialDialog:
         e = MagicMock()
         e.control.value = "deepseek"
         dialog._on_provider_change(e)
+        assert dialog.model_dropdown.options is not None
         model_keys = [opt.key for opt in dialog.model_dropdown.options]
         assert "deepseek-chat" in model_keys
         assert "deepseek-reasoner" in model_keys
