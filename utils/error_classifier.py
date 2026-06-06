@@ -78,26 +78,6 @@ except ImportError:
     RateLimitError = None  # type: ignore[misc,assignment]
     ServiceUnavailableError = None  # type: ignore[misc,assignment]
 
-LITELLM_PERMANENT_EXCEPTIONS = (
-    (
-        LiteLLMAuthenticationError,
-        ContentPolicyViolationError,
-        PermissionDeniedError,
-        LiteLLMNotFoundError,
-    )
-    if _LITELLM_AVAILABLE
-    else ()
-)
-
-LITELLM_TRANSIENT_EXCEPTIONS = (
-    (
-        RateLimitError,
-        ServiceUnavailableError,
-    )
-    if _LITELLM_AVAILABLE
-    else ()
-)
-
 
 def classify_severity(e: Exception, context: str = "general") -> str:
     """

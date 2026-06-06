@@ -702,7 +702,7 @@ class ConfigHandler:
         provider: str,
         model: str,
         base_url: str,
-        api_key: str = None,  # type: ignore[assignment]
+        api_key: str | None = None,
         **kwargs,
     ) -> bool:
         """

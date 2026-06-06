@@ -536,7 +536,7 @@ class LLMConfigPanel(ft.Container):
 
         self.page.run_task(self._on_llm_test_connection)
 
-    def _validate_azure_fields(self) -> tuple[bool, str, str, str]:
+    def _validate_azure_fields(self) -> tuple[bool, str, str, str | None]:
         """
         验证 Azure 专用字段，返回 (is_valid, resource_name, deployment_name, api_version)。
 
@@ -553,7 +553,7 @@ class LLMConfigPanel(ft.Container):
             self._show_warning(I18n.get("llm_azure_need_deployment"))
             return False, "", "", ""
 
-        return True, resource_name, deployment_name, api_version or ""
+        return True, resource_name, deployment_name, api_version
 
     async def _on_llm_test_connection(self):
         api_key = (self.api_key_input.value or "").strip()
@@ -586,7 +586,8 @@ class LLMConfigPanel(ft.Container):
                     return
 
                 model = deployment_name
-                kwargs["api_version"] = api_version
+                if api_version:
+                    kwargs["api_version"] = api_version
                 kwargs["azure_resource_name"] = resource_name
                 base_url = ""
             else:
@@ -640,7 +641,9 @@ class LLMConfigPanel(ft.Container):
                 return False
 
             model = deployment_name
-            kwargs = {"api_version": api_version, "azure_resource_name": resource_name}
+            kwargs: dict[str, object] = {"azure_resource_name": resource_name}
+            if api_version:
+                kwargs["api_version"] = api_version
             base_url = ""
         else:
             model = self.model_dropdown.value or self.custom_model_input.value or ""
@@ -842,6 +845,8 @@ class LLMConfigPanel(ft.Container):
     async def _save_config(self):
         provider = self._current_provider
         # Strip whitespace from api_key; if modified, use stripped value, else None
+        # Note: (api_key_raw or "").strip() ensures empty input clears the stored key,
+        # whereas the original api_key_raw.strip() would return None for empty input (keeping old key).
         api_key_raw = self.api_key_input.value
         api_key = (api_key_raw or "").strip() if self._api_key_modified else None
 
@@ -855,7 +860,8 @@ class LLMConfigPanel(ft.Container):
             model = deployment_name
             base_url = ""
 
-            kwargs["api_version"] = api_version
+            if api_version:
+                kwargs["api_version"] = api_version
             kwargs["azure_resource_name"] = resource_name
             kwargs["azure_deployment_name"] = deployment_name
         else:
@@ -966,7 +972,7 @@ class LLMConfigPanel(ft.Container):
                 provider=config["provider"],
                 model=config["model"],
                 base_url=config["base_url"],
-                api_key=api_key_to_save,  # type: ignore[reportArgumentType]  # api_key accepts None when unchanged
+                api_key=api_key_to_save,
                 **kwargs,
             )
             self._api_key_modified = False
