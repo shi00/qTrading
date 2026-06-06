@@ -527,6 +527,8 @@ class LocalModelManager:
         worker_died = False
         # Capture result_queue locally to avoid TOCTOU race with _shutdown_worker
         result_queue = self._result_queue
+        if result_queue is None:
+            raise RuntimeError("Result queue not initialized")
         try:
             deadline = asyncio.get_running_loop().time() + float(timeout_val)
             while True:
@@ -538,8 +540,7 @@ class LocalModelManager:
                 if remaining <= 0:
                     break
                 try:
-                    if result_queue is not None:
-                        result = result_queue.get_nowait()
+                    result = result_queue.get_nowait()
                     break
                 except queue.Empty:
                     pass
@@ -547,8 +548,7 @@ class LocalModelManager:
                 proc = self._worker_proc
                 if proc is not None and not proc.is_alive():
                     try:
-                        if result_queue is not None:
-                            result = result_queue.get_nowait()
+                        result = result_queue.get_nowait()
                     except queue.Empty:
                         pass
                     worker_died = True
@@ -557,8 +557,7 @@ class LocalModelManager:
 
             if result is None:
                 try:
-                    if result_queue is not None:
-                        result = result_queue.get_nowait()
+                    result = result_queue.get_nowait()
                 except queue.Empty:
                     pass
 
