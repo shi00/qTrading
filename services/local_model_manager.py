@@ -297,6 +297,9 @@ class LocalModelManager:
                 break
             except queue.Empty:
                 pass
+            except OSError:
+                logger.warning("[LocalModel] OSError reading result queue while waiting for worker ready.")
+                pass
 
             # Detect subprocess crash early (capture proc locally to avoid TOCTOU race)
             proc = self._worker_proc
@@ -304,7 +307,7 @@ class LocalModelManager:
                 # One last attempt to read any residual result
                 try:
                     result = result_queue.get_nowait()
-                except queue.Empty:
+                except (queue.Empty, OSError):
                     pass
                 worker_died = True
                 break
@@ -315,7 +318,7 @@ class LocalModelManager:
         if result is None:
             try:
                 result = result_queue.get_nowait()
-            except queue.Empty:
+            except (queue.Empty, OSError):
                 pass
 
         if result is None:

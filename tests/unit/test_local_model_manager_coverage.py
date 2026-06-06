@@ -241,10 +241,11 @@ class TestLocalModelManagerEnsureWorkerEdgeCases:
         mgr = LocalModelManager()
         mgr._worker_ready = False
         mgr._result_queue = MagicMock()
-        mgr._result_queue.get = MagicMock(side_effect=OSError("os error"))
+        mgr._result_queue.get_nowait = MagicMock(side_effect=OSError("os error"))
+        mgr._worker_proc = None
 
         with patch.object(mgr, "_shutdown_worker"):
-            result = await mgr._await_worker_ready()
+            result = await mgr._await_worker_ready(timeout=0.1)
             assert result is False
             mgr._shutdown_worker.assert_called()
 
@@ -269,13 +270,16 @@ class TestLocalModelManagerEnsureWorkerEdgeCases:
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_timeout_error(self):
+        import queue as queue_mod
+
         mgr = LocalModelManager()
         mgr._worker_ready = False
         mgr._result_queue = MagicMock()
-        mgr._result_queue.get = MagicMock(side_effect=TimeoutError("timeout"))
+        mgr._result_queue.get_nowait = MagicMock(side_effect=queue_mod.Empty)
+        mgr._worker_proc = None
 
         with patch.object(mgr, "_shutdown_worker"):
-            result = await mgr._await_worker_ready()
+            result = await mgr._await_worker_ready(timeout=0.1)
             assert result is False
             mgr._shutdown_worker.assert_called()
 
