@@ -33,7 +33,7 @@ paths = [
 [[allowlists]]
 description = "Allow mock/fake tokens in test code"
 regexes = [
-  '''test_token_[a-zA-Z0-9]+''',
+  '''test_token_[a-zA-Z0-9_]+''',
   '''fake_api_key_[a-zA-Z0-9]+''',
   '''mock_secret_[a-zA-Z0-9]+''',
   '''ci_astock_default_pwd''',
