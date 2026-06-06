@@ -1,5 +1,4 @@
 import pytest
-from services.ai_service import AIService
 
 
 def pytest_collection_modifyitems(items):
@@ -10,6 +9,8 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture(autouse=True)
 def reset_ai_singleton():
+    from services.ai_service import AIService
+
     AIService._reset_singleton()
     yield
     AIService._reset_singleton()
