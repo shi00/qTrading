@@ -756,7 +756,7 @@ class TestMultiProviderCredentials:
         cfg_mod.ConfigHandler,
         "load_config",
         return_value={
-            "llm_custom_models": {"qwen": [f"model-{i}" for i in range(48)]},
+            "llm_custom_models": {},
             "llm_provider_credentials": {"qwen": {}},
         },
     )
@@ -767,13 +767,13 @@ class TestMultiProviderCredentials:
             provider="qwen",
             api_key="qwen_key",
             base_url="https://api.qwen.com/v1",
-            models=["model-48", "model-49", "model-50"],
+            models=[f"model-{i}" for i in range(53)],
         )
         assert result is True
         saved_config = mock_save.call_args[0][0]
         models_list = saved_config["llm_custom_models"]["qwen"]
         assert len(models_list) == 50
-        assert models_list[-3:] == ["model-48", "model-49", "model-50"]
+        assert models_list == [f"model-{i}" for i in range(3, 53)]
 
 
 class TestMigrateCustomModelsCredentials:

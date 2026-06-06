@@ -6,6 +6,7 @@ Coverage Goal: >85%
 """
 
 import os
+import threading
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -877,7 +878,11 @@ class TestLocalModelManagerIntegration:
         LocalModelManager._reset_singleton()
 
         LocalModelManager._instance = object.__new__(LocalModelManager)
-        LocalModelManager._instance._llm = "mock_llm_instance"
+        LocalModelManager._instance._worker_lock = threading.Lock()
+        LocalModelManager._instance._worker_proc = None
+        LocalModelManager._instance._request_queue = None
+        LocalModelManager._instance._result_queue = None
+        LocalModelManager._instance._worker_ready = False
         LocalModelManager._initialized = True
 
         LocalModelManager._reset_singleton()
