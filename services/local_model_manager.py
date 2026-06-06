@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import queue
 import threading
+import traceback
 from typing import Any
 
 from utils.config_handler import ConfigHandler
@@ -26,7 +27,7 @@ class LocalInferenceTimeoutError(RuntimeError):
 _SENTINEL = "__SHUTDOWN__"
 
 
-def _persistent_worker(
+def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverable by unit tests
     model_path: str,
     config: dict,
     request_queue: multiprocessing.Queue,
@@ -49,7 +50,7 @@ def _persistent_worker(
         ChatCompletionRequestSystemMessage = llama_types_module.ChatCompletionRequestSystemMessage
         ChatCompletionRequestUserMessage = llama_types_module.ChatCompletionRequestUserMessage
     except (ImportError, AttributeError) as e:
-        result_queue.put(("error", f"llama-cpp-python import failed: {e}"))
+        result_queue.put(("error", f"llama-cpp-python import failed: {e}\n{traceback.format_exc()}"))
         return
 
     try:
@@ -64,7 +65,7 @@ def _persistent_worker(
         )
         result_queue.put(("ready", model_path))
     except Exception as e:
-        result_queue.put(("error", f"Model load failed: {e}"))
+        result_queue.put(("error", f"Model load failed: {e}\n{traceback.format_exc()}"))
         return
 
     while True:
@@ -110,7 +111,7 @@ def _persistent_worker(
             output = "".join(collected_content)
             result_queue.put(("ok", output))
         except Exception as e:
-            result_queue.put(("error", str(e)))
+            result_queue.put(("error", f"{e}\n{traceback.format_exc()}"))
 
 
 try:
@@ -195,39 +196,43 @@ class LocalModelManager:
         self._worker_ready = False
 
     def _shutdown_worker(self):
-        """Gracefully shut down the persistent worker subprocess."""
+        """Gracefully shut down the persistent worker subprocess (thread-safe)."""
         with self._worker_lock:
-            if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
-                try:
-                    self._request_queue.put(_SENTINEL, timeout=2.0)
-                except Exception as e:
-                    logger.debug(f"[LocalModel] Failed to send sentinel to worker: {e}")
-                self._worker_proc.join(timeout=5)
+            self._shutdown_worker_locked()
+
+    def _shutdown_worker_locked(self):
+        """Internal: shut down worker. Caller MUST hold _worker_lock."""
+        if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
+            try:
+                self._request_queue.put(_SENTINEL, timeout=2.0)
+            except Exception as e:
+                logger.debug(f"[LocalModel] Failed to send sentinel to worker: {e}")
+            self._worker_proc.join(timeout=5)
+            if self._worker_proc.is_alive():
+                self._worker_proc.terminate()
+                self._worker_proc.join(timeout=3)
                 if self._worker_proc.is_alive():
-                    self._worker_proc.terminate()
-                    self._worker_proc.join(timeout=3)
-                    if self._worker_proc.is_alive():
-                        self._worker_proc.kill()
-                        self._worker_proc.join(timeout=2)
+                    self._worker_proc.kill()
+                    self._worker_proc.join(timeout=2)
 
-            if self._request_queue is not None:
-                try:
-                    self._request_queue.close()
-                    self._request_queue.join_thread()
-                except Exception as e:
-                    logger.debug(f"[LocalModel] Failed to close request queue: {e}")
-            if self._result_queue is not None:
-                try:
-                    self._result_queue.close()
-                    self._result_queue.join_thread()
-                except Exception as e:
-                    logger.debug(f"[LocalModel] Failed to close result queue: {e}")
+        if self._request_queue is not None:
+            try:
+                self._request_queue.close()
+                self._request_queue.join_thread()
+            except Exception as e:
+                logger.debug(f"[LocalModel] Failed to close request queue: {e}")
+        if self._result_queue is not None:
+            try:
+                self._result_queue.close()
+                self._result_queue.join_thread()
+            except Exception as e:
+                logger.debug(f"[LocalModel] Failed to close result queue: {e}")
 
-            self._worker_proc = None
-            self._request_queue = None
-            self._result_queue = None
-            self._worker_ready = False
-            logger.info("[LocalModel] Persistent worker shut down.")
+        self._worker_proc = None
+        self._request_queue = None
+        self._result_queue = None
+        self._worker_ready = False
+        logger.info("[LocalModel] Persistent worker shut down.")
 
     def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
         """Start a persistent worker subprocess with the given model.
@@ -245,7 +250,7 @@ class LocalModelManager:
             ):
                 return True
 
-            self._shutdown_worker()
+            self._shutdown_worker_locked()
 
             self._request_queue = multiprocessing.Queue()
             self._result_queue = multiprocessing.Queue()
@@ -257,29 +262,82 @@ class LocalModelManager:
             )
             proc.start()
             self._worker_proc = proc
+            logger.info(f"[LocalModel] Persistent worker started. pid={proc.pid}")
             return True
 
     async def _await_worker_ready(self, timeout: float = 180.0) -> bool:
-        """Wait for the persistent worker to become ready without blocking the event loop."""
-        if self._result_queue is None:
+        """Wait for the persistent worker to become ready without blocking the event loop.
+
+        Uses a polling approach (like run_inference) so we can detect a crashed
+        subprocess early instead of blocking on result_queue.get() for the full timeout.
+        """
+        result_queue = self._result_queue
+        if result_queue is None:
             logger.error("[LocalModel] Result queue not initialized.")
             return False
-        loop = asyncio.get_running_loop()
-        try:
-            status, payload = await loop.run_in_executor(None, lambda: self._result_queue.get(timeout=timeout))
-        except (queue.Empty, TimeoutError, OSError) as e:
-            logger.error(f"[LocalModel] Persistent worker failed to become ready within {timeout}s: {e}")
+
+        result = None
+        worker_died = False
+        deadline = asyncio.get_running_loop().time() + timeout
+
+        while True:
+            if self._cancel_event.is_set():
+                logger.info("[LocalModel] Cancel event detected while waiting for worker ready.")
+                self._worker_ready = False
+                self._shutdown_worker()
+                return False
+
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+
+            # Non-blocking check for result (use captured ref to avoid TOCTOU race)
+            try:
+                result = result_queue.get_nowait()
+                break
+            except queue.Empty:
+                pass
+
+            # Detect subprocess crash early (capture proc locally to avoid TOCTOU race)
+            proc = self._worker_proc
+            if proc is not None and not proc.is_alive():
+                # One last attempt to read any residual result
+                try:
+                    result = result_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                worker_died = True
+                break
+
+            await asyncio.sleep(min(0.5, remaining))
+
+        # Final drain attempt
+        if result is None:
+            try:
+                result = result_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        if result is None:
+            self._worker_ready = False
+            if worker_died:
+                exitcode = self._worker_proc.exitcode if self._worker_proc is not None else None
+                logger.error(f"[LocalModel] Persistent worker crashed before ready. exitcode={exitcode}")
+            else:
+                logger.error(f"[LocalModel] Persistent worker failed to become ready within {timeout}s.")
             self._shutdown_worker()
             return False
 
+        status, payload = result
         if status == "ready":
             self._worker_ready = True
             logger.info(f"[LocalModel] Persistent worker ready with model: {payload}")
             return True
-        else:
-            logger.error(f"[LocalModel] Persistent worker failed: {payload}")
-            self._shutdown_worker()
-            return False
+
+        logger.error(f"[LocalModel] Persistent worker failed: {payload}")
+        self._worker_ready = False
+        self._shutdown_worker()
+        return False
 
     def get_loaded_model_path(self) -> str:
         """Return the path of the currently loaded model, or empty string if none."""
@@ -456,6 +514,8 @@ class LocalModelManager:
 
         result = None
         worker_died = False
+        # Capture result_queue locally to avoid TOCTOU race with _shutdown_worker
+        result_queue = self._result_queue
         try:
             deadline = asyncio.get_running_loop().time() + float(timeout_val)
             while True:
@@ -467,15 +527,17 @@ class LocalModelManager:
                 if remaining <= 0:
                     break
                 try:
-                    if self._result_queue is not None:
-                        result = self._result_queue.get_nowait()
+                    if result_queue is not None:
+                        result = result_queue.get_nowait()
                     break
                 except queue.Empty:
                     pass
-                if self._worker_proc is not None and not self._worker_proc.is_alive():
+                # Capture proc locally to avoid TOCTOU race
+                proc = self._worker_proc
+                if proc is not None and not proc.is_alive():
                     try:
-                        if self._result_queue is not None:
-                            result = self._result_queue.get_nowait()
+                        if result_queue is not None:
+                            result = result_queue.get_nowait()
                     except queue.Empty:
                         pass
                     worker_died = True
@@ -484,8 +546,8 @@ class LocalModelManager:
 
             if result is None:
                 try:
-                    if self._result_queue is not None:
-                        result = self._result_queue.get_nowait()
+                    if result_queue is not None:
+                        result = result_queue.get_nowait()
                 except queue.Empty:
                     pass
 
