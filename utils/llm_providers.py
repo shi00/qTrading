@@ -11,6 +11,8 @@ LLM Provider Configuration Data
 - 注意: 以下为静态默认列表，可能不是最新。建议使用动态刷新功能获取实时模型列表。
 """
 
+from pathlib import Path
+
 AZURE_DEFAULT_API_VERSION = "2025-04-01-preview"
 
 AZURE_API_VERSIONS = [
@@ -30,7 +32,7 @@ LLM_PROVIDERS = {
                 "id": "deepseek-v4-pro",
                 "name": "DeepSeek V4 Pro",
                 "context": 1000000,
-                "tag": "旗舰",
+                "tag": ["旗舰", "reasoning"],
             },
             {
                 "id": "deepseek-v4-flash",
@@ -40,6 +42,7 @@ LLM_PROVIDERS = {
             },
         ],
         "key_prefix": "sk-",
+        "litellm_prefix": "deepseek",
         "console_url": "https://platform.deepseek.com/api_keys",
         "pricing_url": "https://api-docs.deepseek.com/quick_start/pricing",
         "models_url": "https://api-docs.deepseek.com/",
@@ -54,7 +57,7 @@ LLM_PROVIDERS = {
                 "id": "qwen3.6-max-preview",
                 "name": "Qwen 3.6 Max",
                 "context": 256000,
-                "tag": "旗舰",
+                "tag": ["旗舰", "reasoning"],
             },
             {
                 "id": "qwen3.6-plus",
@@ -70,6 +73,7 @@ LLM_PROVIDERS = {
             },
         ],
         "key_prefix": "sk-",
+        "litellm_prefix": "openai",
         "console_url": "https://dashscope.console.aliyun.com/apiKey",
         "pricing_url": "https://help.aliyun.com/zh/model-studio/getting-started/models",
         "models_url": "https://help.aliyun.com/zh/model-studio/text-generation-model/",
@@ -81,9 +85,10 @@ LLM_PROVIDERS = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "models": [
             {"id": "glm-5.1", "name": "GLM-5.1", "context": 200000, "tag": "最新"},
-            {"id": "glm-5", "name": "GLM-5", "context": 200000, "tag": "旗舰"},
+            {"id": "glm-5", "name": "GLM-5", "context": 200000, "tag": ["旗舰", "reasoning"]},
         ],
         "key_prefix": "",
+        "litellm_prefix": "openai",
         "console_url": "https://open.bigmodel.cn/usercenter/apikeys",
         "pricing_url": "https://open.bigmodel.cn/pricing",
         "models_url": "https://open.bigmodel.cn/cn/guide/start/model-overview",
@@ -98,6 +103,7 @@ LLM_PROVIDERS = {
             {"id": "kimi-k2.5", "name": "Kimi K2.5", "context": 262144, "tag": "推荐"},
         ],
         "key_prefix": "sk-",
+        "litellm_prefix": "openai",
         "console_url": "https://platform.moonshot.cn/console/api-keys",
         "pricing_url": "https://platform.moonshot.cn/docs/pricing/chat",
         "models_url": "https://platform.moonshot.cn/docs/models",
@@ -122,6 +128,7 @@ LLM_PROVIDERS = {
             },
         ],
         "key_prefix": "",
+        "litellm_prefix": "openai",
         "console_url": "https://www.minimaxi.com/user-center/basic-information/interface-key",
         "pricing_url": "https://www.minimaxi.com/document/pricing",
         "models_url": "https://www.minimaxi.com/document/guides/chat",
@@ -146,10 +153,11 @@ LLM_PROVIDERS = {
                 "context": 400000,
                 "tag": "高速",
             },
-            {"id": "o4-mini", "name": "o4 Mini", "context": 200000, "tag": "推理"},
-            {"id": "o3-pro", "name": "o3 Pro", "context": 200000, "tag": "推理增强"},
+            {"id": "o4-mini", "name": "o4 Mini", "context": 200000, "tag": ["推理", "reasoning"]},
+            {"id": "o3-pro", "name": "o3 Pro", "context": 200000, "tag": ["推理增强", "reasoning"]},
         ],
         "key_prefix": "sk-",
+        "litellm_prefix": "openai",
         "console_url": "https://platform.openai.com/api-keys",
         "pricing_url": "https://openai.com/api/pricing",
         "models_url": "https://platform.openai.com/docs/models",
@@ -176,19 +184,19 @@ LLM_PROVIDERS = {
                 "id": "claude-opus-4-7",
                 "name": "Claude Opus 4.7",
                 "context": 1000000,
-                "tag": "最新旗舰",
+                "tag": ["最新旗舰", "reasoning"],
             },
             {
                 "id": "claude-opus-4-6",
                 "name": "Claude Opus 4.6",
                 "context": 1000000,
-                "tag": "旗舰",
+                "tag": ["旗舰", "reasoning"],
             },
             {
                 "id": "claude-sonnet-4-6",
                 "name": "Claude Sonnet 4.6",
                 "context": 1000000,
-                "tag": "推荐",
+                "tag": ["推荐", "reasoning"],
             },
             {
                 "id": "claude-haiku-4-5",
@@ -198,6 +206,7 @@ LLM_PROVIDERS = {
             },
         ],
         "key_prefix": "sk-ant-",
+        "litellm_prefix": "anthropic",
         "console_url": "https://console.anthropic.com/settings/keys",
         "pricing_url": "https://www.anthropic.com/pricing",
         "models_url": "https://docs.anthropic.com/en/docs/about-claude/models/overview",
@@ -212,7 +221,7 @@ LLM_PROVIDERS = {
                 "id": "gemini-3.1-pro-preview",
                 "name": "Gemini 3.1 Pro",
                 "context": 1048576,
-                "tag": "最新",
+                "tag": ["最新", "reasoning"],
             },
             {
                 "id": "gemini-3-flash",
@@ -228,6 +237,7 @@ LLM_PROVIDERS = {
             },
         ],
         "key_prefix": "",
+        "litellm_prefix": "gemini",
         "console_url": "https://aistudio.google.com/apikey",
         "pricing_url": "https://ai.google.dev/gemini-api/docs/pricing",
         "models_url": "https://ai.google.dev/gemini-api/docs/models",
@@ -260,7 +270,7 @@ LLM_PROVIDERS = {
                 "id": "magistral-medium-latest",
                 "name": "Magistral Medium",
                 "context": 131072,
-                "tag": "推理增强",
+                "tag": ["推理增强", "reasoning"],
             },
             {
                 "id": "devstral-latest",
@@ -270,6 +280,7 @@ LLM_PROVIDERS = {
             },
         ],
         "key_prefix": "",
+        "litellm_prefix": "mistral",
         "console_url": "https://console.mistral.ai/api-keys/",
         "pricing_url": "https://mistral.ai/pricing",
         "models_url": "https://docs.mistral.ai/models/overview",
@@ -281,6 +292,7 @@ LLM_PROVIDERS = {
         "base_url": "",
         "models": [],
         "key_prefix": "",
+        "litellm_prefix": "openai",
         "console_url": "",
         "pricing_url": "",
         "models_url": "",
@@ -306,7 +318,7 @@ def get_model_info(provider_id: str, model_id: str) -> dict:
     for model in provider.get("models", []):
         if model["id"] == model_id:
             return model
-    return {"id": model_id, "name": model_id, "context": 4096}
+    return {"id": model_id, "name": model_id, "context": 0}
 
 
 def get_all_providers() -> dict:
@@ -318,9 +330,6 @@ def get_providers_by_category(category: str) -> list:
     """获取分类下的供应商列表"""
     provider_ids = PROVIDER_CATEGORIES.get(category, [])
     return [LLM_PROVIDERS[pid] for pid in provider_ids if pid in LLM_PROVIDERS]
-
-
-from pathlib import Path
 
 
 def get_provider_icon_path(icon_name: str) -> str:
@@ -353,3 +362,24 @@ def get_provider_icon(provider_id: str) -> str:
     provider = LLM_PROVIDERS.get(provider_id, {})
     icon_name = provider.get("icon", "custom.png")
     return get_provider_icon_path(icon_name)
+
+
+def get_display_tag(tag: str | list[str]) -> str:
+    """Get the display tag from a model's tag field.
+
+    The tag field can be either a string or a list of strings.
+    For lists, returns the first non-internal tag (skipping "reasoning" etc.).
+    For strings, returns as-is.
+
+    Args:
+        tag: Model tag value (string or list of strings)
+
+    Returns:
+        Display-friendly tag string
+    """
+    if isinstance(tag, list):
+        # Return first non-internal tag for display
+        internal_tags = {"reasoning"}
+        display_tags = [t for t in tag if t not in internal_tags]
+        return display_tags[0] if display_tags else ""
+    return tag

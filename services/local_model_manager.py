@@ -141,17 +141,14 @@ class LocalModelManager:
     _instance: LocalModelManager | None = None
     _initialized: bool = False
     _lock = threading.Lock()
-    _model_path: str = ""
-    _model_md5: str = ""
-    _model_stat: tuple = (0, 0)
-    _last_config: dict = {}
-    _is_loading: bool = False
-    _cancel_event: threading.Event = threading.Event()
-    _worker_proc: multiprocessing.Process | None = None
-    _request_queue: multiprocessing.Queue | None = None
-    _result_queue: multiprocessing.Queue | None = None
-    _worker_ready: bool = False
-    _worker_lock: threading.Lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        # Note: No lock here — callers (get_instance, _reset_singleton) already
+        # hold cls._lock. Using a lock here would cause deadlock with threading.Lock.
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
 
     @classmethod
     def _reset_singleton(cls):
@@ -161,13 +158,6 @@ class LocalModelManager:
                 cls._instance._shutdown_worker()
             cls._instance = None
             cls._initialized = False
-            cls._model_path = ""
-            cls._model_md5 = ""
-            cls._model_stat = (0, 0)
-            cls._last_config = {}
-            cls._is_loading = False
-            cls._cancel_event = threading.Event()
-            cls._worker_ready = False
 
     @classmethod
     def _get_load_lock(cls):
@@ -183,17 +173,24 @@ class LocalModelManager:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = LocalModelManager()
-                cls._initialized = True
+                cls._instance._initialized = True
         return cls._instance
 
     def __init__(self):
         if self._initialized:
             return
-        self._last_config = {}
-        self._worker_proc = None
-        self._request_queue = None
-        self._result_queue = None
-        self._worker_ready = False
+        self._model_path: str = ""
+        self._model_md5: str = ""
+        self._model_stat: tuple = (0, 0)
+        self._last_config: dict = {}
+        self._is_loading: bool = False
+        self._cancel_event: threading.Event = threading.Event()
+        self._worker_proc: multiprocessing.Process | None = None
+        self._request_queue: multiprocessing.Queue | None = None
+        self._result_queue: multiprocessing.Queue | None = None
+        self._worker_ready: bool = False
+        self._worker_lock: threading.Lock = threading.Lock()
+        self._initialized = True
 
     def _shutdown_worker(self):
         """Gracefully shut down the persistent worker subprocess (thread-safe)."""

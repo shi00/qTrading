@@ -98,6 +98,7 @@ class ProviderCredential(BaseModel):
 
     base_url: str = ""
     api_key_encrypted: str = ""
+    models: list[str] = []
 
 
 class AppConfig(BaseModel):

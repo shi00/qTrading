@@ -279,6 +279,37 @@ class TestConfigHandlerLLM:
         assert config.get("llm_base_url") == "https://api.deepseek.com"
         assert (KEYRING_SERVICE_NAME, "ai_api_key") not in mock_keyring
 
+    def test_save_llm_config_preserves_key_when_none(self, isolated_config, mock_keyring):
+        """Test: save_llm_config with api_key=None preserves the existing key.
+
+        This is the fix for the C3 bug where api_key or "" converted None to "",
+        causing accidental key deletion when the user only changed provider/model
+        without touching the API key input.
+        """
+        from utils.config_handler import ConfigHandler, KEYRING_SERVICE_NAME
+
+        # First save: set up a key
+        ConfigHandler.save_llm_config(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="sk-original-key",
+        )
+        assert mock_keyring[(KEYRING_SERVICE_NAME, "ai_api_key")] == "sk-original-key"
+
+        # Second save: change model but pass api_key=None (user didn't touch key input)
+        ConfigHandler.save_llm_config(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
+            api_key=None,
+        )
+
+        # Key should be preserved
+        assert mock_keyring[(KEYRING_SERVICE_NAME, "ai_api_key")] == "sk-original-key"
+        config = ConfigHandler.load_config()
+        assert config.get("llm_model") == "deepseek-v4-pro"
+
 
 class TestAIServiceLiteLLM:
     """Tests for AIService LiteLLM integration"""

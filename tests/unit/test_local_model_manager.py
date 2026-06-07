@@ -8,31 +8,9 @@ from services.local_model_manager import LocalModelManager, _HAS_LLAMA_CPP
 
 @pytest.fixture(autouse=True)
 def reset_singleton():
-    LocalModelManager._instance = None
-    LocalModelManager._initialized = False
-    LocalModelManager._model_path = ""
-    LocalModelManager._model_md5 = ""
-    LocalModelManager._model_stat = (0, 0)
-    LocalModelManager._last_config = {}
-    LocalModelManager._is_loading = False
-    LocalModelManager._cancel_event.clear()
-    LocalModelManager._worker_proc = None
-    LocalModelManager._request_queue = None
-    LocalModelManager._result_queue = None
-    LocalModelManager._worker_ready = False
+    LocalModelManager._reset_singleton()
     yield
-    LocalModelManager._instance = None
-    LocalModelManager._initialized = False
-    LocalModelManager._model_path = ""
-    LocalModelManager._model_md5 = ""
-    LocalModelManager._model_stat = (0, 0)
-    LocalModelManager._last_config = {}
-    LocalModelManager._is_loading = False
-    LocalModelManager._cancel_event.clear()
-    LocalModelManager._worker_proc = None
-    LocalModelManager._request_queue = None
-    LocalModelManager._result_queue = None
-    LocalModelManager._worker_ready = False
+    LocalModelManager._reset_singleton()
 
 
 class TestLocalModelManagerGetLoadedModelPath:

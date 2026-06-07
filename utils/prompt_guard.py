@@ -37,11 +37,6 @@ _CN_INJECTION_PATTERNS = [
 ]
 
 _INJECTION_WARNING_KEYWORDS = [
-    "ignore all",
-    "disregard all",
-    "forget all",
-    "bypass safety",
-    "override safety",
     "jailbreak",
     "DAN mode",
     "unrestricted",

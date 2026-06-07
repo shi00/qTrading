@@ -14,31 +14,9 @@ from services.local_model_manager import (
 
 @pytest.fixture(autouse=True)
 def reset_singleton():
-    LocalModelManager._instance = None
-    LocalModelManager._initialized = False
-    LocalModelManager._model_path = ""
-    LocalModelManager._model_md5 = ""
-    LocalModelManager._model_stat = (0, 0)
-    LocalModelManager._last_config = {}
-    LocalModelManager._is_loading = False
-    LocalModelManager._cancel_event.clear()
-    LocalModelManager._worker_proc = None
-    LocalModelManager._request_queue = None
-    LocalModelManager._result_queue = None
-    LocalModelManager._worker_ready = False
+    LocalModelManager._reset_singleton()
     yield
-    LocalModelManager._instance = None
-    LocalModelManager._initialized = False
-    LocalModelManager._model_path = ""
-    LocalModelManager._model_md5 = ""
-    LocalModelManager._model_stat = (0, 0)
-    LocalModelManager._last_config = {}
-    LocalModelManager._is_loading = False
-    LocalModelManager._cancel_event.clear()
-    LocalModelManager._worker_proc = None
-    LocalModelManager._request_queue = None
-    LocalModelManager._result_queue = None
-    LocalModelManager._worker_ready = False
+    LocalModelManager._reset_singleton()
 
 
 class TestPersistentWorkerImportFailure:
@@ -395,13 +373,15 @@ class TestLocalModelManagerRunInferenceDeadlineReached:
 
 class TestLocalModelManagerInit:
     def test_init_returns_if_already_initialized(self):
-        LocalModelManager._initialized = True
-        LocalModelManager._instance = MagicMock()
-
+        # Create a real instance first, then verify __init__ skips on second call
         mgr = LocalModelManager()
+        saved_config = mgr._last_config  # Should be {} from first init
 
-        assert mgr._last_config == {}
-        assert LocalModelManager._initialized is True
+        # Call constructor again — __init__ should skip due to _initialized=True
+        mgr2 = LocalModelManager()
+        assert mgr2 is mgr  # Same instance (singleton)
+        assert mgr2._last_config == saved_config  # Not re-initialized
+        assert mgr2._initialized is True
 
 
 class TestLocalModelManagerGetLoadLock:

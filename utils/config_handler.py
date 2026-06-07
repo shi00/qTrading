@@ -946,11 +946,8 @@ class ConfigHandler:
 
         if models is not None:
             custom_models = config.get("llm_custom_models", {})
-            existing_models = custom_models.get(provider, [])
-            updated_models = list(existing_models)
-            for m in models:
-                if m not in updated_models:
-                    updated_models.append(m)
+            # Replace (not append) to allow UI to remove models
+            updated_models = list(models)
             if len(updated_models) > 50:
                 updated_models = updated_models[-50:]
             custom_models[provider] = updated_models
