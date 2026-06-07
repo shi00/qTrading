@@ -9,6 +9,7 @@ import threading
 import time
 
 import httpx
+import pandas as pd
 
 from core.i18n import I18n
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
@@ -133,6 +134,22 @@ except ImportError:
     LITELLM_AVAILABLE = False
     logger.warning("[AIService] LiteLLM not installed, cloud LLM features disabled")
 
+# Import litellm exceptions separately — they may not exist in older versions or mock environments
+_LITELLM_EXCEPTIONS_AVAILABLE = False
+if LITELLM_AVAILABLE:
+    try:
+        from litellm.exceptions import (  # type: ignore[import-untyped]
+            AuthenticationError as LitellmAuthenticationError,
+            ContentPolicyViolationError as LitellmContentPolicyViolationError,
+            InternalServerError as LitellmInternalServerError,
+            RateLimitError as LitellmRateLimitError,
+            ServiceUnavailableError as LitellmServiceUnavailableError,
+        )
+
+        _LITELLM_EXCEPTIONS_AVAILABLE = True
+    except ImportError:
+        pass
+
 
 def _check_reasoning_support(model: str) -> bool:
     """检查模型是否支持推理增强 (reasoning_content)"""
@@ -141,22 +158,21 @@ def _check_reasoning_support(model: str) -> bool:
     try:
         return litellm.utils.supports_reasoning(model=model)
     except Exception as exc:
-        logger.debug(f"[AIService] supports_reasoning check failed for {model}: {exc}, using fallback list")
-        reasoning_models = {
-            "deepseek-v4-pro",
-            "o3-pro",
-            "o4-mini",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "magistral",
-            "qwen3.6-max",
-            "kimi-k2",
-            "gemini-3.1-pro",
-            "glm-5",
-        }
-        model_lower = model.lower()
-        return any(rm in model_lower for rm in reasoning_models)
+        logger.debug(f"[AIService] supports_reasoning check failed for {model}: {exc}, using LLM_PROVIDERS fallback")
+        from utils.llm_providers import LLM_PROVIDERS
+
+        # Derive reasoning model IDs from LLM_PROVIDERS tags
+        for provider_config in LLM_PROVIDERS.values():
+            for m in provider_config.get("models", []):
+                tag = m.get("tag", "")
+                tags = tag if isinstance(tag, list) else [tag]
+                if "reasoning" in tags:
+                    # Bidirectional substring match: "qwen3.6-max" matches "qwen3.6-max-preview"
+                    model_lower = model.lower()
+                    model_id_lower = m["id"].lower()
+                    if model_lower in model_id_lower or model_id_lower in model_lower:
+                        return True
+        return False
 
 
 def _classify_api_error(e: Exception) -> dict:
@@ -222,6 +238,7 @@ class AIService:
         self._litellm_config = {}
         self._local_model_loaded = False
         self._supports_reasoning = False
+        self._failover_credentials: dict[str, dict] = {}
 
         self._configure_litellm()
         self._setup_client()
@@ -315,6 +332,18 @@ class AIService:
         litellm_model = f"{provider}/{model_id}" if provider else model_id
         self._supports_reasoning = _check_reasoning_support(litellm_model)
 
+        # Pre-load failover credentials to avoid keyring calls on hot path
+        self._failover_credentials = {}
+        try:
+            failover_config = ConfigHandler.get_failover_config()
+            for model_str in failover_config.get("fallbacks", []):
+                if "/" in model_str:
+                    fb_provider = model_str.split("/")[0]
+                    if fb_provider not in self._failover_credentials:
+                        self._failover_credentials[fb_provider] = ConfigHandler.get_llm_config_for_provider(fb_provider)
+        except Exception as e:
+            logger.debug(f"[AIService] Failover credential pre-load skipped: {e}")
+
         logger.info(
             f"[AIService] Init | ✅ Cloud client ready. provider={provider}, reasoning={self._supports_reasoning}"
         )
@@ -324,7 +353,13 @@ class AIService:
         return self._is_cloud_configured and bool(self._litellm_config.get("api_key"))
 
     @staticmethod
-    def _build_litellm_params(llm_config: dict, messages: list, model_override: str | None = None, **kwargs) -> dict:
+    def _build_litellm_params(
+        llm_config: dict,
+        messages: list,
+        model_override: str | None = None,
+        failover_credentials: dict[str, dict] | None = None,
+        **kwargs,
+    ) -> dict:
         """
         构建 LiteLLM 请求参数 (静态方法，供 test_connection 复用)
 
@@ -332,6 +367,7 @@ class AIService:
             llm_config: LLM 配置字典
             messages: 消息列表
             model_override: 覆盖 llm_config 中的 model 字段（用于 failover 切换供应商）
+            failover_credentials: 预加载的跨供应商凭证缓存 {provider: config_dict}
             **kwargs: 其他参数
 
         Azure 特殊处理:
@@ -368,7 +404,10 @@ class AIService:
             request_params["model"] = model
             if is_cross_provider:
                 override_provider = model.split("/")[0]
-                override_llm_config = ConfigHandler.get_llm_config_for_provider(override_provider)
+                # Use pre-loaded failover credentials cache to avoid keyring calls on hot path
+                override_llm_config = (failover_credentials or {}).get(
+                    override_provider
+                ) or ConfigHandler.get_llm_config_for_provider(override_provider)
                 if override_llm_config.get("api_key"):
                     request_params["api_key"] = override_llm_config["api_key"]
                 else:
@@ -382,19 +421,10 @@ class AIService:
                 request_params["api_key"] = llm_config.get("api_key")
                 request_params["api_base"] = llm_config.get("base_url", "")
         else:
-            prefix_map = {
-                "openai": "openai",
-                "anthropic": "anthropic",
-                "google": "gemini",
-                "deepseek": "deepseek",
-                "mistral": "mistral",
-                "qwen": "openai",
-                "zhipu": "openai",
-                "moonshot": "openai",
-                "minimax": "openai",
-                "custom": "openai",
-            }
-            prefix = prefix_map.get(provider, "openai")
+            from utils.llm_providers import LLM_PROVIDERS
+
+            provider_config = LLM_PROVIDERS.get(provider, {})
+            prefix = provider_config.get("litellm_prefix", "openai")
             request_params["model"] = f"{prefix}/{model}"
             request_params["api_key"] = llm_config.get("api_key")
             request_params["api_base"] = llm_config.get("base_url", "")
@@ -469,7 +499,13 @@ class AIService:
             {"content": str, "usage": dict, "reasoning_content": str}
         """
         llm_config = self._litellm_config
-        request_params = self._build_litellm_params(llm_config, messages, model_override=model_override, **kwargs)
+        request_params = self._build_litellm_params(
+            llm_config,
+            messages,
+            model_override=model_override,
+            failover_credentials=self._failover_credentials,
+            **kwargs,
+        )
 
         total_chars = sum(len(m.get("content", "")) for m in messages)
         estimated_tokens = total_chars // 3
@@ -602,6 +638,7 @@ class AIService:
         json_mode: bool = True,
         on_chunk=None,
         purpose: str = "analysis",
+        local_max_tokens: int = 256,
     ) -> dict:
         """
         Unified helper for Chat Completions (Cloud or Local).
@@ -612,6 +649,7 @@ class AIService:
             temperature: sampling temp
             timeout: timeout in seconds
             json_mode: whether to enforce JSON return
+            local_max_tokens: max tokens for local model inference (default 256 for news classification)
         Returns:
             dict: Parsed JSON content (or raw dict if non-json)
         Raises:
@@ -638,7 +676,7 @@ class AIService:
 
             response_content = await manager.run_inference(
                 prompt=user_prompt,
-                max_tokens=256,  # News classification only needs a small JSON (~60 tokens)
+                max_tokens=local_max_tokens,
                 temperature=temperature,
                 system_prompt=system_prompt,
             )
@@ -764,39 +802,28 @@ class AIService:
 
                 is_transient = False
 
-                if LITELLM_AVAILABLE:
-                    try:
-                        from litellm.exceptions import (
-                            AuthenticationError,
-                            ContentPolicyViolationError,
-                            RateLimitError,
-                            ServiceUnavailableError,
-                            InternalServerError,
+                if _LITELLM_EXCEPTIONS_AVAILABLE:
+                    if isinstance(e, LitellmAuthenticationError):
+                        logger.error(
+                            "[AIService] Failover | ❌ Authentication error for %s, not retrying",
+                            model,
                         )
-
-                        if isinstance(e, AuthenticationError):
-                            logger.error(
-                                "[AIService] Failover | ❌ Authentication error for %s, not retrying",
-                                model,
-                            )
-                            raise
-                        if isinstance(e, ContentPolicyViolationError):
-                            logger.error(
-                                "[AIService] Failover | ❌ Content policy violation for %s, not retrying",
-                                model,
-                            )
-                            raise
-
-                        is_transient = isinstance(
-                            e,
-                            (
-                                RateLimitError,
-                                ServiceUnavailableError,
-                                InternalServerError,
-                            ),
+                        raise
+                    if isinstance(e, LitellmContentPolicyViolationError):
+                        logger.error(
+                            "[AIService] Failover | ❌ Content policy violation for %s, not retrying",
+                            model,
                         )
-                    except ImportError:
-                        is_transient = False
+                        raise
+
+                    is_transient = isinstance(
+                        e,
+                        (
+                            LitellmRateLimitError,
+                            LitellmServiceUnavailableError,
+                            LitellmInternalServerError,
+                        ),
+                    )
 
                 is_transient = is_transient or isinstance(
                     e,
@@ -815,7 +842,7 @@ class AIService:
                         "[AIService] Failover | ⚠️ %s failed (%s: %s), trying next",
                         model,
                         error_type,
-                        str(e)[:100],
+                        DataSanitizer.sanitize_error(e)[:100],
                     )
                     continue
                 else:
@@ -870,7 +897,6 @@ class AIService:
             return None
 
         # Build Prompt
-        import pandas as pd
         from core.i18n import I18n
 
         # Format news
@@ -1120,16 +1146,12 @@ class AIService:
             return validate_ai_analysis_response(res)
 
         except AIServiceUnavailableError as ae:
-            logger.error(
-                f"[AIService] Analyze | ❌ All providers failed: {ae}",
-                exc_info=True,
-            )
+            logger.error("[AIService] Analyze | ❌ All providers failed: %s", ae)
+            logger.debug("[AIService] Analyze | All providers failed traceback:", exc_info=True)
             return {"error": "All LLM providers unavailable", "score": 0}
         except (TimeoutError, httpx.TimeoutException) as te:
-            logger.error(
-                f"[AIService] Analyze | ❌ Timeout (120s exceeded): {type(te).__name__}",
-                exc_info=True,
-            )
+            logger.error("[AIService] Analyze | ❌ Timeout (120s exceeded): %s", type(te).__name__)
+            logger.debug("[AIService] Analyze | Timeout traceback:", exc_info=True)
             return {"error": "Analysis timeout", "score": 0}
         except LocalInferenceTimeoutError as lite:
             logger.error(
@@ -1138,10 +1160,8 @@ class AIService:
             )
             return {"error": "Local model timeout", "score": 0}
         except Exception as e:
-            logger.error(
-                f"[AIService] Analyze | ❌ Top-level failure: {DataSanitizer.sanitize_error(e)}",
-                exc_info=True,
-            )
+            logger.error("[AIService] Analyze | ❌ Top-level failure: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[AIService] Analyze | Top-level failure traceback:", exc_info=True)
             return {"error": DataSanitizer.sanitize_error(e), "score": 0}
 
     async def _get_setup_lock(self):
@@ -1234,7 +1254,7 @@ class AIService:
                 )
             else:
                 logger.warning(
-                    f"[AIService] Classify | ⚠️ Local model unavailable, falling back to cloud: {local_e}",
+                    f"[AIService] Classify | ⚠️ Local model unavailable, falling back to cloud: {DataSanitizer.sanitize_error(local_e)}",
                 )
 
         # 2. Fallback to Cloud
@@ -1255,10 +1275,8 @@ class AIService:
             )
             return result
         except Exception as e:
-            logger.error(
-                f"[AIService] Classify | ❌ All providers failed: {DataSanitizer.sanitize_error(e)}",
-                exc_info=True,
-            )
+            logger.error("[AIService] Classify | ❌ All providers failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[AIService] Classify | All providers failed traceback:", exc_info=True)
             return {"category": "unknown", "sentiment": "neutral", "error": DataSanitizer.sanitize_error(e)}
 
     async def verify_connection(self) -> bool:
@@ -1276,11 +1294,9 @@ class AIService:
             )
             return True
         except Exception as e:
-            logger.error(
-                f"[AIService] Verify | ❌ Connection verification failed: {e}",
-                exc_info=True,
-            )
-            raise e
+            logger.error("[AIService] Verify | ❌ Connection verification failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[AIService] Verify | Connection verification traceback:", exc_info=True)
+            raise
 
     @staticmethod
     async def test_connection(

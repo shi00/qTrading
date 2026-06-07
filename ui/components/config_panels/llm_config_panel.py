@@ -23,7 +23,9 @@ from utils.llm_providers import (
     AZURE_API_VERSIONS,
     AZURE_DEFAULT_API_VERSION,
     LLM_PROVIDERS,
+    get_display_tag,
 )
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -292,8 +294,9 @@ class LLMConfigPanel(ft.Container):
         for model in models:
             text = model.get("name", model.get("id", ""))
             tag = model.get("tag", "")
-            if tag:
-                text = f"{text} ({tag})"
+            display_tag = get_display_tag(tag)
+            if display_tag:
+                text = f"{text} ({display_tag})"
             options.append(
                 ft.dropdown.Option(
                     key=model.get("id"),
@@ -392,7 +395,14 @@ class LLMConfigPanel(ft.Container):
                     self.custom_model_input.visible = True
                     self.custom_model_input.value = model
                 elif models:
-                    recommended = next((m.get("id") for m in models if m.get("tag") == "推荐"), None)
+                    recommended = next(
+                        (
+                            m.get("id")
+                            for m in models
+                            if "推荐" in (m.get("tag") if isinstance(m.get("tag"), list) else [m.get("tag")])
+                        ),
+                        None,
+                    )
                     self.model_dropdown.value = recommended or models[0].get("id")
 
             provider_config = LLM_PROVIDERS.get(provider, {})
@@ -469,7 +479,14 @@ class LLMConfigPanel(ft.Container):
 
             models = provider.get("models", [])
             if models:
-                recommended = next((m.get("id") for m in models if m.get("tag") == "推荐"), None)
+                recommended = next(
+                    (
+                        m.get("id")
+                        for m in models
+                        if "推荐" in (m.get("tag") if isinstance(m.get("tag"), list) else [m.get("tag")])
+                    ),
+                    None,
+                )
                 self.model_dropdown.value = recommended or models[0].get("id")
 
         self._update_links_row()
@@ -623,7 +640,7 @@ class LLMConfigPanel(ft.Container):
 
             error_info = _classify_api_error(ex)
             self._show_error(get_error_message(error_info))
-            logger.error(f"[LLMConfigPanel] Test connection error: {ex}")
+            logger.error("[LLMConfigPanel] Test connection error: %s", DataSanitizer.sanitize_error(ex))
 
         finally:
             self._is_verifying = False
@@ -692,7 +709,7 @@ class LLMConfigPanel(ft.Container):
 
             error_info = _classify_api_error(ex)
             self._show_error(get_error_message(error_info))
-            logger.error(f"[LLMConfigPanel] Verify connection error: {ex}")
+            logger.error("[LLMConfigPanel] Verify connection error: %s", DataSanitizer.sanitize_error(ex))
             return False
 
         finally:
@@ -769,7 +786,7 @@ class LLMConfigPanel(ft.Container):
 
             error_info = classify_error(ex, context="llm")
             self._show_error(get_error_message(error_info))
-            logger.error(f"[LLMConfigPanel] Refresh models error: {ex}")
+            logger.error("[LLMConfigPanel] Refresh models error: %s", DataSanitizer.sanitize_error(ex))
 
         finally:
             self.refresh_models_button.disabled = False
@@ -877,7 +894,7 @@ class LLMConfigPanel(ft.Container):
                 provider=provider,
                 model=model or "",
                 base_url=base_url,
-                api_key=api_key or "",
+                api_key=api_key,
                 **kwargs,
             )
 
@@ -902,7 +919,7 @@ class LLMConfigPanel(ft.Container):
 
             error_info = classify_error(ex, context="llm")
             self._show_error(f"{I18n.get('settings_save_failed')}: {get_error_message(error_info)}")
-            logger.error(f"[LLMConfigPanel] Save config error: {ex}")
+            logger.error("[LLMConfigPanel] Save config error: %s", DataSanitizer.sanitize_error(ex))
 
         self.update()
 
@@ -986,7 +1003,7 @@ class LLMConfigPanel(ft.Container):
             )
             return True
         except Exception as e:
-            logger.error(f"[LLMConfigPanel] Save current config error: {e}")
+            logger.error("[LLMConfigPanel] Save current config error: %s", DataSanitizer.sanitize_error(e))
             return False
 
     @staticmethod
@@ -1023,7 +1040,7 @@ class LLMConfigPanel(ft.Container):
                     logger.debug("[LLMConfigPanel] Synced credential to failover provider: %s", provider)
                     break
         except Exception as e:
-            logger.debug("[LLMConfigPanel] Failed to sync failover credential: %s", e)
+            logger.debug("[LLMConfigPanel] Failed to sync failover credential: %s", DataSanitizer.sanitize_error(e))
 
     def _show_success(self, message: str):  # pragma: no cover
         self.status_text.value = message
@@ -1062,7 +1079,7 @@ class LLMConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.debug(f"Safe update skipped: {e}")
+            logger.debug("[LLMConfigPanel] Safe update skipped: %s", DataSanitizer.sanitize_error(e))
 
     def did_mount(self):  # pragma: no cover
         I18n.subscribe(self._on_locale_change)

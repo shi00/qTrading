@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -97,6 +98,59 @@ class TestSanitizeError:
         result = DataSanitizer.sanitize_error(err)
         assert "eyJhbGciOiJIUzI1NiJ9" not in result
         assert "***" in result
+
+    def test_error_with_colon_key_value(self):
+        """冒号格式: api_key: sk-xxx (LiteLLM 异常见格式)"""
+        err = ValueError("Invalid api_key: sk-abc123xyz789")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-abc123xyz789" not in result
+        assert "***" in result
+
+    def test_error_with_colon_token(self):
+        """冒号格式: token: xxx"""
+        err = ValueError("Authentication failed, token: eyJhbGciOiJIUzI1NiJ9")
+        result = DataSanitizer.sanitize_error(err)
+        assert "eyJhbGciOiJIUzI1NiJ9" not in result
+
+    def test_error_with_json_api_key(self):
+        """JSON 格式: "api_key": "sk-xxx" """
+        err = ValueError('{"error": {"api_key": "sk-proj-LEAKED123", "message": "invalid key"}}')
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-proj-LEAKED123" not in result
+
+    def test_error_with_natural_language_key(self):
+        """自然语言: The api_key sk-xxx is invalid"""
+        err = ValueError("The api_key sk-abc123xyz789 is invalid")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-abc123xyz789" not in result
+
+    def test_error_with_mixed_formats(self):
+        """混合格式: 多种泄露方式同时出现"""
+        err = ValueError("api_key=sk-xxx1 Bearer sk-xxx2 token: sk-xxx3")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-xxx1" not in result
+        assert "sk-xxx2" not in result
+        assert "sk-xxx3" not in result
+
+    def test_error_with_chinese_colon(self):
+        """中文冒号格式: api_key：sk-xxx"""
+        err = ValueError("Invalid api_key：sk-abc123xyz789")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-abc123xyz789" not in result
+
+    def test_no_false_positive_pass_keyword(self):
+        """pass 关键字不应被误匹配"""
+        err = ValueError("pass: true, the pass was accepted")
+        result = DataSanitizer.sanitize_error(err)
+        assert "pass: true" in result
+        assert "accepted" in result
+
+    def test_no_false_positive_normal_text(self):
+        """正常文本不应被误匹配"""
+        err = ValueError("the token is valid and the secret is out")
+        result = DataSanitizer.sanitize_error(err)
+        assert "the token is valid" in result
+        assert "the secret is out" in result
 
 
 class TestSanitizeDict:
@@ -254,3 +308,97 @@ class TestAIServiceErrorSanitization:
     def test_kwargs_with_sensitive(self):
         result = DataSanitizer.sanitize_args(token="abc123456789")
         assert isinstance(result, tuple)
+
+    @pytest.mark.asyncio
+    async def test_analyze_top_level_failure_actually_sanitizes(self):
+        """验证 sanitize_error 真正脱敏了敏感数据（不 mock DataSanitizer）"""
+        from services.ai_service import AIService
+
+        svc = AIService.__new__(AIService)
+        svc._is_cloud_configured = True
+        svc._litellm_config = {"api_key": "test-key"}
+        svc._local_model_loaded = False
+        svc._supports_reasoning = False
+        svc._initialized = True
+        sensitive = "api_key=sk-LEAKED123&token=secret_value"
+        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive))
+        svc._get_prompt_dump_dir = lambda: "/tmp"
+
+        with patch("services.ai_service.ConfigHandler") as mock_cfg:
+            mock_cfg.get_ai_system_prompt.return_value = ""
+            mock_cfg.get_ai_news_prompt.return_value = ""
+            mock_cfg.get_setting.return_value = False
+            mock_cfg.get_ai_provider.return_value = "cloud"
+            with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+                mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                result = await svc.analyze_stock(
+                    stock_info={"ts_code": "000001.SZ", "name": "test"},
+                    tech_info={},
+                    news_list=[],
+                    strategy_key="value",
+                )
+
+        assert "sk-LEAKED123" not in result["error"], f"Sensitive data leaked in error result: {result['error']}"
+        assert "secret_value" not in result["error"], f"Sensitive data leaked in error result: {result['error']}"
+
+
+class TestExcInfoDowngrade:
+    """S1: Verify exc_info=True is downgraded to debug level for sensitive error paths."""
+
+    @pytest.mark.asyncio
+    async def test_analyze_all_providers_failed_no_exc_info_at_error(self, caplog):
+        """error 级别不应含完整堆栈（exc_info 已降级到 debug）"""
+        from services.ai_service import AIService, AIServiceUnavailableError
+
+        svc = AIService.__new__(AIService)
+        svc._is_cloud_configured = True
+        svc._litellm_config = {"api_key": "test-key"}
+        svc._local_model_loaded = False
+        svc._supports_reasoning = False
+        svc._initialized = True
+        svc._chat_completion = AsyncMock(
+            side_effect=AIServiceUnavailableError("All LLM providers failed. Tried: [test-model]")
+        )
+        svc._get_prompt_dump_dir = lambda: "/tmp"
+
+        with patch("services.ai_service.ConfigHandler") as mock_cfg:
+            mock_cfg.get_ai_system_prompt.return_value = ""
+            mock_cfg.get_ai_news_prompt.return_value = ""
+            mock_cfg.get_setting.return_value = False
+            mock_cfg.get_ai_provider.return_value = "cloud"
+            with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+                mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                with caplog.at_level(logging.ERROR):
+                    await svc.analyze_stock(
+                        stock_info={"ts_code": "000001.SZ", "name": "test"},
+                        tech_info={},
+                        news_list=[],
+                        strategy_key="value",
+                    )
+
+        for record in caplog.records:
+            if record.levelno == logging.ERROR and "All providers failed" in record.message:
+                assert record.exc_info is None, (
+                    f"ERROR level log should not have exc_info after downgrade. Got exc_info={record.exc_info}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_verify_connection_sanitized_in_log(self, caplog):
+        """verify_connection 日志必须脱敏异常"""
+        from services.ai_service import AIService
+
+        svc = AIService.__new__(AIService)
+        svc._is_cloud_configured = True
+        svc._litellm_config = {"api_key": "test-key"}
+        svc._local_model_loaded = False
+        svc._supports_reasoning = False
+        svc._initialized = True
+        sensitive_key = "sk-LEAKED_KEY_12345"
+        svc._chat_completion_litellm = AsyncMock(side_effect=RuntimeError(f"Invalid api_key: {sensitive_key}"))
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError):
+                await svc.verify_connection()
+
+        for record in caplog.records:
+            assert sensitive_key not in record.message, f"API key leaked in log: {record.message}"

@@ -17,7 +17,8 @@ from ui.components.settings_widgets import SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
-from utils.llm_providers import LLM_PROVIDERS
+from utils.llm_providers import LLM_PROVIDERS, get_display_tag
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +163,9 @@ class ProviderCredentialDialog(ft.AlertDialog):
         for m in models:
             tag = m.get("tag", "")
             label = f"{m['id']}"
-            if tag:
-                label += f" ({tag})"
+            display_tag = get_display_tag(tag)
+            if display_tag:
+                label += f" ({display_tag})"
             self.model_dropdown.options.append(ft.dropdown.Option(key=m["id"], text=label))
 
         default_url = pinfo.get("base_url", "")
@@ -247,7 +249,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
                 )
         except Exception as ex:
             self._show_snack(
-                I18n.get("failover_test_failed") + f": {ex}",
+                I18n.get("failover_test_failed") + f": {DataSanitizer.sanitize_error(ex)}",
                 AppColors.ERROR,
             )
 

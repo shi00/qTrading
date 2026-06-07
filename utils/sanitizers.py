@@ -90,6 +90,22 @@ class DataSanitizer:
 
     _PATTERN_BEARER = re.compile(r"Bearer\s+[^\s\"']+", re.IGNORECASE)
 
+    _PATTERN_COLON_KEY_VALUE = re.compile(
+        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)\s*[:：]\s*[^\s,;\"']+",
+        re.IGNORECASE,
+    )
+
+    _PATTERN_JSON_KEY_VALUE = re.compile(
+        r"""["']?(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)["']?\s*:\s*["'][^"']+["']""",
+        re.IGNORECASE,
+    )
+
+    # Space-separated key-value with known secret prefixes (sk-, pk-, key-, eyJ for JWT)
+    _PATTERN_SPACE_KEY_VALUE = re.compile(
+        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)\s+(sk-|pk-|key-|eyJ)[^\s,;\"']+",
+        re.IGNORECASE,
+    )
+
     _PATTERN_URL_CREDENTIALS = re.compile(
         r"(postgresql|postgres|mysql|mongodb|redis|amqp|http|https|ftp)://([^:@\s]+):([^@\s]+)@",
         re.IGNORECASE,
@@ -114,6 +130,12 @@ class DataSanitizer:
         msg = DataSanitizer._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", msg)
 
         msg = DataSanitizer._PATTERN_STANDALONE_KEY_VALUE.sub(r"\1=***", msg)
+
+        msg = DataSanitizer._PATTERN_COLON_KEY_VALUE.sub(r"\1: ***", msg)
+
+        msg = DataSanitizer._PATTERN_JSON_KEY_VALUE.sub(r'"\1": "***"', msg)
+
+        msg = DataSanitizer._PATTERN_SPACE_KEY_VALUE.sub(r"\1 ***", msg)
 
         msg = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(r"\1://\2:***@", msg)
 
