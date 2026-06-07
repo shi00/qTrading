@@ -236,3 +236,8 @@ class TestIsRecommendedModel:
         from utils.llm_providers import is_recommended_model
 
         assert is_recommended_model({"id": "x", "tag": None}) is False
+
+    def test_empty_string_tag(self):
+        from utils.llm_providers import is_recommended_model
+
+        assert is_recommended_model({"id": "x", "tag": ""}) is False

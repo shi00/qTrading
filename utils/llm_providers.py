@@ -385,16 +385,19 @@ def get_display_tag(tag: str | list[str]) -> str:
     return tag
 
 
+RECOMMENDED_TAG = "推荐"
+
+
 def is_recommended_model(model: dict) -> bool:
-    """Check if a model is tagged as recommended (推荐).
+    """Check if a model is tagged as recommended.
 
     Args:
         model: Model dict with optional "tag" field
 
     Returns:
-        True if the model's tag contains "推荐"
+        True if the model's tag contains the recommended tag
     """
     tag = model.get("tag")
     if isinstance(tag, list):
-        return "推荐" in tag
-    return tag == "推荐"
+        return RECOMMENDED_TAG in tag
+    return tag == RECOMMENDED_TAG

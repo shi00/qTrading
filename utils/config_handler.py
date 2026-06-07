@@ -46,6 +46,18 @@ class ConfigHandler:
 
     T = TypeVar("T")
 
+    @classmethod
+    def _clear_cache(cls):
+        """Clear the in-memory config cache.
+
+        Intended for test isolation only — prevents cross-test state leakage
+        when tests modify config on disk.  Production code should never need
+        this because ``save_config`` / ``ensure_defaults`` already keep the
+        cache in sync.
+        """
+        with cls._lock.gen_wlock():
+            cls._config_cache = None
+
     @staticmethod
     def get_typed(key: str, expected_type: type[T], default: T) -> T:
         """类型安全的通用 getter"""
@@ -308,7 +320,7 @@ class ConfigHandler:
                     return ConfigValidationResult(
                         is_valid=False,
                         config={},
-                        errors=[str(e)],
+                        errors=[DataSanitizer.sanitize_error(e)],
                         used_defaults=False,
                     )
             return ConfigValidationResult(
@@ -587,7 +599,13 @@ class ConfigHandler:
         password: str,
         database: str,
     ) -> bool:
-        """Save database configuration and sync config.DB_URL for downstream consumers."""
+        """Save database configuration.
+
+        All runtime URL resolution should go through ConfigHandler.get_db_url(),
+        which rebuilds the URL from stored components + keyring password on every
+        call.  We no longer mutate config.DB_URL / DB_URL_SYNC — those are
+        treated as read-only snapshots of the DATABASE_URL env var at import time.
+        """
         from data.persistence.db_config_service import DatabaseConfigService
 
         db_url = DatabaseConfigService.build_url(
@@ -613,12 +631,6 @@ class ConfigHandler:
 
         if password:
             ConfigHandler.save_db_password(password)
-
-        # Sync config.DB_URL / DB_URL_SYNC so that code reading these module-level
-        # variables directly (e.g. DatabaseManager before this fix, Alembic env.py
-        # fallback) gets the correct value after onboarding.
-        config.DB_URL = db_url
-        config.DB_URL_SYNC = db_url.replace("+asyncpg", "")
 
         return True
 

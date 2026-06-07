@@ -838,11 +838,14 @@ class AIService:
                 )
 
                 if is_transient:
+                    # Truncate before sanitizing to avoid breaking sanitization markers
+                    raw_msg = str(e)
+                    truncated_raw = raw_msg[:100] if len(raw_msg) > 100 else raw_msg
                     logger.warning(
-                        "[AIService] Failover | ⚠️ %s failed (%s: %s), trying next",
+                        "[AIService] Failover | ⚠️ %s failed (%s: %s)",
                         model,
                         error_type,
-                        DataSanitizer.sanitize_error(e)[:100],
+                        DataSanitizer.sanitize_error(ValueError(truncated_raw)),
                     )
                     continue
                 else:
