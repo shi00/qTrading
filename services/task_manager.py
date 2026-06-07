@@ -269,7 +269,8 @@ class TaskManager:
             logger.debug(f"[TaskManager] Task [{task.id}] already cancelled, skipping launch")
             return
 
-        task._cancel_event = asyncio.Event()
+        # Note: _cancel_event will be created lazily in _task_runner
+        # to ensure it's bound to the correct event loop
         self._persist_task(task)
         self._notify_subscribers()
         logger.info(f"[TaskManager] Queued task: [{task.id}] {task.name}")

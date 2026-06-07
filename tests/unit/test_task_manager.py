@@ -871,7 +871,8 @@ class TestTaskManagerRegisterAndRun:
             patch("asyncio.create_task", side_effect=lambda c, *args, **kwargs: [c.close(), MagicMock()][1]),
         ):
             mgr._register_and_run(t)
-        assert t._cancel_event is not None
+        # _cancel_event is now created lazily in _task_runner, not in _register_and_run
+        assert t._cancel_event is None
 
 
 class TestTaskManagerTaskRunner:

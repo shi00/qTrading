@@ -51,9 +51,9 @@ def get_strategy_registry() -> dict[str, type]:
 class BaseStrategy(ABC):
     required_history_days: int = 0
 
-    required_context_keys: list[str] = []
-    required_tables: list[str] = []
-    required_apis: list[str] = []
+    required_context_keys: tuple[str, ...] = ()
+    required_tables: tuple[str, ...] = ()
+    required_apis: tuple[str, ...] = ()
 
     CONTEXT_KEY_TABLE_MAP: dict[str, str] = {
         "northbound_data": "northbound_holding",

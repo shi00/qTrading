@@ -35,6 +35,22 @@ _SLOW_UPSERT_THRESHOLD_MS = 2000
 class BaseDao:
     _maintenance_event = None
 
+    def _check_engine(self) -> None:
+        """Check if the engine is initialized and not disposed.
+
+        Raises:
+            RuntimeError: If engine is not initialized.
+            EngineDisposedError: If engine has been disposed.
+        """
+        if self.engine is None:
+            raise RuntimeError(
+                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
+            )
+        if getattr(self.engine, "_disposed", False):
+            raise EngineDisposedError(
+                f"[{self.__class__.__name__}] Engine disposed. Call CacheManager.init_db() to reinitialize."
+            )
+
     @staticmethod
     async def chunked_in_query(read_db_fn, sql_template, values, *, chunk_size=_IN_CHUNK_SIZE, params_fn=None):
         """

@@ -226,7 +226,7 @@ class ConfigHandler:
                     )
 
         except Exception as e:
-            logger.error(f"Failed to ensure default config: {e}")
+            logger.error("Failed to ensure default config: %s", DataSanitizer.sanitize_error(e))
 
     @staticmethod
     def _save_json_atomically(data, path):
@@ -262,7 +262,7 @@ class ConfigHandler:
             )
             return ""
         except Exception as e:
-            logger.error(f"Decryption error: {e}")
+            logger.error("Decryption error: %s", DataSanitizer.sanitize_error(e))
             return ""
 
     @staticmethod
@@ -284,7 +284,7 @@ class ConfigHandler:
                     ConfigHandler._config_cache = get_default_config()
                     return ConfigHandler._config_cache.copy()
                 except Exception as e:
-                    logger.warning(f"[ConfigHandler] Failed to load config file: {e}")
+                    logger.warning("[ConfigHandler] Failed to load config file: %s", DataSanitizer.sanitize_error(e))
                     return {}
             return {}
 
@@ -399,7 +399,7 @@ class ConfigHandler:
                 ConfigHandler.save_config({"ts_token": ""})
                 logger.info("Migrated ts_token from config to keyring and cleared legacy value")
             except Exception as e:
-                logger.debug(f"Keyring migration failed: {e}")
+                logger.debug("Keyring migration failed: %s", DataSanitizer.sanitize_error(e))
         return decrypted
 
     @staticmethod
@@ -417,7 +417,8 @@ class ConfigHandler:
             return ConfigHandler.save_config({"ts_token": ""})
         except Exception as e:
             logger.warning(
-                f"Failed to use keyring for ts_token: {e}. Falling back to SecurityManager.",
+                "Failed to use keyring for ts_token: %s. Falling back to SecurityManager.",
+                DataSanitizer.sanitize_error(e),
             )
             try:
                 encrypted = SecurityManager.encrypt_data(token)
@@ -828,7 +829,7 @@ class ConfigHandler:
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
             except Exception as exc:
-                logger.debug(f"Keyring get_password for ai_api_key failed: {exc}")
+                logger.debug("Keyring get_password for ai_api_key failed: %s", DataSanitizer.sanitize_error(exc))
 
         # 3. 加密配置文件
         if not api_key:

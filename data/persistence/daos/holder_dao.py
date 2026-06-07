@@ -5,7 +5,6 @@ import pandas as pd
 from data.persistence.models import StkHoldernumber, Top10Holders, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao, EngineDisposedError
-from .financial_dao import _chunked_in_query
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +179,7 @@ class HolderDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await _chunked_in_query(
+                return await BaseDao.chunked_in_query(
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code, end_date)

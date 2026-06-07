@@ -84,9 +84,9 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
 
     required_quality_tier = QualityTier.BRONZE
     enable_ai_analysis = False
-    required_context_keys = ["northbound_data"]
-    required_tables = ["northbound_holding"]
-    required_apis = ["hk_hold"]
+    required_context_keys: tuple[str, ...] = ("northbound_data",)
+    required_tables: tuple[str, ...] = ("northbound_holding",)
+    required_apis: tuple[str, ...] = ("hk_hold",)
 
     def __init__(self):
         super().__init__("strategy_northbound_holding_name", "strategy_northbound_holding_desc")
@@ -147,9 +147,9 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
     """
 
     enable_ai_analysis = False
-    required_context_keys = ["northbound_flow_data"]
-    required_tables = ["moneyflow_hsgt"]
-    required_apis = ["moneyflow_hsgt"]
+    required_context_keys: tuple[str, ...] = ("northbound_flow_data",)
+    required_tables: tuple[str, ...] = ("moneyflow_hsgt",)
+    required_apis: tuple[str, ...] = ("moneyflow_hsgt",)
 
     def __init__(self):
         super().__init__("strategy_northbound_flow_name", "strategy_northbound_flow_desc")
@@ -216,9 +216,9 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
 class InstitutionalStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.BRONZE
     enable_ai_analysis = False
-    required_context_keys = ["top_list"]
-    required_tables = ["top_list"]
-    required_apis = ["top_list"]
+    required_context_keys: tuple[str, ...] = ("top_list",)
+    required_tables: tuple[str, ...] = ("top_list",)
+    required_apis: tuple[str, ...] = ("top_list",)
 
     def __init__(self):
         super().__init__("strategy_institutional_name", "strategy_institutional_desc")
@@ -269,9 +269,9 @@ class InstitutionalStrategy(PolarsBaseStrategy):
 class BlockTradeStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.BRONZE
     enable_ai_analysis = False
-    required_context_keys = ["block_trade"]
-    required_tables = ["block_trade"]
-    required_apis = ["block_trade"]
+    required_context_keys: tuple[str, ...] = ("block_trade",)
+    required_tables: tuple[str, ...] = ("block_trade",)
+    required_apis: tuple[str, ...] = ("block_trade",)
 
     def __init__(self):
         super().__init__("strategy_block_trade_name", "strategy_block_trade_desc")

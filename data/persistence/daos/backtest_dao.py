@@ -165,9 +165,11 @@ class BacktestDAO(BaseDao):
         Returns:
             是否删除成功
         """
+        self._check_engine()
         stmt = sa.delete(BacktestResultModel).where(BacktestResultModel.run_id == run_id)
         try:
-            await self._write_db(stmt)
+            async with self.engine.begin() as conn:
+                await conn.execute(stmt)
             return True
         except EngineDisposedError:
             logger.warning("[BacktestDAO] Engine disposed, skipping delete for %s", run_id)

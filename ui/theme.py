@@ -10,6 +10,7 @@ A-Share Quantitative Screener - Unified Theme Configuration
 """
 
 import logging
+import threading
 from typing import TypedDict
 
 import flet as ft
@@ -368,18 +369,21 @@ class AppColors:
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
     _CURRENT_THEME_NAME = ThemeName.DARK
     _listeners = []
+    _listeners_lock = threading.Lock()  # Thread-safe lock for _listeners list
 
     @classmethod
     def subscribe(cls, listener):
         """订阅主题变更事件"""
-        if listener not in cls._listeners:
-            cls._listeners.append(listener)
+        with cls._listeners_lock:
+            if listener not in cls._listeners:
+                cls._listeners.append(listener)
 
     @classmethod
     def unsubscribe(cls, listener):
         """取消订阅"""
-        if listener in cls._listeners:
-            cls._listeners.remove(listener)
+        with cls._listeners_lock:
+            if listener in cls._listeners:
+                cls._listeners.remove(listener)
 
     @classmethod
     def load_theme(cls, theme_name: str = ThemeName.DARK):
@@ -415,7 +419,9 @@ class AppColors:
 
         # 通知监听器 (复制列表避免迭代期间修改)
         logger.debug(f"Notifying {len(cls._listeners)} theme listeners")
-        for listener in list(cls._listeners):
+        with cls._listeners_lock:
+            listeners_snapshot = list(cls._listeners)
+        for listener in listeners_snapshot:
             try:
                 listener()
             except Exception as e:

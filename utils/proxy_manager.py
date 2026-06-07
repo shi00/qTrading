@@ -31,6 +31,7 @@ class ProxyManager:
     _original_no_proxy: set[str] | None = None
     _env_written: bool = False
     _env_lock: threading.RLock = threading.RLock()
+    _config_lock: threading.RLock = threading.RLock()  # Lock for config mutation (domains, initialized)
 
     @staticmethod
     def apply_smart_proxy_policy():
@@ -47,47 +48,48 @@ class ProxyManager:
         """
         logger.info("[ProxyManager] Computing proxy configuration...")
 
-        if ProxyManager._original_no_proxy is None:
-            original_domains: set[str] = set()
-            no_proxy_upper = os.environ.get("NO_PROXY", "")
-            no_proxy_lower = os.environ.get("no_proxy", "")
+        with ProxyManager._config_lock:
+            if ProxyManager._original_no_proxy is None:
+                original_domains: set[str] = set()
+                no_proxy_upper = os.environ.get("NO_PROXY", "")
+                no_proxy_lower = os.environ.get("no_proxy", "")
 
-            if no_proxy_upper:
-                original_domains.update([d.strip() for d in no_proxy_upper.split(",") if d.strip()])
-            if no_proxy_lower:
-                original_domains.update([d.strip() for d in no_proxy_lower.split(",") if d.strip()])
+                if no_proxy_upper:
+                    original_domains.update([d.strip() for d in no_proxy_upper.split(",") if d.strip()])
+                if no_proxy_lower:
+                    original_domains.update([d.strip() for d in no_proxy_lower.split(",") if d.strip()])
 
-            ProxyManager._original_no_proxy = original_domains
-            logger.info(
-                f"[ProxyManager] Snapshotted {len(original_domains)} original NO_PROXY domains from env.",
+                ProxyManager._original_no_proxy = original_domains
+                logger.info(
+                    f"[ProxyManager] Snapshotted {len(original_domains)} original NO_PROXY domains from env.",
+                )
+
+            final_domains: set[str] = ProxyManager._original_no_proxy.copy()
+
+            target_domains = ConfigHandler.get_no_proxy_domains()
+
+            target_domains = list(
+                set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]),
             )
 
-        final_domains: set[str] = ProxyManager._original_no_proxy.copy()
+            if not target_domains:
+                logger.info("[ProxyManager] No cache/whitelist domains configured.")
+            else:
+                logger.info(
+                    f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist.",
+                )
+                final_domains.update(target_domains)
 
-        target_domains = ConfigHandler.get_no_proxy_domains()
+            ProxyManager._no_proxy_domains = final_domains
+            ProxyManager._initialized = True
 
-        target_domains = list(
-            set([d.strip() for d in target_domains if isinstance(d, str) and d.strip()]),
-        )
-
-        if not target_domains:
-            logger.info("[ProxyManager] No cache/whitelist domains configured.")
-        else:
-            logger.info(
-                f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist.",
-            )
-            final_domains.update(target_domains)
-
-        ProxyManager._no_proxy_domains = final_domains
-        ProxyManager._initialized = True
-
-        if final_domains:
-            valid_domains = [d for d in final_domains if d]
-            logger.info(
-                f"[ProxyManager] Configuration cached. {len(valid_domains)} domains in NO_PROXY.",
-            )
-        else:
-            logger.info("[ProxyManager] Configuration cached. NO_PROXY empty.")
+            if final_domains:
+                valid_domains = [d for d in final_domains if d]
+                logger.info(
+                    f"[ProxyManager] Configuration cached. {len(valid_domains)} domains in NO_PROXY.",
+                )
+            else:
+                logger.info("[ProxyManager] Configuration cached. NO_PROXY empty.")
 
     @staticmethod
     def reapply_proxy_policy():
@@ -104,9 +106,13 @@ class ProxyManager:
     @staticmethod
     def get_no_proxy_domains() -> set[str]:
         """Return the cached set of NO_PROXY domains."""
+        with ProxyManager._config_lock:
+            if not ProxyManager._initialized:
+                pass  # Need to initialize outside lock to avoid deadlock
         if not ProxyManager._initialized:
             ProxyManager.apply_smart_proxy_policy()
-        return ProxyManager._no_proxy_domains.copy()
+        with ProxyManager._config_lock:
+            return ProxyManager._no_proxy_domains.copy()
 
     @staticmethod
     def get_no_proxy_string() -> str:

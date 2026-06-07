@@ -179,7 +179,9 @@ class TushareClient:
             rate=rate_per_sec,
         )
         logger.info(
-            f"[API] Rate Limiter initialized: {limit_per_min} req/min ({rate_per_sec:.2f} req/s)",
+            "[API] Rate Limiter initialized: %s req/min (%.2f req/s)",
+            limit_per_min,
+            rate_per_sec,
         )
 
         api_limiters: dict[str, TokenBucket] = {}
@@ -282,9 +284,10 @@ class TushareClient:
             self._capability_cache.clear()
 
             logger.info(
-                f"[API] Token updated: {old_token[:4] + '****' if old_token else 'None'} -> "
-                f"{token[:4] + '****' if token else 'None'}. "
-                f"Cache cleared ({cache_size} entries)."
+                "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
+                DataSanitizer.sanitize_token(old_token),
+                DataSanitizer.sanitize_token(token),
+                cache_size,
             )
             return True
 
@@ -304,7 +307,7 @@ class TushareClient:
         """Mark an API as unavailable for the current token."""
         with self._capability_cache_lock:
             self._capability_cache[api_name] = False
-            logger.warning(f"[API] Capability cached: '{api_name}' marked as UNAVAILABLE for current token")
+            logger.warning("[API] Capability cached: '%s' marked as UNAVAILABLE for current token", api_name)
 
     def mark_api_available(self, api_name: str) -> None:
         """Mark an API as available for the current token."""
@@ -331,7 +334,9 @@ class TushareClient:
         try:
             await self.persist_capabilities_to_app_state()
         except Exception as exc:
-            logger.debug(f"[TushareClient] Capability persist failed (non-critical): {exc}")
+            logger.debug(
+                "[TushareClient] Capability persist failed (non-critical): %s", DataSanitizer.sanitize_error(exc)
+            )
 
     def get_effective_synced_tables(self, all_tables: list[str]) -> list[str]:
         """
@@ -386,7 +391,7 @@ class TushareClient:
             "capabilities": capabilities,
         }
         await set_app_state(engine, "tushare_capabilities", json.dumps(payload))
-        logger.info(f"[TushareClient] Persisted {len(capabilities)} capabilities to AppState")
+        logger.info("[TushareClient] Persisted %s capabilities to AppState", len(capabilities))
 
     async def load_capabilities_from_app_state(self) -> None:
         """
@@ -416,11 +421,11 @@ class TushareClient:
             if payload.get("token_hash") == token_hash:
                 with self._capability_cache_lock:
                     self._capability_cache.update(payload.get("capabilities", {}))
-                logger.info(f"[TushareClient] Loaded {len(self._capability_cache)} capabilities from AppState")
+                logger.info("[TushareClient] Loaded %s capabilities from AppState", len(self._capability_cache))
             else:
                 logger.debug("[TushareClient] Token hash mismatch, skipping capability load")
         except Exception as e:
-            logger.warning(f"[TushareClient] Failed to load capabilities: {e}")
+            logger.warning("[TushareClient] Failed to load capabilities: %s", DataSanitizer.sanitize_error(e))
 
     async def probe_api_capabilities(self) -> dict[str, bool | None]:
         """
@@ -468,7 +473,11 @@ class TushareClient:
                 self.mark_api_unavailable(api_name)
             except Exception as e:
                 results[api_name] = None
-                logger.warning(f"[TushareClient] Probe {api_name} failed with non-permission error: {e}")
+                logger.warning(
+                    "[TushareClient] Probe %s failed with non-permission error: %s",
+                    api_name,
+                    DataSanitizer.sanitize_error(e),
+                )
 
         await self.persist_capabilities_to_app_state()
         return results
@@ -500,7 +509,7 @@ class TushareClient:
 
         capability = self.is_api_available(api_name)
         if capability is False:
-            logger.debug(f"[tushare_api] SKIPPING {api_name}: known unavailable (cached)")
+            logger.debug("[tushare_api] SKIPPING %s: known unavailable (cached)", api_name)
             raise TushareAPIPermissionError(api_name, f"API '{api_name}' is cached as unavailable for current token")
 
         formatted_kwargs = {}
@@ -513,7 +522,9 @@ class TushareClient:
 
         api_limiter = getattr(self, "_api_limiters", {}).get(api_name)
         if api_limiter and logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"[tushare_api] api_name='{api_name}' -> api_limiter active ({api_limiter.rate * 60:.0f}/min)")
+            logger.debug(
+                "[tushare_api] api_name='%s' -> api_limiter active (%.0f/min)", api_name, api_limiter.rate * 60
+            )
 
         for i in range(self.max_retries):
             if api_limiter:
@@ -575,7 +586,9 @@ class TushareClient:
                     except RuntimeError:
                         pass
                     logger.error(
-                        f"[tushare_api] PERMISSION_DENIED ({api_name}): {error_msg}",
+                        "[tushare_api] PERMISSION_DENIED (%s): %s",
+                        api_name,
+                        error_msg,
                     )
                     raise TushareAPIPermissionError(api_name, error_msg) from e
 
@@ -650,8 +663,9 @@ class TushareClient:
 
         if page >= max_pages:
             logger.error(
-                f"[API] Pagination hit max_pages={max_pages} (offset={offset}). "
-                f"Results are INCOMPLETE. Consider increasing max_pages or using date range filters."
+                "[API] Pagination hit max_pages=%s (offset=%s). Results are INCOMPLETE. Consider increasing max_pages or using date range filters.",
+                max_pages,
+                offset,
             )
 
         if not df_list:
@@ -680,7 +694,7 @@ class TushareClient:
             if df is not None and not df.empty:
                 return df["cal_date"].tolist()
         except Exception as e:
-            logger.warning(f"[API] get_trade_dates sync call failed: {DataSanitizer.sanitize_error(e)}")
+            logger.warning("[API] get_trade_dates sync call failed: %s", DataSanitizer.sanitize_error(e))
         return []
 
     def is_trading_day(self, date_str: typing.Any = None):
@@ -711,7 +725,7 @@ class TushareClient:
                 if year in self._loaded_years:
                     return date_str in self._trade_cal_cache
 
-                logger.info(f"[Cache] Loading trading calendar for year {year}...")
+                logger.info("[Cache] Loading trading calendar for year %s...", year)
 
                 start_date = f"{year}0101"
                 end_date = f"{year}1231"
@@ -730,18 +744,22 @@ class TushareClient:
                     self._trade_cal_cache.update(dates)
                     self._loaded_years.add(year)
                     logger.info(
-                        f"[Cache] Successfully loaded {len(dates)} trading days for {year}",
+                        "[Cache] Successfully loaded %s trading days for %s",
+                        len(dates),
+                        year,
                     )
 
                     return date_str in dates
                 logger.warning(
-                    f"[Cache] Failed to load calendar for {year} (Empty response)",
+                    "[Cache] Failed to load calendar for %s (Empty response)",
+                    year,
                 )
                 # Do not mark as loaded so we retry next time, or logic below deals with it
 
         except Exception as e:
             logger.warning(
-                f"[API] Trade calendar cache load failed: {e}, falling back to Offline Calendar",
+                "[API] Trade calendar cache load failed: %s, falling back to Offline Calendar",
+                DataSanitizer.sanitize_error(e),
             )
 
         # 3. Fallback: Offline Calendar (pandas_market_calendars)
@@ -750,14 +768,15 @@ class TushareClient:
 
             return OfflineCalendar.is_trading_day(date_str)
         except Exception as ex:
-            logger.error(f"[API] Offline calendar check failed: {ex}")
+            logger.error("[API] Offline calendar check failed: %s", DataSanitizer.sanitize_error(ex))
             # Ultimate Fallback: Simple weekday check (Mon-Fri)
             try:
                 dt = datetime.datetime.strptime(date_str, "%Y%m%d")
                 is_weekday = dt.weekday() < 5
                 if is_weekday:
                     logger.warning(
-                        f"[API] UNSAFE_FALLBACK: Assuming {date_str} is trading day (weekday check). May be inaccurate for holidays!",
+                        "[API] UNSAFE_FALLBACK: Assuming %s is trading day (weekday check). May be inaccurate for holidays!",
+                        date_str,
                     )
                 return is_weekday
             except (ValueError, TypeError):
@@ -857,7 +876,7 @@ class TushareClient:
                         how="left",
                     )
         except Exception as e:
-            logger.warning(f"[API] Failed to fetch adj_factor: {DataSanitizer.sanitize_error(e)}, using default 1.0")
+            logger.warning("[API] Failed to fetch adj_factor: %s, using default 1.0", DataSanitizer.sanitize_error(e))
 
         # Fill NaN adj_factor with 1.0
         if "adj_factor" in df_daily.columns:
@@ -1279,10 +1298,10 @@ class TushareClient:
 
     async def get_macro_data(self, api_name: str, start_m: str | None = None, end_m: str | None = None):
         if api_name not in self._MACRO_API_WHITELIST:
-            logger.error(f"[API] Rejected macro API: {api_name} (not in whitelist)")
+            logger.error("[API] Rejected macro API: %s (not in whitelist)", api_name)
             return None
         func = getattr(self.pro, api_name, None)
         if not func:
-            logger.error(f"[API] Macro API not found: {api_name}")
+            logger.error("[API] Macro API not found: %s", api_name)
             return None
         return await self._handle_api_call(func, start_m=start_m, end_m=end_m)

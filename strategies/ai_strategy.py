@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 @register_strategy("ai_active")
 class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
     required_quality_tier = QualityTier.SILVER
-    required_context_keys = ["screening_data"]
-    required_tables = ["daily_quotes", "daily_indicators"]
+    required_context_keys: tuple[str, ...] = ("screening_data",)
+    required_tables: tuple[str, ...] = ("daily_quotes", "daily_indicators")
 
     @property
     def required_history_days(self):

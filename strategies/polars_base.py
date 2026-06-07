@@ -41,8 +41,8 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
 
     required_quality_tier: QualityTier = QualityTier.SILVER
     requires_fundamental_coverage: bool = False
-    required_context_keys: list[str] = ["screening_data"]
-    required_tables: list[str] = ["daily_quotes"]
+    required_context_keys: tuple[str, ...] = ("screening_data",)
+    required_tables: tuple[str, ...] = ("daily_quotes",)
 
     async def filter(self, context: StrategyContext):
         _check_tier(

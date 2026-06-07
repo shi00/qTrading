@@ -260,6 +260,7 @@ class ScreenerDao(BaseDao):
         conn: typing.Any = None,
     ):
         """Update review metrics and advance review_status according to available horizons."""
+        self._check_engine()
         effective_status = review_status
         if effective_status is None:
             effective_status = REVIEW_STATUS_COMPLETED if t5_pct is not None else REVIEW_STATUS_T1_DONE
@@ -283,9 +284,6 @@ class ScreenerDao(BaseDao):
                 review_status=effective_status,
             )
         )
-
-        if self.engine is None:
-            raise RuntimeError("[ScreenerDao] Engine not initialized. Call CacheManager.init_db() first.")
 
         await self._get_maintenance_event().wait()
         if conn is not None:

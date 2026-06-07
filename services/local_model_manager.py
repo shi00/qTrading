@@ -154,8 +154,9 @@ class LocalModelManager:
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
-            if cls._instance is not None:
-                cls._instance._shutdown_worker()
+            inst = cls._instance
+            if inst is not None:
+                inst._shutdown_worker()
             cls._instance = None
             cls._initialized = False
 

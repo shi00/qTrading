@@ -12,6 +12,7 @@ from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,6 @@ class NewsSubscriptionService:
 
         self._current_fetch_task = None
         self._processing_task = None
-        self._queue_put_lock = None
 
         # P2-R4: Content hash dedup (LRU-style) to catch duplicates across restarts
         self._seen_hashes: OrderedDict[str, None] = OrderedDict()
@@ -90,10 +90,10 @@ class NewsSubscriptionService:
         """
         if is_alert:
             self._alert_listeners.add(callback)
-            logger.debug(f"[NewsService] Added alert listener: {callback}")
+            logger.debug("[NewsService] Added alert listener: %s", callback)
         else:
             self._listeners.add(callback)
-            logger.info(f"[NewsService] Added news listener: {callback}")
+            logger.info("[NewsService] Added news listener: %s", callback)
 
     def remove_listener(self, callback: typing.Callable | None, is_alert: typing.Any = False):
         """Remove a listener."""
@@ -102,7 +102,7 @@ class NewsSubscriptionService:
         else:
             try:
                 self._listeners.remove(callback)
-                logger.info(f"[NewsService] Removed news listener: {callback}")
+                logger.info("[NewsService] Removed news listener: %s", callback)
             except KeyError:
                 pass
 
@@ -117,10 +117,10 @@ class NewsSubscriptionService:
             await asyncio.wait_for(self.processing_queue.put(item), timeout=1.0)
         except TimeoutError:
             # Serialize drop-then-put to avoid race window between multiple producers.
-            lock = self._queue_put_lock
-            if lock is None:
-                lock = asyncio.Lock()
-                self._queue_put_lock = lock
+            def _lock_factory():
+                return asyncio.Lock()
+
+            lock = get_loop_local("news_queue_put_lock", _lock_factory)
 
             async with lock:
                 if self.processing_queue.full():
@@ -149,7 +149,7 @@ class NewsSubscriptionService:
                 await asyncio.wait_for(self.processing_queue.join(), timeout=drain_timeout)
             except TimeoutError:
                 qsize = self.processing_queue.qsize()
-                logger.warning(f"[NewsService] stop_async drain timeout, remaining queue size={qsize}")
+                logger.warning("[NewsService] stop_async drain timeout, remaining queue size=%s", qsize)
 
         if self._processing_task:
             if not self._processing_task.done():
@@ -175,8 +175,11 @@ class NewsSubscriptionService:
 
         self._running = True
 
-        self.processing_queue = asyncio.Queue(maxsize=500)
-        self._queue_put_lock = asyncio.Lock()
+        # Use loop-local Queue and Lock to avoid cross-loop reuse issues
+        def _queue_factory():
+            return asyncio.Queue(maxsize=500)
+
+        self.processing_queue = get_loop_local("news_processing_queue", _queue_factory)
 
         poll_task = asyncio.create_task(self._poll_loop())
         self._background_tasks.add(poll_task)
@@ -250,7 +253,8 @@ class NewsSubscriptionService:
             self._running = False
         except Exception as e:
             logger.error(
-                f"[NewsService] Error in background fetch task: {e}",
+                "[NewsService] Error in background fetch task: %s",
+                e,
                 exc_info=True,
             )
             # Optional: Implement retry logic here if needed, but for periodic polling,
@@ -271,7 +275,7 @@ class NewsSubscriptionService:
                 tag = I18n.get("news_tag_format", emoji=emoji, category=category)
                 return tag
         except Exception as e:
-            logger.warning(f"[NewsService] AI Tagging failed: {e}")
+            logger.warning("[NewsService] AI Tagging failed: %s", e)
 
         if any(k in clean_content for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]):
             tag = I18n.get("news_tag_format", emoji="🏛️", category=I18n.get("tag_policy"))
@@ -336,7 +340,8 @@ class NewsSubscriptionService:
                 break
             except Exception as e:
                 logger.error(
-                    f"[NewsService] Error in processing loop: {e}",
+                    "[NewsService] Error in processing loop: %s",
+                    e,
                     exc_info=True,
                 )
                 # Prevent tight error loop logging
@@ -389,21 +394,24 @@ class NewsSubscriptionService:
                 if listener in self._listener_errors:
                     del self._listener_errors[listener]
             except TimeoutError:
-                logger.warning(f"[NewsService] Listener {listener} timed out (5s)")
+                logger.warning("[NewsService] Listener %s timed out (5s)", listener)
             except Exception as e:
                 count = self._listener_errors.get(listener, 0) + 1
                 self._listener_errors[listener] = count
 
                 if count >= 3:
                     logger.error(
-                        f"[NewsService] Listener {listener} failed {count} times. Removing. Last error: {e}",
+                        "[NewsService] Listener %s failed %s times. Removing. Last error: %s",
+                        listener,
+                        count,
+                        e,
                     )
                     if listener in self._listeners:
                         self._listeners.remove(listener)
                     if listener in self._listener_errors:
                         del self._listener_errors[listener]
                 else:
-                    logger.warning(f"[NewsService] Listener error ({count}/3): {e}")
+                    logger.warning("[NewsService] Listener error (%s/3): %s", count, e)
 
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""
@@ -429,7 +437,8 @@ class NewsSubscriptionService:
 
                 if is_initial_sync:
                     logger.info(
-                        f"[NewsService] Initial sync: saving {len(news_list)} news items",
+                        "[NewsService] Initial sync: saving %s news items",
+                        len(news_list),
                     )
                     for item in reversed(news_list):
                         h = get_hash(item)
@@ -471,7 +480,8 @@ class NewsSubscriptionService:
                         current_news_content = item.get("content", "")
                         current_news_time = item.get("time", "")
                         logger.info(
-                            f"[NewsService] Found NEW update! Time: {current_news_time}",
+                            "[NewsService] Found NEW update! Time: %s",
+                            current_news_time,
                         )
 
                         clean_content = current_news_content.strip()
@@ -502,9 +512,9 @@ class NewsSubscriptionService:
                                             timeout=3.0,
                                         )
                                 except TimeoutError:
-                                    logger.warning(f"[NewsService] Alert listener {listener} timed out (3s)")
+                                    logger.warning("[NewsService] Alert listener %s timed out (3s)", listener)
                                 except Exception as e:
-                                    logger.error(f"[NewsService] Alert listener error: {e}")
+                                    logger.error("[NewsService] Alert listener error: %s", e)
 
                 if new_items_found:
                     await self._notify_listeners(
@@ -516,4 +526,4 @@ class NewsSubscriptionService:
             logger.warning("[NewsService] Engine disposed during poll, stopping.")
             self._running = False
         except Exception as e:
-            logger.warning(f"[NewsService] Poll failed: {e}", exc_info=True)
+            logger.warning("[NewsService] Poll failed: %s", e, exc_info=True)

@@ -11,12 +11,14 @@ import requests
 from cachetools import TTLCache
 
 from core.i18n import I18n
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
 _US_MOVES_CACHE: TTLCache = TTLCache(maxsize=1, ttl=300)
+_US_MOVES_CACHE_LOCK = threading.Lock()  # Thread-safe lock for TTLCache access
 _SINA_CONSECUTIVE_EMPTY = {"us_api": 0, "concept": 0}
 _SINA_EMPTY_THRESHOLD = 3
 
@@ -73,7 +75,7 @@ class NewsFetcher:
 
             market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
         except (ImportError, AttributeError, IndexError, TypeError) as exc:
-            logger.debug(f"[NewsFetcher] Failed to read akshare default market: {exc}")
+            logger.debug("[NewsFetcher] Failed to read akshare default market: %s", DataSanitizer.sanitize_error(exc))
             market = "沪深京"  # Fallback to standard standard UTF-8 key
 
         # Run the IO bound akshare calls in the thread pool
@@ -160,7 +162,9 @@ class NewsFetcher:
                 return _run_with_python_string_storage(_fetch_locked)
             except Exception as outer_e:
                 logger.error(
-                    f"[News] Fatal error fetching stock news for {ts_code}: {outer_e}",
+                    "[News] Fatal error fetching stock news for %s: %s",
+                    ts_code,
+                    DataSanitizer.sanitize_error(outer_e),
                 )
                 return []
 
@@ -170,10 +174,12 @@ class NewsFetcher:
             future = ThreadPoolManager().run_async(TaskType.IO, _fetch)
             return await asyncio.wait_for(future, timeout=15.0)
         except TimeoutError:
-            logger.warning(f"[News] Timeout fetching news for {ts_code}")
+            logger.warning("[News] Timeout fetching news for %s", ts_code)
             return []
         except Exception as e:
-            logger.error(f"[News] Error dispatching news fetch task for {ts_code}: {e}")
+            logger.error(
+                "[News] Error dispatching news fetch task for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
+            )
             return []
 
     @staticmethod
@@ -243,7 +249,11 @@ class NewsFetcher:
                     dt_obj = pd.to_datetime(final_time)  # type: ignore[assignment]
                     final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
                 except (ValueError, TypeError) as exc:
-                    logger.debug(f"[NewsFetcher] Pandas time standardize fallback for '{final_time}': {exc}")
+                    logger.debug(
+                        "[NewsFetcher] Pandas time standardize fallback for '%s': %s",
+                        final_time,
+                        DataSanitizer.sanitize_error(exc),
+                    )
                     final_time = str(final_time)
 
                 news_list.append(
@@ -259,7 +269,7 @@ class NewsFetcher:
             return news_list
 
         except Exception as e:
-            logger.error(f"[News] Error fetching global news: {e}")
+            logger.error("[News] Error fetching global news: %s", DataSanitizer.sanitize_error(e))
             return []
 
     @staticmethod
@@ -284,9 +294,10 @@ class NewsFetcher:
                 )
                 return ""
 
-        cached = _US_MOVES_CACHE.get("result")
-        if cached is not None:
-            return cached
+        with _US_MOVES_CACHE_LOCK:
+            cached = _US_MOVES_CACHE.get("result")
+            if cached is not None:
+                return cached
 
         MAX_RETRIES = 3
         RETRY_DELAY = 1.0
@@ -353,7 +364,9 @@ class NewsFetcher:
                     break
             except Exception as e:
                 last_error = e
-                logger.warning(f"[News] US API attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+                logger.warning(
+                    "[News] US API attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, DataSanitizer.sanitize_error(e)
+                )
                 if attempt < MAX_RETRIES - 1:
                     import asyncio
 
@@ -406,11 +419,12 @@ class NewsFetcher:
                     summary.append(f"{name}: {chg}%")
 
             result = ", ".join(summary)
-            _US_MOVES_CACHE["result"] = result
+            with _US_MOVES_CACHE_LOCK:
+                _US_MOVES_CACHE["result"] = result
             return result
 
         except Exception as e:
-            logger.error(f"[News] Error fetching US moves: {e}")
+            logger.error("[News] Error fetching US moves: %s", DataSanitizer.sanitize_error(e))
             return "Global data error."
 
     @staticmethod
@@ -427,7 +441,7 @@ class NewsFetcher:
                 try:
                     return _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念"))
                 except Exception as e:
-                    logger.warning(f"[News] Sina Concept Boards failed: {e}")
+                    logger.warning("[News] Sina Concept Boards failed: %s", DataSanitizer.sanitize_error(e))
                     return None
 
             # Use Global IO Pool with timeout to prevent hanging on unresponsive API
@@ -483,5 +497,5 @@ class NewsFetcher:
             return results
 
         except Exception as e:
-            logger.error(f"[News] Error fetching hot concepts: {e}")
+            logger.error("[News] Error fetching hot concepts: %s", DataSanitizer.sanitize_error(e))
             return []

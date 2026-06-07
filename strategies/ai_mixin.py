@@ -244,7 +244,7 @@ class AIStrategyMixin:
         self,
         candidates_df: pd.DataFrame,
         context: dict,
-        max_stocks: int = None,  # type: ignore[assignment]
+        max_stocks: int | None = None,
     ) -> pd.DataFrame:
         """
         Run sequential AI analysis on pre-filtered candidates.
@@ -620,7 +620,7 @@ class AIStrategyMixin:
         on_chunk=None,
         history_df=None,
         news=None,
-        ui_prompt_override: str = None,  # type: ignore[assignment]
+        ui_prompt_override: str | None = None,
         vol_ratio_threshold: float = 1.5,
     ):
         """

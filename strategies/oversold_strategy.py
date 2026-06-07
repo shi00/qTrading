@@ -25,8 +25,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                      "golden pit" rebounds from "falling knife" traps.
     """
 
-    required_context_keys = ["screening_data"]
-    required_tables = ["daily_quotes"]
+    required_context_keys: tuple[str, ...] = ("screening_data",)
+    required_tables: tuple[str, ...] = ("daily_quotes",)
 
     @property
     def required_history_days(self):

@@ -23,6 +23,7 @@ import pandas as pd
 from data.constants import MARKET_CLOSE_HOUR
 from data.domain_services.offline_calendar import OfflineCalendar
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.loop_local import get_loop_local
 from utils.time_utils import get_now, parse_date
 
 if TYPE_CHECKING:
@@ -73,7 +74,6 @@ class TradeCalendarService:
 
         self._mem_cache: dict = {}
         self._cache_ttl: int = 300
-        self._cache_lock = asyncio.Lock()
 
         self._latest_trade_date_cache: dict = {"ts": 0, "val": None}
 
@@ -308,6 +308,8 @@ class TradeCalendarService:
 
             return []
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(
                 f"[TradeCalendarService] get_trade_dates failed: {e}",
@@ -497,7 +499,11 @@ class TradeCalendarService:
         ):
             return self._latest_trade_date_cache["val"]
 
-        async with self._cache_lock:
+        # Use loop-local Lock to avoid cross-loop reuse issues
+        def _lock_factory():
+            return asyncio.Lock()
+
+        async with get_loop_local("trade_calendar_cache_lock", _lock_factory):
             now_ts = time.time()
             if (
                 self._latest_trade_date_cache["val"] is not None
@@ -623,6 +629,8 @@ class TradeCalendarService:
 
             return pd.DataFrame()
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(
                 f"[TradeCalendarService] get_trade_cal_df failed: {e}",

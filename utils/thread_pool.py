@@ -56,6 +56,11 @@ class ThreadPoolManager:
             cls._instance = None
             cls._initialized = False
 
+        # Also reset the global _manager accessor
+        global _manager
+        with _manager_lock:
+            _manager = None
+
     def __init__(self):
         if self._initialized:
             return

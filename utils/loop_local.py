@@ -40,6 +40,10 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = True)
 
     if loop not in store:
         with _fallback_lock:
+            # Double-check pattern to prevent race condition
+            if loop in store:
+                # Another thread already created the instance while we were waiting for the lock
+                return store[loop]
             if key in _fallback_store:
                 store[loop] = _fallback_store.pop(key)
                 logger.debug(f"[loop_local] Migrated fallback instance for '{key}' to loop-local store.")

@@ -14,43 +14,9 @@ from data.persistence.models import (
     get_model_pk_columns,
 )
 
-from .base_dao import BaseDao
+from .base_dao import _IN_CHUNK_SIZE, BaseDao
 
 logger = logging.getLogger(__name__)
-
-_IN_CHUNK_SIZE = 500
-
-
-async def _chunked_in_query(read_db_fn, sql_template, ts_codes, params_fn=None):
-    """
-    Execute a SQL query with IN clause in chunks to avoid PostgreSQL parameter limit.
-
-    Args:
-        read_db_fn: async _read_db method
-        sql_template: SQL with {placeholders} marker
-        ts_codes: list of stock codes
-        params_fn: callable(ts_codes_chunk) -> extra params list, appended after ts_codes
-    """
-    if len(ts_codes) <= _IN_CHUNK_SIZE:
-        placeholders = ",".join([f"${i + 1}" for i in range(len(ts_codes))])
-        extra = params_fn(ts_codes) if params_fn else []
-        sql = sql_template.format(placeholders=placeholders)
-        df = await read_db_fn(sql, ts_codes + extra)
-        return df if df is not None else pd.DataFrame()
-
-    all_results = []
-    for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
-        chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
-        placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-        extra = params_fn(chunk) if params_fn else []
-        sql = sql_template.format(placeholders=placeholders)
-        df = await read_db_fn(sql, chunk + extra)
-        if df is not None and not df.empty:
-            all_results.append(df)
-
-    if all_results:
-        return pd.concat(all_results, ignore_index=True)
-    return pd.DataFrame()
 
 
 class FinancialDao(BaseDao):
@@ -304,7 +270,7 @@ class FinancialDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await _chunked_in_query(
+                return await BaseDao.chunked_in_query(
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code)
@@ -345,7 +311,7 @@ class FinancialDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await _chunked_in_query(
+                return await BaseDao.chunked_in_query(
                     self._read_db,
                     """
                     SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
@@ -385,7 +351,7 @@ class FinancialDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await _chunked_in_query(
+                return await BaseDao.chunked_in_query(
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code)

@@ -43,8 +43,8 @@ class UILogger:
         cls,
         component: str,
         action: str,
-        target: str = None,  # type: ignore[untyped]
-        details: str = None,  # type: ignore[untyped]
+        target: str | None = None,
+        details: str | None = None,
     ):
         """
         静态辅助方法：为匿名 Lambda 等无法挂接装饰器的场景准备的单行打点入口
@@ -60,7 +60,7 @@ class UILogger:
 def log_ui_action(
     component_name: str,
     action_type: str = "Click",
-    target_name: str = None,  # type: ignore[untyped]
+    target_name: str | None = None,
 ):
     """
     UI 动作强制埋点装饰器 (适用于绑定在类方法的 Event Handler)
@@ -83,8 +83,8 @@ def log_ui_action(
 
 
 def log_async_operation(
-    operation_name: str = None,  # type: ignore[untyped]
-    sanitize_params: list[str] = None,  # type: ignore[untyped]
+    operation_name: str | None = None,
+    sanitize_params: list[str] | None = None,
     log_args: bool = False,
     log_result: bool = False,
     log_exceptions: bool = True,
@@ -190,7 +190,7 @@ def log_async_operation(
 def track_performance(
     threshold_ms: int = PerfThreshold.DB_BULK_IO,
     alert_level: str = "WARNING",
-    operation_name: str = None,  # type: ignore[untyped]
+    operation_name: str | None = None,
 ):
     """
     性能追踪装饰器
@@ -267,7 +267,7 @@ class AsyncOperationLogger:
     def __init__(
         self,
         operation: str,
-        context: dict = None,  # type: ignore[untyped]
+        context: dict | None = None,
         log_level: int = logging.DEBUG,
     ):
         """

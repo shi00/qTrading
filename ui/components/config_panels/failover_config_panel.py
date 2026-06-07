@@ -38,8 +38,6 @@ class FailoverItem:
 class ProviderCredentialDialog(ft.AlertDialog):
     """Dialog for adding/editing a failover provider's credentials."""
 
-    _KEY_MASK_THRESHOLD = 8
-
     def __init__(
         self,
         page: ft.Page | None = None,
@@ -149,7 +147,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if cred.get("api_key"):
             key = cred["api_key"]
             self.api_key_input.value = key
-            self.api_key_masked = f"{key[:4]}...{key[-4:]}" if len(key) > self._KEY_MASK_THRESHOLD else "****"
+            self.api_key_masked = DataSanitizer.sanitize_token(key)
 
     def _on_provider_change(self, e):
         provider = e.control.value
@@ -311,8 +309,6 @@ class ProviderCredentialDialog(ft.AlertDialog):
 class FailoverConfigPanel(ft.Container):
     """Failover configuration panel with list management."""
 
-    _KEY_MASK_THRESHOLD = 8
-
     def __init__(self, on_save: Callable | None = None):
         self.on_save = on_save
         self._failover_items: list[FailoverItem] = []
@@ -389,8 +385,7 @@ class FailoverConfigPanel(ft.Container):
             has_key = bool(cred.get("api_key"))
             key_masked = ""
             if has_key and cred["api_key"]:
-                k = cred["api_key"]
-                key_masked = f"{k[:4]}...{k[-4:]}" if len(k) > self._KEY_MASK_THRESHOLD else "****"
+                key_masked = DataSanitizer.sanitize_token(cred["api_key"])
 
             self._failover_items.append(
                 FailoverItem(
