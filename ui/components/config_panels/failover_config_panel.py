@@ -147,7 +147,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if cred.get("api_key"):
             key = cred["api_key"]
             self.api_key_input.value = key
-            self.api_key_masked = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "****"
+            self.api_key_masked = f"{key[:4]}...{key[-4:]}" if len(key) > self._KEY_MASK_THRESHOLD else "****"
 
     def _on_provider_change(self, e):
         provider = e.control.value
@@ -386,7 +386,7 @@ class FailoverConfigPanel(ft.Container):
             key_masked = ""
             if has_key and cred["api_key"]:
                 k = cred["api_key"]
-                key_masked = f"{k[:4]}...{k[-4:]}" if len(k) > 8 else "****"
+                key_masked = f"{k[:4]}...{k[-4:]}" if len(k) > self._KEY_MASK_THRESHOLD else "****"
 
             self._failover_items.append(
                 FailoverItem(

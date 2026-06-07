@@ -383,3 +383,18 @@ def get_display_tag(tag: str | list[str]) -> str:
         display_tags = [t for t in tag if t not in internal_tags]
         return display_tags[0] if display_tags else ""
     return tag
+
+
+def is_recommended_model(model: dict) -> bool:
+    """Check if a model is tagged as recommended (推荐).
+
+    Args:
+        model: Model dict with optional "tag" field
+
+    Returns:
+        True if the model's tag contains "推荐"
+    """
+    tag = model.get("tag")
+    if isinstance(tag, list):
+        return "推荐" in tag
+    return tag == "推荐"

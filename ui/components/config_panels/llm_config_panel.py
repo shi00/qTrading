@@ -24,6 +24,7 @@ from utils.llm_providers import (
     AZURE_DEFAULT_API_VERSION,
     LLM_PROVIDERS,
     get_display_tag,
+    is_recommended_model,
 )
 from utils.sanitizers import DataSanitizer
 
@@ -59,6 +60,9 @@ class LLMConfigPanel(ft.Container):
         show_save_button: Whether to show the save button (default: False)
         compact: Whether to use compact layout for wizard (default: False)
     """
+
+    _REFRESH_TIMEOUT = 10.0
+    _MAX_CUSTOM_MODELS = 50
 
     def __init__(
         self,
@@ -396,11 +400,7 @@ class LLMConfigPanel(ft.Container):
                     self.custom_model_input.value = model
                 elif models:
                     recommended = next(
-                        (
-                            m.get("id")
-                            for m in models
-                            if "推荐" in (m.get("tag") if isinstance(m.get("tag"), list) else [m.get("tag")])
-                        ),
+                        (m.get("id") for m in models if is_recommended_model(m)),
                         None,
                     )
                     self.model_dropdown.value = recommended or models[0].get("id")
@@ -480,11 +480,7 @@ class LLMConfigPanel(ft.Container):
             models = provider.get("models", [])
             if models:
                 recommended = next(
-                    (
-                        m.get("id")
-                        for m in models
-                        if "推荐" in (m.get("tag") if isinstance(m.get("tag"), list) else [m.get("tag")])
-                    ),
+                    (m.get("id") for m in models if is_recommended_model(m)),
                     None,
                 )
                 self.model_dropdown.value = recommended or models[0].get("id")
@@ -760,7 +756,7 @@ class LLMConfigPanel(ft.Container):
                 response = await client.get(
                     models_url,
                     headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=10.0,
+                    timeout=self._REFRESH_TIMEOUT,
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -847,7 +843,7 @@ class LLMConfigPanel(ft.Container):
             custom_models[provider] = []
         if model not in custom_models[provider]:
             custom_models[provider].append(model)
-            custom_models[provider] = custom_models[provider][-50:]
+            custom_models[provider] = custom_models[provider][-self._MAX_CUSTOM_MODELS :]
         return custom_models
 
     @staticmethod
