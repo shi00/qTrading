@@ -112,14 +112,14 @@ class DataSanitizer:
     )
 
     @staticmethod
-    def sanitize_error(exception: Exception, show_traceback: bool = False) -> str:
+    def sanitize_error(exception: Exception | str, show_traceback: bool = False) -> str:
         """
         异常信息脱敏
 
         移除文件路径和敏感凭证,避免暴露系统结构和API密钥
 
         Args:
-            exception: 异常对象
+            exception: 异常对象或字符串
             show_traceback: 是否包含堆栈(仅用于DEBUG)
 
         Returns:

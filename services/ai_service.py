@@ -845,7 +845,7 @@ class AIService:
                         "[AIService] Failover | ⚠️ %s failed (%s: %s)",
                         model,
                         error_type,
-                        DataSanitizer.sanitize_error(ValueError(truncated_raw)),
+                        DataSanitizer.sanitize_error(truncated_raw),
                     )
                     continue
                 else:

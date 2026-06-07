@@ -38,6 +38,8 @@ class FailoverItem:
 class ProviderCredentialDialog(ft.AlertDialog):
     """Dialog for adding/editing a failover provider's credentials."""
 
+    _KEY_MASK_THRESHOLD = 8
+
     def __init__(
         self,
         page: ft.Page | None = None,
