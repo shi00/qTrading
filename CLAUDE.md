@@ -63,7 +63,7 @@
 | **HTTP 客户端** | requests + httpx (异步) + urllib3 |
 | **代码质量** | Ruff (Linter + Formatter) + Pyright (类型检查) |
 | **配置验证** | Pydantic (AppConfig 模型验证 + 默认值管理) |
-| **CI/CD** | GitHub Actions (Linux + Windows 双平台，含 PyInstaller 打包) |
+| **CI/CD** | GitHub Actions (Linux + Windows 双平台，含 Windows E2E、PyInstaller 打包、依赖同步 PR) |
 | **依赖管理** | uv (`pyproject.toml` → `requirements*.txt`，`--universal` 跨平台锁定，pre-commit 自动同步) |
 
 ---
@@ -80,7 +80,7 @@
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) |
 | R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[reason]` 注释 (pre-commit 强制拦截) |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) |
-| R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (必须检查 `CacheManager._disposed`，否则抛 `EngineDisposedError`) |
+| R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) |
 | R7 | **测试状态污染** | 测试中不隔离单例 (必须使用 `reset_singleton` 上下文管理器) |
 | R8 | **废弃 API** | 使用 `_write_db(is_many=True)` 进行批量写入 (会发 `DeprecationWarning`，必须用 `_save_upsert()`) |
@@ -98,6 +98,7 @@
 - 所有异步操作的 CPU/IO 任务必须通过 `ThreadPoolManager` 提交到对应线程池 (`TaskType.IO` / `TaskType.CPU`)。
 - `BaseDao` 的批量写入必须使用 `_save_upsert()`，分块由基类自动处理 (`_UPSERT_CHUNK_SIZE=500`)。
 - Pre-commit hooks 必须在提交前执行并保持通过。
+- 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。
 - 涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
@@ -115,7 +116,7 @@ app/              ← 引导层 (bootstrap: 启动初始化、服务编排，仅
 data/             ← 数据层 (DAO、同步策略、外部数据源、领域服务、缓存管理)
   ├── cache/             缓存管理器 (CacheManager 单例，DAO 统一入口、引擎管理)
   ├── persistence/       持久化 (DAOs、ORM 模型、数据库迁移、质量门控、配置/状态/元数据/复盘服务)
-  ├── domain_services/   领域服务 (交易日历、市场数据、离线日历快照)
+  ├── domain_services/   领域服务 (交易日历、市场数据、离线日历快照、交易成本)
   ├── external/          外部数据源 (Tushare 客户端、新闻抓取与订阅)
   ├── sync/              数据同步策略 (历史数据、财务数据、股东数据、宏观数据)
   └── mixins/            数据层混入 (交易日历混入、健康检查混入)
@@ -192,7 +193,7 @@ class MyService:
 
 1. 使用 `@register_singleton` 注册
 2. 实现 `_reset_singleton()` 方法 (测试隔离)
-3. 使用线程锁保护 `__new__`
+3. 实例创建必须受锁保护；优先在 `__new__` 中持锁，若存在 `get_instance()` 等统一入口，可由入口持锁以避免重复加锁死锁
 4. 支持 `_initialized` 标志防止重复初始化
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 方法 (由 `singleton_registry` 的集中 `atexit` 处理器调用，按注册逆序执行)
 
@@ -216,7 +217,7 @@ class MyService:
 
 ### 5.2 类型标注
 
-- **类型检查器**: Pyright (`basic` 模式，完整配置见 `pyrightconfig.json`；`pyproject.toml [tool.pyright]` 仅作为最小化兜底)
+- **类型检查器**: Pyright (`basic` 模式，CI 固定安装 `pyright==1.1.410`；完整配置见 `pyrightconfig.json`，优先级高于 `pyproject.toml`)
 - **关键 Pyright 规则**:
 
 | 规则 | 级别 | 说明 |
@@ -279,7 +280,7 @@ from data.cache.cache_manager import CacheManager
 - **线程安全**: UI 回调可能来自线程池，使用 `loop.call_soon_threadsafe()` 转移到事件循环。
 - **线程池分离**: IO 密集型使用 `TaskType.IO`，CPU 密集型 (NumPy/Pandas 等 GIL 释放型) 使用 `TaskType.CPU`；纯 Python CPU 密集任务应使用 `ProcessPoolExecutor` (项目暂无)。
 - **CancelledError 必须传播**: 永远 `raise` 不吞没，否则破坏优雅停机。
-- **事件循环绑定对象**: 使用 `utils.loop_local` 的 `get_loop_local()` / `del_loop_local()` 管理 `asyncio.Event`、`asyncio.Lock` 等绑定到特定事件循环的对象，避免跨循环死锁。
+- **事件循环绑定对象**: 使用 `utils.loop_local` 的 `get_loop_local()` / `del_loop_local()` / `clear_all_loop_locals()` 管理 `asyncio.Event`、`asyncio.Lock` 等绑定到特定事件循环的对象，避免跨循环死锁。
 - **`asyncio.gather`** 涉及失败可恢复场景使用 `return_exceptions=True`，并在调用方逐个分类异常。
 - **不要在 `__init__`** 中调用 `asyncio.create_task()`，会绑定到错误的事件循环；改为提供 `async def initialize()` 方法。
 
@@ -289,7 +290,7 @@ from data.cache.cache_manager import CacheManager
 - **参数占位符**: 使用 `$1, $2, ...` (asyncpg 原生占位符，非 `%s`)。
 - **批量写入**: 使用 `_save_upsert()` (基于 `ON CONFLICT DO UPDATE`，内置分块 `_UPSERT_CHUNK_SIZE=500`)。
 - **分块 IN 查询**: 使用 `chunked_in_query()` 避免 PostgreSQL 参数上限 (`_IN_CHUNK_SIZE=500`)。
-- **引擎状态检查**: 操作前检查 `CacheManager._instance._disposed` 标志，若已释放抛出 `EngineDisposedError`。
+- **引擎状态检查**: DAO 操作前必须确认引擎仍可用；关机/释放后继续访问时应抛出或传播 `EngineDisposedError`，调用方按关机降级处理。
 - **维护锁**: DAO 操作前 `await self._get_maintenance_event().wait()` 等待维护完成 (基类已自动处理)。
 - **慢查询阈值**: 读 500ms / 写 2000ms / UPSERT 2000ms (基类自动告警，无需手动埋点)。
 - **DB 异常应在 DAO 层处理**: 业务层只接收 `EngineDisposedError` 和业务异常，不应直接捕获 `asyncpg.*Error`。
@@ -462,6 +463,8 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 - `@pytest.mark.unit` — 单元测试
 - `@pytest.mark.integration` — 集成测试
+- `@pytest.mark.database` — 需要数据库连接
+- `@pytest.mark.ai` — 涉及 AI 服务或模型调用
 - `@pytest.mark.e2e` — 端到端测试
 - `@pytest.mark.slow` — 慢速测试 (真实 sleep、大量 IO)
 - `@pytest.mark.network` — 需要真实网络访问
@@ -496,17 +499,19 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 ## 8. CI/CD 流水线与门禁
 
-GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR 必须通过以下门禁：
+GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量门禁包括：
 
-1. **Ruff Check & Format**
-2. **Security Audit** (`pip-audit -s osv`，扫描 `requirements.txt` 与 `requirements-optional.txt`)
-3. **Pyright Type Check** (`continue-on-error: false`)
-4. **Alembic Migration** (验证 upgrade → downgrade → upgrade，确保迁移幂等可逆)
-5. **Unit & Integration Tests** (含 e2e)
-6. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)**
-7. **requirements*.txt 同步验证** (Windows job 强制 `uv pip compile --universal` 输出与提交内容一致；不一致时自动在 main 分支创建修复 commit)
+1. **Fast Ruff Check & Format** (Python 3.13 + 3.14 experimental)
+2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步)
+3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt` 与 `requirements-optional.txt`，使用 `.security/audit-allowlist.yml`)
+4. **Pyright Type Check** (`pyright==1.1.410`，`continue-on-error: false`)
+5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
+6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration)
+7. **Windows E2E Tests** (`tests/e2e/`，MS Edge + PostgreSQL)
+8. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)**
+9. **requirements*.txt 漂移处理** (Windows pre-commit 发现 main 分支漂移时，由 `update-requirements` job 创建同步 PR)
 
-发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → Inno Setup 制作安装包 → GitHub Release 发布。
+发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → GitHub Release 发布。
 
 ### 8.1 Pre-commit Hooks
 
@@ -533,7 +538,8 @@ npx pyright
 
 # 运行测试
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
-python -m pytest tests/integration/ -v --tb=short
+python -m pytest tests/integration/ -n auto -v --tb=short
+python -m pytest tests/e2e/ -v --tb=short
 
 # 覆盖率
 python -m pytest tests/ --cov --cov-report=term-missing --cov-report=json
@@ -541,8 +547,10 @@ python scripts/check_per_file_coverage.py
 
 # 数据库与安全
 python -m alembic upgrade head
-python -m alembic downgrade -1
-pip-audit -s osv -r requirements.txt --desc
+python -m alembic check
+python -m alembic downgrade base
+python -m alembic upgrade head
+python scripts/run_pip_audit.py --requirements requirements.txt requirements-optional.txt --allowlist .security/audit-allowlist.yml --sources pypi osv
 
 # 依赖同步 (通常由 pre-commit 自动触发)
 uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
@@ -609,7 +617,7 @@ python main.py
    - 开发依赖加到 `[project.optional-dependencies] dev`
    - 可选依赖加到 `[project.optional-dependencies] optional`
 2. `git commit` 时 pre-commit 会自动运行 `uv pip compile --universal` 重新生成对应的 `requirements*.txt`。
-3. 本地安装新依赖: `pip install -r requirements.txt -r requirements-dev.txt`。
+3. 本地安装新依赖: `uv pip install --system -r requirements.txt -r requirements-dev.txt`；如需可选功能，再安装 `requirements-optional.txt`。
 
 ### 10.7 排查典型问题
 
