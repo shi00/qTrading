@@ -309,6 +309,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
 class FailoverConfigPanel(ft.Container):
     """Failover configuration panel with list management."""
 
+    _KEY_MASK_THRESHOLD = 8
+
     def __init__(self, on_save: Callable | None = None):
         self.on_save = on_save
         self._failover_items: list[FailoverItem] = []
