@@ -100,6 +100,7 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
 
         dao = ScreenerDao.__new__(ScreenerDao)
         dao.engine = MagicMock()
+        dao.engine._disposed = False  # bypass _check_engine
         mock_conn = AsyncMock()
         dao.engine.begin = MagicMock()
         dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -126,6 +127,7 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
 
         dao = ScreenerDao.__new__(ScreenerDao)
         dao.engine = MagicMock()
+        dao.engine._disposed = False  # bypass _check_engine
         mock_conn = AsyncMock()
         dao.engine.begin = MagicMock()
         dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
