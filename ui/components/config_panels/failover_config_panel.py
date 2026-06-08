@@ -274,6 +274,13 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self._show_snack(I18n.get("llm_test_need_key"), AppColors.WARNING)
             return
 
+        # 编辑模式下清空 API Key 时提示警告（允许用户有意清除）
+        if self._is_edit and not api_key:
+            existing_cred = ConfigHandler.get_provider_credential(provider)
+            if existing_cred.get("api_key"):
+                # 显示警告但不阻止保存（用户可能有意清除凭证）
+                self._show_snack(I18n.get("failover_clear_key_warning"), AppColors.WARNING)
+
         primary_provider = ConfigHandler.load_config().get("llm_provider", "")
         if provider == primary_provider:
             self._show_snack(I18n.get("failover_primary_in_list"), AppColors.WARNING)

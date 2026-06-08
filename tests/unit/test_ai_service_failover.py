@@ -447,7 +447,7 @@ class TestCrossProviderFailoverCredentials:
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     def test_cross_provider_without_credentials_omits_api_key(self):
-        """跨供应商 failover 且无凭证配置时不设置 api_key"""
+        """跨供应商 failover 且无凭证配置时不设置 api_key，但使用默认 base_url"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -461,7 +461,8 @@ class TestCrossProviderFailoverCredentials:
             params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert params["model"] == "openai/gpt-4o"
         assert "api_key" not in params
-        assert "api_base" not in params
+        # 修复后：无凭证 base_url 时回退到 LLM_PROVIDERS 默认值
+        assert params["api_base"] == "https://api.openai.com"
 
     def test_cross_provider_uses_credential_base_url(self):
         """跨供应商 failover 时使用凭证中的 base_url"""
@@ -518,7 +519,7 @@ class TestCrossProviderCredentialFallback:
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     def test_no_credential_logs_debug(self):
-        """ConfigHandler 也无凭证时，不设置 api_key 并输出 debug 日志"""
+        """ConfigHandler 也无凭证时，不设置 api_key 并输出 debug 日志，但使用默认 base_url"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -531,3 +532,63 @@ class TestCrossProviderCredentialFallback:
         with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
             params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert "api_key" not in params
+        # 修复后：无凭证 base_url 时回退到 LLM_PROVIDERS 默认值
+        assert params["api_base"] == "https://api.openai.com"
+
+
+class TestCrossProviderBaseUrlFallback:
+    """测试跨供应商 failover 时 base_url 回退逻辑"""
+
+    def test_credential_base_url_preferred_over_default(self):
+        """凭证中的 base_url 应优先于 LLM_PROVIDERS 默认值"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        # 用户自定义了一个不同的 base_url
+        mock_credential = {
+            "api_key": "sk-openai-custom",
+            "base_url": "https://custom-openai-proxy.example.com",
+        }
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        # 应使用用户自定义的 base_url，而非 LLM_PROVIDERS 默认值
+        assert params["api_base"] == "https://custom-openai-proxy.example.com"
+
+    def test_fallback_to_llm_providers_default_base_url(self):
+        """无凭证 base_url 时回退到 LLM_PROVIDERS 中的默认值"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        # 凭证中没有 base_url
+        mock_credential = {"api_key": "sk-qwen-key", "base_url": ""}
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
+        # 应使用 LLM_PROVIDERS 中 qwen 的默认 base_url
+        assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def test_custom_provider_no_base_url_fallback(self):
+        """custom 供应商无默认 base_url，不应设置 api_base"""
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+
+        mock_credential = {"api_key": "sk-custom-key", "base_url": ""}
+        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+            params = AIService._build_litellm_params(llm_config, messages, model_override="custom/my-model")
+        assert params["model"] == "custom/my-model"
+        # custom 供应商在 LLM_PROVIDERS 中 base_url 为空，不应设置 api_base
+        assert "api_base" not in params

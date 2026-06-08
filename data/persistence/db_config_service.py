@@ -5,6 +5,7 @@ Provides database connection testing, creation, and configuration management.
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 from dataclasses import dataclass
@@ -182,6 +183,7 @@ class DatabaseConfigService:
                 # asyncpg 对数据库不存在也抛 ConnectionDoesNotExistError
                 # 需要先连接 postgres 验证认证，再判断是否是数据库不存在
                 if target_db != "postgres":
+                    verify_conn = None
                     try:
                         verify_conn = await asyncio.wait_for(
                             asyncpg.connect(
@@ -193,7 +195,6 @@ class DatabaseConfigService:
                             ),
                             timeout=cls.CONNECTION_TIMEOUT,
                         )
-                        await verify_conn.close()
                         # 认证成功，说明是目标数据库不存在
                         logger.warning(
                             "[DBConfigService] Database '%s' not found on %s:%s (auth verified)",
@@ -233,6 +234,11 @@ class DatabaseConfigService:
                             status=ConnectionStatus.CONNECTION_ERROR,
                             message=I18n.get("db_err_interrupted"),
                         )
+                    finally:
+                        # 确保验证连接在所有路径（包括异常路径）中都被关闭
+                        if verify_conn is not None:
+                            with contextlib.suppress(Exception):
+                                await verify_conn.close()
 
                 # target_db == "postgres"，无法二次验证，按认证错误处理
                 logger.warning(

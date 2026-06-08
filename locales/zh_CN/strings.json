@@ -1492,6 +1492,7 @@
     "failover_test_failed": "连接失败",
     "failover_test_connection": "测试连接",
     "failover_primary_in_list": "主供应商已在 failover 列表中",
+    "failover_clear_key_warning": "⚠️ API Key 已清空，凭证将被删除",
     "failover_empty_hint": "暂无 Failover 供应商，点击上方按钮添加",
     "failover_move_up": "上移",
     "failover_move_down": "下移",

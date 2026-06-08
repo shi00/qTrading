@@ -421,8 +421,17 @@ class AIService:
                         "[AIService] Cross-provider failover to '%s' has no dedicated API key, using primary key (may fail)",
                         override_provider,
                     )
-                if override_llm_config.get("base_url"):
-                    request_params["api_base"] = override_llm_config["base_url"]
+                # Prefer credential's base_url, fallback to LLM_PROVIDERS default
+                override_base_url = override_llm_config.get("base_url")
+                if override_base_url:
+                    request_params["api_base"] = override_base_url
+                else:
+                    # Fallback to default base_url from LLM_PROVIDERS configuration
+                    from utils.llm_providers import LLM_PROVIDERS
+
+                    default_base_url = LLM_PROVIDERS.get(override_provider, {}).get("base_url", "")
+                    if default_base_url:
+                        request_params["api_base"] = default_base_url
             else:
                 request_params["api_key"] = llm_config.get("api_key")
                 request_params["api_base"] = llm_config.get("base_url", "")

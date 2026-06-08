@@ -1492,6 +1492,7 @@
     "failover_test_failed": "Connection failed",
     "failover_test_connection": "Test Connection",
     "failover_primary_in_list": "Primary provider already in failover list",
+    "failover_clear_key_warning": "⚠️ API Key cleared, credential will be deleted",
     "failover_empty_hint": "No failover providers configured. Click above to add.",
     "failover_move_up": "Move Up",
     "failover_move_down": "Move Down",

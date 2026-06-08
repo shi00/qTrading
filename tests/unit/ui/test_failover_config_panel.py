@@ -1255,3 +1255,86 @@ class TestProviderCredentialDialogTestConnection:
             await dialog._on_test_connection(MagicMock())
 
         mock_ai.test_connection.assert_not_called()
+
+
+class TestProviderCredentialDialogEditModeClearApiKey:
+    """测试编辑模式下清空 API Key 的警告提示"""
+
+    def test_edit_mode_clear_api_key_shows_warning(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """编辑模式下清空 API Key 时显示警告 SnackBar"""
+        edit_item = FailoverItem(
+            provider="deepseek",
+            model="deepseek-chat",
+            display_name="DeepSeek",
+            has_credential=True,
+        )
+        # 原有凭证有 API Key
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "test_token_existing",
+            "base_url": "",
+        }
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+            edit_item=edit_item,
+        )
+        # 用户清空 API Key
+        dialog.api_key_input.value = ""
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["deepseek/deepseek-chat"],
+            "llm_provider": "openai",
+        }
+        dialog._on_confirm_click(MagicMock())
+        # 应显示警告 SnackBar
+        assert len(mock_page.overlay) == 1
+        # 应仍然保存（不阻止操作）
+        mock_config_handler.save_provider_credential.assert_called_once()
+
+    def test_edit_mode_clear_api_key_no_existing_credential(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """编辑模式下清空 API Key，但原有凭证本就为空，不显示警告"""
+        edit_item = FailoverItem(
+            provider="deepseek",
+            model="deepseek-chat",
+            display_name="DeepSeek",
+            has_credential=False,
+        )
+        # 原有凭证没有 API Key
+        mock_config_handler.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+            edit_item=edit_item,
+        )
+        dialog.api_key_input.value = ""
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["deepseek/deepseek-chat"],
+            "llm_provider": "openai",
+        }
+        dialog._on_confirm_click(MagicMock())
+        # 不显示警告（原有凭证本就为空）
+        assert len(mock_page.overlay) == 0
+        mock_config_handler.save_provider_credential.assert_called_once()

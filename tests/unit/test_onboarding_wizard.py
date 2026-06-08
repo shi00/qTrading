@@ -494,13 +494,21 @@ class TestScheduleConfigCompleteness:
         """Test that schedule time is validated with correct regex format"""
         import re
 
-        valid_formats = ["16:30", "9:00", "23:59", "00:00", "25:00", "12:60"]
+        # 格式正确且数值合法的时间
+        valid_formats = ["16:30", "9:00", "23:59", "00:00", "0:00"]
+        # 格式正确但数值非法的时间（格式匹配但数值超限，需后续范围检查）
+        valid_format_invalid_value = ["25:00", "12:60"]
+        # 格式不正确的时间
         invalid_formats = ["abc", "12-30", "1:2", "123:45", "", "12:3"]
 
         pattern = r"^\d{1,2}:\d{2}$"
 
         for time in valid_formats:
             assert re.match(pattern, time), f"{time} should match format HH:MM"
+
+        for time in valid_format_invalid_value:
+            # 格式匹配，但数值超限，应由后续范围检查拒绝
+            assert re.match(pattern, time), f"{time} matches format but has invalid values"
 
         for time in invalid_formats:
             if time:
