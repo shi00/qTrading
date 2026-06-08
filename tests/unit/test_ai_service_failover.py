@@ -170,18 +170,6 @@ class TestChatCompletionWithFailover:
 
                 assert "All LLM providers failed" in str(exc_info.value)
 
-    @pytest.mark.skip(reason="litellm exceptions are factory functions, not classes")
-    @pytest.mark.asyncio
-    async def test_fallback_on_litellm_rate_limit(self):
-        """LiteLLM RateLimitError 时触发 fallback"""
-        pass
-
-    @pytest.mark.skip(reason="litellm exceptions are factory functions, not classes")
-    @pytest.mark.asyncio
-    async def test_no_fallback_on_litellm_auth_error(self):
-        """LiteLLM AuthenticationError 不触发 fallback，直接抛出"""
-        pass
-
 
 class TestAIServiceUnavailableError:
     """测试 AIServiceUnavailableError 异常"""

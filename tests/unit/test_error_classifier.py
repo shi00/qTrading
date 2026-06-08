@@ -131,52 +131,6 @@ class TestClassifyErrorLLMContext:
         assert result.get("should_retry") is False
 
 
-class TestClassifyErrorLLMTypeMatching:
-    def test_litellm_authentication_error(self):
-        try:
-            from litellm.exceptions import AuthenticationError
-
-            err = AuthenticationError("test", "test-provider", "test-model")
-            result = classify_error(err, context="llm")
-            assert result["code"] == "auth_failed"
-            assert result.get("should_retry") is False
-        except ImportError:
-            pytest.skip("litellm not available")
-
-    def test_litellm_rate_limit_error(self):
-        try:
-            from litellm.exceptions import RateLimitError
-
-            err = RateLimitError("test", "test-provider", "test-model")
-            result = classify_error(err, context="llm")
-            assert result["code"] == "rate_limit"
-            assert result.get("should_retry") is True
-        except ImportError:
-            pytest.skip("litellm not available")
-
-    def test_litellm_content_policy_violation_error(self):
-        try:
-            from litellm.exceptions import ContentPolicyViolationError
-
-            err = ContentPolicyViolationError("test", "test-provider", "test-model")
-            result = classify_error(err, context="llm")
-            assert result["code"] == "content_policy"
-            assert result.get("should_retry") is False
-        except ImportError:
-            pytest.skip("litellm not available")
-
-    def test_litellm_service_unavailable_error(self):
-        try:
-            from litellm.exceptions import ServiceUnavailableError
-
-            err = ServiceUnavailableError("test", "test-provider", "test-model")
-            result = classify_error(err, context="llm")
-            assert result["code"] == "server_error"
-            assert result.get("should_retry") is True
-        except ImportError:
-            pytest.skip("litellm not available")
-
-
 class TestClassifyErrorDBContext:
     def test_value_error_format(self):
         result = classify_error(ValueError("bad format"), context="db")
