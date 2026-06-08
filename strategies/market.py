@@ -1,5 +1,6 @@
 import logging
 
+import pandas as pd
 import polars as pl
 
 from data.persistence.quality_gate import QualityTier
@@ -176,18 +177,18 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
             },
         ]
 
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    async def filter(self, context: dict):
+        """Override filter to add northbound flow gating before _filter_logic."""
         flow_df = context.get("northbound_flow_data")
         p = context.get("params", {})
         target_flow = p.get("nb_flow_min", 50)
-        mv_min = p.get("total_mv_min", 100)
 
         if flow_df is None or flow_df.empty:
-            return lf.head(0)
+            logger.debug(f"[{self.name}] Gating: no northbound_flow_data. Returning empty.")
+            return pd.DataFrame()
 
         try:
             flow_lf = pl.from_pandas(flow_df).lazy()
-
             north_money_val = (
                 flow_lf.sort("trade_date", descending=True).select(pl.col("north_money").first()).collect().item()
             )
@@ -197,19 +198,22 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
                     f"[{self.name}] Gating: north_money={north_money_val}, "
                     f"threshold={target_flow}. Returning empty (market sentiment insufficient)."
                 )
-                return lf.head(0)
-
-            return (
-                lf.drop_nulls(subset=["total_mv", "pe_ttm"])
-                .filter((pl.col("total_mv") >= mv_min) & (pl.col("pe_ttm") > 0))
-                .sort("total_mv", descending=True)
-            )
+                return pd.DataFrame()
         except Exception as e:
-            logger.warning(
-                f"[{self.name}] Logic error: {e}. Params: {context.get('params')}",
-                exc_info=True,
-            )
-            return lf.head(0)
+            logger.warning(f"[{self.name}] Gating check failed: {e}", exc_info=True)
+            return pd.DataFrame()
+
+        return await super().filter(context)
+
+    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+        p = context.get("params", {})
+        mv_min = p.get("total_mv_min", 100)
+
+        return (
+            lf.drop_nulls(subset=["total_mv", "pe_ttm"])
+            .filter((pl.col("total_mv") >= mv_min) & (pl.col("pe_ttm") > 0))
+            .sort("total_mv", descending=True)
+        )
 
 
 @register_strategy("institutional")

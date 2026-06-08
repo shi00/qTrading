@@ -6,6 +6,7 @@ Tests for market strategies (VolumeBreakout, Northbound, Institutional, BlockTra
 P1-19 fix: Renamed TechnicalBreakoutStrategy to VolumeBreakoutStrategy.
 """
 
+import asyncio
 import unittest
 
 import pandas as pd
@@ -479,18 +480,19 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {"trade_date": "20240101", "north_money": 30.0},
             ]
         )
-        base_lf = pl.DataFrame(
+        screening_data = pd.DataFrame(
             [
                 {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
             ]
-        ).lazy()
+        )
 
         strat = NorthboundFlowStrategy()
         ctx = {
             "northbound_flow_data": flow_df,
+            "screening_data": screening_data,
             "params": {"nb_flow_min": 50},
         }
-        out = strat._filter_logic(base_lf, ctx).collect()
+        out = asyncio.get_event_loop().run_until_complete(strat.filter(ctx))
         assert len(out) == 0
 
     def test_gating_returns_empty_when_flow_null(self):
@@ -499,18 +501,19 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {"trade_date": "20240101", "north_money": None},
             ]
         )
-        base_lf = pl.DataFrame(
+        screening_data = pd.DataFrame(
             [
                 {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
             ]
-        ).lazy()
+        )
 
         strat = NorthboundFlowStrategy()
         ctx = {
             "northbound_flow_data": flow_df,
+            "screening_data": screening_data,
             "params": {"nb_flow_min": 50},
         }
-        out = strat._filter_logic(base_lf, ctx).collect()
+        out = asyncio.get_event_loop().run_until_complete(strat.filter(ctx))
         assert len(out) == 0
 
     def test_filter_returns_empty_when_context_missing(self):
@@ -560,15 +563,16 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
 
     def test_flow_equal_to_threshold_returns_empty(self):
         flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 50.0}])
-        base_lf = pl.DataFrame(
+        screening_data = pd.DataFrame(
             [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 5.0, "total_mv": 500.0}]
-        ).lazy()
+        )
         strat = NorthboundFlowStrategy()
         ctx = {
             "northbound_flow_data": flow_df,
+            "screening_data": screening_data,
             "params": {"nb_flow_min": 50},
         }
-        out = strat._filter_logic(base_lf, ctx).collect()
+        out = asyncio.get_event_loop().run_until_complete(strat.filter(ctx))
         assert len(out) == 0
 
 

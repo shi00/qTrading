@@ -240,7 +240,11 @@ class NewsFetcher:
                         else:
                             final_time = f"{today_str} {raw_time}"
                     except (ValueError, IndexError, TypeError) as exc:
-                        logger.debug(f"[NewsFetcher] Time parse fallback for '{raw_time}': {exc}")
+                        logger.debug(
+                            "[NewsFetcher] Time parse fallback for '%s': %s",
+                            raw_time,
+                            DataSanitizer.sanitize_error(exc),
+                        )
                         final_time = f"{today_str} {raw_time}"
 
                 # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting

@@ -12,6 +12,7 @@ from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
@@ -254,9 +255,9 @@ class NewsSubscriptionService:
         except Exception as e:
             logger.error(
                 "[NewsService] Error in background fetch task: %s",
-                e,
-                exc_info=True,
+                DataSanitizer.sanitize_error(e),
             )
+            logger.debug("[NewsService] Error in background fetch task traceback:", exc_info=True)
             # Optional: Implement retry logic here if needed, but for periodic polling,
             # just failing and waiting for next interval is often cleaner.
 
@@ -275,7 +276,7 @@ class NewsSubscriptionService:
                 tag = I18n.get("news_tag_format", emoji=emoji, category=category)
                 return tag
         except Exception as e:
-            logger.warning("[NewsService] AI Tagging failed: %s", e)
+            logger.warning("[NewsService] AI Tagging failed: %s", DataSanitizer.sanitize_error(e))
 
         if any(k in clean_content for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]):
             tag = I18n.get("news_tag_format", emoji="🏛️", category=I18n.get("tag_policy"))
@@ -341,9 +342,9 @@ class NewsSubscriptionService:
             except Exception as e:
                 logger.error(
                     "[NewsService] Error in processing loop: %s",
-                    e,
-                    exc_info=True,
+                    DataSanitizer.sanitize_error(e),
                 )
+                logger.debug("[NewsService] Error in processing loop traceback:", exc_info=True)
                 # Prevent tight error loop logging
                 await asyncio.sleep(5.0)
 
@@ -404,14 +405,14 @@ class NewsSubscriptionService:
                         "[NewsService] Listener %s failed %s times. Removing. Last error: %s",
                         listener,
                         count,
-                        e,
+                        DataSanitizer.sanitize_error(e),
                     )
                     if listener in self._listeners:
                         self._listeners.remove(listener)
                     if listener in self._listener_errors:
                         del self._listener_errors[listener]
                 else:
-                    logger.warning("[NewsService] Listener error (%s/3): %s", count, e)
+                    logger.warning("[NewsService] Listener error (%s/3): %s", count, DataSanitizer.sanitize_error(e))
 
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""
@@ -514,7 +515,9 @@ class NewsSubscriptionService:
                                 except TimeoutError:
                                     logger.warning("[NewsService] Alert listener %s timed out (3s)", listener)
                                 except Exception as e:
-                                    logger.error("[NewsService] Alert listener error: %s", e)
+                                    logger.error(
+                                        "[NewsService] Alert listener error: %s", DataSanitizer.sanitize_error(e)
+                                    )
 
                 if new_items_found:
                     await self._notify_listeners(
@@ -526,4 +529,5 @@ class NewsSubscriptionService:
             logger.warning("[NewsService] Engine disposed during poll, stopping.")
             self._running = False
         except Exception as e:
-            logger.warning("[NewsService] Poll failed: %s", e, exc_info=True)
+            logger.warning("[NewsService] Poll failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[NewsService] Poll failed traceback:", exc_info=True)

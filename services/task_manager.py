@@ -108,6 +108,15 @@ class TaskManager:
 
         del_loop_local("task_manager_semaphore")
 
+    @classmethod
+    def _atexit_cleanup(cls):
+        """Cancel active tasks on process exit. Called by singleton_registry."""
+        inst = cls._instance
+        if inst is not None:
+            for task in list(inst._tasks.values()):
+                if task._asyncio_task and not task._asyncio_task.done():
+                    task._asyncio_task.cancel()
+
     def __init__(self):
         with self._lock:
             if self.__class__._initialized:

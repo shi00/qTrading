@@ -161,6 +161,13 @@ class LocalModelManager:
             cls._initialized = False
 
     @classmethod
+    def _atexit_cleanup(cls):
+        """Release subprocess and queues on process exit. Called by singleton_registry."""
+        inst = cls._instance
+        if inst is not None:
+            inst._shutdown_worker()
+
+    @classmethod
     def _get_load_lock(cls):
         """Get or create load lock dynamically per event loop to avoid cross-loop binding deadlocks."""
 

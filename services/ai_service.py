@@ -103,18 +103,18 @@ def validate_ai_analysis_response(response: dict) -> dict:
         try:
             score = float(score)
             if not (0 <= score <= 100):
-                logger.warning(f"[AIService] Output validation: score out of range [0,100]: {score}")
+                logger.warning("[AIService] Output validation: score out of range [0,100]: %s", score)
                 score = max(0, min(100, score))
             response["score"] = score
         except (ValueError, TypeError):
-            logger.warning(f"[AIService] Output validation: invalid score type: {score}")
+            logger.warning("[AIService] Output validation: invalid score type: %s", score)
             response["score"] = 0
 
     recommendation = response.get("recommendation")
     if recommendation is not None:
         rec_lower = str(recommendation).lower().strip()
         if rec_lower not in VALID_RECOMMENDATIONS:
-            logger.warning(f"[AIService] Output validation: unexpected recommendation: {recommendation}")
+            logger.warning("[AIService] Output validation: unexpected recommendation: %s", recommendation)
             response["recommendation"] = "neutral"
         else:
             response["recommendation"] = rec_lower
@@ -158,7 +158,11 @@ def _check_reasoning_support(model: str) -> bool:
     try:
         return litellm.utils.supports_reasoning(model=model)
     except Exception as exc:
-        logger.debug(f"[AIService] supports_reasoning check failed for {model}: {exc}, using LLM_PROVIDERS fallback")
+        logger.debug(
+            "[AIService] supports_reasoning check failed for %s: %s, using LLM_PROVIDERS fallback",
+            model,
+            DataSanitizer.sanitize_error(exc),
+        )
         from utils.llm_providers import LLM_PROVIDERS
 
         # Derive reasoning model IDs from LLM_PROVIDERS tags
@@ -265,7 +269,7 @@ class AIService:
                     with contextlib.suppress(OSError):
                         os.remove(file_path)
         except Exception as e:
-            logger.debug(f"[AIService] Prompt dump cleanup skipped: {e}")
+            logger.debug("[AIService] Prompt dump cleanup skipped: %s", DataSanitizer.sanitize_error(e))
 
     def _configure_litellm(self):
         """配置 LiteLLM 全局参数 (1.82+ 优化)"""
@@ -342,10 +346,12 @@ class AIService:
                     if fb_provider not in self._failover_credentials:
                         self._failover_credentials[fb_provider] = ConfigHandler.get_llm_config_for_provider(fb_provider)
         except Exception as e:
-            logger.debug(f"[AIService] Failover credential pre-load skipped: {e}")
+            logger.debug("[AIService] Failover credential pre-load skipped: %s", DataSanitizer.sanitize_error(e))
 
         logger.info(
-            f"[AIService] Init | ✅ Cloud client ready. provider={provider}, reasoning={self._supports_reasoning}"
+            "[AIService] Init | Cloud client ready. provider=%s, reasoning=%s",
+            provider,
+            self._supports_reasoning,
         )
 
     def is_cloud_available(self) -> bool:
@@ -511,7 +517,9 @@ class AIService:
         estimated_tokens = total_chars // 3
         if estimated_tokens > 80000:
             logger.warning(
-                f"[AIService] Cloud | ⚠️ Prompt may exceed context window: ~{estimated_tokens} tokens ({total_chars} chars)"
+                "[AIService] Cloud | Prompt may exceed context window: ~%d tokens (%d chars)",
+                estimated_tokens,
+                total_chars,
             )
 
         # S1-4 fix: Real-time reasoning support check for model switching
@@ -689,7 +697,8 @@ class AIService:
             sem = self._get_news_semaphore() if purpose == "news" else self._get_analysis_semaphore()
             async with sem:
                 logger.debug(
-                    f"[AIService] Cloud | Invoking LiteLLM ({len(messages)} messages)",
+                    "[AIService] Cloud | Invoking LiteLLM (%d messages)",
+                    len(messages),
                 )
 
                 result = await self._chat_completion_litellm(
@@ -722,9 +731,9 @@ class AIService:
                     except json.JSONDecodeError:
                         pass
             except Exception as e:
-                logger.debug(f"[AIService] JSON heuristic extraction failed: {e}")
+                logger.debug("[AIService] JSON heuristic extraction failed: %s", DataSanitizer.sanitize_error(e))
 
-            raise ValueError(f"Invalid JSON response: {response_content[:100]}...")
+            raise ValueError(f"Invalid JSON response: {DataSanitizer.sanitize_error(response_content[:100])}...")
 
         return {"content": response_content}
 
@@ -926,7 +935,7 @@ class AIService:
                 stock_info.pop("concepts", None)
 
         except Exception as e:
-            logger.warning(f"[AIService] Analyze | ⚠️ Concepts processing failed: {DataSanitizer.sanitize_error(e)}")
+            logger.warning("[AIService] Analyze | Concepts processing failed: %s", DataSanitizer.sanitize_error(e))
             stock_info.pop("concepts", None)
 
         # Convert dicts to XML-like string, filtering out Pandas artifacts and private injected keys like `_23` or `_rsi_period`
@@ -979,7 +988,7 @@ class AIService:
             raw_prompt = ui_prompt_override.strip()
             is_valid, warning = validate_prompt(raw_prompt)
             if not is_valid:
-                logger.warning(f"[AIService] Prompt override rejected: {warning}")
+                logger.warning("[AIService] Prompt override rejected: %s", warning)
                 sanitized_override = None
                 if strategy_key:
                     base_prompt = get_base_prompt(strategy_key)
@@ -1131,7 +1140,8 @@ class AIService:
                     f.write(f"# User Prompt\n```xml\n{user_prompt}\n```\n")
 
                 logger.debug(
-                    f"[AIService] Analyze | Prepared LLM Context. Full payload saved to: {dump_file}",
+                    "[AIService] Analyze | Prepared LLM Context. Full payload saved to: %s",
+                    dump_file,
                 )
             except Exception as e:
                 logger.debug(
@@ -1253,11 +1263,13 @@ class AIService:
                 local_e,
             ):
                 logger.warning(
-                    f"[AIService] Classify | ⚠️ Local failed, falling back to cloud: {DataSanitizer.sanitize_error(local_e)}",
+                    "[AIService] Classify | Local failed, falling back to cloud: %s",
+                    DataSanitizer.sanitize_error(local_e),
                 )
             else:
                 logger.warning(
-                    f"[AIService] Classify | ⚠️ Local model unavailable, falling back to cloud: {DataSanitizer.sanitize_error(local_e)}",
+                    "[AIService] Classify | Local model unavailable, falling back to cloud: %s",
+                    DataSanitizer.sanitize_error(local_e),
                 )
 
         # 2. Fallback to Cloud
@@ -1274,7 +1286,9 @@ class AIService:
             )
             result = self._parse_news_result(raw_result)
             logger.debug(
-                f"[AIService] Classify | Cloud ✅ {result.get('category')} / {result.get('sentiment')}",
+                "[AIService] Classify | Cloud OK: %s / %s",
+                result.get("category"),
+                result.get("sentiment"),
             )
             return result
         except Exception as e:
@@ -1370,7 +1384,7 @@ class AIService:
             return result
 
         except Exception as e:
-            logger.error(f"[AIService] TestConn | ❌ Test connection failed: {DataSanitizer.sanitize_error(e)}")
+            logger.error("[AIService] TestConn | Test connection failed: %s", DataSanitizer.sanitize_error(e))
             error_info = _classify_api_error(e)
             return {
                 "success": False,

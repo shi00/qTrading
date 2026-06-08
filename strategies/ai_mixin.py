@@ -515,8 +515,18 @@ class AIStrategyMixin:
                     if on_chunk and hasattr(on_chunk, "final_flush"):
                         on_chunk.final_flush()
 
-        tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in candidates_df.to_dict("records")]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Batch task creation to avoid unbounded coroutine explosion
+        _BATCH_SIZE = 20
+        all_records = candidates_df.to_dict("records")
+        results: list = []
+
+        for batch_start in range(0, len(all_records), _BATCH_SIZE):
+            if dp and dp.is_cancelled():
+                break
+            batch = all_records[batch_start : batch_start + _BATCH_SIZE]
+            batch_tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in batch]
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            results.extend(batch_results)
 
         for res in results:
             if isinstance(res, asyncio.CancelledError):
@@ -558,7 +568,9 @@ class AIStrategyMixin:
         error_count = total_tasks - len(final_rows)
         if error_count > 0:
             logger.info(
-                f"[AIStrategyMixin] Partial analysis: {error_count}/{total_tasks} stocks skipped or failed",
+                "[AIStrategyMixin] Partial analysis: %d/%d stocks skipped or failed",
+                error_count,
+                total_tasks,
             )
 
         return result_df.sort_values("ai_score", ascending=False)
@@ -617,9 +629,9 @@ class AIStrategyMixin:
         dp,
         ai_client: AIService,
         prefetched: PreFetchedContext,
-        on_chunk=None,
-        history_df=None,
-        news=None,
+        on_chunk: Callable | None = None,
+        history_df: pd.DataFrame | None = None,
+        news: list | None = None,
         ui_prompt_override: str | None = None,
         vol_ratio_threshold: float = 1.5,
     ):
@@ -798,7 +810,9 @@ class AIStrategyMixin:
             raise
         except (ConnectionError, TimeoutError, httpx.TimeoutException) as e:
             logger.error(
-                f"[AIStrategyMixin] Network error for {row.get('ts_code', '?')}: {e}",
+                "[AIStrategyMixin] Network error for %s: %s",
+                row.get("ts_code", "?"),
+                DataSanitizer.sanitize_error(e),
             )
             raise
         except Exception as e:
@@ -1212,7 +1226,7 @@ class AIStrategyMixin:
         ts_code: str,
         cache: typing.Any,
         prefetched: dict | None = None,
-        as_of_date=None,
+        as_of_date: str | None = None,
         labels_out: list[str] | None = None,
     ) -> str:
         """
@@ -1336,7 +1350,7 @@ class AIStrategyMixin:
         ts_code: str,
         cache: typing.Any,
         prefetched: dict | None = None,
-        as_of_date=None,
+        as_of_date: str | None = None,
         labels_out: list[str] | None = None,
     ) -> str:
         """
@@ -1483,7 +1497,7 @@ class AIStrategyMixin:
             return "\n".join(lines) + "\n"
         return I18n.get("ai_no_auxiliary_data")
 
-    async def _build_macro_context(self, cache: typing.Any, as_of_date=None) -> str:
+    async def _build_macro_context(self, cache: typing.Any, as_of_date: str | None = None) -> str:
         """
         构建宏观经济环境上下文。
 

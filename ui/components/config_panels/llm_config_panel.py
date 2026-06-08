@@ -853,7 +853,9 @@ class LLMConfigPanel(ft.Container):
         new_failover_models = [m for m in failover_models if not m.startswith(primary_prefix)]
         if len(new_failover_models) != len(failover_models):
             ConfigHandler.save_config({"llm_failover_models": new_failover_models})
-            logger.info(f"[LLMConfigPanel] Automatically removed primary provider {provider} models from failover list")
+            logger.info(
+                "[LLMConfigPanel] Automatically removed primary provider %s models from failover list", provider
+            )
 
     async def _save_config(self):
         provider = self._current_provider

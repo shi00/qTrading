@@ -259,6 +259,7 @@ class TestScreenerDaoUpdatePredictionResult:
         mock_engine = MagicMock()
         mock_engine.begin = MagicMock(return_value=mock_begin)
         dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         await dao.update_prediction_result(
             record_id=1,
@@ -282,6 +283,7 @@ class TestScreenerDaoUpdatePredictionResult:
         mock_engine = MagicMock()
         mock_engine.begin = MagicMock(return_value=mock_begin)
         dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         await dao.update_prediction_result(
             record_id=1,
@@ -434,6 +436,7 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
     @pytest.mark.asyncio
     async def test_table_not_in_metadata(self):
         dao = ScreenerDao(MagicMock())
+        dao._check_engine = MagicMock()
         with patch("data.persistence.daos.screener_dao.Base") as mock_base:
             mock_base.metadata.tables.get.return_value = None
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
@@ -458,6 +461,7 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
         mock_engine = MagicMock()
         mock_engine.begin = MagicMock(return_value=mock_begin)
         dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         with patch("data.persistence.daos.screener_dao.sa.update") as mock_update:
             mock_update.return_value.where.return_value.values.return_value = MagicMock()
