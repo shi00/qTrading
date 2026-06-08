@@ -80,7 +80,7 @@ class BacktestDataProvider:
         4. 加载辅助表（northbound, moneyflow, top_list, block_trade）
         5. 设置 _diagnostics 用于依赖状态追踪
         """
-        context: StrategyContext = {}  # type: ignore[typeddict-item]
+        context: StrategyContext = {}
         diagnostics = {
             "quality_tier": None,
             "trade_date": None,

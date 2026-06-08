@@ -359,7 +359,7 @@ class TestBacktestIntegration:
         context = await provider.build_context(trade_date, disable_ai=False)
         context["data_processor"] = mock_dp
 
-        assert context["is_backtest"] is True
+        assert context.get("is_backtest") is True
         assert context.get("_disable_ai") is None
 
         with (

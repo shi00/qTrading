@@ -190,7 +190,7 @@ class TestBacktestDataProviderScreeningData:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        assert context["screening_data"] is None
+        assert context.get("screening_data") is None
         diagnostics = context.get("_diagnostics", {})
         assert diagnostics.get("base_complete") is False
 
@@ -202,7 +202,7 @@ class TestBacktestDataProviderScreeningData:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        assert context["screening_data"] is None
+        assert context.get("screening_data") is None
 
 
 class TestBacktestDataProviderNormalizeTradeDate:

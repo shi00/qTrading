@@ -31,20 +31,20 @@ def fmt_val(val, fmt_spec=".2f", suffix=""):
 
 
 class StrategyContext(TypedDict, total=False):
-    screening_data: pd.DataFrame
-    fundamental_screening_data: pd.DataFrame
-    data: pd.DataFrame
+    screening_data: pd.DataFrame | None
+    fundamental_screening_data: pd.DataFrame | None
+    data: pd.DataFrame | None
     data_processor: Any
     params: dict[str, Any]
     on_progress: Callable[[int, int, str], None]
     on_result: Callable
     on_stream_result: Callable
     on_stream_start: Callable
-    northbound_data: pd.DataFrame
-    northbound_flow_data: pd.DataFrame
-    moneyflow_data: pd.DataFrame
-    top_list: pd.DataFrame
-    block_trade: pd.DataFrame
+    northbound_data: pd.DataFrame | None
+    northbound_flow_data: pd.DataFrame | None
+    moneyflow_data: pd.DataFrame | None
+    top_list: pd.DataFrame | None
+    block_trade: pd.DataFrame | None
     trade_date: datetime.date | datetime.datetime | str
     is_backtest: bool
     _task_id: str

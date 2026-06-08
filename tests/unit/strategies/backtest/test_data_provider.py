@@ -105,9 +105,10 @@ class TestBacktestDataProvider:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        assert context["screening_data"] is not None
-        assert len(context["screening_data"]) == 2
-        assert "000002.SZ" not in context["screening_data"]["ts_code"].values
+        sd = context.get("screening_data")
+        assert sd is not None
+        assert len(sd) == 2
+        assert "000002.SZ" not in sd["ts_code"].values
 
     @pytest.mark.asyncio
     async def test_build_context_handles_missing_is_tradable(self, mock_cache: MagicMock) -> None:
@@ -125,8 +126,9 @@ class TestBacktestDataProvider:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        assert context["screening_data"] is not None
-        assert len(context["screening_data"]) == 2
+        sd = context.get("screening_data")
+        assert sd is not None
+        assert len(sd) == 2
 
     @pytest.mark.asyncio
     async def test_build_context_handles_empty_screening_data(self, mock_cache: MagicMock) -> None:
@@ -136,9 +138,11 @@ class TestBacktestDataProvider:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        assert context["screening_data"] is not None
-        assert context["screening_data"].empty
-        assert context["_diagnostics"]["base_complete"] is False
+        sd = context.get("screening_data")
+        assert sd is not None
+        assert sd.empty
+        diagnostics = context.get("_diagnostics", {})
+        assert diagnostics.get("base_complete") is False
 
     @pytest.mark.asyncio
     async def test_build_context_includes_diagnostics(self, mock_cache: MagicMock) -> None:
@@ -159,7 +163,7 @@ class TestBacktestDataProvider:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        screening_data = context["screening_data"]
+        screening_data = context.get("screening_data")
         assert screening_data is not None
         assert "turnover_rate" in screening_data.columns
 
@@ -200,7 +204,7 @@ class TestBacktestDataProvider:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        screening_data = context["screening_data"]
+        screening_data = context.get("screening_data")
         assert screening_data is not None
         assert "list_status" in screening_data.columns
 
@@ -259,6 +263,6 @@ class TestBacktestDataProviderWithProcessor:
         mock_cache_for_processor.get_screening_data.assert_not_called()
         mock_cache_for_processor.get_fundamental_screening_data.assert_not_called()
 
-        screening_data = context["screening_data"]
+        screening_data = context.get("screening_data")
         assert screening_data is not None
         assert "turnover_rate" in screening_data.columns

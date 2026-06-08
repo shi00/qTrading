@@ -286,9 +286,9 @@ class TestCheckDependenciesWithRequiredApis:
         client.mark_api_unavailable("test_api")
 
         class TestStrategy(BaseStrategy):
-            required_apis = ["test_api"]
-            required_context_keys = []
-            required_tables = []
+            required_apis = ("test_api",)
+            required_context_keys = ()
+            required_tables = ()
 
             def __init__(self):
                 super().__init__(name_key="test", desc_key="test_desc")
@@ -315,9 +315,9 @@ class TestCheckDependenciesWithRequiredApis:
         client.mark_api_available("test_api")
 
         class TestStrategy(BaseStrategy):
-            required_apis = ["test_api"]
-            required_context_keys = []
-            required_tables = []
+            required_apis = ("test_api",)
+            required_context_keys = ()
+            required_tables = ()
 
             def __init__(self):
                 super().__init__(name_key="test", desc_key="test_desc")
