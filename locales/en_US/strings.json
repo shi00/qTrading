@@ -645,6 +645,7 @@
     "db_err_db_error": "Database error, please check configuration",
     "db_err_unknown": "Connection failed, please check logs for details",
     "db_err_invalid_name": "Invalid database name: '{database}'",
+    "db_err_name_too_long": "Database name too long (max {max_length} characters)",
     "db_err_already_exists": "Database '{database}' already exists",
     "db_err_no_privilege": "Insufficient privileges to create database",
     "db_err_create_failed": "Failed to create database: {error}",

@@ -253,18 +253,6 @@ class DatabaseConfigService:
                     status=ConnectionStatus.AUTHENTICATION_ERROR,
                     message=I18n.get("db_err_auth"),
                 )
-            if error_type_name == "InvalidPasswordError":
-                logger.warning(
-                    "[DBConfigService] Authentication failed (%s) for user '%s'@%s:%s",
-                    error_type_name,
-                    user,
-                    host,
-                    port,
-                )
-                return ConnectionResult(
-                    status=ConnectionStatus.AUTHENTICATION_ERROR,
-                    message=I18n.get("db_err_auth"),
-                )
             logger.warning(
                 "[DBConfigService] PostgreSQL error (%s) on %s:%s: %s",
                 error_type_name,
@@ -352,6 +340,12 @@ class DatabaseConfigService:
         Returns:
             Tuple of (success, message)
         """
+        # PostgreSQL 标识符最大长度 (NAMEDATALEN - 1)
+        MAX_DATABASE_NAME_LENGTH = 63
+
+        if len(database) > MAX_DATABASE_NAME_LENGTH:
+            return False, I18n.get("db_err_name_too_long").format(max_length=MAX_DATABASE_NAME_LENGTH)
+
         try:
             conn = await asyncio.wait_for(
                 asyncpg.connect(

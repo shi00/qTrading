@@ -122,55 +122,6 @@ class TestStepConfig:
         ]
 
 
-class TestNavigationLogic:
-    """Tests for navigation logic"""
-
-    @pytest.mark.asyncio
-    async def test_next_step_advances(self):
-        """Test _next_step advances to next step"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        mock_page = MagicMock()
-        mock_page.run_task = MagicMock()
-        mock_page.overlay = []
-
-        wizard = MagicMock(spec=OnboardingWizard)
-        wizard.current_step = 0
-        wizard.step_validated = {}
-        wizard.sync_in_progress = False
-        wizard.on_complete = AsyncMock()
-
-        from ui.views.onboarding_wizard import STEP_CONFIGS
-
-        wizard.current_step = 0
-        if wizard.current_step < len(STEP_CONFIGS) - 1:
-            wizard.current_step += 1
-
-        assert wizard.current_step == 1
-
-    @pytest.mark.asyncio
-    async def test_prev_step_goes_back(self):
-        """Test _prev_step goes back"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        wizard = MagicMock(spec=OnboardingWizard)
-        wizard.current_step = 2
-        wizard.step_validated = {}
-
-        if wizard.current_step > 0:
-            wizard.current_step -= 1
-
-        assert wizard.current_step == 1
-
-
-class TestValidationState:
-    """Tests for validation state management"""
-
-    def test_step_validated_initialization(self):
-        """Test step_validated is initialized empty"""
-        assert {} == {}
-
-
 class TestConfigPersistence:
     """Tests for configuration persistence"""
 
@@ -874,29 +825,32 @@ class TestLocalModelManagerIntegration:
     def test_local_model_manager_singleton_reset_clears_instance(self):
         """Test that _reset_singleton clears the singleton instance"""
         from services.local_model_manager import LocalModelManager
+        from tests.conftest import reset_singleton
 
-        LocalModelManager._reset_singleton()
-        assert LocalModelManager._instance is None
-        assert LocalModelManager._initialized is False
+        with reset_singleton(LocalModelManager):
+            assert LocalModelManager._instance is None
+            assert LocalModelManager._initialized is False
 
     def test_local_model_manager_singleton_reset_unloads_model(self):
         """Test that _reset_singleton unloads LLM model to free memory"""
         from services.local_model_manager import LocalModelManager
+        from tests.conftest import reset_singleton
 
-        LocalModelManager._reset_singleton()
+        with reset_singleton(LocalModelManager):
+            # 在隔离环境中创建实例并设置属性
+            LocalModelManager._instance = object.__new__(LocalModelManager)
+            LocalModelManager._instance._worker_lock = threading.Lock()
+            LocalModelManager._instance._worker_proc = None
+            LocalModelManager._instance._request_queue = None
+            LocalModelManager._instance._result_queue = None
+            LocalModelManager._instance._worker_ready = False
+            LocalModelManager._initialized = True
 
-        LocalModelManager._instance = object.__new__(LocalModelManager)
-        LocalModelManager._instance._worker_lock = threading.Lock()
-        LocalModelManager._instance._worker_proc = None
-        LocalModelManager._instance._request_queue = None
-        LocalModelManager._instance._result_queue = None
-        LocalModelManager._instance._worker_ready = False
-        LocalModelManager._initialized = True
+            # 调用 reset 清理
+            LocalModelManager._reset_singleton()
 
-        LocalModelManager._reset_singleton()
-
-        assert LocalModelManager._instance is None
-        assert LocalModelManager._initialized is False
+            assert LocalModelManager._instance is None
+            assert LocalModelManager._initialized is False
 
 
 class TestWizardValidationMethods:
@@ -1050,7 +1004,8 @@ class TestLLMProviderName:
 class TestCloudAIValidationSaveConfig:
     """Tests for cloud AI validation always saves config"""
 
-    def test_validate_cloud_ai_saves_config_on_success(self):
+    @pytest.mark.asyncio
+    async def test_validate_cloud_ai_saves_config_on_success(self):
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from ui.views.onboarding_wizard import OnboardingWizard
@@ -1070,8 +1025,6 @@ class TestCloudAIValidationSaveConfig:
         wizard.page = MagicMock()
 
         with patch("ui.views.onboarding_wizard.I18n"):
-            import asyncio
-
-            asyncio.run(wizard._validate_and_save_cloud_ai())
+            await wizard._validate_and_save_cloud_ai()
 
         wizard.llm_config_panel.save_current_config.assert_called()

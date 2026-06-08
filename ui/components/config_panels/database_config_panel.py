@@ -18,6 +18,7 @@ from data.persistence.db_config_service import (
     DatabaseConfigService,
 )
 from ui.i18n import I18n
+from utils.log_decorators import PerfThreshold, log_async_operation
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 
@@ -321,6 +322,7 @@ class DatabaseConfigPanel(ft.Container):
 
         return True, ""
 
+    @log_async_operation(operation_name="db_panel_test_connection", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def test_connection(self) -> bool:
         is_valid, error = self.validate()
         if not is_valid:
@@ -405,6 +407,7 @@ class DatabaseConfigPanel(ft.Container):
                 self.on_loading_change(False)
             self._safe_update()
 
+    @log_async_operation(operation_name="db_panel_save_config", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def save_config(self) -> bool:
         is_valid, error = self.validate()
         if not is_valid:
