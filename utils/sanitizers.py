@@ -154,8 +154,19 @@ class DataSanitizer:
                 exception,
                 exception.__traceback__,
             )
-            # 过滤敏感路径
-            tb_clean = [DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line) for line in tb_lines]
+            # 先做凭证脱敏（与主流程一致），再做路径脱敏
+            tb_clean = []
+            for line in tb_lines:
+                line = DataSanitizer._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", line)
+                line = DataSanitizer._PATTERN_STANDALONE_KEY_VALUE.sub(r"\1=***", line)
+                line = DataSanitizer._PATTERN_COLON_KEY_VALUE.sub(r"\1: ***", line)
+                line = DataSanitizer._PATTERN_JSON_KEY_VALUE.sub(r'"\1": "***"', line)
+                line = DataSanitizer._PATTERN_SPACE_KEY_VALUE.sub(r"\1 ***", line)
+                line = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(r"\1://\2:***@", line)
+                line = DataSanitizer._PATTERN_BEARER.sub("Bearer ***", line)
+                line = DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line)
+                line = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", line)
+                tb_clean.append(line)
             return "\n".join(tb_clean)
 
         return msg

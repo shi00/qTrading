@@ -13,6 +13,7 @@ from typing import Any
 
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -368,7 +369,7 @@ class LocalModelManager:
                     hash_md5.update(chunk)
             return hash_md5.hexdigest()
         except Exception as e:
-            logger.error(f"[LocalModel] Failed to calculate MD5: {e}")
+            logger.error("[LocalModel] Failed to calculate MD5: %s", DataSanitizer.sanitize_error(e))
             return ""
 
     async def load_model(self, model_path: str, config: dict[str, Any] | None = None) -> bool:

@@ -16,6 +16,7 @@ from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import TASK_NAME_PREFIX, ScreenerViewModel
 from utils.log_decorators import UILogger
+from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -1276,7 +1277,8 @@ class ScreenerView(ft.Container):
                         "error",
                     )
             except Exception as ex:
-                logger.error(f"[ScreenerView] Export | ❌ Failed: {ex}", exc_info=True)
+                logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
+                logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
             finally:
                 self.export_btn.disabled = False
                 self.export_btn.update()

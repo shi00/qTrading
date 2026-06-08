@@ -18,6 +18,7 @@ import flet as ft
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +344,7 @@ class TushareConfigPanel(ft.Container):
 
             error_info = classify_error(e, context="token")
             self._show_error(get_error_message(error_info))
-            logger.error(f"[TushareConfigPanel] Token verification failed: {e}")
+            logger.error("[TushareConfigPanel] Token verification failed: %s", DataSanitizer.sanitize_error(e))
             return False
 
         finally:

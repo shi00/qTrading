@@ -241,7 +241,7 @@ class ConfigHandler:
             os.replace(tmp_file, path)
             return True
         except Exception as e:
-            logger.error(f"Atomic save failed for {path}: {e}")
+            logger.error("Atomic save failed for %s: %s", path, DataSanitizer.sanitize_error(e))
             if os.path.exists(tmp_file):
                 with contextlib.suppress(OSError):
                     os.remove(tmp_file)
@@ -370,7 +370,7 @@ class ConfigHandler:
                     return True
                 return False
         except Exception as e:
-            logger.error(f"Error saving config: {e}")
+            logger.error("Error saving config: %s", DataSanitizer.sanitize_error(e))
             return False
 
     @staticmethod
@@ -385,7 +385,7 @@ class ConfigHandler:
         try:
             kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
         except Exception as e:
-            logger.debug(f"Keyring get_password for ts_token failed: {e}")
+            logger.debug("Keyring get_password for ts_token failed: %s", DataSanitizer.sanitize_error(e))
         if kr_token:
             return kr_token
 
@@ -425,11 +425,12 @@ class ConfigHandler:
                 return ConfigHandler.save_config({"ts_token": encrypted})
             except SecurityError as se:
                 logger.error(
-                    f"Cannot securely store ts_token: {se}\nPlease use environment variable TS_TOKEN instead.",
+                    "Cannot securely store ts_token: %s. Please use environment variable TS_TOKEN instead.",
+                    DataSanitizer.sanitize_error(se),
                 )
                 return False
             except Exception as enc_err:
-                logger.error(f"Failed to encrypt ts_token: {enc_err}")
+                logger.error("Failed to encrypt ts_token: %s", DataSanitizer.sanitize_error(enc_err))
                 return False
 
     @staticmethod
@@ -555,7 +556,7 @@ class ConfigHandler:
             if password:
                 return password
         except Exception as e:
-            logger.debug(f"Failed to get db_password from keyring: {e}")
+            logger.debug("Failed to get db_password from keyring: %s", DataSanitizer.sanitize_error(e))
 
         # 3. 加密配置文件
         user_config = ConfigHandler.load_config()
@@ -574,7 +575,7 @@ class ConfigHandler:
             ConfigHandler.save_config({"db_password_encrypted": ""})
             return True
         except Exception as e:
-            logger.warning(f"Failed to save db_password to keyring: {e}")
+            logger.warning("Failed to save db_password to keyring: %s", DataSanitizer.sanitize_error(e))
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "db_password")
             except Exception:
@@ -585,11 +586,12 @@ class ConfigHandler:
                 return True
             except SecurityError as se:
                 logger.error(
-                    f"Cannot securely store db_password: {se}\nPlease use environment variable DB_PASSWORD instead.",
+                    "Cannot securely store db_password: %s. Please use environment variable DB_PASSWORD instead.",
+                    DataSanitizer.sanitize_error(se),
                 )
                 return False
             except Exception as e2:
-                logger.error(f"Failed to encrypt db_password: {e2}")
+                logger.error("Failed to encrypt db_password: %s", DataSanitizer.sanitize_error(e2))
                 return False
 
     @staticmethod
@@ -780,18 +782,20 @@ class ConfigHandler:
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                 except Exception as e:
-                    logger.warning(f"Keyring save failed: {e}. Falling back to SecurityManager.")
+                    logger.warning(
+                        "Keyring save failed: %s. Falling back to SecurityManager.", DataSanitizer.sanitize_error(e)
+                    )
                     try:
                         encrypted_key = SecurityManager.encrypt_data(api_key)
                         ConfigHandler.save_config({"ai_api_key": encrypted_key})
                     except SecurityError as se:
                         logger.error(
-                            f"Cannot securely store ai_api_key: {se}\n"
-                            "Please use environment variable AI_API_KEY instead.",
+                            "Cannot securely store ai_api_key: %s. Please use environment variable AI_API_KEY instead.",
+                            DataSanitizer.sanitize_error(se),
                         )
                         return False
                     except Exception as enc_err:
-                        logger.error(f"Failed to encrypt ai_api_key: {enc_err}")
+                        logger.error("Failed to encrypt ai_api_key: %s", DataSanitizer.sanitize_error(enc_err))
                         return False
             else:
                 try:
@@ -841,7 +845,10 @@ class ConfigHandler:
                     ConfigHandler.save_config({"ai_api_key": ""})
                     logger.info("Migrated ai_api_key from config to keyring and cleared legacy value")
                 except Exception as exc:
-                    logger.debug(f"[ConfigHandler] Keyring migration for ai_api_key skipped: {exc}")
+                    logger.debug(
+                        "[ConfigHandler] Keyring migration for ai_api_key skipped: %s",
+                        DataSanitizer.sanitize_error(exc),
+                    )
 
         provider = config.get("llm_provider", "deepseek")
         model = config.get("llm_model", "deepseek-v4-flash")
@@ -973,7 +980,9 @@ class ConfigHandler:
                     keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", api_key)
                 except Exception as e:
                     logger.warning(
-                        f"[ConfigHandler] Keyring save failed for {provider}: {e}. Falling back to encrypted storage."
+                        "[ConfigHandler] Keyring save failed for %s: %s. Falling back to encrypted storage.",
+                        provider,
+                        DataSanitizer.sanitize_error(e),
                     )
                     try:
                         encrypted_key = SecurityManager.encrypt_data(api_key)
@@ -981,7 +990,11 @@ class ConfigHandler:
                         provider_credentials[provider] = cred
                         config_update["llm_provider_credentials"] = provider_credentials
                     except Exception as enc_err:
-                        logger.error(f"[ConfigHandler] Failed to encrypt api_key for {provider}: {enc_err}")
+                        logger.error(
+                            "[ConfigHandler] Failed to encrypt api_key for %s: %s",
+                            provider,
+                            DataSanitizer.sanitize_error(enc_err),
+                        )
                         return False
             else:
                 # 用户主动清空密钥，清除 keyring 和加密存储

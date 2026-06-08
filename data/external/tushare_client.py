@@ -588,7 +588,7 @@ class TushareClient:
                     logger.error(
                         "[tushare_api] PERMISSION_DENIED (%s): %s",
                         api_name,
-                        error_msg,
+                        DataSanitizer.sanitize_error(e),
                     )
                     raise TushareAPIPermissionError(api_name, error_msg) from e
 
@@ -600,9 +600,12 @@ class TushareClient:
                     sleep_time = 5 + random.uniform(0, 5) + i * 5
                     current_rpm = active_limiter.current_rate_per_min if active_limiter else 0
                     logger.warning(
-                        f"[tushare_api] RATE_LIMITED ({api_name}): "
-                        f"adaptive slowdown -> {current_rpm:.0f}/min, "
-                        f"backoff={sleep_time:.1f}s (attempt {i + 1}/{self.max_retries})",
+                        "[tushare_api] RATE_LIMITED (%s): adaptive slowdown -> %.0f/min, backoff=%.1fs (attempt %d/%d)",
+                        api_name,
+                        current_rpm,
+                        sleep_time,
+                        i + 1,
+                        self.max_retries,
                     )
                     await asyncio.sleep(sleep_time)
                     continue
@@ -610,14 +613,21 @@ class TushareClient:
                 if is_network_error:
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
                     logger.warning(
-                        f"[tushare_api] CONNECTION_ERROR ({api_name}): {type(e).__name__} - retry in {sleep_time:.2f}s (attempt {i + 1}/{self.max_retries})",
+                        "[tushare_api] CONNECTION_ERROR (%s): %s - retry in %.2fs (attempt %d/%d)",
+                        api_name,
+                        type(e).__name__,
+                        sleep_time,
+                        i + 1,
+                        self.max_retries,
                     )
                     await asyncio.sleep(sleep_time)
                     continue
 
                 if i == self.max_retries - 1:
                     logger.error(
-                        f"[tushare_api] RETRY_EXHAUSTED ({api_name}): {error_msg}",
+                        "[tushare_api] RETRY_EXHAUSTED (%s): %s",
+                        api_name,
+                        DataSanitizer.sanitize_error(e),
                     )
                     raise e
 
@@ -641,8 +651,11 @@ class TushareClient:
                 if page == 0:
                     raise
                 logger.warning(
-                    f"[API] Pagination failed on page {page} (offset={offset}): {exc}. "
-                    f"Returning {len(df_list)} partial pages already fetched."
+                    "[API] Pagination failed on page %d (offset=%d): %s. Returning %d partial pages already fetched.",
+                    page,
+                    offset,
+                    DataSanitizer.sanitize_error(exc),
+                    len(df_list),
                 )
                 break
 

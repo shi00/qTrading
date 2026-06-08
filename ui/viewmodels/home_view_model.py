@@ -6,6 +6,7 @@ import pandas as pd
 from data.data_processor import DataProcessor
 from data.domain_services.market_data_service import MarketDataService
 from data.external.news_subscription import NewsSubscriptionService
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,8 @@ class HomeViewModel:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"[HomeVM] Error fetching news: {e}", exc_info=True)
+            logger.error("[HomeVM] Error fetching news: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[HomeVM] Error fetching news traceback", exc_info=True)
             return None
 
     def clear_state(self):

@@ -8,6 +8,7 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +401,8 @@ class SystemTab(ft.Container):
             I18n.set_locale(new_locale)
             self.show_snack(I18n.get("settings_language_changed"))
         except Exception as ex:
-            logger.error(f"[SystemTab] Language | ❌ Change failed: {ex}", exc_info=True)
+            logger.error("[SystemTab] Language | Change failed: %s", DataSanitizer.sanitize_error(ex))
+            logger.debug("[SystemTab] Language | Change failed traceback", exc_info=True)
             self.show_snack(f"Error: {ex}", color=AppColors.ERROR)
 
     def _on_locale_change(self, new_locale: str = None):  # pragma: no cover

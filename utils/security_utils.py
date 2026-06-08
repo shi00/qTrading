@@ -11,6 +11,7 @@ import threading
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from config import APP_ROOT
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,7 @@ class SecurityManager:
         try:
             cls._save_key(new_key)
         except Exception as e:
-            logger.error("Failed to save new derived key during migration: %s", e)
+            logger.error("Failed to save new derived key during migration: %s", DataSanitizer.sanitize_error(e))
             return False
 
         for path in (_LEGACY_MARKER, cls.KEY_FILE_BAK):

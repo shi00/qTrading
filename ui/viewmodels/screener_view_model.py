@@ -13,6 +13,7 @@ from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
 from ui.i18n import I18n
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -654,5 +655,6 @@ class ScreenerViewModel:
             )
             return filepath, None
         except Exception as e:
-            logger.error(f"Export failed: {e}", exc_info=True)
+            logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Export failed traceback", exc_info=True)
             return None, str(e)

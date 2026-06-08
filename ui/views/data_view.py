@@ -12,6 +12,7 @@ from data.persistence.metadata_manager import MetaDataManager
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.correlation import ensure_correlation_id
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
@@ -741,7 +742,8 @@ class TableViewerTab(ft.Container):
             )
 
         except Exception as e:
-            logger.error(f"Export failed: {e}", exc_info=True)
+            logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Export failed traceback", exc_info=True)
             self.page.show_toast(  # type: ignore[untyped]
                 I18n.get("data_export_fail", error=str(e)),
                 "error",
@@ -1071,7 +1073,8 @@ class SQLConsoleTab(ft.Container):
             )
             self.status_text.color = AppColors.ERROR
             self.result_table.rows = []
-            logger.error(f"SQL Execution error: {e}", exc_info=True)
+            logger.error("SQL Execution error: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("SQL Execution error traceback", exc_info=True)
         finally:
             self.result_table.visible = has_data
             self.empty_state.visible = not has_data

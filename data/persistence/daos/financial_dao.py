@@ -13,6 +13,7 @@ from data.persistence.models import (
     get_model_columns,
     get_model_pk_columns,
 )
+from utils.sanitizers import DataSanitizer
 
 from .base_dao import _IN_CHUNK_SIZE, BaseDao
 
@@ -176,7 +177,9 @@ class FinancialDao(BaseDao):
 
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get financial history for {ts_code}: {e}")
+            logger.warning(
+                "[FinancialDao] Failed to get financial history for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
+            )
             return pd.DataFrame()
 
     async def get_financial_reports_history_batch(
@@ -240,7 +243,7 @@ class FinancialDao(BaseDao):
                 df = df.drop(columns=["rn"])
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get financial history batch: {e}")
+            logger.warning("[FinancialDao] Failed to get financial history batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def get_fina_audit_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
@@ -283,7 +286,7 @@ class FinancialDao(BaseDao):
                     ts_codes,
                 )
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get audit batch: {e}")
+            logger.warning("[FinancialDao] Failed to get audit batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def get_dividend_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
@@ -322,7 +325,7 @@ class FinancialDao(BaseDao):
                     ts_codes,
                 )
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get dividend batch: {e}")
+            logger.warning("[FinancialDao] Failed to get dividend batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def get_pledge_stat_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
@@ -363,7 +366,7 @@ class FinancialDao(BaseDao):
                     ts_codes,
                 )
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get pledge batch: {e}")
+            logger.warning("[FinancialDao] Failed to get pledge batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def get_fina_mainbz(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
@@ -392,7 +395,9 @@ class FinancialDao(BaseDao):
                 )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get fina_mainbz for {ts_code}: {e}")
+            logger.warning(
+                "[FinancialDao] Failed to get fina_mainbz for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
+            )
             return pd.DataFrame()
 
     async def get_fina_mainbz_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
@@ -438,7 +443,7 @@ class FinancialDao(BaseDao):
                 return pd.concat(all_results, ignore_index=True)
             return pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get fina_mainbz batch: {e}")
+            logger.warning("[FinancialDao] Failed to get fina_mainbz batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def verify_stock_financial_integrity(
@@ -536,5 +541,7 @@ class FinancialDao(BaseDao):
                 return set(df["ts_code"])
             return set()
         except Exception as e:
-            logger.warning(f"[FinancialDao] Failed to get incomplete financial stocks: {e}")
+            logger.warning(
+                "[FinancialDao] Failed to get incomplete financial stocks: %s", DataSanitizer.sanitize_error(e)
+            )
             return set()

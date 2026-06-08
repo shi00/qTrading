@@ -285,7 +285,8 @@ class DatabaseConfigService:
                     status=ConnectionStatus.CONNECTION_ERROR,
                     message=I18n.get("db_err_interrupted"),
                 )
-            logger.error("Unexpected error testing connection: %s", e, exc_info=True)
+            logger.error("Unexpected error testing connection: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Unexpected error testing connection traceback:", exc_info=True)
             return ConnectionResult(
                 status=ConnectionStatus.UNKNOWN_ERROR,
                 message=I18n.get("db_err_unknown"),
@@ -374,7 +375,8 @@ class DatabaseConfigService:
             return False, I18n.get("db_err_no_privilege")
 
         except Exception as e:
-            logger.error("Failed to create database: %s", e, exc_info=True)
+            logger.error("Failed to create database: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Failed to create database traceback:", exc_info=True)
             return False, I18n.get("db_err_create_failed").format(error=DataSanitizer.sanitize_error(e))
 
     @classmethod
@@ -481,7 +483,8 @@ class DatabaseConfigService:
             finally:
                 await engine.dispose()
         except Exception as e:
-            logger.error("Failed to run migrations: %s", e, exc_info=True)
+            logger.error("Failed to run migrations: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Failed to run migrations traceback:", exc_info=True)
             return False, I18n.get("db_err_migration_failed").format(error=DataSanitizer.sanitize_error(e))
 
     @classmethod

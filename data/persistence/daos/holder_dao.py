@@ -3,6 +3,7 @@ import logging
 import pandas as pd
 
 from data.persistence.models import StkHoldernumber, Top10Holders, get_model_columns, get_model_pk_columns
+from utils.sanitizers import DataSanitizer
 
 from .base_dao import BaseDao, EngineDisposedError
 
@@ -69,7 +70,7 @@ class HolderDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(f"[HolderDao] Failed to calculate holder changes: {e}")
+            logger.warning("[HolderDao] Failed to calculate holder changes: %s", DataSanitizer.sanitize_error(e))
 
     async def save_top10_holders(self, df: pd.DataFrame):
         """Save Top 10 Holders. Table: top10_holders"""
@@ -78,7 +79,7 @@ class HolderDao(BaseDao):
         if "holder_name" in df.columns:
             null_count = df["holder_name"].isna().sum()
             if null_count > 0:
-                logger.warning(f"[HolderDao] Filtering {null_count} rows with NULL holder_name from top10_holders")
+                logger.warning("[HolderDao] Filtering %s rows with NULL holder_name from top10_holders", null_count)
                 df = df[df["holder_name"].notna()].copy()  # type: ignore[assignment]
             if df.empty:
                 return 0
@@ -119,7 +120,9 @@ class HolderDao(BaseDao):
                 )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[HolderDao] Failed to get top10 holders for {ts_code}: {e}")
+            logger.warning(
+                "[HolderDao] Failed to get top10 holders for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
+            )
             return pd.DataFrame()
 
     async def get_stk_holdernumber(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
@@ -150,7 +153,9 @@ class HolderDao(BaseDao):
                 )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[HolderDao] Failed to get holder number for {ts_code}: {e}")
+            logger.warning(
+                "[HolderDao] Failed to get holder number for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
+            )
             return pd.DataFrame()
 
     async def get_top10_holders_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
@@ -191,7 +196,7 @@ class HolderDao(BaseDao):
                     ts_codes,
                 )
         except Exception as e:
-            logger.warning(f"[HolderDao] Failed to get top10 holders batch: {e}")
+            logger.warning("[HolderDao] Failed to get top10 holders batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def get_stk_holdernumber_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
@@ -241,7 +246,7 @@ class HolderDao(BaseDao):
                 return pd.concat(all_results, ignore_index=True)
             return pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[HolderDao] Failed to get holder number batch: {e}")
+            logger.warning("[HolderDao] Failed to get holder number batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
     async def get_existing_top10_ts_codes(self, period: str) -> set[str]:
@@ -269,5 +274,9 @@ class HolderDao(BaseDao):
                 return set(df["ts_code"].tolist())
             return set()
         except Exception as e:
-            logger.warning(f"[HolderDao] Failed to get existing top10 ts_codes for period={period}: {e}")
+            logger.warning(
+                "[HolderDao] Failed to get existing top10 ts_codes for period=%s: %s",
+                period,
+                DataSanitizer.sanitize_error(e),
+            )
             return set()

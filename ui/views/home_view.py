@@ -13,6 +13,7 @@ from ui.theme import AppColors
 from ui.viewmodels.home_view_model import HomeViewModel
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -256,11 +257,13 @@ class HomeView(ft.Container):
                 self.date_text.update()
                 self.dashboard.update_data(data)
         except Exception as e:
-            logger.error(f"[HomeView] Market | ❌ Load failed: {e}", exc_info=True)
+            logger.error("[HomeView] Market | Load failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[HomeView] Market | Load failed traceback", exc_info=True)
 
     async def _refresh_news_data(self, _data=None):  # pragma: no cover
         try:
             news_data, has_more = await self.vm.refresh_news()
             self.news_feed.set_news(news_data, has_more)  # type: ignore[untyped]
         except Exception as e:
-            logger.error(f"[HomeView] News | ❌ Load failed: {e}", exc_info=True)
+            logger.error("[HomeView] News | Load failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[HomeView] News | Load failed traceback", exc_info=True)
