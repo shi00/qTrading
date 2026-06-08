@@ -398,6 +398,7 @@ class LLMConfigPanel(ft.Container):
                     self.model_dropdown.visible = False
                     self.custom_model_input.visible = True
                     self.custom_model_input.value = model
+                    self._load_custom_model_history(provider)
                 elif models:
                     recommended = next(
                         (m.get("id") for m in models if is_recommended_model(m)),
@@ -441,9 +442,9 @@ class LLMConfigPanel(ft.Container):
         self.model_dropdown.options = self._build_model_options(provider_id)
         self.model_dropdown.value = None
 
-        # 尝试加载该供应商已存储的凭证（如之前作为 failover 配置过）
-        stored_cred = ConfigHandler.get_provider_credential(provider_id)
-        stored_key = stored_cred.get("api_key", "")
+        # 尝试加载该供应商已存储的专属凭证（不回退到全局 Key，避免显示错误供应商的 Key）
+        stored_cred = ConfigHandler.get_provider_credential(provider_id, fallback_to_global=False)
+        stored_key = stored_cred.get("api_key", "") or ""
         stored_base_url = stored_cred.get("base_url", "")
 
         self.api_key_input.value = stored_key
@@ -549,6 +550,14 @@ class LLMConfigPanel(ft.Container):
 
         self.page.run_task(self._on_llm_test_connection)
 
+    def _acquire_verify_lock(self) -> bool:
+        """尝试获取验证锁。返回 True 表示成功获取，False 表示已有验证在执行。"""
+        if self._is_verifying:
+            logger.warning("[LLMConfigPanel] Verification already in progress")
+            return False
+        self._is_verifying = True
+        return True
+
     def _validate_azure_fields(self) -> tuple[bool, str, str, str | None]:
         """
         验证 Azure 专用字段，返回 (is_valid, resource_name, deployment_name, api_version)。
@@ -582,7 +591,9 @@ class LLMConfigPanel(ft.Container):
             self._show_warning(I18n.get("llm_test_need_model"))
             return
 
-        self._is_verifying = True
+        if not self._acquire_verify_lock():
+            self._show_warning(I18n.get("llm_testing_in_progress"))
+            return
         self._show_info(I18n.get("llm_testing"))
         self.test_button.disabled = True
         if self.on_loading_change:
@@ -673,11 +684,9 @@ class LLMConfigPanel(ft.Container):
             self._show_error(I18n.get("wizard_err_provider_model_required"))
             return False
 
-        if self._is_verifying:
-            logger.warning("[LLMConfigPanel] Verification already in progress")
+        if not self._acquire_verify_lock():
             return False
 
-        self._is_verifying = True
         self._set_loading_state(True)
         self._show_info(I18n.get("llm_testing"))
 
@@ -999,10 +1008,30 @@ class LLMConfigPanel(ft.Container):
                 config["base_url"],
                 custom_models.get(config["provider"]),
             )
+            self._schedule_ai_service_reload()
             return True
         except Exception as e:
             logger.error("[LLMConfigPanel] Save current config error: %s", DataSanitizer.sanitize_error(e))
             return False
+
+    def _schedule_ai_service_reload(self):
+        """在保存配置后异步刷新 AIService 运行时状态。
+
+        save_current_config 是同步方法，无法 await reload_config，
+        因此通过 page.run_task 调度异步刷新。
+        """
+        if not self.page:
+            return
+        try:
+
+            async def _reload():
+                from services.ai_service import AIService
+
+                await AIService().reload_config()
+
+            self.page.run_task(_reload)
+        except Exception as e:
+            logger.debug("[LLMConfigPanel] AIService reload scheduling skipped: %s", DataSanitizer.sanitize_error(e))
 
     @staticmethod
     def _sync_provider_credential_to_failover(
@@ -1100,6 +1129,8 @@ class LLMConfigPanel(ft.Container):
 
         self.provider_dropdown.options = self._build_provider_options()
         self.provider_dropdown.value = self._current_provider
+
+        self.model_dropdown.options = self._build_model_options(self._current_provider)
 
         self._update_links_row()
 

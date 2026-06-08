@@ -884,5 +884,100 @@ class TestRemovePrimaryFromFailover:
         assert config["llm_failover_models"] == ["openai/gpt-4o"]
 
 
+class TestSaveCurrentConfigReloadsAIService:
+    """验证 save_current_config 保存后调度 AIService reload"""
+
+    def test_save_current_config_schedules_ai_service_reload(self, isolated_config, mock_keyring):
+        """save_current_config 应通过 page.run_task 调度 AIService.reload_config"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        panel._current_provider = "deepseek"
+        panel.model_dropdown.value = "deepseek-v4-flash"
+        panel.base_url_input.value = "https://api.deepseek.com"
+        panel.api_key_input.value = "test-key"
+        panel._api_key_modified = True
+
+        # Mock page.run_task 以捕获异步调用
+        run_task_calls = []
+
+        class MockPage:
+            def run_task(self, coro):
+                run_task_calls.append(coro)
+
+        panel.page = MockPage()
+
+        result = panel.save_current_config()
+        assert result is True
+        # 应调度了一个异步任务（AIService reload）
+        assert len(run_task_calls) == 1
+
+    def test_save_current_config_without_page_still_saves(self, isolated_config, mock_keyring):
+        """无 page 时 save_current_config 仍应保存成功（只是不调度 reload）"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        panel._current_provider = "deepseek"
+        panel.model_dropdown.value = "deepseek-v4-flash"
+        panel.base_url_input.value = "https://api.deepseek.com"
+        panel.api_key_input.value = "test-key"
+        panel._api_key_modified = True
+        panel.page = None
+
+        result = panel.save_current_config()
+        assert result is True
+
+
+class TestProviderCredentialFallbackToGlobal:
+    """验证 get_provider_credential 的 fallback_to_global 参数"""
+
+    def test_fallback_to_global_returns_primary_key(self, isolated_config, mock_keyring):
+        """fallback_to_global=True 时回退到全局 API Key"""
+        from utils.config_handler import ConfigHandler, KEYRING_SERVICE_NAME
+
+        mock_keyring[(KEYRING_SERVICE_NAME, "ai_api_key")] = "global-key"
+
+        cred = ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
+        assert cred["api_key"] == "global-key"
+
+    def test_no_fallback_returns_none_for_missing_provider_key(self, isolated_config, mock_keyring):
+        """fallback_to_global=False 时不回退，返回 None"""
+        from utils.config_handler import ConfigHandler, KEYRING_SERVICE_NAME
+
+        mock_keyring[(KEYRING_SERVICE_NAME, "ai_api_key")] = "global-key"
+
+        cred = ConfigHandler.get_provider_credential("qwen", fallback_to_global=False)
+        assert cred["api_key"] is None
+
+    def test_no_fallback_returns_provider_specific_key(self, isolated_config, mock_keyring):
+        """fallback_to_global=False 时仍返回供应商专属 Key"""
+        from utils.config_handler import ConfigHandler, KEYRING_SERVICE_NAME
+
+        mock_keyring[(KEYRING_SERVICE_NAME, "ai_api_key_qwen")] = "qwen-specific-key"
+
+        cred = ConfigHandler.get_provider_credential("qwen", fallback_to_global=False)
+        assert cred["api_key"] == "qwen-specific-key"
+
+
+class TestAcquireVerifyLock:
+    """验证 _acquire_verify_lock 互斥逻辑"""
+
+    def test_acquire_verify_lock_succeeds_initially(self, isolated_config):
+        """首次获取验证锁应成功"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        assert panel._acquire_verify_lock() is True
+        assert panel._is_verifying is True
+
+    def test_acquire_verify_lock_fails_when_already_verifying(self, isolated_config):
+        """验证进行中时再次获取应失败"""
+        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+
+        panel = LLMConfigPanel(show_save_button=False, compact=True)
+        panel._acquire_verify_lock()
+        assert panel._acquire_verify_lock() is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

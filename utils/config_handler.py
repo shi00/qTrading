@@ -1014,12 +1014,14 @@ class ConfigHandler:
         return True
 
     @staticmethod
-    def get_provider_credential(provider: str) -> dict:
+    def get_provider_credential(provider: str, fallback_to_global: bool = True) -> dict:
         """
         获取指定 LLM 供应商的完整凭证
 
         Args:
             provider: 供应商 ID
+            fallback_to_global: 为 True 时，若该供应商无专属 Key 则回退到全局 API Key；
+                                为 False 时仅返回该供应商专属凭证（UI 切换供应商时使用）。
 
         Returns:
             {
@@ -1047,7 +1049,7 @@ class ConfigHandler:
                 pass
 
         # Fallback to global api_key if provider-specific key not found
-        if not api_key:
+        if fallback_to_global and not api_key:
             # Try keyring global key first
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")

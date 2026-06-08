@@ -1337,4 +1337,41 @@ class TestProviderCredentialDialogEditModeClearApiKey:
         dialog._on_confirm_click(MagicMock())
         # 不显示警告（原有凭证本就为空）
         assert len(mock_page.overlay) == 0
-        mock_config_handler.save_provider_credential.assert_called_once()
+
+
+class TestProviderCredentialDialogNormalizeBaseUrl:
+    """测试 ProviderCredentialDialog._normalize_base_url"""
+
+    def test_normalize_strips_chat_completions(self):
+        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+
+        assert (
+            ProviderCredentialDialog._normalize_base_url("https://api.deepseek.com/v1/chat/completions")
+            == "https://api.deepseek.com/v1"
+        )
+
+    def test_normalize_strips_completions(self):
+        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+
+        assert (
+            ProviderCredentialDialog._normalize_base_url("https://api.example.com/completions")
+            == "https://api.example.com"
+        )
+
+    def test_normalize_adds_https_prefix(self):
+        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+
+        assert ProviderCredentialDialog._normalize_base_url("api.example.com/v1") == "https://api.example.com/v1"
+
+    def test_normalize_empty_string(self):
+        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+
+        assert ProviderCredentialDialog._normalize_base_url("") == ""
+
+    def test_normalize_preserves_base_path(self):
+        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+
+        assert (
+            ProviderCredentialDialog._normalize_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1")
+            == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )

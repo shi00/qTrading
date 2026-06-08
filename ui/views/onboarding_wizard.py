@@ -1210,6 +1210,15 @@ class OnboardingWizard(ft.Container):
             if hasattr(self, "header_desc"):
                 self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
 
+            # 取消旧面板的 i18n 订阅，避免泄漏
+            for panel_attr in ("database_panel", "tushare_panel", "llm_config_panel", "local_model_panel"):
+                old_panel = getattr(self, panel_attr, None)
+                if old_panel and hasattr(old_panel, "will_unmount"):
+                    try:
+                        old_panel.will_unmount()
+                    except Exception:
+                        pass
+
             self._init_database_controls()
             self._init_token_controls()
             self._init_cloud_ai_controls()

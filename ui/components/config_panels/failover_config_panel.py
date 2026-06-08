@@ -8,6 +8,7 @@ Provides UI for configuring LLM failover providers:
 """
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -217,6 +218,19 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if self.page:
             self.page.launch_url(url)
 
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        """规范化 base_url，去除用户可能粘贴的 API 端点后缀。"""
+        if not url:
+            return ""
+        url = url.strip().rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        url = re.sub(r"/chat/completions$", "", url)
+        url = re.sub(r"/completions$", "", url)
+        url = re.sub(r"/embeddings$", "", url)
+        return url
+
     def _on_cancel(self, e):
         self.open = False
         if self.page:
@@ -255,6 +269,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
+            # 清理旧的 SnackBar 避免累积
+            self.page.overlay[:] = [s for s in self.page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
             self.page.overlay.append(snack)
             snack.open = True
@@ -268,6 +284,9 @@ class ProviderCredentialDialog(ft.AlertDialog):
 
         if not provider or not model:
             return
+
+        # 规范化 base_url（去除 /chat/completions 等后缀）
+        base_url = self._normalize_base_url(base_url)
 
         # 新增模式下要求 API Key 非空
         if not self._is_edit and not api_key:
@@ -584,6 +603,8 @@ class FailoverConfigPanel(ft.Container):
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
+            # 清理旧的 SnackBar 避免累积
+            self.page.overlay[:] = [s for s in self.page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
             self.page.overlay.append(snack)
             snack.open = True
