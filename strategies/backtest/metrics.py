@@ -56,7 +56,7 @@ class BacktestMetrics:
         if len(daily_returns) < 2:
             return 0.0
         std_val = daily_returns.std()
-        if std_val is None:
+        if std_val is None or not isinstance(std_val, (int, float)):
             return 0.0
         return float(std_val) * math.sqrt(trading_days_per_year)
 
@@ -73,14 +73,14 @@ class BacktestMetrics:
         excess_returns = daily_returns - daily_rf
 
         excess_std = excess_returns.std()
-        if excess_std is None:
+        if excess_std is None or not isinstance(excess_std, (int, float)):
             return 0.0
         excess_std_float = float(excess_std)
         if excess_std_float == 0:
             return 0.0
 
         excess_mean = excess_returns.mean()
-        if excess_mean is None:
+        if excess_mean is None or not isinstance(excess_mean, (int, float)):
             return 0.0
 
         return float(excess_mean) / excess_std_float * math.sqrt(trading_days_per_year)

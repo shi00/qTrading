@@ -59,7 +59,7 @@ class PreFetchedContext:
     news_tasks: dict = field(default_factory=dict)
     history_context: str = ""
     global_context: str = ""
-    trade_date: object | None = None
+    trade_date: str | None = None
 
     indicators: pd.DataFrame = field(default_factory=pd.DataFrame)
     sector_stats: dict = field(default_factory=dict)

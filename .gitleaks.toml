@@ -37,6 +37,13 @@ regexes = [
   '''fake_api_key_[a-zA-Z0-9]+''',
   '''mock_secret_[a-zA-Z0-9]+''',
   '''ci_astock_default_pwd''',
+  '''sk-abc123xyz789''',
+  '''sk-proj-LEAKED123''',
+  '''sk-LEAKED_KEY_12345''',
+  '''sk-proj-abc123def456ghi789''',
+  '''sk-proj-LEAKED-KEY-12345''',
+  '''sk-LEAKED123''',
+  '''eyJhbGciOiJIUzI1NiJ9''',
 ]
 
 [[allowlists]]

@@ -285,8 +285,8 @@ class TushareClient:
 
             logger.info(
                 "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
-                DataSanitizer.sanitize_token(old_token),
-                DataSanitizer.sanitize_token(token),
+                DataSanitizer.sanitize_token(old_token or ""),
+                DataSanitizer.sanitize_token(token or ""),
                 cache_size,
             )
             return True

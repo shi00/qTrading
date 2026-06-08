@@ -102,7 +102,8 @@ class DatabaseManager:
         """
         self._ensure_engine()
         try:
-            insp = sa.inspect(self._engine)  # type: ignore[arg-type]
+            assert self._engine is not None
+            insp = sa.inspect(self._engine)
             return sorted(insp.get_table_names())
         except Exception as e:
             logger.error(f"Error fetching tables: {e}")
@@ -117,7 +118,8 @@ class DatabaseManager:
         self._ensure_engine()
         try:
             self._validate_table_name(table_name)
-            insp = sa.inspect(self._engine)  # type: ignore[arg-type]
+            assert self._engine is not None
+            insp = sa.inspect(self._engine)
             columns = []
             for col_info in insp.get_columns(table_name):
                 columns.append(

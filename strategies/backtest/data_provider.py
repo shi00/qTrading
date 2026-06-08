@@ -15,6 +15,7 @@ import pandas as pd
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
     from data.data_processor import DataProcessor
+    from strategies.utils import StrategyContext
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class BacktestDataProvider:
         trade_date: date,
         *,
         disable_ai: bool = True,
-    ) -> dict:
+    ) -> StrategyContext:
         """
         构建历史策略上下文。
 
@@ -68,7 +69,7 @@ class BacktestDataProvider:
     async def _build_historical_screening_context(
         self,
         trade_date: date,
-    ) -> dict:
+    ) -> StrategyContext:
         """
         复刻 DataProcessor.prepare_screening_context() 的历史版本。
 
@@ -79,7 +80,7 @@ class BacktestDataProvider:
         4. 加载辅助表（northbound, moneyflow, top_list, block_trade）
         5. 设置 _diagnostics 用于依赖状态追踪
         """
-        context = {}
+        context: StrategyContext = {}  # type: ignore[typeddict-item]
         diagnostics = {
             "quality_tier": None,
             "trade_date": None,

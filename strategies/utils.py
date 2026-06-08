@@ -32,6 +32,7 @@ def fmt_val(val, fmt_spec=".2f", suffix=""):
 
 class StrategyContext(TypedDict, total=False):
     screening_data: pd.DataFrame
+    fundamental_screening_data: pd.DataFrame
     data: pd.DataFrame
     data_processor: Any
     params: dict[str, Any]
@@ -40,9 +41,13 @@ class StrategyContext(TypedDict, total=False):
     on_stream_result: Callable
     on_stream_start: Callable
     northbound_data: pd.DataFrame
+    northbound_flow_data: pd.DataFrame
     moneyflow_data: pd.DataFrame
     top_list: pd.DataFrame
     block_trade: pd.DataFrame
     trade_date: datetime.date | datetime.datetime | str
+    is_backtest: bool
     _task_id: str
+    _disable_ai: bool
     _dependency_status: dict[str, Any]
+    _diagnostics: dict[str, Any]

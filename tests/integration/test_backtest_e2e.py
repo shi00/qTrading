@@ -18,7 +18,7 @@ from strategies.base_strategy import BaseStrategy
 class SimpleTestStrategy(BaseStrategy):
     """用于端到端测试的简单策略"""
 
-    required_context_keys = ["screening_data"]
+    required_context_keys = ("screening_data",)
 
     def __init__(self):
         super().__init__("test_strategy", "Test Strategy for E2E")
@@ -425,7 +425,7 @@ class TestBacktestE2E:
         cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         class EmptyStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("empty_strategy", "Empty Strategy")

@@ -556,6 +556,7 @@ class CacheManager:
         # === Step 2: Parallel table health checks (each with own connection) ===
         if self.engine is None:
             raise RuntimeError("Database engine not initialized")
+        engine = self.engine
 
         async def _check_single_table(table: str, meta: dict) -> tuple[str, dict]:
             table_type = meta.get("type", "stock")
@@ -575,7 +576,7 @@ class CacheManager:
                 }
 
             try:
-                async with self.engine.connect() as conn:
+                async with engine.connect() as conn:
                     await conn.execution_options(isolation_level="AUTOCOMMIT")
 
                     if not is_stock_table:

@@ -12,7 +12,7 @@ from strategies.base_strategy import BaseStrategy
 
 
 class MockStrategy(BaseStrategy):
-    required_context_keys = []
+    required_context_keys = ()
 
     def __init__(self):
         super().__init__("mock_strategy", "Mock Strategy for Testing")

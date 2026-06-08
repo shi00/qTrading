@@ -13,8 +13,8 @@ from strategies.base_strategy import BaseStrategy
 class MockStrategy(BaseStrategy):
     """用于测试的 Mock 策略"""
 
-    required_context_keys = ["screening_data"]
-    required_tables = ["daily_quotes"]
+    required_context_keys = ("screening_data",)
+    required_tables = ("daily_quotes",)
 
     def __init__(self):
         super().__init__("mock_strategy", "Mock Strategy for Testing")
@@ -136,7 +136,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class FailingStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("failing_strategy", "Failing Strategy")
@@ -163,7 +163,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class EmptyResultStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("empty_strategy", "Empty Result Strategy")
@@ -215,7 +215,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class PolarsStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("polars_strategy", "Polars Strategy")
@@ -250,7 +250,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class ScoreStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("score_strategy", "Score Strategy")
@@ -284,7 +284,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class SignalScoreStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("signal_score_strategy", "Signal Score Strategy")
@@ -317,7 +317,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class ReasonStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("reason_strategy", "Reason Strategy")
@@ -350,7 +350,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class SignalReasonStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("signal_reason_strategy", "Signal Reason Strategy")
@@ -383,7 +383,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class NoteStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("note_strategy", "Note Strategy")
@@ -416,7 +416,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class MissingTsCodeStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("missing_ts_code_strategy", "Missing TsCode Strategy")
@@ -448,7 +448,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class MissingTsCodePolarsStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("missing_ts_code_polars_strategy", "Missing TsCode Polars Strategy")
@@ -480,7 +480,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class UnexpectedTypeStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("unexpected_type_strategy", "Unexpected Type Strategy")
@@ -508,7 +508,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class NoneReturnStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("none_return_strategy", "None Return Strategy")
@@ -536,7 +536,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class MultiStockStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("multi_stock_strategy", "Multi Stock Strategy")
@@ -571,7 +571,7 @@ class TestBacktestStrategyAdapter:
         adapter: BacktestStrategyAdapter,
     ) -> None:
         class RankTestStrategy(BaseStrategy):
-            required_context_keys = []
+            required_context_keys = ()
 
             def __init__(self):
                 super().__init__("rank_test_strategy", "Rank Test Strategy")

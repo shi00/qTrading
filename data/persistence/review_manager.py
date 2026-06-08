@@ -78,7 +78,7 @@ class ReviewManager:
                     else:
                         dt_str = str(dt_val).replace("-", "")[:8]
                     raw_pct = i_row.get("pct_chg")
-                    index_cache[dt_str] = float(raw_pct) if pd.notna(raw_pct) is True else None
+                    index_cache[dt_str] = float(raw_pct) if raw_pct is not None and pd.notna(raw_pct) is True else None
                 logger.info(
                     "[Review] Bulk loaded %d days of index data for %s.",
                     len(df_index_bulk),
