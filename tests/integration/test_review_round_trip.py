@@ -155,6 +155,52 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         sql_str = str(compiled)
         self.assertIn("COMPLETED", sql_str)
 
+    def test_conn_none_path_compiles_valid_sql(self):
+        """Verify conn=None path compiles SQLAlchemy stmt into valid SQL with correct params."""
+        from data.persistence.daos.screener_dao import ScreenerDao
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        # Use a real asyncpg engine so dialect.compile() works correctly
+        real_engine = create_async_engine("postgresql+asyncpg://test:test@localhost/test")
+
+        dao = ScreenerDao.__new__(ScreenerDao)
+        dao.engine = real_engine
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+
+        captured_sql = None
+        captured_params = None
+
+        async def mock_write_db(sql, params, *, suppress_errors=False):
+            nonlocal captured_sql, captured_params
+            captured_sql = sql
+            captured_params = params
+            return 1
+
+        dao._write_db = AsyncMock(side_effect=mock_write_db)
+
+        import asyncio
+
+        asyncio.run(
+            dao.update_prediction_result(
+                record_id=1,
+                pct=5.0,
+                label="WIN",
+                t1_price=10.5,
+                t5_pct=3.0,
+                t5_price=10.3,
+                index_pct=1.0,
+                alpha=2.0,
+            )
+        )
+
+        # Verify SQL was compiled and contains UPDATE ... SET ... WHERE
+        self.assertIsNotNone(captured_sql)
+        self.assertIn("UPDATE", captured_sql.upper())
+        self.assertIn("WHERE", captured_sql.upper())
+        # Verify params contain the expected values including COMPLETED status
+        self.assertIn("COMPLETED", captured_params)
+
 
 class TestParamsSnapshotJsonb(unittest.TestCase):
     def test_dict_params_snapshot_passes_through(self):
