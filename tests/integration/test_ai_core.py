@@ -1,6 +1,6 @@
 """
-Unit Tests for AI Core Modules
-Targets: ReviewManager, AIStrategy, NewsFetcher
+Integration Tests for AI Core Modules
+Targets: ReviewManager, AIStrategy, Backtest Context
 Coverage Goal: >90%
 """
 
@@ -251,31 +251,6 @@ class TestReviewManager:
 
         assert isinstance(context, str)
         assert "<history_context>" in context or context == ""
-
-
-# ==============================================================================
-# NEWS FETCHER TESTS
-# ==============================================================================
-
-
-class TestNewsFetcher:
-    """Tests for NewsFetcher"""
-
-    @pytest.mark.skip(reason="Requires real network - run manually")
-    @pytest.mark.asyncio
-    async def test_get_us_major_moves_returns_string(self):
-        """Test: get_us_major_moves returns a non-empty string"""
-        result = await NewsFetcher.get_us_major_moves()
-
-        assert isinstance(result, str)
-
-    @pytest.mark.skip(reason="Requires real network - run manually")
-    @pytest.mark.asyncio
-    async def test_get_stock_news_returns_list(self):
-        """Test: get_stock_news returns a list"""
-        result = await NewsFetcher.get_stock_news("000001.SZ", limit=3)
-
-        assert isinstance(result, list)
 
 
 # ==============================================================================
