@@ -129,8 +129,22 @@ class TestSyncDaoMarkStockStep4Completed:
     @pytest.mark.asyncio
     async def test_save(self):
         dao = SyncDao(MagicMock())
-        dao._write_db = AsyncMock(return_value=1)
+        dao._save_upsert = AsyncMock(return_value=1)
         await dao.mark_stock_step4_completed("000001.SZ", sync_version=1)
+        dao._save_upsert.assert_awaited_once()
+        call_args = dao._save_upsert.call_args
+        df = call_args[0][0]
+        assert df.iloc[0]["ts_code"] == "000001.SZ"
+        assert df.iloc[0]["sync_version"] == 1
+        assert call_args[1]["pk_columns"] == ["ts_code"]
+
+    @pytest.mark.asyncio
+    async def test_save_with_conn(self):
+        dao = SyncDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        mock_conn = MagicMock()
+        await dao.mark_stock_step4_completed("000001.SZ", sync_version=1, conn=mock_conn)
+        assert dao._save_upsert.call_args[1]["conn"] is mock_conn
 
 
 class TestSyncDaoClearStep4SyncStatus:

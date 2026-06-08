@@ -1349,9 +1349,9 @@ class TestCacheManagerDelegations:
     @pytest.mark.asyncio
     async def test_mark_stock_step4_completed(self):
         mgr = self._make_mgr()
-        mgr.sync_dao.mark_stock_step4_completed = AsyncMock(return_value=None)
+        mgr.sync_dao.mark_stock_step4_completed = AsyncMock(return_value=1)
         result = await mgr.mark_stock_step4_completed("000001.SZ")
-        assert result is None
+        assert result == 1
         mgr.sync_dao.mark_stock_step4_completed.assert_called_once_with("000001.SZ", 1, conn=None)
 
     @pytest.mark.asyncio

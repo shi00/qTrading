@@ -1,13 +1,15 @@
 """BacktestDAO 单元测试"""
 
+import asyncio
 from datetime import date, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import polars as pl
 import pytest
 
 from data.persistence.daos.backtest_dao import BacktestDAO
+from data.persistence.daos.base_dao import EngineDisposedError
 from strategies.backtest.config import BacktestConfig, BacktestResult
 
 
@@ -277,7 +279,9 @@ class TestBacktestDAO:
         mock_begin.__aexit__ = AsyncMock(return_value=False)
         dao.engine.begin = MagicMock(return_value=mock_begin)
 
-        success = await dao.delete_result("test_run_001")
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            success = await dao.delete_result("test_run_001")
 
         assert success is True
         mock_conn.execute.assert_called_once()
@@ -292,6 +296,66 @@ class TestBacktestDAO:
         mock_begin.__aexit__ = AsyncMock(return_value=False)
         dao.engine.begin = MagicMock(return_value=mock_begin)
 
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            success = await dao.delete_result("test_run_001")
+
+        assert success is False
+
+    @pytest.mark.asyncio
+    async def test_delete_result_engine_disposed(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock(side_effect=EngineDisposedError("disposed"))
+
         success = await dao.delete_result("test_run_001")
 
         assert success is False
+
+    @pytest.mark.asyncio
+    async def test_delete_result_cancelled_error_propagates(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        dao.engine.begin = MagicMock(return_value=mock_begin)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            with pytest.raises(asyncio.CancelledError):
+                await dao.delete_result("test_run_001")
+
+    @pytest.mark.asyncio
+    async def test_delete_result_shutdown_connection_error(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(side_effect=Exception("no active connection"))
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        dao.engine.begin = MagicMock(return_value=mock_begin)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            success = await dao.delete_result("test_run_001")
+
+        assert success is False
+
+    @pytest.mark.asyncio
+    async def test_delete_result_cache_manager_disposed(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_instance = MagicMock()
+            mock_instance._disposed = True
+            mock_cm._instance = mock_instance
+            success = await dao.delete_result("test_run_001")
+
+        assert success is False
+
+    @pytest.mark.asyncio
+    async def test_delete_result_engine_not_initialized(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock(side_effect=RuntimeError("Engine not initialized"))
+
+        with pytest.raises(RuntimeError, match="Engine not initialized"):
+            await dao.delete_result("test_run_001")

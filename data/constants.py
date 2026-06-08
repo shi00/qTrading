@@ -60,6 +60,8 @@ FINANCIAL_REPORT_SCHEMA_COLS = [
     "goodwill",
     "audit_result",
     "n_cashflow_act",  # 经营活动产生的现金流量净额
+    "money_cap",  # 货币资金
+    "accounts_receiv",  # 应收账款
 ]
 
 # Major Market Indices to Track

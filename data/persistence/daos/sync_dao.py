@@ -10,6 +10,7 @@ from data.constants import (
     SYNC_RESULT_SAVE_FAILED,
     SYNC_RESULT_SKIPPED_PERMISSION,
 )
+from data.persistence.models import StockSyncStatus, get_model_columns, get_model_pk_columns
 from utils.time_utils import get_now, parse_date
 
 from .base_dao import BaseDao
@@ -99,11 +100,22 @@ class SyncDao(BaseDao):
 
     async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):
         now = get_now().replace(tzinfo=None)
-        sql = '''INSERT INTO stock_sync_status ("ts_code","step4_completed_at","sync_version")
-               VALUES ($1, $2, $3)
-               ON CONFLICT("ts_code") DO UPDATE SET
-               "step4_completed_at"=excluded."step4_completed_at","sync_version"=excluded."sync_version"'''
-        await self._write_db(sql, [(ts_code, now, sync_version)], is_many=True, conn=conn)
+        df = pd.DataFrame(
+            [
+                {
+                    "ts_code": ts_code,
+                    "step4_completed_at": now,
+                    "sync_version": sync_version,
+                }
+            ]
+        )
+        await self._save_upsert(
+            df,
+            "stock_sync_status",
+            get_model_columns(StockSyncStatus),
+            pk_columns=get_model_pk_columns(StockSyncStatus),
+            conn=conn,
+        )
 
     async def clear_step4_sync_status(self):
         await self._write_db("DELETE FROM stock_sync_status")

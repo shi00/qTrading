@@ -24,13 +24,16 @@ from data.sync.financial import FinancialSyncStrategy
 class TestSyncTypeConsistency:
     """Test cases for type consistency in data synchronization."""
 
-    def test_financial_report_schema_cols_has_goodwill_and_audit_result(self):
-        assert "goodwill" in FINANCIAL_REPORT_SCHEMA_COLS, (
-            "FINANCIAL_REPORT_SCHEMA_COLS missing 'goodwill' - incremental sync will drop this field"
-        )
-        assert "audit_result" in FINANCIAL_REPORT_SCHEMA_COLS, (
-            "FINANCIAL_REPORT_SCHEMA_COLS missing 'audit_result' - incremental sync will drop this field"
-        )
+    def test_financial_report_schema_cols_matches_orm(self):
+        """FINANCIAL_REPORT_SCHEMA_COLS 必须与 ORM 模型列完全一致（排除时间戳）"""
+        from data.persistence.models import FinancialReports, get_model_columns
+
+        orm_cols = set(get_model_columns(FinancialReports))
+        schema_cols = set(FINANCIAL_REPORT_SCHEMA_COLS)
+        missing_in_schema = orm_cols - schema_cols
+        extra_in_schema = schema_cols - orm_cols
+        assert not missing_in_schema, f"FINANCIAL_REPORT_SCHEMA_COLS 缺少 ORM 字段: {missing_in_schema}"
+        assert not extra_in_schema, f"FINANCIAL_REPORT_SCHEMA_COLS 多出 ORM 不存在的字段: {extra_in_schema}"
 
     def test_get_cached_dates_for_table_has_all_critical_tables(self):
         critical_tables = [
