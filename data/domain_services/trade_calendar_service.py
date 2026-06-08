@@ -123,6 +123,8 @@ class TradeCalendarService:
             await self._cache.save_trade_cal(df)
             logger.debug(f"[TradeCalendarService] Persisted {len(df)} calendar records to DB")
             return True
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[TradeCalendarService] Failed to persist calendar data: {e}")
             return False
@@ -343,6 +345,8 @@ class TradeCalendarService:
 
         try:
             return await self._cache.stock_dao.count_trade_days(start_obj, end_obj)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[TradeCalendarService] count_trade_days failed, using list: {e}")
             dates = await self.get_trade_dates(start_obj, end_obj)
@@ -380,6 +384,8 @@ class TradeCalendarService:
 
             return rough_start
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[TradeCalendarService] get_start_date_by_trade_days failed: {e}")
             rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
@@ -525,6 +531,8 @@ class TradeCalendarService:
                     result = dates[-1]
                     self._latest_trade_date_cache = {"ts": now_ts, "val": result}
                     return result
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"[TradeCalendarService] get_latest_trade_date failed: {e}")
 

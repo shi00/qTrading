@@ -119,7 +119,7 @@ class ToastManager:
         try:
             await toast_card.start_timer()
         except asyncio.CancelledError:
-            pass  # Normal cancellation during shutdown
+            raise  # Normal cancellation during shutdown — must propagate for graceful teardown
 
     def _remove_toast(self, toast: "ToastCard") -> None:
         """Remove a toast from the stack."""
@@ -301,7 +301,7 @@ class ToastCard(ft.Container):
             if not self._is_cancelled:
                 await self.dismiss()
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as exc:
             logger.debug(f"[ToastManager] Auto-dismiss failed: {exc}")
 

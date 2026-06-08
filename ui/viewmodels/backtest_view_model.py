@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import date
@@ -177,6 +178,8 @@ class BacktestViewModel:
 
                 return I18n.get("backtest_success").format(sharpe=f"{result.metrics['sharpe_ratio']:.2f}")
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
                 if self.on_status:

@@ -551,8 +551,10 @@ class TaskManager:
                         completed_at=self._safe_dt(row.get("completed_at")),
                     )
                     self._history.append(t)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    logger.warning(f"[TaskManager] Skipping malformed history row: {e}")
+                    logger.warning("[TaskManager] Skipping malformed history row: %s", str(e))
             logger.info(
                 f"[TaskManager] Loaded {len(self._history)} historical task(s) from DB.",
             )
@@ -664,6 +666,8 @@ class TaskManager:
                 "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at"
             )
             await cache.write_db(sql, params)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug(f"[TaskManager] Persist failed (non-critical): {e}")
 
@@ -696,5 +700,7 @@ class TaskManager:
             stmt = TaskHistory.__table__.delete().where(TaskHistory.__table__.c.id.in_(task_ids))
             async with cm.engine.begin() as conn:  # type: ignore[union-attr]
                 await conn.execute(stmt)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug(f"[TaskManager] DB clear failed (non-critical): {e}")
