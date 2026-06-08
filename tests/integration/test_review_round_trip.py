@@ -101,10 +101,10 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         dao = ScreenerDao.__new__(ScreenerDao)
         dao.engine = MagicMock()
         dao.engine._disposed = False  # bypass _check_engine
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         mock_conn = AsyncMock()
-        dao.engine.begin = MagicMock()
-        dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        dao.engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.execute = AsyncMock()
 
         import asyncio
 
@@ -114,6 +114,7 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
                 pct=5.0,
                 label="WIN",
                 t1_price=10.5,
+                conn=mock_conn,
             )
         )
 
@@ -128,10 +129,10 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         dao = ScreenerDao.__new__(ScreenerDao)
         dao.engine = MagicMock()
         dao.engine._disposed = False  # bypass _check_engine
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
         mock_conn = AsyncMock()
-        dao.engine.begin = MagicMock()
-        dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        dao.engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.execute = AsyncMock()
 
         import asyncio
 
@@ -145,6 +146,7 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
                 t5_price=10.3,
                 index_pct=1.0,
                 alpha=2.0,
+                conn=mock_conn,
             )
         )
 
