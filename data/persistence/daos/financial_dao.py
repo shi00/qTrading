@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import pandas as pd
@@ -176,6 +177,8 @@ class FinancialDao(BaseDao):
                 )
 
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 "[FinancialDao] Failed to get financial history for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -242,6 +245,8 @@ class FinancialDao(BaseDao):
             if df is not None and not df.empty and "rn" in df.columns:
                 df = df.drop(columns=["rn"])
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get financial history batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -285,6 +290,8 @@ class FinancialDao(BaseDao):
                     """,
                     ts_codes,
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get audit batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -324,6 +331,8 @@ class FinancialDao(BaseDao):
                     """,
                     ts_codes,
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get dividend batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -365,6 +374,8 @@ class FinancialDao(BaseDao):
                     """,
                     ts_codes,
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get pledge batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -394,6 +405,8 @@ class FinancialDao(BaseDao):
                     (ts_code,),
                 )
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 "[FinancialDao] Failed to get fina_mainbz for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -442,6 +455,8 @@ class FinancialDao(BaseDao):
             if all_results:
                 return pd.concat(all_results, ignore_index=True)
             return pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get fina_mainbz batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -494,10 +509,14 @@ class FinancialDao(BaseDao):
                 )
                 count = df["cnt"].iloc[0] if df is not None and not df.empty else 0
                 result["tables"]["fina_audit"] = count
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.debug(f"[FinancialDao] fina_audit count query failed: {exc}")
                 result["tables"]["fina_audit"] = 0
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             result["valid"] = False
             result["error"] = str(e)
@@ -540,6 +559,8 @@ class FinancialDao(BaseDao):
             if df is not None and not df.empty:
                 return set(df["ts_code"])
             return set()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 "[FinancialDao] Failed to get incomplete financial stocks: %s", DataSanitizer.sanitize_error(e)

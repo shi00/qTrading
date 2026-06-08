@@ -289,8 +289,15 @@ class ScreenerDao(BaseDao):
         if conn is not None:
             await conn.execute(stmt)
         else:
-            async with self.engine.begin() as conn:
-                await conn.execute(stmt)
+            compiled = stmt.compile(
+                dialect=self.engine.dialect,
+                compile_kwargs={"literal_binds": False},
+            )
+            await self._write_db(
+                str(compiled),
+                tuple(compiled.params[key] for key in compiled.positiontup),  # type: ignore[union-attr]
+                suppress_errors=True,
+            )
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:

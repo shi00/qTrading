@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import re
@@ -212,6 +213,8 @@ class QuoteDao(BaseDao):
                 return False
             found_tables = set(df["tbl"].tolist())
             return found_tables == set(safe_tables)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             if raise_on_error:
                 raise
@@ -271,6 +274,8 @@ class QuoteDao(BaseDao):
                     return 0
                 return int(df["cnt"].iloc[0])
             return 0
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[QuoteDao] Failed to get expected stock count for {trade_date}: {e}")
             return 0
@@ -391,6 +396,8 @@ class QuoteDao(BaseDao):
             if df is None or df.empty:
                 return set()
             return set(df[date_col])
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 f"[QuoteDao] Failed to get cached dates for {table_name}: {e}",
@@ -748,6 +755,8 @@ class QuoteDao(BaseDao):
                 normalized_results[_normalize_trade_date(trade_date)] = count
 
             return normalized_results
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[QuoteDao] Failed to get bulk counts for {table_name}: {e}")
             return {}
@@ -815,6 +824,8 @@ class QuoteDao(BaseDao):
                 normalized_results[_normalize_trade_date(trade_date)] = count
 
             return normalized_results
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[QuoteDao] Failed to get bulk expected counts: {e}")
             return {}
@@ -972,6 +983,8 @@ class QuoteDao(BaseDao):
             if sorted_dates:
                 latest_date = max(sorted_dates)
                 field_completeness = await self.get_field_completeness(latest_date)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug(f"[QuoteDao] Field completeness check skipped: {e}")
 
@@ -1036,6 +1049,8 @@ class QuoteDao(BaseDao):
                         for col in ind_fields:
                             result[col] = None
                     return result
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug(f"[QuoteDao] get_field_completeness failed for {trade_date}: {e}")
         return {}

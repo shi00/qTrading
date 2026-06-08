@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import pandas as pd
@@ -67,6 +68,8 @@ class HolderDao(BaseDao):
                 """
                 await self._write_db(sql, tuple(chunk))
             logger.debug(f"[HolderDao] Calculated holder changes for {len(ts_codes)} stocks")
+        except asyncio.CancelledError:
+            raise
         except EngineDisposedError:
             raise
         except Exception as e:
@@ -119,6 +122,8 @@ class HolderDao(BaseDao):
                     (ts_code,),
                 )
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 "[HolderDao] Failed to get top10 holders for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -152,6 +157,8 @@ class HolderDao(BaseDao):
                     (ts_code,),
                 )
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 "[HolderDao] Failed to get holder number for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -195,6 +202,8 @@ class HolderDao(BaseDao):
                     """,
                     ts_codes,
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[HolderDao] Failed to get top10 holders batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -245,6 +254,8 @@ class HolderDao(BaseDao):
             if all_results:
                 return pd.concat(all_results, ignore_index=True)
             return pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("[HolderDao] Failed to get holder number batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -273,6 +284,8 @@ class HolderDao(BaseDao):
             if df is not None and not df.empty:
                 return set(df["ts_code"].tolist())
             return set()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(
                 "[HolderDao] Failed to get existing top10 ts_codes for period=%s: %s",

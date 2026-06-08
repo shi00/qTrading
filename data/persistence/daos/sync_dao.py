@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import date, datetime
 
@@ -92,6 +93,8 @@ class SyncDao(BaseDao):
             if df is not None and not df.empty:
                 return set(df["ts_code"])
             return set()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             if raise_on_error:
                 raise

@@ -125,17 +125,15 @@ class TestShutdownCoordinatorRunAsyncStep:
         assert result.ok is False
 
     @pytest.mark.asyncio
-    async def test_cancelled_step_returns_failed_result(self):
+    async def test_cancelled_step_raises(self):
         coord = ShutdownCoordinator()
-        result = await coord._run_async_step(
-            name="test",
-            step=AsyncMock(side_effect=asyncio.CancelledError()),
-            step_timeout_s=5.0,
-            critical=True,
-        )
-        assert result.ok is False
-        assert result.error == "cancelled"
-        assert result.timed_out is False
+        with pytest.raises(asyncio.CancelledError):
+            await coord._run_async_step(
+                name="test",
+                step=AsyncMock(side_effect=asyncio.CancelledError()),
+                step_timeout_s=5.0,
+                critical=True,
+            )
 
 
 class TestShutdownCoordinatorCleanupSteps:

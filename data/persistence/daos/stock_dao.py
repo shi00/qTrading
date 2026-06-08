@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 
@@ -199,9 +200,18 @@ class StockDao(BaseDao):
                     await conn.exec_driver_sql(sql_insert, params)
 
             return len(params)  # type: ignore[untyped]
+        except asyncio.CancelledError:
+            logger.warning("[StockDao] Cancelled during overwrite_concepts.")
+            raise
         except Exception as e:
+            err_str = str(e)
+            if any(
+                msg in err_str for msg in ["no active connection", "database is closed", "ConnectionDoesNotExistError"]
+            ):
+                logger.warning(f"[StockDao] DB closed during overwrite_concepts (shutdown): {e}")
+                return 0
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
-            raise e
+            raise
 
     async def clear_all_doubao_concepts(self) -> int:
         return await self._write_db(
@@ -276,6 +286,8 @@ class StockDao(BaseDao):
             if df is not None and not df.empty:
                 return df["cnt"].iloc[0] or 0
             return 0
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.debug(f"[StockDao] get_concept_count failed: {exc}")
             return 0

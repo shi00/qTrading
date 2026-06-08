@@ -205,19 +205,35 @@ class ShutdownCoordinator:
 
     async def _run_cleanup_steps(self, step_timeout_s: float) -> list[StepResult]:
         results: list[StepResult] = []
+        cancelled = False
         for name, method_name, critical in _CLEANUP_STEPS:
             step_func = getattr(self, method_name)
-            result = await self._run_async_step(
-                name=name,
-                step=step_func,
-                step_timeout_s=step_timeout_s,
-                critical=critical,
-            )
+            start = time.perf_counter()
+            try:
+                result = await self._run_async_step(
+                    name=name,
+                    step=step_func,
+                    step_timeout_s=step_timeout_s,
+                    critical=critical,
+                )
+            except asyncio.CancelledError:
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                result = StepResult(
+                    name=name,
+                    critical=critical,
+                    ok=False,
+                    timed_out=False,
+                    elapsed_ms=elapsed_ms,
+                    error="cancelled",
+                )
+                cancelled = True
             results.append(result)
             if critical and not result.ok:
                 logger.error(
                     f"[Shutdown] Critical step '{name}' failed. Continuing remaining steps to release resources."
                 )
+        if cancelled:
+            raise asyncio.CancelledError()
         return results
 
     async def _run_async_step(self, name: str, step, step_timeout_s: float, critical: bool) -> StepResult:
@@ -234,18 +250,9 @@ class ShutdownCoordinator:
                 elapsed_ms=elapsed_ms,
             )
         except asyncio.CancelledError:
-            # Intentionally not re-raising: shutdown steps must continue
-            # even if one step is cancelled, to release remaining resources.
             elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.warning(f"[Shutdown] {name} cancelled, continuing with remaining steps")
-            return StepResult(
-                name=name,
-                critical=critical,
-                ok=False,
-                timed_out=False,
-                elapsed_ms=elapsed_ms,
-                error="cancelled",
-            )
+            logger.warning(f"[Shutdown] {name} cancelled")
+            raise
         except TimeoutError as ex:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.error(f"[Shutdown] {name} timed out after {step_timeout_s:.1f}s")

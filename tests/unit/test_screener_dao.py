@@ -251,16 +251,11 @@ class TestScreenerDaoGetLearningContext:
 class TestScreenerDaoUpdatePredictionResult:
     @pytest.mark.asyncio
     async def test_basic(self):
-        mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock()
-        mock_begin = AsyncMock()
-        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_begin.__aexit__ = AsyncMock(return_value=False)
         mock_engine = MagicMock()
-        mock_engine.begin = MagicMock(return_value=mock_begin)
         dao = ScreenerDao(mock_engine)
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        dao._write_db = AsyncMock(return_value=1)
         await dao.update_prediction_result(
             record_id=1,
             pct=5.0,
@@ -271,27 +266,22 @@ class TestScreenerDaoUpdatePredictionResult:
             index_pct=1.0,
             alpha=4.0,
         )
-        mock_conn.execute.assert_called_once()
+        dao._write_db.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_with_review_status(self):
-        mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock()
-        mock_begin = AsyncMock()
-        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_begin.__aexit__ = AsyncMock(return_value=False)
         mock_engine = MagicMock()
-        mock_engine.begin = MagicMock(return_value=mock_begin)
         dao = ScreenerDao(mock_engine)
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        dao._write_db = AsyncMock(return_value=1)
         await dao.update_prediction_result(
             record_id=1,
             pct=5.0,
             label="WIN",
             review_status="completed",
         )
-        mock_conn.execute.assert_called_once()
+        dao._write_db.assert_called_once()
 
 
 class TestScreenerDaoSaveScreeningResults:
@@ -453,20 +443,15 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
 
     @pytest.mark.asyncio
     async def test_default_status_t1_done_when_no_t5(self):
-        mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock()
-        mock_begin = AsyncMock()
-        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_begin.__aexit__ = AsyncMock(return_value=False)
         mock_engine = MagicMock()
-        mock_engine.begin = MagicMock(return_value=mock_begin)
         dao = ScreenerDao(mock_engine)
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        dao._write_db = AsyncMock(return_value=1)
         with patch("data.persistence.daos.screener_dao.sa.update") as mock_update:
             mock_update.return_value.where.return_value.values.return_value = MagicMock()
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
-        mock_conn.execute.assert_called_once()
+        dao._write_db.assert_called_once()
 
 
 class TestScreenerDaoSaveScreeningResultsTuple:

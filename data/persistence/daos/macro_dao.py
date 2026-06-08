@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import pandas as pd
@@ -86,6 +87,8 @@ class MacroDao(BaseDao):
                     'SELECT date, "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y" FROM shibor_daily ORDER BY date DESC LIMIT 1'
                 )
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[MacroDao] Failed to get shibor latest: {e}")
             return pd.DataFrame()
@@ -112,6 +115,8 @@ class MacroDao(BaseDao):
                     "SELECT period, m2, m2_yoy, m1, m1_yoy, cpi, ppi FROM macro_economy ORDER BY period DESC LIMIT 1"
                 )
             return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"[MacroDao] Failed to get macro economy latest: {e}")
             return pd.DataFrame()
