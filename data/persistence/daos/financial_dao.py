@@ -270,7 +270,7 @@ class FinancialDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await BaseDao.chunked_in_query(
+                return await self.chunked_in_query(
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code)
@@ -311,7 +311,7 @@ class FinancialDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await BaseDao.chunked_in_query(
+                return await self.chunked_in_query(
                     self._read_db,
                     """
                     SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
@@ -351,7 +351,7 @@ class FinancialDao(BaseDao):
                     return pd.concat(all_results, ignore_index=True)
                 return pd.DataFrame()
             else:
-                return await BaseDao.chunked_in_query(
+                return await self.chunked_in_query(
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code)

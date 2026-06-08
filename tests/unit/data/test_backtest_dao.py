@@ -269,16 +269,28 @@ class TestBacktestDAO:
 
     @pytest.mark.asyncio
     async def test_delete_result_success(self, dao: BacktestDAO) -> None:
-        dao._write_db = AsyncMock()
+        dao._check_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        dao.engine.begin = MagicMock(return_value=mock_begin)
 
         success = await dao.delete_result("test_run_001")
 
         assert success is True
-        dao._write_db.assert_called_once()
+        mock_conn.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_delete_result_failure(self, dao: BacktestDAO) -> None:
-        dao._write_db = AsyncMock(side_effect=Exception("DB error"))
+        dao._check_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(side_effect=Exception("DB error"))
+        mock_begin = AsyncMock()
+        mock_begin.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_begin.__aexit__ = AsyncMock(return_value=False)
+        dao.engine.begin = MagicMock(return_value=mock_begin)
 
         success = await dao.delete_result("test_run_001")
 

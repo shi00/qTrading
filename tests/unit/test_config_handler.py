@@ -1422,15 +1422,19 @@ class TestSaveDbConfig:
     @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_syncs_config_db_url(self, mock_save, mock_pw):
-        """save_db_config 必须同步更新 config.DB_URL / DB_URL_SYNC"""
+        """save_db_config 必须保存 db 组件，get_db_url 从组件重建 URL"""
         from data.persistence.db_config_service import DatabaseConfigService
 
         built_url = "postgresql+asyncpg://admin:secret@dbhost:5433/testdb"
         with patch.object(DatabaseConfigService, "build_url", return_value=built_url):
             cfg_mod.ConfigHandler.save_db_config("dbhost", 5433, "admin", "secret", "testdb")
-        # save_db_config() assigns config.DB_URL directly; verify it was set
-        assert built_url == cfg_mod.config.DB_URL
-        assert cfg_mod.config.DB_URL_SYNC == "postgresql://admin:secret@dbhost:5433/testdb"
+        # save_db_config() no longer mutates config.DB_URL; components are saved
+        # and get_db_url() rebuilds the URL from them
+        saved_data = mock_save.call_args[0][0]
+        assert saved_data["db_host"] == "dbhost"
+        assert saved_data["db_port"] == 5433
+        assert saved_data["db_user"] == "admin"
+        assert saved_data["db_name"] == "testdb"
 
     @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
