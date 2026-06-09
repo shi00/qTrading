@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -7,6 +9,7 @@ from data.external.news_fetcher import (
     _run_with_python_string_storage,
     _US_MOVES_CACHE,
     _SINA_CONSECUTIVE_EMPTY,
+    _SINA_CONSECUTIVE_FAILURES,
     _SINA_EMPTY_THRESHOLD,
 )
 
@@ -17,11 +20,13 @@ def clean_global_caches():
     _SINA_CONSECUTIVE_EMPTY.clear()
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+    _SINA_CONSECUTIVE_FAILURES["concept"] = 0
     yield
     _US_MOVES_CACHE.clear()
     _SINA_CONSECUTIVE_EMPTY.clear()
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+    _SINA_CONSECUTIVE_FAILURES["concept"] = 0
 
 
 class TestRunWithPythonStringStorage:
@@ -507,13 +512,14 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_none_df(self, mock_tpm):
+    async def test_none_df_raises(self, mock_tpm):
+        """df is None means data source failure — must raise, not return []."""
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=None)
 
-        result = await NewsFetcher.get_hot_concepts()
-        assert result == []
+        with pytest.raises(RuntimeError, match="returned None"):
+            await NewsFetcher.get_hot_concepts()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
@@ -600,26 +606,47 @@ class TestGetHotConcepts:
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
     @patch("data.external.news_fetcher.ak")
-    async def test_sina_exception(self, mock_ak, mock_run, mock_tpm):
+    async def test_sina_exception_raises(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_sector_spot.side_effect = Exception("sina error")
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("sina error"))
 
-        result = await NewsFetcher.get_hot_concepts()
-        assert result == []
+        with pytest.raises(Exception, match="sina error"):
+            await NewsFetcher.get_hot_concepts()
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
     @patch("data.external.news_fetcher.ak")
-    async def test_general_exception(self, mock_ak, mock_run, mock_tpm):
+    async def test_general_exception_raises(self, mock_ak, mock_run, mock_tpm):
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("general error"))
 
-        result = await NewsFetcher.get_hot_concepts()
-        assert result == []
+        with pytest.raises(Exception, match="general error"):
+            await NewsFetcher.get_hot_concepts()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_timeout_raises(self, mock_tpm):
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+        # asyncio.wait_for wraps CancelledError into TimeoutError
+        with pytest.raises((TimeoutError, asyncio.CancelledError)):
+            await NewsFetcher.get_hot_concepts()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_cancelled_error_propagates(self, mock_tpm):
+        """CancelledError must always propagate (R2: graceful shutdown)."""
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        # Simulate wait_for raising CancelledError (which it does when the inner task is cancelled)
+        with patch("asyncio.wait_for", side_effect=asyncio.CancelledError()):
+            with pytest.raises(asyncio.CancelledError):
+                await NewsFetcher.get_hot_concepts()
 
 
 class TestNewsFetcherGetLatestGlobalNews:
@@ -712,13 +739,13 @@ class TestGetHotConceptsTimeout:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_timeout_returns_empty(self, mock_tpm, mock_run):
+    async def test_timeout_raises(self, mock_tpm, mock_run):
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
 
-        result = await NewsFetcher.get_hot_concepts(limit=3)
-        assert result == []
+        with pytest.raises(TimeoutError):
+            await NewsFetcher.get_hot_concepts(limit=3)
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher._run_with_python_string_storage")
@@ -767,9 +794,10 @@ class TestSinaConsecutiveEmptyAlert:
     @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_concept_empty_increments_counter(self, mock_tpm, mock_run):
+        """Empty DataFrame (not None) should increment empty counter and return []."""
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=None)
+        mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame())
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
@@ -1122,8 +1150,8 @@ class TestGetHotConceptsDirectExecution:
             mock_tpm.return_value = mock_tpm_instance
             mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-            result = await NewsFetcher.get_hot_concepts(limit=3)
-        assert result == []
+            with pytest.raises(Exception, match="sina error"):
+                await NewsFetcher.get_hot_concepts(limit=3)
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ak")

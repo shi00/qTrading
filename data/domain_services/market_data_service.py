@@ -218,9 +218,11 @@ class MarketDataService:
         hsgt = results[1] if not isinstance(results[1], Exception) else MarketDataService._get_empty_hsgt_data_static()
         if isinstance(results[1], Exception):
             logger.warning(f"[MarketDataService] HSGT fetch failed: {results[1]}")
-        hot_concepts = results[2] if not isinstance(results[2], Exception) else []
+        hot_concepts = results[2] if not isinstance(results[2], Exception) else None
         if isinstance(results[2], Exception):
             logger.warning(f"[MarketDataService] Hot concepts fetch failed: {results[2]}")
+            # Preserve previous hot_concepts on failure; only update on success
+            hot_concepts = self._cached_data.get("hot_concepts", []) if self._cached_data else []
 
         self._cached_data = {
             "date": date,

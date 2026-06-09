@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 _US_MOVES_CACHE: TTLCache = TTLCache(maxsize=1, ttl=300)
 _US_MOVES_CACHE_LOCK = threading.Lock()  # Thread-safe lock for TTLCache access
 _SINA_CONSECUTIVE_EMPTY = {"us_api": 0, "concept": 0}
+_SINA_CONSECUTIVE_FAILURES = {"concept": 0}
 _SINA_EMPTY_THRESHOLD = 3
+_SINA_FAILURE_ERROR_INTERVAL = 3
+_HOT_CONCEPTS_TIMEOUT_SECONDS = 15.0
 
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
@@ -436,70 +439,118 @@ class NewsFetcher:
         """
         Get top performing concept boards.
         Uses Sina Finance (verified working, not blocked).
+
+        Returns:
+            list[dict] on success (may be empty if source returns no data).
+            Raises TimeoutError/Exception on failure so caller can decide fallback.
         """
+
+        def _fetch():
+            # Sina Finance - Concept Boards
+            # ProxyManager already whitelists domestic domains via NO_PROXY at startup
+            return _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念"))
+
         try:
-
-            def _fetch():
-                # Sina Finance - Concept Boards
-                # ProxyManager already whitelists domestic domains via NO_PROXY at startup
-                try:
-                    return _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念"))
-                except Exception as e:
-                    logger.warning("[News] Sina Concept Boards failed: %s", DataSanitizer.sanitize_error(e))
-                    return None
-
             # Use Global IO Pool with timeout to prevent hanging on unresponsive API
             df = await asyncio.wait_for(
                 ThreadPoolManager().run_async(TaskType.IO, _fetch),
-                timeout=10.0,
+                timeout=_HOT_CONCEPTS_TIMEOUT_SECONDS,
             )
-
-            if df is None or df.empty:
-                _SINA_CONSECUTIVE_EMPTY["concept"] += 1
-                count = _SINA_CONSECUTIVE_EMPTY["concept"]
-                if count >= _SINA_EMPTY_THRESHOLD:
-                    logger.error(
-                        "[News] Concept boards data empty %d consecutive times. Data source may be degraded.",
-                        count,
-                    )
-                return []
-
-            _SINA_CONSECUTIVE_EMPTY["concept"] = 0
-
-            # Sina returns: 板块, 涨跌幅
-            if "涨跌幅" in df.columns:
-                df = df.sort_values("涨跌幅", ascending=False)
-
-            results = []
-            for _, row in df.head(limit if limit is not None else len(df)).iterrows():
-                name = row.get("板块", "")
-                if not name:
-                    continue
-
-                try:
-                    raw_val = row.get("涨跌幅", 0)
-                    # Handle NaN from pandas
-                    if pd.isna(raw_val):  # type: ignore[union-attr]
-                        change_val = 0.0
-                    else:
-                        change_val = float(raw_val)  # type: ignore[arg-type]
-                    change_str = f"{change_val:.2f}%"
-                except (ValueError, TypeError):
-                    change_str = "0.00%"
-                    change_val = 0.0
-
-                # Color: red=up, green=down, gray=flat
-                if change_val > 0:
-                    color = "red"
-                elif change_val < 0:
-                    color = "green"
-                else:
-                    color = "grey"
-
-                results.append({"name": name, "change": change_str, "color": color})
-
-            return results
-
+        except asyncio.CancelledError:
+            logger.warning("[News] Hot concepts fetch cancelled during shutdown.")
+            raise
+        except TimeoutError:
+            _SINA_CONSECUTIVE_FAILURES["concept"] += 1
+            count = _SINA_CONSECUTIVE_FAILURES["concept"]
+            if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
+                logger.error(
+                    "[News] Hot concepts fetch timed out (%.0fs). Consecutive failures: %d. Data source may be degraded.",
+                    _HOT_CONCEPTS_TIMEOUT_SECONDS,
+                    count,
+                )
+            else:
+                logger.warning(
+                    "[News] Hot concepts fetch timed out (%.0fs). Consecutive failures: %d.",
+                    _HOT_CONCEPTS_TIMEOUT_SECONDS,
+                    count,
+                )
+            raise
         except Exception as e:
-            logger.error("[News] Error fetching hot concepts: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            _SINA_CONSECUTIVE_FAILURES["concept"] += 1
+            count = _SINA_CONSECUTIVE_FAILURES["concept"]
+            if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
+                logger.error(
+                    "[News] Hot concepts fetch failed (%d consecutive). Error: %s",
+                    count,
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "[News] Hot concepts fetch failed (%d consecutive). Error: %s",
+                    count,
+                    DataSanitizer.sanitize_error(e),
+                )
+            raise
+
+        if df is None:
+            # None means the underlying call returned nothing usable — treat as failure
+            _SINA_CONSECUTIVE_FAILURES["concept"] += 1
+            count = _SINA_CONSECUTIVE_FAILURES["concept"]
+            logger.warning(
+                "[News] Hot concepts fetch returned None. Consecutive failures: %d.",
+                count,
+            )
+            if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
+                logger.error(
+                    "[News] Hot concepts fetch returned None %d consecutive times. Data source may be degraded.",
+                    count,
+                )
+            raise RuntimeError("Hot concepts data source returned None")
+
+        if df.empty:
+            _SINA_CONSECUTIVE_EMPTY["concept"] += 1
+            count = _SINA_CONSECUTIVE_EMPTY["concept"]
+            if count >= _SINA_EMPTY_THRESHOLD:
+                logger.error(
+                    "[News] Concept boards data empty %d consecutive times. Data source may be degraded.",
+                    count,
+                )
             return []
+
+        _SINA_CONSECUTIVE_EMPTY["concept"] = 0
+        _SINA_CONSECUTIVE_FAILURES["concept"] = 0
+
+        # Sina returns: 板块, 涨跌幅
+        if "涨跌幅" in df.columns:
+            df = df.sort_values("涨跌幅", ascending=False)
+
+        results = []
+        for _, row in df.head(limit if limit is not None else len(df)).iterrows():
+            name = row.get("板块", "")
+            if not name:
+                continue
+
+            try:
+                raw_val = row.get("涨跌幅", 0)
+                # Handle NaN from pandas
+                if pd.isna(raw_val):  # type: ignore[union-attr]
+                    change_val = 0.0
+                else:
+                    change_val = float(raw_val)  # type: ignore[arg-type]
+                change_str = f"{change_val:.2f}%"
+            except (ValueError, TypeError):
+                change_str = "0.00%"
+                change_val = 0.0
+
+            # Color: red=up, green=down, gray=flat
+            if change_val > 0:
+                color = "red"
+            elif change_val < 0:
+                color = "green"
+            else:
+                color = "grey"
+
+            results.append({"name": name, "change": change_str, "color": color})
+
+        return results

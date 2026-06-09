@@ -477,6 +477,60 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
         listener.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_hot_concepts_failure_preserves_previous(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
+        """When hot concepts fetch fails, previous cached hot_concepts should be preserved."""
+        mock_cache = MagicMock()
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
+        svc = MarketDataService()
+        svc.cache = mock_cache
+        svc.api = mock_tc
+
+        index_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [1.0],
+                "close": [3000.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=index_df)
+        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        svc.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+
+        # First call: hot concepts succeeds
+        previous_concepts = [{"name": "AI", "change": "+3%", "color": "red"}]
+        mock_news.get_hot_concepts = AsyncMock(return_value=previous_concepts)
+
+        with patch("data.domain_services.market_data_service.TradeCalendarService") as mock_cal_cls:
+            mock_cal = MagicMock()
+            mock_cal.get_latest_trade_date = AsyncMock(return_value=None)
+            mock_cal_cls.return_value = mock_cal
+            svc.trade_calendar = mock_cal
+
+            await svc._fetch_market_data()
+
+        assert svc._cached_data["hot_concepts"] == previous_concepts
+
+        # Second call: hot concepts fails — should preserve previous
+        mock_news.get_hot_concepts = AsyncMock(side_effect=TimeoutError("timeout"))
+
+        with patch("data.domain_services.market_data_service.TradeCalendarService") as mock_cal_cls:
+            mock_cal = MagicMock()
+            mock_cal.get_latest_trade_date = AsyncMock(return_value=None)
+            mock_cal_cls.return_value = mock_cal
+            svc.trade_calendar = mock_cal
+
+            await svc._fetch_market_data()
+
+        assert svc._cached_data["hot_concepts"] == previous_concepts
+
 
 class TestMarketDataServiceGetHsgt:
     def setup_method(self):
