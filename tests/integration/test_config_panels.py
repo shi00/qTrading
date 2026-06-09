@@ -319,7 +319,9 @@ class TestConfigPanelsIntegration:
         def on_change():
             callback_called.append(True)
 
-        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), on_change=on_change, show_save_button=False)
+        panel = LocalModelConfigPanel(
+            on_verify_model=AsyncMock(return_value=True), on_change=on_change, show_save_button=False
+        )
 
         panel._on_input_change(None)
 
@@ -1012,7 +1014,9 @@ class TestLocalModelConfigPanelVerificationState:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(side_effect=Exception("Test error")), show_save_button=False)
+        panel = LocalModelConfigPanel(
+            on_verify_model=AsyncMock(side_effect=Exception("Test error")), show_save_button=False
+        )
         panel.page = mock_page
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.gguf"
