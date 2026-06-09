@@ -270,6 +270,7 @@ class OnboardingWizard(ft.Container):
 
     def _init_cloud_ai_controls(self):  # pragma: no cover
         self.llm_config_panel = LLMConfigPanel(
+            on_test_connection=self._on_llm_test_connection,
             show_save_button=False,
             compact=True,
             on_loading_change=self._on_panel_loading_change,
@@ -277,6 +278,7 @@ class OnboardingWizard(ft.Container):
 
     def _init_local_model_controls(self):  # pragma: no cover
         self.local_model_panel = LocalModelConfigPanel(
+            on_verify_model=self._on_verify_local_model,
             show_save_button=False,
             compact=True,
             show_internal_loading=False,
@@ -288,6 +290,32 @@ class OnboardingWizard(ft.Container):
         """通用面板加载状态回调 - 仅控制遮罩显隐"""
         self._show_loading_overlay(loading)
         self._safe_update()
+
+    async def _on_llm_test_connection(
+        self,
+        provider: str,
+        model: str,
+        base_url: str,
+        api_key: str,
+        **kwargs,
+    ) -> dict:
+        """LLM 连接测试回调"""
+        from services.ai_service import AIService
+
+        return await AIService.test_connection(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            **kwargs,
+        )
+
+    async def _on_verify_local_model(self, model_path: str, config: dict) -> bool:
+        """验证本地模型回调"""
+        from services.local_model_manager import LocalModelManager
+
+        manager = await LocalModelManager.get_instance()
+        return await manager.load_model(model_path, config)
 
     def _init_sync_controls(self):  # pragma: no cover
         self.sync_progress = ft.ProgressBar(  # pragma: no cover

@@ -140,12 +140,14 @@ def _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, **kwargs):
 
 
 def _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, **kwargs):
+    kwargs.setdefault("on_test_connection", AsyncMock(return_value={"success": True}))
     panel = LLMConfigPanel(**kwargs)
     panel.page = mock_page
     return panel
 
 
 def _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, **kwargs):
+    kwargs.setdefault("on_verify_model", AsyncMock(return_value=True))
     panel = LocalModelConfigPanel(**kwargs)
     panel.page = mock_page
     return panel
@@ -323,8 +325,8 @@ class TestLLMConfigPanel:
         panel.model_dropdown.value = "deepseek-chat"
         panel.base_url_input.value = "https://api.deepseek.com"
 
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "update"):
-            mock_ai.return_value.reload_config = AsyncMock()
+        panel.on_reload_service = AsyncMock()
+        with patch.object(panel, "update"):
             await panel._save_config()
 
         mock_config_handler_llm.save_llm_config.assert_called_once()
@@ -508,8 +510,8 @@ class TestLLMConfigPanel:
         panel.model_dropdown.value = "deepseek-chat"
         panel.base_url_input.value = " https://api.deepseek.com/v1/chat/completions "
 
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "update"):
-            mock_ai.return_value.reload_config = AsyncMock()
+        panel.on_reload_service = AsyncMock()
+        with patch.object(panel, "update"):
             await panel._save_config()
 
         call_kwargs = mock_config_handler_llm.save_llm_config.call_args.kwargs
@@ -703,18 +705,13 @@ class TestLocalModelConfigPanel:
         panel.model_path_input.value = "/models/test.gguf"
         panel.timeout_input.value = "300"
 
-        mock_manager = MagicMock()
-        mock_manager.load_model = AsyncMock(return_value=True)
-
         with (
             patch("os.path.exists", return_value=True),
             patch("os.path.isfile", return_value=True),
             patch("os.path.getsize", return_value=1024),
-            patch("services.local_model_manager.LocalModelManager") as mock_lm_cls,
             patch("asyncio.sleep"),
             patch.object(panel, "_safe_update"),
         ):
-            mock_lm_cls.get_instance = AsyncMock(return_value=mock_manager)
             result = await panel.async_verify_model()
 
         assert result is True
@@ -1290,23 +1287,11 @@ class TestLLMConfigPanelExtended:
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
         with (
-            patch("services.ai_service._classify_api_error", return_value="network"),
+            patch("utils.error_classifier.classify_error", return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True}),
             patch("utils.error_classifier.get_error_message", return_value="Network error"),
             patch.object(panel, "_safe_update"),
         ):
             await panel._on_llm_test_connection()
-
-    @pytest.mark.asyncio
-    async def test_on_llm_test_connection_calls_default_service(
-        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
-    ):
-        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
-        panel.api_key_input.value = "sk-test"
-        panel.model_dropdown.value = "deepseek-chat"
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "_safe_update"):
-            mock_ai.test_connection = AsyncMock(return_value={"success": True})
-            await panel._on_llm_test_connection()
-            mock_ai.test_connection.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_async_verify_connection_azure_missing_resource(
@@ -1400,8 +1385,8 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "_safe_update"):
-            mock_ai.test_connection = AsyncMock(return_value={"success": True})
+        panel.on_test_connection = AsyncMock(return_value={"success": True})
+        with patch.object(panel, "_safe_update"):
             result = await panel.async_verify_connection()
         assert result is True
         assert panel._is_verifying is False
@@ -1413,8 +1398,8 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "_safe_update"):
-            mock_ai.test_connection = AsyncMock(return_value={"success": False, "message": "auth failed"})
+        panel.on_test_connection = AsyncMock(return_value={"success": False, "message": "auth failed"})
+        with patch.object(panel, "_safe_update"):
             result = await panel.async_verify_connection()
         assert result is False
 
@@ -1425,13 +1410,12 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
+        panel.on_test_connection = AsyncMock(side_effect=Exception("network error"))
         with (
-            patch("services.ai_service.AIService") as mock_ai,
-            patch("services.ai_service._classify_api_error", return_value="network"),
+            patch("utils.error_classifier.classify_error", return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True}),
             patch("utils.error_classifier.get_error_message", return_value="Network error"),
             patch.object(panel, "_safe_update"),
         ):
-            mock_ai.test_connection = AsyncMock(side_effect=Exception("network error"))
             result = await panel.async_verify_connection()
         assert result is False
 
@@ -1484,8 +1468,8 @@ class TestLLMConfigPanelExtended:
         panel._api_key_modified = False
         panel.model_dropdown.value = "deepseek-custom-model"
         panel.custom_model_input.value = "deepseek-custom-model"
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "update"):
-            mock_ai.return_value.reload_config = AsyncMock()
+        panel.on_reload_service = AsyncMock()
+        with patch.object(panel, "update"):
             await panel._save_config()
         call_kwargs = mock_config_handler_llm.save_llm_config.call_args.kwargs
         assert "custom_models" in call_kwargs
@@ -1505,8 +1489,8 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel._api_key_modified = False
         panel.custom_model_input.value = "my-model"
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "update"):
-            mock_ai.return_value.reload_config = AsyncMock()
+        panel.on_reload_service = AsyncMock()
+        with patch.object(panel, "update"):
             await panel._save_config()
         call_kwargs = mock_config_handler_llm.save_llm_config.call_args.kwargs
         assert "custom_models" in call_kwargs
@@ -1532,8 +1516,8 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_save=on_save)
         panel._api_key_modified = False
         panel.model_dropdown.value = "deepseek-chat"
-        with patch("services.ai_service.AIService") as mock_ai, patch.object(panel, "update"):
-            mock_ai.return_value.reload_config = AsyncMock()
+        panel.on_reload_service = AsyncMock()
+        with patch.object(panel, "update"):
             await panel._save_config()
         on_save.assert_called_once()
 
@@ -1760,10 +1744,9 @@ class TestLocalModelConfigPanelExtended:
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
         panel.model_path_input.value = "/path/to/model.gguf"
         panel.timeout_input.value = "300"
+        panel.on_verify_model = AsyncMock(side_effect=Exception("load error"))
         with patch("os.path.exists", return_value=True):
-            with patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance:
-                mock_get_instance.side_effect = Exception("load error")
-                result = await panel.async_verify_model()
+            result = await panel.async_verify_model()
         assert result is False
 
     def test_show_success(self, mock_config_handler_local, mock_i18n_local, mock_page):
@@ -2008,3 +1991,97 @@ class TestTushareConfigPanelExtended:
         )
         panel._set_loading_state(True)
         on_loading.assert_called_with(True)
+
+
+class TestCallbackInjection:
+    """验证回调注入机制：Component 通过回调调用 Service，而非直接导入。"""
+
+    @pytest.mark.asyncio
+    async def test_on_test_connection_callback_called_with_correct_params(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        mock_callback = AsyncMock(return_value={"success": True})
+        panel = _make_llm_panel(
+            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page,
+            on_test_connection=mock_callback,
+        )
+        panel.api_key_input.value = "sk-test"
+        panel.model_dropdown.value = "deepseek-chat"
+        with patch.object(panel, "_safe_update"):
+            await panel._on_llm_test_connection()
+        mock_callback.assert_called_once()
+        call_kwargs = mock_callback.call_args
+        assert call_kwargs.kwargs["provider"] == "deepseek"
+        assert call_kwargs.kwargs["model"] == "deepseek-chat"
+        assert call_kwargs.kwargs["api_key"] == "sk-test"
+
+    @pytest.mark.asyncio
+    async def test_on_reload_service_called_after_save(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        mock_reload = AsyncMock()
+        panel = _make_llm_panel(
+            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page,
+            on_reload_service=mock_reload,
+        )
+        panel.api_key_input.value = "sk-test"
+        panel.model_dropdown.value = "deepseek-chat"
+        with patch.object(panel, "_safe_update"):
+            await panel._save_config()
+        mock_reload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_verify_model_callback_called_with_correct_params(
+        self, mock_config_handler_local, mock_i18n_local, mock_page
+    ):
+        mock_callback = AsyncMock(return_value=True)
+        panel = _make_local_panel(
+            mock_config_handler_local, mock_i18n_local, mock_page,
+            on_verify_model=mock_callback,
+        )
+        panel.model_path_input.value = "C:/path/to/model.gguf"
+        with (
+            patch("os.path.exists", return_value=True),
+            patch.object(panel, "_safe_update"),
+            patch.object(panel, "_show_success"),
+        ):
+            await panel.async_verify_model()
+        mock_callback.assert_called_once()
+        call_args = mock_callback.call_args
+        assert call_args.args[0] == "C:/path/to/model.gguf"
+        assert isinstance(call_args.args[1], dict)
+
+    @pytest.mark.asyncio
+    async def test_async_verify_connection_uses_callback_not_service(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        mock_callback = AsyncMock(return_value={"success": True})
+        panel = _make_llm_panel(
+            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page,
+            on_test_connection=mock_callback,
+        )
+        panel.api_key_input.value = "sk-test"
+        panel.model_dropdown.value = "deepseek-chat"
+        with patch.object(panel, "_safe_update"):
+            result = await panel.async_verify_connection()
+        assert result is True
+        mock_callback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_verify_model_uses_callback_not_service(
+        self, mock_config_handler_local, mock_i18n_local, mock_page
+    ):
+        mock_callback = AsyncMock(return_value=True)
+        panel = _make_local_panel(
+            mock_config_handler_local, mock_i18n_local, mock_page,
+            on_verify_model=mock_callback,
+        )
+        panel.model_path_input.value = "C:/path/to/model.gguf"
+        with (
+            patch("os.path.exists", return_value=True),
+            patch.object(panel, "_safe_update"),
+            patch.object(panel, "_show_success"),
+        ):
+            result = await panel.async_verify_model()
+        assert result is True
+        mock_callback.assert_called_once()

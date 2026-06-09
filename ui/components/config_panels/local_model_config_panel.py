@@ -11,7 +11,7 @@ Provides a unified UI for configuring local GGUF models with:
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import flet as ft
 
@@ -37,15 +37,19 @@ class LocalModelConfigPanel(ft.Container):
     - i18n support with hot reload
 
     Args:
+        on_verify_model: Callback to verify a local model (required)
         on_verify_success: Callback when verification succeeds (optional)
         on_save: Callback when configuration is saved (optional)
         on_change: Callback when any input changes (optional)
+        on_loading_change: Callback when loading state changes (optional)
         show_save_button: Whether to show the save button (default: False)
         compact: Whether to use compact layout for wizard (default: False)
+        show_internal_loading: Whether to show internal loading indicator (default: True)
     """
 
     def __init__(  # pragma: no cover
         self,
+        on_verify_model: Callable[[str, dict], Awaitable[bool]],
         on_verify_success: Callable | None = None,
         on_save: Callable | None = None,
         on_change: Callable | None = None,
@@ -57,6 +61,7 @@ class LocalModelConfigPanel(ft.Container):
     ):
         super().__init__(**kwargs)
 
+        self.on_verify_model = on_verify_model
         self.on_verify_success = on_verify_success
         self.on_save = on_save
         self.on_change = on_change
@@ -412,15 +417,12 @@ class LocalModelConfigPanel(ft.Container):
         try:
             import asyncio
 
-            from services.local_model_manager import LocalModelManager
-
             # Ensure Flet renders the loading mask even if the
             # model is cached and returns instantly
             await asyncio.sleep(0.5)
 
             config = self.get_current_config()
-            manager = await LocalModelManager.get_instance()
-            success = await manager.load_model(model_path, config)
+            success = await self.on_verify_model(model_path, config)
 
             if not success:
                 self._show_error(I18n.get("wizard_err_model_load_failed"))

@@ -9,7 +9,7 @@ Provides UI for configuring LLM failover providers:
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import flet as ft
@@ -43,10 +43,12 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self,
         page: ft.Page | None = None,
         on_confirm: Callable | None = None,
+        on_test_connection: Callable[..., Awaitable[dict]] | None = None,
         edit_item: FailoverItem | None = None,
         existing_providers: list[str] | None = None,
     ):
         self._on_confirm = on_confirm
+        self._on_test_connection = on_test_connection
         self._edit_item = edit_item
         self._existing_providers = existing_providers or []
         self._provider = edit_item.provider if edit_item else ""
@@ -125,16 +127,21 @@ class ProviderCredentialDialog(ft.AlertDialog):
                 text=I18n.get("btn_cancel", "取消"),
                 on_click=self._on_cancel,
             ),
-            ft.TextButton(
-                text=I18n.get("failover_test_connection", "测试连接"),
-                on_click=self._on_test_connection,
-            ),
+        ]
+        if self._on_test_connection:
+            self.actions.append(
+                ft.TextButton(
+                    text=I18n.get("failover_test_connection", "测试连接"),
+                    on_click=self._on_test_connection,
+                ),
+            )
+        self.actions.append(
             ft.ElevatedButton(
                 text=I18n.get("btn_confirm", "确定"),
                 on_click=self._on_confirm_click,
                 style=AppStyles.primary_button(),
             ),
-        ]
+        )
 
     def _populate_edit_data(self):
         if self._edit_item is None:
@@ -245,10 +252,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if not provider or not model or not api_key:
             return
 
-        try:
-            from services.ai_service import AIService
+        if not self._on_test_connection:
+            return
 
-            result = await AIService.test_connection(
+        try:
+            result = await self._on_test_connection(
                 provider=provider,
                 model=model,
                 base_url=base_url,
@@ -335,7 +343,12 @@ class ProviderCredentialDialog(ft.AlertDialog):
 class FailoverConfigPanel(ft.Container):
     """Failover configuration panel with list management."""
 
-    def __init__(self, on_save: Callable | None = None):
+    def __init__(
+        self,
+        on_test_connection: Callable[..., Awaitable[dict]],
+        on_save: Callable | None = None,
+    ):
+        self.on_test_connection = on_test_connection
         self.on_save = on_save
         self._failover_items: list[FailoverItem] = []
         self._list_column = ft.Column([], spacing=8)
@@ -532,6 +545,7 @@ class FailoverConfigPanel(ft.Container):
         dialog = ProviderCredentialDialog(
             page=self.page,
             on_confirm=self._on_dialog_confirmed,
+            on_test_connection=self.on_test_connection,
             existing_providers=existing,
         )
         if self.page:
@@ -542,6 +556,7 @@ class FailoverConfigPanel(ft.Container):
         dialog = ProviderCredentialDialog(
             page=self.page,
             on_confirm=self._on_dialog_confirmed,
+            on_test_connection=self.on_test_connection,
             edit_item=item,
         )
         if self.page:

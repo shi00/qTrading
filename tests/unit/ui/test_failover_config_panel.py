@@ -128,6 +128,7 @@ def _make_panel(
     **kwargs,
 ):
     """创建 FailoverConfigPanel 实例并绑定 mock page"""
+    kwargs.setdefault("on_test_connection", AsyncMock(return_value={"success": True}))
     panel = FailoverConfigPanel(**kwargs)
     panel.page = mock_page
     return panel
@@ -143,6 +144,7 @@ def _make_dialog(
     **kwargs,
 ):
     """创建 ProviderCredentialDialog 实例并绑定 mock page"""
+    kwargs.setdefault("on_test_connection", AsyncMock(return_value={"success": True}))
     dialog = ProviderCredentialDialog(page=mock_page, **kwargs)
     return dialog
 
@@ -1176,6 +1178,7 @@ class TestProviderCredentialDialogTestConnection:
         mock_app_styles,
         mock_page,
     ):
+        mock_callback = AsyncMock(return_value={"success": True})
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -1183,16 +1186,21 @@ class TestProviderCredentialDialogTestConnection:
             mock_app_colors,
             mock_app_styles,
             mock_page,
+            on_test_connection=mock_callback,
         )
         dialog._provider = "deepseek"
         dialog.model_dropdown.value = "deepseek-chat"
         dialog.api_key_input.value = "test_token_mock"
         dialog.base_url_input.value = "https://api.deepseek.com"
 
-        with patch("services.ai_service.AIService") as mock_ai:
-            mock_ai.test_connection = AsyncMock(return_value={"success": True})
-            await dialog._on_test_connection(MagicMock())
+        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock())
 
+        mock_callback.assert_called_once_with(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com",
+            api_key="test_token_mock",
+        )
         # 成功时显示 SnackBar
         assert len(mock_page.overlay) == 1
 
@@ -1206,6 +1214,7 @@ class TestProviderCredentialDialogTestConnection:
         mock_app_styles,
         mock_page,
     ):
+        mock_callback = AsyncMock(return_value={"success": False, "error": "auth failed"})
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -1213,16 +1222,16 @@ class TestProviderCredentialDialogTestConnection:
             mock_app_colors,
             mock_app_styles,
             mock_page,
+            on_test_connection=mock_callback,
         )
         dialog._provider = "deepseek"
         dialog.model_dropdown.value = "deepseek-chat"
         dialog.api_key_input.value = "test_token_mock"
         dialog.base_url_input.value = "https://api.deepseek.com"
 
-        with patch("services.ai_service.AIService") as mock_ai:
-            mock_ai.test_connection = AsyncMock(return_value={"success": False, "error": "auth failed"})
-            await dialog._on_test_connection(MagicMock())
+        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock())
 
+        mock_callback.assert_called_once()
         # 失败时显示 SnackBar
         assert len(mock_page.overlay) == 1
 
@@ -1236,7 +1245,8 @@ class TestProviderCredentialDialogTestConnection:
         mock_app_styles,
         mock_page,
     ):
-        """缺少必要字段时直接返回，不调用 AIService"""
+        """缺少必要字段时直接返回，不调用 on_test_connection 回调"""
+        mock_callback = AsyncMock(return_value={"success": True})
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -1244,17 +1254,16 @@ class TestProviderCredentialDialogTestConnection:
             mock_app_colors,
             mock_app_styles,
             mock_page,
+            on_test_connection=mock_callback,
         )
         dialog._provider = "deepseek"
         dialog.model_dropdown.value = "deepseek-chat"
         dialog.api_key_input.value = ""  # 空 API Key
         dialog.base_url_input.value = ""
 
-        with patch("services.ai_service.AIService") as mock_ai:
-            mock_ai.test_connection = AsyncMock()
-            await dialog._on_test_connection(MagicMock())
+        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock())
 
-        mock_ai.test_connection.assert_not_called()
+        mock_callback.assert_not_called()
 
 
 class TestProviderCredentialDialogEditModeClearApiKey:

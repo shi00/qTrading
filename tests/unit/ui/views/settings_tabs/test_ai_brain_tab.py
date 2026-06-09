@@ -27,8 +27,8 @@ class TestAIBrainTabEventHandlers:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService"),
-            patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager"),
+            patch("services.ai_service.AIService"),
+            patch("services.local_model_manager.LocalModelManager"),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
             mock_ch.get_ai_max_candidates.return_value = 30
@@ -81,7 +81,7 @@ class TestAIBrainTabEventHandlers:
 
     @pytest.mark.asyncio
     async def test_on_llm_test_connection(self):
-        with patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai:
+        with patch("services.ai_service.AIService") as mock_ai:
             mock_ai.test_connection = AsyncMock(return_value={"success": True})
             tab = self._make_tab()
 
@@ -98,8 +98,8 @@ class TestAIBrainTabEventHandlers:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService"),
-            patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager"),
+            patch("services.ai_service.AIService"),
+            patch("services.local_model_manager.LocalModelManager"),
             patch("ui.views.settings_tabs.ai_brain_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.ai_brain_tab.AppColors", self.mock_ac),
             patch.object(AIBrainTab, "_build_controls", side_effect=RuntimeError("boom")),
@@ -130,8 +130,8 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService"),
-            patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager"),
+            patch("services.ai_service.AIService"),
+            patch("services.local_model_manager.LocalModelManager"),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
             mock_ch.get_ai_max_candidates.return_value = 30
@@ -280,7 +280,7 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(False, "prompt_err_injection")),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
@@ -299,7 +299,7 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(False, "prompt_err_length")),
             patch("utils.prompt_guard.MAX_PROMPT_LENGTH", 8000),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
@@ -334,7 +334,7 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", side_effect=mock_validate),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
@@ -359,7 +359,7 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
@@ -396,7 +396,7 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=self._make_thread_pool_mock()),
         ):
@@ -427,7 +427,7 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
@@ -474,9 +474,9 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
-            patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager") as mock_lmm,
+            patch("services.local_model_manager.LocalModelManager") as mock_lmm,
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
@@ -525,9 +525,9 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
-            patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager") as mock_lmm,
+            patch("services.local_model_manager.LocalModelManager") as mock_lmm,
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()
@@ -576,9 +576,9 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
-            patch("ui.views.settings_tabs.ai_brain_tab.AIService") as mock_ai,
+            patch("services.ai_service.AIService") as mock_ai,
             patch("ui.views.settings_tabs.ai_brain_tab.validate_prompt", return_value=(True, None)),
-            patch("ui.views.settings_tabs.ai_brain_tab.LocalModelManager") as mock_lmm,
+            patch("services.local_model_manager.LocalModelManager") as mock_lmm,
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager", return_value=mock_tpm),
         ):
             mock_ai.return_value.reload_config = AsyncMock()

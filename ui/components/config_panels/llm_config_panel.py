@@ -11,7 +11,7 @@ Provides a unified UI for configuring multiple LLM providers with:
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import flet as ft
 
@@ -55,8 +55,10 @@ class LLMConfigPanel(ft.Container):
     - i18n support with hot reload
 
     Args:
+        on_test_connection: Callback for connection test (required)
         on_save: Callback when save button is clicked (optional)
-        on_test_connection: Callback for connection test (optional)
+        on_reload_service: Callback to reload service after config save (optional)
+        on_loading_change: Callback when loading state changes (optional)
         show_save_button: Whether to show the save button (default: False)
         compact: Whether to use compact layout for wizard (default: False)
     """
@@ -66,8 +68,9 @@ class LLMConfigPanel(ft.Container):
 
     def __init__(
         self,
+        on_test_connection: Callable[..., Awaitable[dict]],
         on_save: Callable | None = None,
-        on_test_connection: Callable | None = None,
+        on_reload_service: Callable[[], Awaitable[None]] | None = None,
         on_loading_change: Callable[[bool], None] | None = None,
         show_save_button: bool = False,
         compact: bool = False,
@@ -75,8 +78,9 @@ class LLMConfigPanel(ft.Container):
     ):
         super().__init__(**kwargs)
 
-        self.on_save = on_save
         self.on_test_connection = on_test_connection
+        self.on_save = on_save
+        self.on_reload_service = on_reload_service
         self.on_loading_change = on_loading_change
         self._show_save_button = show_save_button
         self._compact = compact
@@ -617,24 +621,13 @@ class LLMConfigPanel(ft.Container):
             else:
                 base_url = self.base_url_input.value or ""
 
-            if self.on_test_connection:
-                result = await self.on_test_connection(
-                    provider=provider,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    **kwargs,
-                )
-            else:
-                from services.ai_service import AIService
-
-                result = await AIService.test_connection(
-                    provider=provider,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    **kwargs,
-                )
+            result = await self.on_test_connection(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                **kwargs,
+            )
 
             if result.get("success"):
                 self._show_success(I18n.get("llm_test_success"))
@@ -642,10 +635,9 @@ class LLMConfigPanel(ft.Container):
                 self._show_error(I18n.get(result.get("message", "common_err_unknown")))
 
         except Exception as ex:
-            from services.ai_service import _classify_api_error
-            from utils.error_classifier import get_error_message
+            from utils.error_classifier import classify_error, get_error_message
 
-            error_info = _classify_api_error(ex)
+            error_info = classify_error(ex, context="llm")
             self._show_error(get_error_message(error_info))
             logger.error("[LLMConfigPanel] Test connection error: %s", DataSanitizer.sanitize_error(ex))
 
@@ -691,9 +683,7 @@ class LLMConfigPanel(ft.Container):
         self._show_info(I18n.get("llm_testing"))
 
         try:
-            from services.ai_service import AIService
-
-            result = await AIService.test_connection(
+            result = await self.on_test_connection(
                 provider=provider,
                 model=model,
                 base_url=base_url,
@@ -709,10 +699,9 @@ class LLMConfigPanel(ft.Container):
             return False
 
         except Exception as ex:
-            from services.ai_service import _classify_api_error
-            from utils.error_classifier import get_error_message
+            from utils.error_classifier import classify_error, get_error_message
 
-            error_info = _classify_api_error(ex)
+            error_info = classify_error(ex, context="llm")
             self._show_error(get_error_message(error_info))
             logger.error("[LLMConfigPanel] Verify connection error: %s", DataSanitizer.sanitize_error(ex))
             return False
@@ -912,9 +901,8 @@ class LLMConfigPanel(ft.Container):
             custom_models = kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
             self._sync_provider_credential_to_failover(provider, api_key, base_url, custom_models.get(provider))
 
-            from services.ai_service import AIService
-
-            await AIService().reload_config()
+            if self.on_reload_service:
+                await self.on_reload_service()
 
             self._show_success(I18n.get("settings_verify_success"))
 
@@ -1015,21 +1003,17 @@ class LLMConfigPanel(ft.Container):
             return False
 
     def _schedule_ai_service_reload(self):
-        """在保存配置后异步刷新 AIService 运行时状态。
+        """在保存配置后通过回调异步刷新服务运行时状态。
 
-        save_current_config 是同步方法，无法 await reload_config，
-        因此通过 page.run_task 调度异步刷新。
+        save_current_config 是同步方法，无法 await 回调，
+        因此通过 page.run_task 调度异步执行。
         """
+        if not self.on_reload_service:
+            return
         if not self.page:
             return
         try:
-
-            async def _reload():
-                from services.ai_service import AIService
-
-                await AIService().reload_config()
-
-            self.page.run_task(_reload)
+            self.page.run_task(self.on_reload_service)
         except Exception as e:
             logger.debug("[LLMConfigPanel] AIService reload scheduling skipped: %s", DataSanitizer.sanitize_error(e))
 

@@ -9,8 +9,6 @@ import os
 
 import flet as ft
 
-from services.ai_service import AIService
-from services.local_model_manager import LocalModelManager
 from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
@@ -147,8 +145,9 @@ class AIBrainTab(ft.Container):
     def _build_content(self):  # pragma: no cover
         """组装 UI 布局"""  # pragma: no cover
         self.llm_config_panel = LLMConfigPanel(  # pragma: no cover
-            on_save=self._on_llm_config_saved,  # pragma: no cover
             on_test_connection=self._on_llm_test_connection,  # pragma: no cover
+            on_reload_service=self._on_reload_ai_service,  # pragma: no cover
+            on_save=self._on_llm_config_saved,  # pragma: no cover
             show_save_button=False,  # pragma: no cover
         )  # pragma: no cover
 
@@ -161,6 +160,7 @@ class AIBrainTab(ft.Container):
         )  # pragma: no cover
 
         self.failover_panel = FailoverConfigPanel(  # pragma: no cover
+            on_test_connection=self._on_llm_test_connection,  # pragma: no cover
             on_save=self._on_llm_config_saved,  # pragma: no cover
         )  # pragma: no cover
 
@@ -173,6 +173,7 @@ class AIBrainTab(ft.Container):
         )  # pragma: no cover
 
         self.local_model_panel = LocalModelConfigPanel(  # pragma: no cover
+            on_verify_model=self._on_verify_local_model,  # pragma: no cover
             on_save=self._on_local_model_saved,  # pragma: no cover
             show_save_button=False,  # pragma: no cover
         )  # pragma: no cover
@@ -433,6 +434,8 @@ class AIBrainTab(ft.Container):
         **kwargs,
     ) -> dict:
         """LLM 连接测试回调"""
+        from services.ai_service import AIService
+
         return await AIService.test_connection(
             provider=provider,
             model=model,
@@ -444,6 +447,19 @@ class AIBrainTab(ft.Container):
     def _on_local_model_saved(self):
         """本地模型配置保存回调"""
         self.show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
+
+    async def _on_reload_ai_service(self):
+        """重载 AIService 配置回调"""
+        from services.ai_service import AIService
+
+        await AIService().reload_config()
+
+    async def _on_verify_local_model(self, model_path: str, config: dict) -> bool:
+        """验证本地模型回调"""
+        from services.local_model_manager import LocalModelManager
+
+        manager = await LocalModelManager.get_instance()
+        return await manager.load_model(model_path, config)
 
     def _validate_prompt_or_warn(self, prompt: str) -> bool:
         """验证 Prompt 安全性，不合法时显示警告并返回 False"""
@@ -462,6 +478,9 @@ class AIBrainTab(ft.Container):
         采用三阶段模式：先验证所有输入 → 再统一保存 → 最后统一重载。
         避免部分保存导致磁盘与内存不一致。
         """
+        from services.ai_service import AIService
+        from services.local_model_manager import LocalModelManager
+
         UILogger.log_action("AIBrainTab", "Click", "btn_save_ai")
         try:
             # ========== 阶段 1: 验证所有输入（不写入任何配置） ==========
