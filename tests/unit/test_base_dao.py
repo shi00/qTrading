@@ -1487,3 +1487,244 @@ class TestEngineDisposedErrorDBP01:
             mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame([(1, "test")], columns=["id", "name"]))
             result = await dao._read_db("SELECT * FROM t")
             assert isinstance(result, pd.DataFrame)
+
+
+class TestPrepareRecordsNaNHandling:
+    """Regression: _save_upsert's _prepare_records must convert all scalar NaN
+    variants to None, while leaving non-scalar values (list/dict) untouched.
+
+    Root cause: Tushare stock_basic returns NaN in VARCHAR columns (e.g. area),
+    asyncpg rejects float('nan') for VARCHAR parameters.
+    """
+
+    @pytest.mark.asyncio
+    async def test_float_nan_in_string_column_converted_to_none(self):
+        """Core regression: float('nan') in object/string column → None."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "ts_code"
+        mock_col_pk.info = {}
+        mock_col_area = MagicMock()
+        mock_col_area.name = "area"
+        mock_col_area.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_area]
+        mock_table.c = {"ts_code": mock_col_pk, "area": mock_col_area}
+        dao = BaseDao(mock_engine)
+
+        captured_records = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured_records
+            captured_records = chunk
+
+        mock_conn.execute = capture_execute
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"stock_basic": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame(
+                {
+                    "ts_code": ["600166.SH", "600167.SH"],
+                    "area": ["北京", float("nan")],
+                }
+            )
+            await dao._save_upsert(df, "stock_basic", ["ts_code", "area"], ["ts_code"], conn=mock_conn)
+
+        assert captured_records is not None
+        assert captured_records[0]["area"] == "北京"
+        assert captured_records[1]["area"] is None
+
+    @pytest.mark.asyncio
+    async def test_np_nan_converted_to_none(self):
+        """np.nan in numeric column → None."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_val = MagicMock()
+        mock_col_val.name = "value"
+        mock_col_val.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_val]
+        mock_table.c = {"id": mock_col_pk, "value": mock_col_val}
+        dao = BaseDao(mock_engine)
+
+        captured_records = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured_records
+            captured_records = chunk
+
+        mock_conn.execute = capture_execute
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame({"id": [1], "value": [np.nan]})
+            await dao._save_upsert(df, "test_table", ["id", "value"], ["id"], conn=mock_conn)
+
+        assert captured_records is not None
+        assert captured_records[0]["value"] is None
+
+    @pytest.mark.asyncio
+    async def test_nat_converted_to_none(self):
+        """pd.NaT in date column → None."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_dt = MagicMock()
+        mock_col_dt.name = "dt"
+        mock_col_dt.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_dt]
+        mock_table.c = {"id": mock_col_pk, "dt": mock_col_dt}
+        dao = BaseDao(mock_engine)
+
+        captured_records = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured_records
+            captured_records = chunk
+
+        mock_conn.execute = capture_execute
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame({"id": [1], "dt": [pd.NaT]})
+            await dao._save_upsert(df, "test_table", ["id", "dt"], ["id"], conn=mock_conn)
+
+        assert captured_records is not None
+        assert captured_records[0]["dt"] is None
+
+    @pytest.mark.asyncio
+    async def test_list_value_not_converted_to_none(self):
+        """list/dict values (JSONB) must NOT be touched by NaN cleaning."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_data = MagicMock()
+        mock_col_data.name = "data"
+        mock_col_data.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_data]
+        mock_table.c = {"id": mock_col_pk, "data": mock_col_data}
+        dao = BaseDao(mock_engine)
+
+        captured_records = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured_records
+            captured_records = chunk
+
+        mock_conn.execute = capture_execute
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            json_data = [{"key": "val"}, [1, 2, 3]]
+            df = pd.DataFrame({"id": [1, 2], "data": json_data})
+            await dao._save_upsert(df, "test_table", ["id", "data"], ["id"], conn=mock_conn)
+
+        assert captured_records is not None
+        assert captured_records[0]["data"] == {"key": "val"}
+        assert captured_records[1]["data"] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_mixed_nan_and_valid_values(self):
+        """Mixed row: some NaN, some valid — only NaN becomes None."""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_name = MagicMock()
+        mock_col_name.name = "name"
+        mock_col_name.info = {}
+        mock_col_val = MagicMock()
+        mock_col_val.name = "val"
+        mock_col_val.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_name, mock_col_val]
+        mock_table.c = {"id": mock_col_pk, "name": mock_col_name, "val": mock_col_val}
+        dao = BaseDao(mock_engine)
+
+        captured_records = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured_records
+            captured_records = chunk
+
+        mock_conn.execute = capture_execute
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame(
+                {
+                    "id": [1, 2, 3],
+                    "name": ["valid", float("nan"), "also_valid"],
+                    "val": [1.0, np.nan, 3.0],
+                }
+            )
+            await dao._save_upsert(df, "test_table", ["id", "name", "val"], ["id"], conn=mock_conn)
+
+        assert captured_records is not None
+        assert captured_records[0]["name"] == "valid"
+        assert captured_records[0]["val"] == 1.0
+        assert captured_records[1]["name"] is None
+        assert captured_records[1]["val"] is None
+        assert captured_records[2]["name"] == "also_valid"
+        assert captured_records[2]["val"] == 3.0

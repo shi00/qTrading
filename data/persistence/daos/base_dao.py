@@ -392,7 +392,7 @@ class BaseDao:
 
             for record in records:
                 for k, v in record.items():
-                    if v is pd.NaT or (isinstance(v, type(pd.NaT)) and pd.isna(v)):
+                    if pd.api.types.is_scalar(v) and pd.isna(v):
                         record[k] = None
             return records
 
