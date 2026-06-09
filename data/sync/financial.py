@@ -15,6 +15,7 @@ from data.sync.base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import I18n
+from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
 from utils.time_utils import get_now, parse_date
@@ -410,7 +411,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                 self._active_tasks.update(tasks)
 
             try:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await gather_return_exceptions_propagating_cancel(*tasks)
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
@@ -559,7 +560,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
             _BATCH_SIZE = 100
             for batch_start in range(0, len(tasks), _BATCH_SIZE):
                 batch = tasks[batch_start : batch_start + _BATCH_SIZE]
-                batch_results = await asyncio.gather(*batch, return_exceptions=True)
+                batch_results = await gather_return_exceptions_propagating_cancel(*batch)
                 for r in batch_results:
                     if isinstance(r, Exception):
                         logger.warning(f"[FinancialSync] Batch task failed: {r}")
@@ -681,7 +682,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
             # Each date: 3 tables in parallel
             coros = [sync_one_date_table(d, tbl, cfg) for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
-            gather_results = await asyncio.gather(*coros, return_exceptions=True)
+            gather_results = await gather_return_exceptions_propagating_cancel(*coros)
             for gr in gather_results:
                 if isinstance(gr, Exception):
                     logger.warning(f"[FinancialSync] Batch table sync failed for date {d}: {gr}")
@@ -785,13 +786,12 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
             ]
 
             # Parallel fetch core + aux
-            results = await asyncio.gather(
+            results = await gather_return_exceptions_propagating_cancel(
                 fetch_income(),
                 fetch_balance(),
                 fetch_indicator(),
                 fetch_cashflow(),
                 *aux_tasks,
-                return_exceptions=True,
             )
 
             # Unpack Core Results

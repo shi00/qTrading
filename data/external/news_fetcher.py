@@ -501,5 +501,5 @@ class NewsFetcher:
             return results
 
         except Exception as e:
-            logger.error("[News] Error fetching hot concepts: %s", DataSanitizer.sanitize_error(e))
+            logger.error("[News] Error fetching hot concepts: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             return []

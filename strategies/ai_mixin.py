@@ -35,6 +35,7 @@ from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from strategies.utils import fmt_val, safe_float
 from core.i18n import I18n
+from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
 from utils.sanitizers import DataSanitizer
@@ -525,7 +526,7 @@ class AIStrategyMixin:
                 break
             batch = all_records[batch_start : batch_start + _BATCH_SIZE]
             batch_tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in batch]
-            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            batch_results = await gather_return_exceptions_propagating_cancel(*batch_tasks)
             results.extend(batch_results)
 
         for res in results:

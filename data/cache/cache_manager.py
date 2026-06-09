@@ -27,6 +27,7 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.sync_dao import SyncDao
 from utils.config_handler import ConfigHandler
+from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.time_utils import get_now
 
@@ -515,10 +516,9 @@ class CacheManager:
         logger.debug("[CacheManager] Health | Starting comprehensive check...")
 
         # === Step 1: All DAO calls outside async with (avoid connection nesting) ===
-        total_stocks_result, date_range_result = await asyncio.gather(
+        total_stocks_result, date_range_result = await gather_return_exceptions_propagating_cancel(
             self.stock_dao.get_active_stock_count(),
             self.quote_dao.get_date_range(),
-            return_exceptions=True,
         )
         total_stocks = (total_stocks_result if not isinstance(total_stocks_result, BaseException) else None) or 1
         if isinstance(date_range_result, BaseException):
@@ -744,7 +744,7 @@ class CacheManager:
                 }
 
         check_coros = [_check_single_table(t, m) for t, m in monitored_tables.items()]
-        gather_results = await asyncio.gather(*check_coros, return_exceptions=True)
+        gather_results = await gather_return_exceptions_propagating_cancel(*check_coros)
         for item in gather_results:
             if isinstance(item, BaseException):
                 logger.warning("[CacheManager] Health | Table check failed: %s", item)
@@ -1029,7 +1029,7 @@ class CacheManager:
         """
         result = {code: {} for code in ts_codes}
 
-        gather_results = await asyncio.gather(
+        gather_results = await gather_return_exceptions_propagating_cancel(
             self.financial_dao.get_fina_audit_batch(ts_codes, as_of_date=as_of_date),
             self.financial_dao.get_dividend_batch(ts_codes, as_of_date=as_of_date),
             self.financial_dao.get_pledge_stat_batch(ts_codes, as_of_date=as_of_date),
@@ -1037,7 +1037,6 @@ class CacheManager:
             self.financial_dao.get_fina_mainbz_batch(ts_codes, as_of_date=as_of_date),
             self.financial_dao.get_financial_reports_history_batch(ts_codes, as_of_date=as_of_date),
             self.holder_dao.get_stk_holdernumber_batch(ts_codes, as_of_date=as_of_date),
-            return_exceptions=True,
         )
 
         batch_keys = [

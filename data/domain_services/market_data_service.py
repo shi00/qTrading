@@ -12,11 +12,14 @@ import math
 import threading
 import typing
 
+import pandas as pd
+
 from data.cache.cache_manager import CacheManager
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.external.news_fetcher import NewsFetcher
 from data.external.tushare_client import TushareClient
 from core.i18n import I18n
+from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -203,7 +206,7 @@ class MarketDataService:
         hsgt_task = self._get_hsgt(date)
         concepts_task = NewsFetcher.get_hot_concepts(limit=self.HOT_CONCEPTS_LIMIT)
 
-        results = await asyncio.gather(index_task, hsgt_task, concepts_task, return_exceptions=True)
+        results = await gather_return_exceptions_propagating_cancel(index_task, hsgt_task, concepts_task)
 
         indices = (
             results[0]
@@ -242,7 +245,11 @@ class MarketDataService:
         df = await self.cache.get_index_daily_range(codes, start_date=date, end_date=date)
 
         if df is None or df.empty:
-            df = await self.api.get_index_daily(trade_date=date)
+            results = await gather_return_exceptions_propagating_cancel(
+                *(self.api.get_index_daily(ts_code=code, trade_date=date) for code in codes),
+            )
+            valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
+            df = pd.concat(valid, ignore_index=True) if valid else pd.DataFrame()
 
         result_map: dict[str, dict] = {}
         if df is not None and not df.empty:

@@ -4,6 +4,7 @@ import threading
 
 import flet as ft
 
+from utils.async_utils import gather_for_shutdown_cleanup
 from ui.i18n import I18n
 from ui.theme import AppColors
 
@@ -154,7 +155,7 @@ class ToastManager:
 
         # Wait for all cancellations to complete
         if valid_tasks:
-            await asyncio.gather(*valid_tasks, return_exceptions=True)
+            await gather_for_shutdown_cleanup(*valid_tasks)
 
         # Clear UI
         with self._lock:

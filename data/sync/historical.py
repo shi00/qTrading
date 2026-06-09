@@ -27,6 +27,7 @@ from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -365,7 +366,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 self._active_tasks.update(tasks)
 
             try:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await gather_return_exceptions_propagating_cancel(*tasks)
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
@@ -427,7 +428,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     with self._tasks_lock:
                         self._active_tasks.update(r_tasks)
                     try:
-                        await asyncio.gather(*r_tasks, return_exceptions=True)
+                        await gather_return_exceptions_propagating_cancel(*r_tasks)
                     finally:
                         with self._tasks_lock:
                             self._active_tasks.difference_update(r_tasks)
@@ -504,7 +505,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         async def fetch_indices():
             try:
                 tasks = [self.context.api.get_index_daily(ts_code=c, trade_date=trade_date) for c in MAJOR_INDICES]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                results = await gather_return_exceptions_propagating_cancel(*tasks)
                 valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if valid:
                     return ("index", pd.concat(valid, ignore_index=True), None)

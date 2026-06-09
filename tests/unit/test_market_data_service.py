@@ -283,6 +283,74 @@ class TestMarketDataServiceGetIndicesBatch:
         assert result[0]["color"] == "grey"
         assert result[0]["value"] == "-"
 
+    @pytest.mark.asyncio
+    async def test_cache_miss_api_called_with_ts_code_per_index(self):
+        """缓存未命中时，API 必须按每个 ts_code 分别调用，不能只传 trade_date。"""
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=None)
+        svc.api = MagicMock()
+
+        async def fake_get_index_daily(**kwargs):
+            ts_code = kwargs.get("ts_code")
+            if ts_code == "000001.SH":
+                return pd.DataFrame({"ts_code": ["000001.SH"], "pct_chg": [1.0], "close": [3100.0]})
+            if ts_code == "399001.SZ":
+                return pd.DataFrame({"ts_code": ["399001.SZ"], "pct_chg": [-0.5], "close": [9500.0]})
+            return None
+
+        svc.api.get_index_daily = AsyncMock(side_effect=fake_get_index_daily)
+        codes = ["000001.SH", "399001.SZ", "399006.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+
+        assert svc.api.get_index_daily.call_count == 3
+        call_kwargs_list = [call.kwargs for call in svc.api.get_index_daily.call_args_list]
+        for call_kwargs in call_kwargs_list:
+            assert "ts_code" in call_kwargs, f"API 调用缺少 ts_code 参数: {call_kwargs}"
+            assert call_kwargs["ts_code"] is not None
+
+        assert len(result) == 3
+        assert result[0]["color"] == "red"
+        assert result[1]["color"] == "green"
+        assert result[2]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_partial_api_failure_fills_grey(self):
+        """部分指数 API 失败时，成功的正常渲染，失败的灰色占位。"""
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=None)
+        svc.api = MagicMock()
+
+        async def fake_get_index_daily(**kwargs):
+            ts_code = kwargs.get("ts_code")
+            if ts_code == "000001.SH":
+                return pd.DataFrame({"ts_code": ["000001.SH"], "pct_chg": [1.0], "close": [3100.0]})
+            raise Exception("API error")
+
+        svc.api.get_index_daily = AsyncMock(side_effect=fake_get_index_daily)
+        codes = ["000001.SH", "399001.SZ", "399006.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+
+        assert len(result) == 3
+        assert result[0]["color"] == "red"
+        assert result[1]["color"] == "grey"
+        assert result[2]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_single_index_passes_ts_code(self):
+        """单指数缓存未命中时，API 调用必须包含 ts_code。"""
+        svc = self._make_svc()
+        svc.cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
+        svc.api = MagicMock()
+        svc.api.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["399006.SZ"], "pct_chg": [3.0], "close": [2100.0]})
+        )
+        codes = ["399006.SZ"]
+        result = await svc._get_indices_batch(codes, "20240614")
+
+        svc.api.get_index_daily.assert_called_once_with(ts_code="399006.SZ", trade_date="20240614")
+        assert len(result) == 1
+        assert result[0]["color"] == "red"
+
 
 class TestMarketDataServiceFetchMarketDataIntegration:
     def setup_method(self):

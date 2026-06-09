@@ -18,6 +18,7 @@ from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
 from core.i18n import I18n
+from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -481,7 +482,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             all_dfs = []
             try:
                 # Wait for all tasks to complete or be cancelled
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                results = await gather_return_exceptions_propagating_cancel(*tasks)
 
                 # Check if we were cancelled during gather
                 if self.is_cancelled():

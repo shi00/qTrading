@@ -592,6 +592,17 @@ class TushareClient:
                     )
                     raise TushareAPIPermissionError(api_name, error_msg) from e
 
+                is_client_param_error = any(
+                    k in error_msg_lower for k in ("必填参数", "缺少参数", "invalid parameter", "missing required")
+                )
+                if is_client_param_error:
+                    logger.error(
+                        "[tushare_api] INVALID_REQUEST (%s): %s",
+                        api_name,
+                        DataSanitizer.sanitize_error(e),
+                    )
+                    raise
+
                 if is_rate_limit:
                     active_limiter = api_limiter or self._rate_limiter
                     if active_limiter:

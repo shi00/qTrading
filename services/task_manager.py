@@ -15,6 +15,7 @@ from typing import Any
 
 
 from core.i18n import I18n
+from utils.async_utils import gather_for_shutdown_cleanup
 from utils.error_classifier import classify_error, classify_severity
 from utils.config_handler import ConfigHandler
 from utils.loop_local import del_loop_local, get_loop_local
@@ -392,7 +393,7 @@ class TaskManager:
                 task._asyncio_task.cancel()
             persist_coros.append(self._persist_task_async(task))
         if persist_coros:
-            await asyncio.gather(*persist_coros, return_exceptions=True)
+            await gather_for_shutdown_cleanup(*persist_coros)
         if active_ids:
             logger.info(
                 f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).",

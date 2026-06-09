@@ -167,6 +167,38 @@ class TestTushareClientHandleApiCallErrors:
                 await client._handle_api_call(MagicMock())
 
     @pytest.mark.asyncio
+    async def test_client_param_error_raises_immediately(self):
+        """参数错误(必填参数)应立即抛出，不重试。"""
+        client = _make_client()
+        client.max_retries = 3
+        call_count = [0]
+
+        async def mock_wait_for(coro, timeout=None):
+            call_count[0] += 1
+            raise Exception("必填参数, ts_code")
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with pytest.raises(Exception, match="必填参数"):
+                await client._handle_api_call(MagicMock())
+        assert call_count[0] == 1, "参数错误不应重试"
+
+    @pytest.mark.asyncio
+    async def test_client_param_error_missing_param(self):
+        """缺少参数也应立即抛出，不重试。"""
+        client = _make_client()
+        client.max_retries = 3
+        call_count = [0]
+
+        async def mock_wait_for(coro, timeout=None):
+            call_count[0] += 1
+            raise Exception("缺少参数 trade_date")
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with pytest.raises(Exception, match="缺少参数"):
+                await client._handle_api_call(MagicMock())
+        assert call_count[0] == 1, "参数错误不应重试"
+
+    @pytest.mark.asyncio
     async def test_rate_limit_reduces_rate_and_retries(self):
         client = _make_client(limit=120)
         client.max_retries = 2
