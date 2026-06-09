@@ -48,7 +48,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         existing_providers: list[str] | None = None,
     ):
         self._on_confirm = on_confirm
-        self._on_test_connection = on_test_connection
+        self._test_connection_callback = on_test_connection
         self._edit_item = edit_item
         self._existing_providers = existing_providers or []
         self._provider = edit_item.provider if edit_item else ""
@@ -128,7 +128,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
                 on_click=self._on_cancel,
             ),
         ]
-        if self._on_test_connection:
+        if self._test_connection_callback:
             self.actions.append(
                 ft.TextButton(
                     text=I18n.get("failover_test_connection", "测试连接"),
@@ -252,11 +252,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if not provider or not model or not api_key:
             return
 
-        if not self._on_test_connection:
+        if not self._test_connection_callback:
             return
 
         try:
-            result = await self._on_test_connection(
+            result = await self._test_connection_callback(
                 provider=provider,
                 model=model,
                 base_url=base_url,
