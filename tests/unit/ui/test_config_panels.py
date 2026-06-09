@@ -1287,7 +1287,10 @@ class TestLLMConfigPanelExtended:
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
         with (
-            patch("utils.error_classifier.classify_error", return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True}),
+            patch(
+                "utils.error_classifier.classify_error",
+                return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True},
+            ),
             patch("utils.error_classifier.get_error_message", return_value="Network error"),
             patch.object(panel, "_safe_update"),
         ):
@@ -1412,7 +1415,10 @@ class TestLLMConfigPanelExtended:
         panel.model_dropdown.value = "deepseek-chat"
         panel.on_test_connection = AsyncMock(side_effect=Exception("network error"))
         with (
-            patch("utils.error_classifier.classify_error", return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True}),
+            patch(
+                "utils.error_classifier.classify_error",
+                return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True},
+            ),
             patch("utils.error_classifier.get_error_message", return_value="Network error"),
             patch.object(panel, "_safe_update"),
         ):
@@ -2002,7 +2008,10 @@ class TestCallbackInjection:
     ):
         mock_callback = AsyncMock(return_value={"success": True})
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page,
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
             on_test_connection=mock_callback,
         )
         panel.api_key_input.value = "sk-test"
@@ -2021,7 +2030,10 @@ class TestCallbackInjection:
     ):
         mock_reload = AsyncMock()
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page,
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
             on_reload_service=mock_reload,
         )
         panel.api_key_input.value = "sk-test"
@@ -2036,7 +2048,9 @@ class TestCallbackInjection:
     ):
         mock_callback = AsyncMock(return_value=True)
         panel = _make_local_panel(
-            mock_config_handler_local, mock_i18n_local, mock_page,
+            mock_config_handler_local,
+            mock_i18n_local,
+            mock_page,
             on_verify_model=mock_callback,
         )
         panel.model_path_input.value = "C:/path/to/model.gguf"
@@ -2057,7 +2071,10 @@ class TestCallbackInjection:
     ):
         mock_callback = AsyncMock(return_value={"success": True})
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page,
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
             on_test_connection=mock_callback,
         )
         panel.api_key_input.value = "sk-test"
@@ -2073,7 +2090,9 @@ class TestCallbackInjection:
     ):
         mock_callback = AsyncMock(return_value=True)
         panel = _make_local_panel(
-            mock_config_handler_local, mock_i18n_local, mock_page,
+            mock_config_handler_local,
+            mock_i18n_local,
+            mock_page,
             on_verify_model=mock_callback,
         )
         panel.model_path_input.value = "C:/path/to/model.gguf"

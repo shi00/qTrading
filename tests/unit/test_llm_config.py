@@ -483,7 +483,9 @@ class TestLLMConfigPanel:
             api_key="test-key",
         )
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
 
         config = panel.get_current_config()
 
@@ -509,7 +511,9 @@ class TestLLMConfigPanel:
             azure_deployment_name="gpt-5.4-deployment",
         )
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
 
         panel._current_provider = "azure"
         panel._is_azure = True
@@ -531,7 +535,9 @@ class TestLLMConfigPanel:
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
         from utils.config_handler import ConfigHandler
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
 
         panel._current_provider = "openai"
         panel.model_dropdown.value = "gpt-5.4"
@@ -550,10 +556,14 @@ class TestLLMConfigPanel:
         """Test: show_save_button parameter controls button visibility"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel_with_button = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=True)
+        panel_with_button = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=True
+        )
         assert panel_with_button.save_button.visible is True
 
-        panel_without_button = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False)
+        panel_without_button = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False
+        )
         assert panel_without_button.save_button.visible is False
 
     def test_compact_parameter(self, isolated_config):
@@ -787,7 +797,9 @@ class TestSyncProviderCredentialToFailover:
             }
         )
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
         panel._sync_provider_credential_to_failover(
             provider="qwen",
             api_key="sk-synced-key",
@@ -810,7 +822,9 @@ class TestSyncProviderCredentialToFailover:
             }
         )
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
         panel._sync_provider_credential_to_failover(
             provider="qwen",
             api_key="sk-should-not-sync",
@@ -836,7 +850,9 @@ class TestSyncProviderCredentialToFailover:
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
         panel._sync_provider_credential_to_failover(
             provider="qwen",
             api_key=None,
@@ -892,7 +908,12 @@ class TestSaveCurrentConfigReloadsAIService:
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
         mock_reload = AsyncMock()
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), on_reload_service=mock_reload, show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}),
+            on_reload_service=mock_reload,
+            show_save_button=False,
+            compact=True,
+        )
         panel._current_provider = "deepseek"
         panel.model_dropdown.value = "deepseek-v4-flash"
         panel.base_url_input.value = "https://api.deepseek.com"
@@ -917,7 +938,9 @@ class TestSaveCurrentConfigReloadsAIService:
         """无 page 时 save_current_config 仍应保存成功（只是不调度 reload）"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
         panel._current_provider = "deepseek"
         panel.model_dropdown.value = "deepseek-v4-flash"
         panel.base_url_input.value = "https://api.deepseek.com"
@@ -967,7 +990,9 @@ class TestAcquireVerifyLock:
         """首次获取验证锁应成功"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
         assert panel._acquire_verify_lock() is True
         assert panel._is_verifying is True
 
@@ -975,7 +1000,9 @@ class TestAcquireVerifyLock:
         """验证进行中时再次获取应失败"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True)
+        panel = LLMConfigPanel(
+            on_test_connection=AsyncMock(return_value={"success": True}), show_save_button=False, compact=True
+        )
         panel._acquire_verify_lock()
         assert panel._acquire_verify_lock() is False
 
