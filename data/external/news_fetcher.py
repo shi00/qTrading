@@ -510,6 +510,7 @@ class NewsFetcher:
 
         if df.empty:
             _SINA_CONSECUTIVE_EMPTY["concept"] += 1
+            _SINA_CONSECUTIVE_FAILURES["concept"] = 0
             count = _SINA_CONSECUTIVE_EMPTY["concept"]
             if count >= _SINA_EMPTY_THRESHOLD:
                 logger.error(
