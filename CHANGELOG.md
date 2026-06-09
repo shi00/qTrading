@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.5.0](https://github.com/shi00/qTrading/compare/v0.4.2...v0.5.0) (2026-06-08)
+
+
+### Features
+
+* **ai:** complete Issue [#41](https://github.com/shi00/qTrading/issues/41) with enhanced label registration and test coverage ([1e2797a](https://github.com/shi00/qTrading/commit/1e2797a3266853b80c2b7d39e8a59d60e65c7e0f))
+* **ai:** implement Issue [#41](https://github.com/shi00/qTrading/issues/41) available-data invariant system ([635f0f9](https://github.com/shi00/qTrading/commit/635f0f950d343c8933bf67e8b506b8e66a86f8cb))
+* **correlation:** add ensure_correlation_id for entry-point tracing ([bbc217a](https://github.com/shi00/qTrading/commit/bbc217ada95b5d841af3436ab94a678ae8844246))
+* **db:** consolidate Alembic migrations and add schema consistency tests ([5e92b44](https://github.com/shi00/qTrading/commit/5e92b446863ac6f9c6c23b0cc62bafb5eaa00244)), closes [#41](https://github.com/shi00/qTrading/issues/41)
+* **tushare:** add point-tier presets for rate limiting ([#69](https://github.com/shi00/qTrading/issues/69)) ([fd4fd4d](https://github.com/shi00/qTrading/commit/fd4fd4d7c7ea4c01171b34dfb1cf9f2d65e4e62f))
+* **ui:** add semantic labels for E2E accessibility ([de4e72f](https://github.com/shi00/qTrading/commit/de4e72f1eb32af167640007d0542cb895f0fdfbd))
+
+
+### Bug Fixes
+
+* adapt tests for DAO engine validation and strategy gating changes ([bf2575e](https://github.com/shi00/qTrading/commit/bf2575ee9b3d5ed75fd670b5cf6fa29493a36aa2))
+* add missing CancelledError re-raise in 4 files ([97ca48e](https://github.com/shi00/qTrading/commit/97ca48edc0a000290c8aef902e0383e00c291f6f))
+* **ai-service:** improve cross-provider failover and credential handling ([6bea6bd](https://github.com/shi00/qTrading/commit/6bea6bd066fa0531bc6c8d15a4ca1663a259b2df))
+* **ai:** filter financial sentinel texts to avoid empty financials block ([2c1567b](https://github.com/shi00/qTrading/commit/2c1567b3f5ddcb921dc058a1d27f4318297319e8)), closes [#41](https://github.com/shi00/qTrading/issues/41)
+* **alembic:** avoid ConfigParser interpolation error with URL-encoded passwords ([4a165af](https://github.com/shi00/qTrading/commit/4a165af32c177e5196e6bd8aac2849743cdf4ce1))
+* **alembic:** make financial_reports column migration idempotent ([aecbda7](https://github.com/shi00/qTrading/commit/aecbda7ec6c3adcc2ddd8076f2b7186aef134601))
+* **config:** add provider credential fallback to global api_key and harden LLM config panel ([6974fe2](https://github.com/shi00/qTrading/commit/6974fe2728ec75560106e09134ac4c5c67fbe0c7))
+* **db:** comprehensive database config hardening - connection leak, sensitive info exposure, perf decorators, wizard save logic ([dbda4aa](https://github.com/shi00/qTrading/commit/dbda4aafb3711c39a9c4894e83e5596ad6367f6f))
+* **db:** correctly identify non-existent database vs auth failure ([4d9e147](https://github.com/shi00/qTrading/commit/4d9e147dbe1e5ff1903f669770288974069e81c7))
+* **db:** disambiguate ConnectionDoesNotExistError for non-existent database ([4a40f45](https://github.com/shi00/qTrading/commit/4a40f451f54dd87ec0854373b9a886cf076e47bd))
+* **db:** fix connection leak, SQL injection risk and improve test quality ([a658026](https://github.com/shi00/qTrading/commit/a6580269e48bf10c4eed68343ed553dfb33f9349))
+* **db:** harden database creation and migration with schema drift detection ([92a20bc](https://github.com/shi00/qTrading/commit/92a20bc82d8d31d3d397ca6012a7734a012342a4))
+* **db:** resolve schema sync whitelist gap and DAO consistency issues ([aa41ec2](https://github.com/shi00/qTrading/commit/aa41ec2ccee1f6ef976497e9ca15324f6f698ce2))
+* **db:** return CONNECTION_ERROR instead of AUTHENTICATION_ERROR when verification is inconclusive ([68b4e21](https://github.com/shi00/qTrading/commit/68b4e216739d5c9496b0b24fcb5f2020368a0630))
+* **e2e:** pass timeout to page.goto and increase CI timeout multiplier ([d438741](https://github.com/shi00/qTrading/commit/d438741f1fa54eee1d22558674a7f66df643115a))
+* **e2e:** resolve CI e2e test failures caused by redundant Flet process and timeout issues ([a59f15b](https://github.com/shi00/qTrading/commit/a59f15b9c78450a1cf9837f83f039d3f2c5bbde9))
+* **e2e:** use fuzzy text matching for Windows Server headless mode ([edaf17f](https://github.com/shi00/qTrading/commit/edaf17f6d4ea6e03804a69c028ac1446ff01281b))
+* **i18n:** register missing UI-facing i18n keys and replace hardcoded English strings ([6ea1053](https://github.com/shi00/qTrading/commit/6ea1053d014b4126e602fce4309498c6bdc0f63b))
+* **i18n:** replace hardcoded English messages in create_database and run_migrations with i18n keys ([c0a365e](https://github.com/shi00/qTrading/commit/c0a365e54ed4c9762a1f5bfa376e303393f3236c))
+* **i18n:** update db_err_interrupted message to cover both auth failure and network issues ([88e67db](https://github.com/shi00/qTrading/commit/88e67db06ac86dec8f1169214959e972f5f17e1b))
+* **llm:** add missing _KEY_MASK_THRESHOLD in FailoverConfigPanel class ([bcbb9ef](https://github.com/shi00/qTrading/commit/bcbb9ef6057c632ef81cad1afe77ef7f284c06c4))
+* **llm:** fix multiple bugs in wizard LLM config panel ([885d132](https://github.com/shi00/qTrading/commit/885d132a6e55aac15320414df400411fb229151b))
+* **local-model:** handle OSError in _await_worker_ready queue reads and fix stale test mocks ([0ecc0e9](https://github.com/shi00/qTrading/commit/0ecc0e9d1fdc025dcb59ca3f38eacc07cb185394))
+* **local-model:** pass configured timeout to worker ready wait and clear cancel event on reload ([9a5d06c](https://github.com/shi00/qTrading/commit/9a5d06cde4614491fcaf2718b2b14f238a81b790))
+* **local-model:** resolve worker ready deadlock and UI hang on model verification ([0f14d25](https://github.com/shi00/qTrading/commit/0f14d25afd52bf45252e7c59cfe99ab5094ffa56))
+* resolve pyright type errors and improve type safety ([57ff1bc](https://github.com/shi00/qTrading/commit/57ff1bcd9b01027131e7b70780094ffa29ddacfb))
+* **security:** add missing _KEY_MASK_THRESHOLD in ProviderCredentialDialog, accept str in sanitize_error ([30778be](https://github.com/shi00/qTrading/commit/30778becd39cdff43b081d2fa7099af24505954d))
+* **security:** sanitize all exception logs and normalize logger format ([c67b075](https://github.com/shi00/qTrading/commit/c67b07529b0c3eb0d58bb0aa9518d69c5ecef505))
+* **security:** sanitize API keys in error logs to prevent credential leakage ([f8e6ce4](https://github.com/shi00/qTrading/commit/f8e6ce43f19cc2dc4080446f7e053f66d544f0d3))
+* **security:** sanitize config errors, fix type annotations, extract tag constant, fix truncation order ([571793e](https://github.com/shi00/qTrading/commit/571793edf6c3b34c6dbedcbac151cbe28f234baf))
+* **security:** sanitize sensitive data in logs and improve code quality ([e240728](https://github.com/shi00/qTrading/commit/e240728dbbc10e276b591eb1dae7c30b33265bda))
+* **security:** upgrade aiohttp to 3.14.0 and litellm to 1.87.0 ([364661f](https://github.com/shi00/qTrading/commit/364661f48f0c4d3b10327226f4cbd1c57362b998))
+* **shutdown,dao:** propagate CancelledError per R2 and unify DAO error handling ([2ad9bf7](https://github.com/shi00/qTrading/commit/2ad9bf7d8933c9f8334d9b8bbab9149ae408b985))
+* **test:** add conn=None path SQL compilation coverage for update_prediction_result ([53bf393](https://github.com/shi00/qTrading/commit/53bf39351636a4029340cecee8718bf4ad132524))
+* **test:** add missing mock for get_tushare_point_tier ([3c4ca71](https://github.com/shi00/qTrading/commit/3c4ca71b52b10a2d94e7245ca16e6144c9360123))
+* **test:** align two failing tests with current implementation ([c435b9a](https://github.com/shi00/qTrading/commit/c435b9a151a291f7af8affa10214925979983cb6))
+* **test:** correct DatabaseMigrator test to use public init_db API ([15d48ba](https://github.com/shi00/qTrading/commit/15d48ba868807f08669f864d77f891437777b3fa))
+* **test:** defer AIService import to fixture to prevent keyring mock bypass ([b75aa1f](https://github.com/shi00/qTrading/commit/b75aa1f972de7cfe1e9c0b6fc1aa17b0c85000e4))
+* **test:** handle special characters in database passwords ([24613f6](https://github.com/shi00/qTrading/commit/24613f631719e3fdade3afb587793048e1264c25))
+* **test:** mock _disposed attribute in ScreenerDao unit tests ([e9bf3ee](https://github.com/shi00/qTrading/commit/e9bf3ee80f638858e1197f53150629c345c8b875))
+* **test:** resolve pyright type error and refactor test helpers ([7f0e98b](https://github.com/shi00/qTrading/commit/7f0e98ba166d42f0c3a8ad0b69855afd7c0e93c5))
+* **test:** update alembic config test to match new implementation ([780585c](https://github.com/shi00/qTrading/commit/780585cc93f294c1fc0bfa155f63e11876e32826))
+* **test:** update i18n-asserted tests to check database name in message instead of English keyword ([cae8453](https://github.com/shi00/qTrading/commit/cae84530e5baf46f1acacf6ed8fdb20657c0efcf))
+* **test:** update integration tests for update_prediction_result conn=None path change ([49657f6](https://github.com/shi00/qTrading/commit/49657f69eb9564243284f6c149f6856b7206ec54))
+* **types:** add None guard for dropdown options iteration in test ([6f8759a](https://github.com/shi00/qTrading/commit/6f8759a0e6714297440dccfce7acc92521852ef1))
+* **types:** resolve all pyright errors and key warnings across codebase ([f4e6e65](https://github.com/shi00/qTrading/commit/f4e6e65c1604eeaa856f70a8966f6b3934d9eed9))
+* **types:** resolve pyright type check errors across backtest and strategy modules ([80110ce](https://github.com/shi00/qTrading/commit/80110cedc78d30cc1cb3e2f689a452e90c0195fd))
+* **ui:** add correlation_id to remaining UI entry points ([5113cdb](https://github.com/shi00/qTrading/commit/5113cdb0d031150821e7d262a27ee0969a4b05f3)), closes [#22](https://github.com/shi00/qTrading/issues/22)
+* **ui:** improve Tushare token validation error messages in onboarding wizard ([9361460](https://github.com/shi00/qTrading/commit/9361460c89e109c29c92b0a62f17529c349bf211))
+* **ui:** resolve R16 violations in ai_brain_tab and db config ([6e24ffe](https://github.com/shi00/qTrading/commit/6e24ffe826e9371c353ce52aa79b6682310e5a1b))
+* **ui:** use normalized locale in language dropdown to match option keys ([65054f1](https://github.com/shi00/qTrading/commit/65054f1d3acf69b3daa0448aa38ca4a92a9dd758))
+
+
+### Documentation
+
+* align CLAUDE.md with actual project state ([2b8baeb](https://github.com/shi00/qTrading/commit/2b8baeb6a8dd9861ae402e70bae37e3b62e3c12f))
+* **db:** add comment explaining auth verification fallback rationale ([2e36ba2](https://github.com/shi00/qTrading/commit/2e36ba2a4fac5175d93a01b579acc0aa4bfc1b79))
+
 ## [0.4.2](https://github.com/shi00/qTrading/compare/v0.4.1...v0.4.2) (2026-05-31)
 
 
