@@ -163,7 +163,7 @@ class TestLocalModelConfigPanel:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         assert hasattr(panel, "model_path_input")
 
     def test_get_current_config(self, mock_page, isolated_config):
@@ -172,7 +172,7 @@ class TestLocalModelConfigPanel:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.gguf"
 
@@ -186,7 +186,7 @@ class TestLocalModelConfigPanel:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = ""
         panel.timeout_input = MagicMock()
@@ -213,7 +213,7 @@ class TestLocalModelConfigPanel:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/nonexistent/path/model.gguf"
         panel.timeout_input = MagicMock()
@@ -241,7 +241,7 @@ class TestLocalModelConfigPanel:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.txt"
         panel.timeout_input = MagicMock()
@@ -271,7 +271,7 @@ class TestLLMConfigPanel:
         """Test LLMConfigPanel can be created"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
         assert hasattr(panel, "provider_dropdown")
         assert hasattr(panel, "api_key_input")
 
@@ -279,7 +279,7 @@ class TestLLMConfigPanel:
         """Test get_current_config returns correct structure"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
         config = panel.get_current_config()
 
         assert "provider" in config
@@ -319,7 +319,7 @@ class TestConfigPanelsIntegration:
         def on_change():
             callback_called.append(True)
 
-        panel = LocalModelConfigPanel(on_change=on_change, show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), on_change=on_change, show_save_button=False)
 
         panel._on_input_change(None)
 
@@ -932,7 +932,7 @@ class TestLocalModelConfigPanelVerificationState:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         assert panel._is_verifying is False
 
     @pytest.mark.asyncio
@@ -942,7 +942,7 @@ class TestLocalModelConfigPanelVerificationState:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         panel.page = mock_page
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.gguf"
@@ -964,7 +964,7 @@ class TestLocalModelConfigPanelVerificationState:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=True), show_save_button=False)
         panel.page = mock_page
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.gguf"
@@ -975,14 +975,7 @@ class TestLocalModelConfigPanelVerificationState:
         panel._set_loading_state = MagicMock()
         panel.get_current_config = MagicMock(return_value={})
 
-        with (
-            patch("os.path.exists", return_value=True),
-            patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance,
-        ):
-            mock_manager = MagicMock()
-            mock_manager.load_model = AsyncMock(return_value=True)
-            mock_get_instance.return_value = mock_manager
-
+        with patch("os.path.exists", return_value=True):
             result = await panel.async_verify_model()
 
         assert result is True
@@ -995,7 +988,7 @@ class TestLocalModelConfigPanelVerificationState:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(return_value=False), show_save_button=False)
         panel.page = mock_page
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.gguf"
@@ -1006,14 +999,7 @@ class TestLocalModelConfigPanelVerificationState:
         panel._set_loading_state = MagicMock()
         panel.get_current_config = MagicMock(return_value={})
 
-        with (
-            patch("os.path.exists", return_value=True),
-            patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance,
-        ):
-            mock_manager = MagicMock()
-            mock_manager.load_model = AsyncMock(return_value=False)
-            mock_get_instance.return_value = mock_manager
-
+        with patch("os.path.exists", return_value=True):
             result = await panel.async_verify_model()
 
         assert result is False
@@ -1026,7 +1012,7 @@ class TestLocalModelConfigPanelVerificationState:
             LocalModelConfigPanel,
         )
 
-        panel = LocalModelConfigPanel(show_save_button=False)
+        panel = LocalModelConfigPanel(on_verify_model=AsyncMock(side_effect=Exception("Test error")), show_save_button=False)
         panel.page = mock_page
         panel.model_path_input = MagicMock()
         panel.model_path_input.value = "/path/to/model.gguf"
@@ -1037,12 +1023,7 @@ class TestLocalModelConfigPanelVerificationState:
         panel._set_loading_state = MagicMock()
         panel.get_current_config = MagicMock(return_value={})
 
-        with (
-            patch("os.path.exists", return_value=True),
-            patch("services.local_model_manager.LocalModelManager.get_instance") as mock_get_instance,
-        ):
-            mock_get_instance.side_effect = Exception("Test error")
-
+        with patch("os.path.exists", return_value=True):
             result = await panel.async_verify_model()
 
         assert result is False
@@ -1056,7 +1037,7 @@ class TestLLMConfigPanelVerificationState:
         """Test _is_verifying is initially False"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
         assert panel._is_verifying is False
 
     @pytest.mark.asyncio
@@ -1064,7 +1045,7 @@ class TestLLMConfigPanelVerificationState:
         """Test that double verification is prevented"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
         panel.page = mock_page
         panel._is_verifying = True
         panel._current_provider = "deepseek"
@@ -1089,7 +1070,7 @@ class TestLLMConfigPanelVerificationState:
         """Test _is_verifying is reset after successful verification"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
         panel.page = mock_page
         panel._current_provider = "deepseek"
         panel._is_azure = False
@@ -1105,10 +1086,7 @@ class TestLLMConfigPanelVerificationState:
         panel._safe_update = MagicMock()
         panel._set_loading_state = MagicMock()
 
-        with patch("services.ai_service.AIService.test_connection", new_callable=AsyncMock) as mock_test:
-            mock_test.return_value = {"success": True}
-
-            result = await panel.async_verify_connection()
+        result = await panel.async_verify_connection()
 
         assert result is True
         assert panel._is_verifying is False
@@ -1118,7 +1096,7 @@ class TestLLMConfigPanelVerificationState:
         """Test _is_verifying is reset after failed verification"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": False, "message": "Test error"}))
         panel.page = mock_page
         panel._current_provider = "deepseek"
         panel._is_azure = False
@@ -1134,10 +1112,7 @@ class TestLLMConfigPanelVerificationState:
         panel._safe_update = MagicMock()
         panel._set_loading_state = MagicMock()
 
-        with patch("services.ai_service.AIService.test_connection", new_callable=AsyncMock) as mock_test:
-            mock_test.return_value = {"success": False, "message": "Test error"}
-
-            result = await panel.async_verify_connection()
+        result = await panel.async_verify_connection()
 
         assert result is False
         assert panel._is_verifying is False
@@ -1147,7 +1122,7 @@ class TestLLMConfigPanelVerificationState:
         """Test _is_verifying is reset after exception"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        panel = LLMConfigPanel()
+        panel = LLMConfigPanel(on_test_connection=AsyncMock(side_effect=Exception("Test error")))
         panel.page = mock_page
         panel._current_provider = "deepseek"
         panel._is_azure = False
@@ -1163,10 +1138,7 @@ class TestLLMConfigPanelVerificationState:
         panel._safe_update = MagicMock()
         panel._set_loading_state = MagicMock()
 
-        with patch("services.ai_service.AIService.test_connection") as mock_test:
-            mock_test.side_effect = Exception("Test error")
-
-            result = await panel.async_verify_connection()
+        result = await panel.async_verify_connection()
 
         assert result is False
         assert panel._is_verifying is False
