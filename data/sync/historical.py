@@ -26,8 +26,9 @@ from data.sync.base import ISyncStrategy, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import I18n
-from utils.config_handler import ConfigHandler
 from utils.async_utils import gather_return_exceptions_propagating_cancel
+from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -153,12 +154,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
             result.status = "failed"
             result.errors.append("Engine disposed during sync")
         except Exception as e:
-            logger.error(
-                f"[HistoricalSync] Run | ❌ Top-level failure: {e}",
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(f"[HistoricalSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(f"[HistoricalSync] Recoverable error ({error_info['code']}): {e}")
+            else:
+                logger.error(f"[HistoricalSync] Operational error: {e}", exc_info=True)
             result.status = "failed"
-            result.errors.append(str(e))
+            result.errors.append(error_info["message_key"])
 
         if self._cancelled and result.status not in ("failed", "cancelled"):
             result.status = "cancelled"

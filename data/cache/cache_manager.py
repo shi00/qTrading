@@ -232,6 +232,14 @@ class CacheManager:
 
     # Backward compatibility for direct SQL usage if any
     async def write_db(self, sql: typing.Any, params: typing.Any = None, is_many: typing.Any = False):
+        if is_many:
+            import warnings
+
+            warnings.warn(
+                "CacheManager.write_db(is_many=True) is deprecated. Use _save_upsert for batch operations.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         dao = BaseDao(self.engine)
         return await dao._write_db(sql, params, is_many, suppress_errors=True)
 

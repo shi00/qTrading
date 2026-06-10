@@ -6,6 +6,7 @@ import typing
 import pandas as pd
 
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.error_classifier import classify_error, classify_severity
 from utils.time_utils import get_now
 
 from .base import ISyncStrategy, SyncResult
@@ -147,9 +148,17 @@ class HolderSyncStrategy(ISyncStrategy):
             result.status = "failed"
             result.errors.append("Engine disposed during sync")
         except Exception as e:
-            logger.error(f"[HolderSync] Run | ❌ Top-level failure: {e}", exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(f"[HolderSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(f"[HolderSync] Recoverable error ({error_info['code']}): {e}")
+            else:
+                logger.error(f"[HolderSync] Operational error: {e}", exc_info=True)
             result.status = "failed"
-            result.errors.append(str(e))
+            result.errors.append(error_info["message_key"])
 
         return result
 

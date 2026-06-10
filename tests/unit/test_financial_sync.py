@@ -7,6 +7,7 @@ import pandas as pd
 
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.base import SyncResult
+from data.persistence.daos.base_dao import EngineDisposedError
 
 
 def make_ctx():
@@ -947,3 +948,56 @@ class TestPeakDisclosureSeason:
             factor, multiplier = _get_seasonal_adjustments()
             assert factor == 2
             assert multiplier == 2.0
+
+
+class TestFinancialSyncEngineDisposed:
+    """Tests for EngineDisposedError graceful degradation."""
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_in_run(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == "failed"
+        assert any("Engine disposed" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_in_fetch_comprehensive(self):
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        strategy = FinancialSyncStrategy(ctx)
+        # EngineDisposedError is caught by gather_return_exceptions_propagating_cancel
+        # and returned as an exception result; other API calls may still succeed
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        # The income table failed but other tables may still produce data
+        assert isinstance(df, (type(None), pd.DataFrame))
+
+
+class TestFinancialSyncClassifyError:
+    """Tests for classify_error / classify_severity integration in run()."""
+
+    @pytest.mark.asyncio
+    async def test_system_error_reraises(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=MemoryError("OOM"))
+        strategy = FinancialSyncStrategy(ctx)
+        with pytest.raises(MemoryError):
+            await strategy.run(force=True)
+
+    @pytest.mark.asyncio
+    async def test_recoverable_error_status_failed(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=ConnectionError("network reset"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_operational_error_status_failed(self):
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(side_effect=ValueError("bad value"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == "failed"
+        assert len(result.errors) > 0

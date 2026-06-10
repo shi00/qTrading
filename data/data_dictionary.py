@@ -290,6 +290,7 @@ TABLE_DEFINITIONS = {
     },
     "top_list": {
         "alias": "tab_top_list",
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "trade_date": "col_trade_date",
             "ts_code": "col_ts_code",
@@ -310,6 +311,7 @@ TABLE_DEFINITIONS = {
     },
     "block_trade": {
         "alias": "tab_block_trade",
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "ts_code": "col_ts_code",
             "trade_date": "col_trade_date",
@@ -335,6 +337,7 @@ TABLE_DEFINITIONS = {
     "index_dailybasic": {"alias": "tab_index_dailybasic", "columns": {}},
     "northbound_holding": {
         "alias": "tab_northbound_holding",
+        "quality_config": {"tier": 2, "monitor": True, "sparse": True},
         "columns": {
             "ts_code": "col_ts_code",
             "trade_date": "col_trade_date",
@@ -404,6 +407,7 @@ TABLE_DEFINITIONS = {
     },
     "limit_list": {
         "alias": "tab_limit_list",
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "trade_date": "col_trade_date",
             "ts_code": "col_ts_code",
@@ -513,6 +517,7 @@ TABLE_DEFINITIONS = {
     "stk_holdernumber": {
         "alias": "tab_stk_holdernumber",
         "desc": "股东户数",
+        "sync_config": {"strategy": "holder", "api": "get_stk_holdernumber"},
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "ts_code": "col_ts_code",
@@ -526,6 +531,7 @@ TABLE_DEFINITIONS = {
     "top10_holders": {
         "alias": "tab_top10_holders",
         "desc": "前十大股东",
+        "sync_config": {"strategy": "holder", "api": "get_top10_holders"},
         "quality_config": {"tier": 1, "monitor": True},
         "columns": {
             "ts_code": "col_ts_code",
@@ -541,6 +547,7 @@ TABLE_DEFINITIONS = {
     },
     "index_weight": {
         "alias": "tab_index_weight",
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {
             "index_code": "col_index_code",
             "con_code": "col_ts_code",

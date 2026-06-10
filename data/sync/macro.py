@@ -8,6 +8,7 @@ import pandas as pd
 from data.constants import MAJOR_INDICES
 from data.persistence.daos.macro_dao import MacroDao
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.error_classifier import classify_error, classify_severity
 from utils.time_utils import get_now, parse_date
 
 from .base import ISyncStrategy, SyncResult
@@ -100,9 +101,17 @@ class MacroSyncStrategy(ISyncStrategy):
             result.status = "failed"
             result.errors.append("Engine disposed during sync")
         except Exception as e:
-            logger.error(f"[MacroSync] Failed: {e}", exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(f"[MacroSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(f"[MacroSync] Recoverable error ({error_info['code']}): {e}")
+            else:
+                logger.error(f"[MacroSync] Operational error: {e}", exc_info=True)
             result.status = "failed"
-            result.errors.append(str(e))
+            result.errors.append(error_info["message_key"])
         if self._cancelled and result.status not in ("failed", "cancelled"):
             result.status = "cancelled"
         if result.status == "cancelled":

@@ -16,8 +16,10 @@ from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
+from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
@@ -81,18 +83,18 @@ def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("end_date").drop_duplicates(subset=["end_date"], keep="last")
 
 
-class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
+class FinancialSyncStrategy(ISyncStrategy):
     """
     Strategy for syncing financial reports and fundamental data.
     """
 
-    def __init__(self, context):  # pragma: no cover
+    def __init__(self, context):
         super().__init__(context)
         self._lazy_event = None  # ST-01: Lazy init
         self._tasks_lock = threading.Lock()
         self._active_tasks = set()
 
-    @property  # pragma: no cover
+    @property
     def _shutdown_event(self):
         """Get or create shutdown event dynamically per event loop."""
 
@@ -101,7 +103,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
         return get_loop_local("fina_shutdown_evt", _factory)
 
-    def cancel(self):  # pragma: no cover
+    def cancel(self):
         """Signal cancellation."""
         super().cancel()
         try:
@@ -114,7 +116,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                 if not task.done():
                     task.cancel()
 
-    async def _get_effective_trade_date(self) -> datetime.date:  # pragma: no cover
+    async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync windows."""
         try:
             trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
@@ -130,9 +132,13 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
             logger.debug(f"[FinancialSync] Effective trade date fallback: {e}")
         return get_now().date()
 
-    async def run(  # pragma: no cover
+    @log_async_operation(
+        operation_name="FinancialSyncStrategy.run",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
+    async def run(
         self,
-        periods: list[str] = None,  # type: ignore[assignment]
+        periods: list[str] | None = None,
         force: bool = False,
         progress_callback=None,
         **kwargs,
@@ -172,7 +178,6 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
                 )
 
         except asyncio.CancelledError:
-            logger.debug("[FinancialSync] Stop | Operation cancelled.")
             result.status = "cancelled"
             raise
         except EngineDisposedError:
@@ -180,16 +185,21 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
             result.status = "failed"
             result.errors.append("Engine disposed during sync")
         except Exception as e:
-            logger.error(
-                f"[FinancialSync] Run | ❌ Top-level failure: {e}",
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(f"[FinancialSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(f"[FinancialSync] Recoverable error ({error_info['code']}): {e}")
+            else:
+                logger.error(f"[FinancialSync] Operational error: {e}", exc_info=True)
             result.status = "failed"
-            result.errors.append(str(e))
+            result.errors.append(error_info["message_key"])
 
         return result
 
-    async def _run_full_sync(  # pragma: no cover
+    async def _run_full_sync(
         self,
         periods,
         progress_callback,
@@ -447,7 +457,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
         await self._sync_corporate_actions_by_date(all_dates, batch_progress)
 
-    async def _run_incremental_sync(  # pragma: no cover
+    async def _run_incremental_sync(
         self,
         progress_callback,
         result_accumulator: SyncResult,
@@ -603,7 +613,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
 
         result_accumulator.added = total_saved
 
-    async def _sync_corporate_actions_by_date(  # pragma: no cover
+    async def _sync_corporate_actions_by_date(
         self,
         dates: list[str],
         progress_callback=None,
@@ -703,7 +713,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
         if progress_callback:
             progress_callback(total, total, I18n.get("status_ready"))
 
-    async def _fetch_comprehensive_financial_data(  # pragma: no cover
+    async def _fetch_comprehensive_financial_data(
         self,
         ts_code,
         start_date=None,
@@ -852,7 +862,7 @@ class FinancialSyncStrategy(ISyncStrategy):  # pragma: no cover
             )
             return None, {"mainbz": 0, "audit": 0}
 
-    async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:  # pragma: no cover
+    async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
         """
         Targeted repair for specific stocks.
         Fixes ALL tables defined in constants.
