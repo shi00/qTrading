@@ -85,7 +85,10 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             lf = pl.from_pandas(df).lazy()
             result_lf = self._filter_logic(lf, context)
             # Offload CPU-intensive collect + conversion to thread pool
-            # to avoid blocking the Flet event loop during full-market screening
+            # to avoid blocking the Flet event loop during full-market screening.
+            # Thread-safety: lambda captures result_lf (immutable LazyFrame graph)
+            # and implicitly references context via closure. This is safe because
+            # context is not mutated concurrently during filter() execution.
             candidates_df = await ThreadPoolManager().run_async(
                 TaskType.CPU,
                 lambda: result_lf.collect().to_pandas(),

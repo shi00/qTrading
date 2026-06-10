@@ -214,6 +214,9 @@ class AIService:
 
     重要: 异步锁必须在运行时动态创建，绑定到当前事件循环
     禁止在类级别或 __init__ 中直接创建 asyncio.Lock/Semaphore
+
+    _atexit_cleanup: 不需要。LiteLLM 是函数式调用（无持久化客户端实例），
+    httpx 客户端由 LiteLLM 内部管理，进程退出时自动释放。
     """
 
     _instance = None
