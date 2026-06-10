@@ -106,11 +106,11 @@ def make_quotes_df(
     df = pl.DataFrame(rows)
 
     if "adj_factor" in df.columns:
-        latest_factors = (
-            df.sort("trade_date").group_by("ts_code").agg(pl.col("adj_factor").last().alias("latest_adj_factor"))
+        base_factors = (
+            df.sort("trade_date").group_by("ts_code").agg(pl.col("adj_factor").first().alias("base_adj_factor"))
         )
-        df = df.join(latest_factors, on="ts_code", how="left")
-        qfq_ratio = pl.col("adj_factor") / pl.col("latest_adj_factor")
+        df = df.join(base_factors, on="ts_code", how="left")
+        qfq_ratio = pl.col("adj_factor") / pl.col("base_adj_factor")
         df = df.with_columns(
             [
                 pl.col("open").alias("raw_open"),
