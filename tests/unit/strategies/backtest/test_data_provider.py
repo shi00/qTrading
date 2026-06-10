@@ -266,3 +266,78 @@ class TestBacktestDataProviderWithProcessor:
         screening_data = context.get("screening_data")
         assert screening_data is not None
         assert "turnover_rate" in screening_data.columns
+
+
+class TestBacktestQualityProxy:
+    """验证 _BacktestQualityProxy 满足质量门控契约。"""
+
+    def test_default_tier_is_gold(self) -> None:
+        from data.persistence.quality_gate import QualityTier
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy()
+        assert proxy._quality_tier == int(QualityTier.GOLD)
+
+    def test_custom_tier(self) -> None:
+        from data.persistence.quality_gate import QualityTier
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy(tier=QualityTier.SILVER)
+        assert proxy._quality_tier == int(QualityTier.SILVER)
+
+    def test_check_tier_passes_with_gold_proxy(self) -> None:
+        """GOLD proxy 应通过任何质量门控检查，不抛 QualityGateError。"""
+        from data.persistence.quality_gate import QualityTier, _check_tier
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy()
+        _check_tier(proxy, QualityTier.GOLD, "test_func")
+
+    def test_check_tier_passes_with_silver_proxy_for_silver_requirement(self) -> None:
+        from data.persistence.quality_gate import QualityTier, _check_tier
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy(tier=QualityTier.SILVER)
+        _check_tier(proxy, QualityTier.SILVER, "test_func")
+
+    def test_check_tier_raises_when_proxy_tier_too_low(self) -> None:
+        """SILVER proxy 不满足 GOLD 要求时应抛 QualityGateError。"""
+        from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy(tier=QualityTier.SILVER)
+        with pytest.raises(QualityGateError):
+            _check_tier(proxy, QualityTier.GOLD, "test_func")
+
+    @pytest.mark.asyncio
+    async def test_proxy_reused_across_build_context_calls(self) -> None:
+        """验证 BacktestDataProvider 复用 proxy 实例。"""
+        cache = MagicMock()
+        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        assert provider._quality_proxy is not None
+
+        ctx1 = await provider.build_context(date(2024, 1, 2))
+        ctx2 = await provider.build_context(date(2024, 1, 3))
+
+        assert ctx1["data_processor"] is ctx2["data_processor"]
+        assert ctx1["data_processor"] is provider._quality_proxy
+
+    def test_no_proxy_when_data_processor_provided(self) -> None:
+        """当 data_processor 存在时，不应创建 proxy。"""
+        cache = MagicMock()
+        processor = MagicMock()
+        provider = BacktestDataProvider(cache, data_processor=processor)
+        assert provider._quality_proxy is None

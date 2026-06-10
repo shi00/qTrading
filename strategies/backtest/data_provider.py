@@ -35,9 +35,8 @@ class _BacktestQualityProxy:
 
     def __init__(self, tier: QualityTier = QualityTier.GOLD):
         self._quality_tier = int(tier)
-        logger.info(
-            "[BacktestQualityProxy] Using quality tier %s for backtest context. "
-            "Backtest data quality is guaranteed by the sync pipeline, not by the quality gate.",
+        logger.debug(
+            "[BacktestQualityProxy] Using quality tier %s for backtest context.",
             tier.name,
         )
 
@@ -60,6 +59,8 @@ class BacktestDataProvider:
     ):
         self.cache = cache
         self.data_processor = data_processor
+        # 缓存 proxy，避免每次 build_context 都新建实例
+        self._quality_proxy = _BacktestQualityProxy() if data_processor is None else None
 
     async def build_context(
         self,
@@ -92,7 +93,7 @@ class BacktestDataProvider:
         if self.data_processor is not None:
             context["data_processor"] = self.data_processor
         else:
-            context["data_processor"] = _BacktestQualityProxy()
+            context["data_processor"] = self._quality_proxy
         return context
 
     async def _build_historical_screening_context(

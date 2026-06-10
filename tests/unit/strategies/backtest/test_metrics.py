@@ -86,6 +86,28 @@ class TestBacktestMetrics:
     def test_calc_win_rate_empty(self) -> None:
         assert BacktestMetrics.calc_win_rate(pl.DataFrame()) == 0.0
 
+    def test_calc_win_rate_excludes_buy_trades(self) -> None:
+        """胜率仅统计卖出/平仓交易，买入交易不计入分母。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["buy", "buy", "sell", "sell", "sell"],
+                "realized_pnl": [0.0, 0.0, 100.0, -50.0, 200.0],
+            }
+        )
+        # 3 笔 sell 中 2 笔盈利 → 胜率 2/3
+        win_rate = BacktestMetrics.calc_win_rate(trades)
+        assert win_rate == pytest.approx(2 / 3, rel=0.01)
+
+    def test_calc_win_rate_all_buy_trades(self) -> None:
+        """全部为买入交易时胜率为 0（无卖出交易）。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["buy", "buy"],
+                "realized_pnl": [0.0, 0.0],
+            }
+        )
+        assert BacktestMetrics.calc_win_rate(trades) == 0.0
+
     def test_calc_profit_factor(self) -> None:
         trades = pl.DataFrame(
             {
@@ -113,6 +135,18 @@ class TestBacktestMetrics:
             }
         )
         assert BacktestMetrics.calc_profit_factor(trades) == 0.0
+
+    def test_calc_profit_factor_excludes_buy_trades(self) -> None:
+        """盈亏比仅统计卖出/平仓交易。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["buy", "sell", "sell"],
+                "realized_pnl": [0.0, 100.0, -50.0],
+            }
+        )
+        # 仅统计 sell: gross_profit=100, gross_loss=50 → pf=2.0
+        pf = BacktestMetrics.calc_profit_factor(trades)
+        assert pf == pytest.approx(2.0, rel=0.01)
 
     def test_calc_ic(self) -> None:
         signal_rank = pl.Series([1, 2, 3, 4, 5])
