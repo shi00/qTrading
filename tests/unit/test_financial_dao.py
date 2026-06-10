@@ -500,7 +500,7 @@ class TestGetPledgeStatBatch:
         result = await dao.get_pledge_stat_batch(["000001.SZ"], as_of_date="20240701")
         assert not result.empty
         sql = dao._read_db.call_args[0][0]
-        assert "ann_date <=" in sql
+        assert "end_date <=" in sql
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
@@ -517,6 +517,7 @@ class TestGetPledgeStatBatch:
         assert not result.empty
         sql = dao._read_db.call_args[0][0]
         assert "end_date <=" not in sql
+        assert "ann_date" not in sql
 
 
 class TestGetFinaMainbz:

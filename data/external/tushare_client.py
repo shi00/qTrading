@@ -804,7 +804,8 @@ class TushareClient:
                     )
                 return is_weekday
             except (ValueError, TypeError):
-                return True  # Default to allowing if all else fails
+                logger.warning("[API] Invalid date format '%s', defaulting to non-trading day", date_str)
+                return False
 
     # ========== Policy-Driven AI Extensions ==========
 

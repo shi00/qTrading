@@ -46,6 +46,34 @@ def _parse_period(p: typing.Any):
     return p_str
 
 
+def _period_to_yyyymm(period: typing.Any) -> str | None:
+    """将 period (date/Timestamp/str) 转为 Tushare 宏观接口的 YYYYMM 格式。
+
+    Tushare 宏观接口 (cn_m, cn_cpi, cn_ppi) 的 start_m/end_m 参数
+    要求 YYYYMM 格式，而非通用 API 的 YYYYMMDD 格式。
+    """
+    if period is None:
+        return None
+    if isinstance(period, str):
+        return period[:6]
+    if hasattr(period, "year") and hasattr(period, "month"):
+        return f"{period.year}{period.month:02d}"
+    return None
+
+
+def _compute_publish_date(period_date: datetime.date) -> datetime.date:
+    """保守估算宏观指标发布日期：报告期次月16日。
+
+    中国宏观经济数据发布窗口：
+    - CPI/PPI：次月 9-12 日发布
+    - M2/M1/M0：次月 10-15 日发布
+    统一使用次月 16 日作为保守估算，确保所有指标均已发布。
+    """
+    if period_date.month == 12:
+        return datetime.date(period_date.year + 1, 1, 16)
+    return datetime.date(period_date.year, period_date.month + 1, 16)
+
+
 class MacroSyncStrategy(ISyncStrategy):
     """
     Strategy for syncing Macroeconomic data (M2, CPI, PPI, Shibor).
@@ -131,10 +159,11 @@ class MacroSyncStrategy(ISyncStrategy):
         """
         try:
             latest = await self.dao.get_macro_latest_date()
+            start_m = _period_to_yyyymm(latest)
 
-            df_m2 = await self.context.api.get_macro_data("cn_m", start_m=latest)
-            df_cpi = await self.context.api.get_macro_data("cn_cpi", start_m=latest)
-            df_ppi = await self.context.api.get_macro_data("cn_ppi", start_m=latest)
+            df_m2 = await self.context.api.get_macro_data("cn_m", start_m=start_m)
+            df_cpi = await self.context.api.get_macro_data("cn_cpi", start_m=start_m)
+            df_ppi = await self.context.api.get_macro_data("cn_ppi", start_m=start_m)
 
             merged = self._merge_macro_data(df_m2, df_cpi, df_ppi)
 
@@ -208,6 +237,11 @@ class MacroSyncStrategy(ISyncStrategy):
             merged["period"] = merged["period"].apply(_parse_period)
             merged["period"] = pd.to_datetime(merged["period"], format="mixed", errors="coerce").dt.date
             merged = merged.dropna(subset=["period"])
+
+            # Compute publish_date from period for point-in-time queries
+            merged["publish_date"] = merged["period"].apply(
+                lambda p: _compute_publish_date(p) if isinstance(p, datetime.date) else None
+            )
 
         return merged
 

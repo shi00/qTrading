@@ -110,7 +110,7 @@ class FinancialDao(BaseDao):
         )
 
     async def save_pledge_stat(self, df: pd.DataFrame):
-        cols = get_model_columns(PledgeStat)
+        cols = get_model_columns(PledgeStat, exclude={"ann_date"})
         pk_columns = get_model_pk_columns(PledgeStat)
         return await self._save_upsert(
             df,
@@ -350,10 +350,10 @@ class FinancialDao(BaseDao):
                     ann_date_param = len(chunk) + 1
                     sql = f"""
                         SELECT DISTINCT ON (ts_code)
-                            ts_code, end_date, ann_date, pledge_count, pledge_ratio
+                            ts_code, end_date, pledge_count, pledge_ratio
                         FROM pledge_stat
                         WHERE ts_code IN ({placeholders})
-                          AND ann_date <= ${ann_date_param}
+                          AND end_date <= ${ann_date_param}
                         ORDER BY ts_code, end_date DESC
                     """
                     df = await self._read_db(sql, chunk + [as_of_date])
@@ -367,7 +367,7 @@ class FinancialDao(BaseDao):
                     self._read_db,
                     """
                     SELECT DISTINCT ON (ts_code)
-                        ts_code, end_date, ann_date, pledge_count, pledge_ratio
+                        ts_code, end_date, pledge_count, pledge_ratio
                     FROM pledge_stat
                     WHERE ts_code IN ({placeholders})
                     ORDER BY ts_code, end_date DESC

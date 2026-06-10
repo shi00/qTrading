@@ -517,6 +517,7 @@ class FinaAudit(Base):
 class MacroEconomy(Base):
     __tablename__ = "macro_economy"
     period = Column(Date, primary_key=True)
+    publish_date = Column(Date, index=True)
     m2 = Column(Numeric(20, 4))
     m2_yoy = Column(Numeric(12, 4))
     m1 = Column(Numeric(20, 4))
@@ -526,6 +527,7 @@ class MacroEconomy(Base):
     cpi = Column(Numeric(12, 4))
     ppi = Column(Numeric(12, 4))
     created_at = Column(DateTime(timezone=False), server_default=func.now())
+    updated_at = Column(DateTime(timezone=False), server_default=func.now())
 
 
 class ShiborDaily(Base):

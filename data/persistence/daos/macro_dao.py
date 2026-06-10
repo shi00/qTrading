@@ -99,20 +99,21 @@ class MacroDao(BaseDao):
 
         Args:
             as_of_date: 截止日期（含），用于历史回放场景防止前视偏差。
+                        使用 publish_date（保守估算发布日）过滤，而非 period（报告期）。
                         None 表示不限制（取最新一期）。
 
         Returns:
-            DataFrame with latest macro economy data (period, m2, m2_yoy, m1, m1_yoy, cpi, ppi, etc.)
+            DataFrame with latest macro economy data (period, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi)
         """
         try:
             if as_of_date is not None:
                 df = await self._read_db(
-                    "SELECT period, m2, m2_yoy, m1, m1_yoy, cpi, ppi FROM macro_economy WHERE period <= $1 ORDER BY period DESC LIMIT 1",
+                    "SELECT period, publish_date, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi FROM macro_economy WHERE publish_date <= $1 ORDER BY publish_date DESC LIMIT 1",
                     as_of_date,
                 )
             else:
                 df = await self._read_db(
-                    "SELECT period, m2, m2_yoy, m1, m1_yoy, cpi, ppi FROM macro_economy ORDER BY period DESC LIMIT 1"
+                    "SELECT period, publish_date, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi FROM macro_economy ORDER BY publish_date DESC LIMIT 1"
                 )
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:

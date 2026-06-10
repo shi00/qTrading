@@ -466,7 +466,8 @@ class TestHolderSyncSyncPledgeStat:
         assert count == -1
 
     @pytest.mark.asyncio
-    async def test_computes_ann_date_from_end_date(self):
+    async def test_no_synthetic_ann_date(self):
+        """MD-001: pledge_stat API does not return ann_date; we must NOT synthesize it."""
         import datetime as _dt
 
         ctx = MagicMock()
@@ -492,12 +493,12 @@ class TestHolderSyncSyncPledgeStat:
         count, date = await strategy._sync_pledge_stat()
         assert count == 2
         assert saved_df is not None
-        assert "ann_date" in saved_df.columns
-        assert saved_df.loc[0, "ann_date"] == _dt.date(2024, 6, 17)
-        assert saved_df.loc[1, "ann_date"] == _dt.date(2024, 6, 10)
+        # ann_date should NOT be synthesized from end_date
+        assert "ann_date" not in saved_df.columns
 
     @pytest.mark.asyncio
     async def test_preserves_existing_ann_date(self):
+        """If Tushare ever returns ann_date, it should be preserved as-is."""
         import datetime as _dt
 
         ctx = MagicMock()

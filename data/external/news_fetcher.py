@@ -13,7 +13,7 @@ from cachetools import TTLCache
 from core.i18n import I18n
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
+from utils.time_utils import CST_TZ, get_now
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,9 @@ class NewsFetcher:
                 # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
                 try:
                     # Try parsing with pandas for robustness (handles multiple formats)
-                    dt_obj = pd.to_datetime(final_time)  # type: ignore[assignment]
+                    dt_obj = pd.to_datetime(final_time)
+                    if dt_obj.tzinfo is None:
+                        dt_obj = dt_obj.tz_localize(CST_TZ)  # type: ignore[union-attr]
                     final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
                 except (ValueError, TypeError) as exc:
                     logger.debug(

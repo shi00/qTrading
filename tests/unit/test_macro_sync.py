@@ -975,3 +975,94 @@ class TestMacroSyncMonthlyWithSkippedPermission:
             result = SyncResult()
             await strategy._sync_shibor_daily(result)
             assert len(result.errors) == 1
+
+
+class TestPeriodToYyyymm:
+    def test_none_returns_none(self):
+        from data.sync.macro import _period_to_yyyymm
+
+        assert _period_to_yyyymm(None) is None
+
+    def test_date_object(self):
+        from data.sync.macro import _period_to_yyyymm
+
+        result = _period_to_yyyymm(datetime.date(2024, 3, 1))
+        assert result == "202403"
+
+    def test_timestamp(self):
+        from data.sync.macro import _period_to_yyyymm
+
+        result = _period_to_yyyymm(pd.Timestamp("2024-03-01"))
+        assert result == "202403"
+
+    def test_yyyymm_string(self):
+        from data.sync.macro import _period_to_yyyymm
+
+        result = _period_to_yyyymm("202403")
+        assert result == "202403"
+
+    def test_yyyymmdd_string(self):
+        from data.sync.macro import _period_to_yyyymm
+
+        result = _period_to_yyyymm("20240301")
+        assert result == "202403"
+
+    def test_december_wraps_year(self):
+        from data.sync.macro import _period_to_yyyymm
+
+        result = _period_to_yyyymm(datetime.date(2024, 12, 1))
+        assert result == "202412"
+
+
+class TestComputePublishDate:
+    def test_regular_month(self):
+        from data.sync.macro import _compute_publish_date
+
+        result = _compute_publish_date(datetime.date(2024, 3, 1))
+        assert result == datetime.date(2024, 4, 16)
+
+    def test_december_wraps_year(self):
+        from data.sync.macro import _compute_publish_date
+
+        result = _compute_publish_date(datetime.date(2024, 12, 1))
+        assert result == datetime.date(2025, 1, 16)
+
+    def test_january(self):
+        from data.sync.macro import _compute_publish_date
+
+        result = _compute_publish_date(datetime.date(2024, 1, 1))
+        assert result == datetime.date(2024, 2, 16)
+
+
+class TestMacroSyncMonthlyUsesYyyymm:
+    @pytest.mark.asyncio
+    async def test_start_m_is_yyyymm_format(self):
+        """MD-003: start_m should be YYYYMM, not YYYYMMDD"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100.0]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=pd.Timestamp("2024-06-01"))
+        strategy.dao.save_macro_economy = AsyncMock(return_value=1)
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        # Verify get_macro_data was called with YYYYMM format start_m
+        for call in ctx.api.get_macro_data.call_args_list:
+            start_m = call.kwargs.get("start_m")
+            if start_m is not None:
+                assert len(start_m) == 6, f"start_m should be YYYYMM format, got '{start_m}'"
+
+
+class TestMergeMacroDataPublishDate:
+    def test_publish_date_computed(self):
+        """MD-002: _merge_macro_data should compute publish_date from period"""
+        df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0], "m2_yoy": [5.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None)
+        assert result is not None
+        assert "publish_date" in result.columns
+        # period 2024-06-01 -> publish_date should be 2024-07-16
+        assert result["publish_date"].iloc[0] == datetime.date(2024, 7, 16)

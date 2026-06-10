@@ -1064,6 +1064,7 @@
     "col_dv_ratio": "Dv Ratio",
     "col_dv_ttm": "Div Yield(TTM)",
     "col_end_date": "End Date",
+    "col_publish_date": "Publish Date",
     "col_ex_date": "Ex Date",
     "col_exchange": "Exchange",
     "col_exp_date": "Exp Date",

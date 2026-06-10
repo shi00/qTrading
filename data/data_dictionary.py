@@ -486,6 +486,7 @@ TABLE_DEFINITIONS = {
         "type": "global",
         "columns": {
             "period": "col_end_date",
+            "publish_date": "col_publish_date",
             "m2": "col_m2",
             "m2_yoy": "col_m2_yoy",
             "m1": "col_m1",

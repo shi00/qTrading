@@ -127,6 +127,7 @@ class TestMacroDaoGetMacroEconomyLatest:
         dao._read_db.assert_called_once()
         call_args = dao._read_db.call_args
         assert "$1" in call_args[0][0]
+        assert "publish_date <=" in call_args[0][0]
         assert call_args[0][1] == "2024-01-01"
 
     @pytest.mark.asyncio
@@ -136,7 +137,7 @@ class TestMacroDaoGetMacroEconomyLatest:
         result = await dao.get_macro_economy_latest(as_of_date=None)
         assert not result.empty
         call_sql = dao._read_db.call_args[0][0]
-        assert "WHERE" not in call_sql or "period <=" not in call_sql
+        assert "WHERE" not in call_sql or "publish_date <=" not in call_sql
 
 
 class TestMacroDaoGetShiborLatestWithAsOfDate:

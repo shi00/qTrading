@@ -35,6 +35,9 @@ from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
+_CALENDAR_DAY_MULTIPLIER = 365 / 250
+_CALENDAR_DAY_BUFFER = 30
+
 
 class HistoricalSyncStrategy(ISyncStrategy):
     """
@@ -120,7 +123,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if result.status in ["success", "partial"]:
                 end_date = await self._get_effective_trade_date()
-                calendar_days = int(days * 365 / 250) + 30
+                calendar_days = int(days * _CALENDAR_DAY_MULTIPLIER) + _CALENDAR_DAY_BUFFER
                 start_date = end_date - datetime.timedelta(days=calendar_days)
                 try:
                     effective_report_tables = TushareClient().get_effective_synced_tables(self.CORE_RESUME_TABLES)
@@ -187,7 +190,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         self._shutdown_event.clear()
 
         end_date = await self._get_effective_trade_date()
-        calendar_days = int(days * 365 / 250) + 30
+        calendar_days = int(days * _CALENDAR_DAY_MULTIPLIER) + _CALENDAR_DAY_BUFFER
         start_date = end_date - datetime.timedelta(days=calendar_days)
 
         try:
@@ -207,6 +210,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
             result.status = "failed"
             result.errors.append("No trade dates found")
             return
+
+        if len(trade_dates) < days:
+            logger.warning(
+                f"[HistoricalSync] Calendar | ⚠️ Only {len(trade_dates)} trade dates returned, "
+                f"fewer than the requested {days} trading days. Sync range may be insufficient."
+            )
 
         # Breakpoint Resume (Check Cache for all Critical tables)
         # All tables that are synced in sync_daily_market_snapshot

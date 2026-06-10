@@ -387,3 +387,15 @@ class TestTushareClientExecutorTimeout:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with pytest.raises(RuntimeError, match="retries exhausted"):
                 await client._handle_api_call(MagicMock())
+
+
+class TestIsTradingDayInvalidDate:
+    def test_invalid_date_returns_false(self):
+        """MD-004: is_trading_day should return False for unparseable dates"""
+        client = TushareClient.__new__(TushareClient)
+        client.pro = None
+        client._trade_cal_cache = set()
+        client._loaded_years = set()
+        client._calendar_lock = MagicMock()
+        result = client.is_trading_day("not_a_date")
+        assert result is False

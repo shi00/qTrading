@@ -995,6 +995,7 @@
     "col_trade_date": "交易日期",
     "col_ann_date": "公告日期",
     "col_end_date": "报告期",
+    "col_publish_date": "发布日期",
     "col_list_date": "上市日期",
     "col_delist_date": "退市日期",
     "col_created_at": "创建时间",
