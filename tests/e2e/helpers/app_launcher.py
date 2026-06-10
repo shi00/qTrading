@@ -56,6 +56,7 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
         "PYTHONUNBUFFERED": "1",
         "LITELLM_LOCAL_MODEL_COST_MAP": "True",
         "E2E_TESTING": "true",
+        "AUTO_MIGRATE": "true",
         **env_overrides,
     }
     proc = subprocess.Popen(

@@ -477,7 +477,7 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertIn("screening_data", s.required_context_keys)
         self.assertIn("fundamental_screening_data", s.required_context_keys)
         self.assertIn("daily_quotes", s.required_tables)
-        self.assertIn("daily_indicators", s.required_tables)
+        self.assertIn("financial_reports", s.required_tables)
 
     def test_polars_base_default_deps(self):
         s = VolumeBreakoutStrategy()

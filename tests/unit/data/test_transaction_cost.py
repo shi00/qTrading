@@ -195,7 +195,8 @@ class TestTransactionCostWithSchedule:
             is_buy=False,
             trade_date=date(2022, 1, 1),
         )
-        assert cost.stamp_duty == 10000.0 * 1e-3
+        # 印花税基于 gross_amount（含滑点调整后金额）计算
+        assert cost.stamp_duty == cost.gross_amount * 1e-3
 
     def test_sell_uses_date_based_rate_after_2023(self, model: TransactionCostModel) -> None:
         cost = model.calculate(
@@ -204,7 +205,7 @@ class TestTransactionCostWithSchedule:
             is_buy=False,
             trade_date=date(2024, 1, 1),
         )
-        assert cost.stamp_duty == 10000.0 * 5e-4
+        assert cost.stamp_duty == cost.gross_amount * 5e-4
 
     def test_sell_uses_date_based_rate_on_change_date(self, model: TransactionCostModel) -> None:
         cost = model.calculate(
@@ -213,7 +214,7 @@ class TestTransactionCostWithSchedule:
             is_buy=False,
             trade_date=date(2023, 8, 28),
         )
-        assert cost.stamp_duty == 10000.0 * 5e-4
+        assert cost.stamp_duty == cost.gross_amount * 5e-4
 
     def test_explicit_rate_overrides_schedule(self) -> None:
         model = TransactionCostModel(TransactionCostConfig(stamp_duty_rate=2e-3))
@@ -223,7 +224,7 @@ class TestTransactionCostWithSchedule:
             is_buy=False,
             trade_date=date(2024, 1, 1),
         )
-        assert cost.stamp_duty == 10000.0 * 2e-3
+        assert cost.stamp_duty == cost.gross_amount * 2e-3
 
     def test_buy_never_has_stamp_duty(self, model: TransactionCostModel) -> None:
         cost = model.calculate(
@@ -236,7 +237,7 @@ class TestTransactionCostWithSchedule:
 
     def test_no_trade_date_uses_current_rate(self, model: TransactionCostModel) -> None:
         cost = model.calculate(price=10.0, volume=1000, is_buy=False)
-        assert cost.stamp_duty == 10000.0 * 5e-4
+        assert cost.stamp_duty == cost.gross_amount * 5e-4
 
 
 class TestFutureScheduleExtension:
