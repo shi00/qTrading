@@ -441,8 +441,9 @@ class NewsFetcher:
         Uses Sina Finance (verified working, not blocked).
 
         Returns:
-            list[dict] on success (may be empty if source returns no data).
-            Raises TimeoutError/Exception on failure so caller can decide fallback.
+            list[dict] on success. Empty list on failure or when source returns
+            no data, so callers can safely use the result without try/except.
+            Only asyncio.CancelledError is propagated for graceful shutdown.
         """
 
         def _fetch():
@@ -474,7 +475,7 @@ class NewsFetcher:
                     _HOT_CONCEPTS_TIMEOUT_SECONDS,
                     count,
                 )
-            raise
+            return []
         except Exception as e:
             _SINA_CONSECUTIVE_FAILURES["concept"] += 1
             count = _SINA_CONSECUTIVE_FAILURES["concept"]
@@ -491,7 +492,7 @@ class NewsFetcher:
                     count,
                     DataSanitizer.sanitize_error(e),
                 )
-            raise
+            return []
 
         if df is None:
             # None means the underlying call returned nothing usable — treat as failure
@@ -506,7 +507,7 @@ class NewsFetcher:
                     "[News] Hot concepts fetch returned None %d consecutive times. Data source may be degraded.",
                     count,
                 )
-            raise RuntimeError("Hot concepts data source returned None")
+            return []
 
         if df.empty:
             _SINA_CONSECUTIVE_EMPTY["concept"] += 1

@@ -512,14 +512,14 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_none_df_raises(self, mock_tpm):
-        """df is None means data source failure — must raise, not return []."""
+    async def test_none_df_returns_empty(self, mock_tpm):
+        """df is None means data source failure — returns []."""
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=None)
 
-        with pytest.raises(RuntimeError, match="returned None"):
-            await NewsFetcher.get_hot_concepts()
+        result = await NewsFetcher.get_hot_concepts()
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
@@ -606,36 +606,36 @@ class TestGetHotConcepts:
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
     @patch("data.external.news_fetcher.ak")
-    async def test_sina_exception_raises(self, mock_ak, mock_run, mock_tpm):
+    async def test_sina_exception_returns_empty(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_sector_spot.side_effect = Exception("sina error")
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("sina error"))
 
-        with pytest.raises(Exception, match="sina error"):
-            await NewsFetcher.get_hot_concepts()
+        result = await NewsFetcher.get_hot_concepts()
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
     @patch("data.external.news_fetcher.ak")
-    async def test_general_exception_raises(self, mock_ak, mock_run, mock_tpm):
+    async def test_general_exception_returns_empty(self, mock_ak, mock_run, mock_tpm):
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("general error"))
 
-        with pytest.raises(Exception, match="general error"):
-            await NewsFetcher.get_hot_concepts()
+        result = await NewsFetcher.get_hot_concepts()
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_timeout_raises(self, mock_tpm):
+    async def test_timeout_returns_empty(self, mock_tpm):
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=asyncio.CancelledError())
-        # asyncio.wait_for wraps CancelledError into TimeoutError
-        with pytest.raises((TimeoutError, asyncio.CancelledError)):
-            await NewsFetcher.get_hot_concepts()
+        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
+
+        result = await NewsFetcher.get_hot_concepts()
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
@@ -739,13 +739,13 @@ class TestGetHotConceptsTimeout:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_timeout_raises(self, mock_tpm, mock_run):
+    async def test_timeout_returns_empty(self, mock_tpm, mock_run):
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
 
-        with pytest.raises(TimeoutError):
-            await NewsFetcher.get_hot_concepts(limit=3)
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher._run_with_python_string_storage")
@@ -1142,7 +1142,7 @@ class TestGetUsMajorMovesDirectExecution:
 class TestGetHotConceptsDirectExecution:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ak")
-    async def test_sina_concept_exception_in_fetch(self, mock_ak):
+    async def test_sina_concept_exception_returns_empty(self, mock_ak):
         mock_ak.stock_sector_spot.side_effect = Exception("sina error")
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
@@ -1150,8 +1150,8 @@ class TestGetHotConceptsDirectExecution:
             mock_tpm.return_value = mock_tpm_instance
             mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-            with pytest.raises(Exception, match="sina error"):
-                await NewsFetcher.get_hot_concepts(limit=3)
+            result = await NewsFetcher.get_hot_concepts(limit=3)
+            assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ak")
