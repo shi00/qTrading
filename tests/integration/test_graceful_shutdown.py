@@ -16,7 +16,7 @@ from utils.shutdown import ShutdownCoordinator
 def mock_singletons():
     """Mock all Singletons to prevent real execution by setting their _instances"""
     from services.task_manager import TaskManager
-    from data.external.news_subscription import NewsSubscriptionService
+    from services.news_subscription_service import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.cache.cache_manager import CacheManager
     from data.domain_services.market_data_service import MarketDataService
@@ -114,7 +114,7 @@ async def test_cleanup_idempotent(mock_singletons):
 async def test_safe_skip_empty_singletons():
     """Ensure missing singletons (Onboarding phase) don't crash the shutdown."""
     from services.task_manager import TaskManager
-    from data.external.news_subscription import NewsSubscriptionService
+    from services.news_subscription_service import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.cache.cache_manager import CacheManager
     from data.domain_services.market_data_service import MarketDataService

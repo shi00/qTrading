@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from data.external.news_subscription import NewsSubscriptionService
+from services.news_subscription_service import NewsSubscriptionService
 
 
 @pytest.mark.asyncio
@@ -20,7 +20,7 @@ async def test_safe_queue_put_timeout_path_drops_oldest_and_keeps_newest():
         coro.close()
         raise TimeoutError()
 
-    with patch("data.external.news_subscription.asyncio.wait_for", side_effect=_raise_timeout):
+    with patch("services.news_subscription_service.asyncio.wait_for", side_effect=_raise_timeout):
         await asyncio.gather(
             svc._safe_queue_put({"id": "new1"}),
             svc._safe_queue_put({"id": "new2"}),

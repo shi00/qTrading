@@ -82,14 +82,6 @@ class TestExternalInit:
 
         assert result is NewsFetcher
 
-    def test_getattr_news_subscription(self):
-        import data.external
-
-        result = data.external.NewsSubscriptionService
-        from data.external.news_subscription import NewsSubscriptionService
-
-        assert result is NewsSubscriptionService
-
     def test_getattr_tushare_client(self):
         import data.external
 

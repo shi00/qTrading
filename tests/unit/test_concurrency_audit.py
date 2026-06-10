@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from data.external.news_subscription import NewsSubscriptionService
+from services.news_subscription_service import NewsSubscriptionService
 from data.domain_services.market_data_service import MarketDataService
 from utils.rate_limiter import TokenBucket
 from utils.thread_pool import ThreadPoolManager
@@ -38,8 +38,8 @@ class TestNewsSubscriptionStopBehavior:
     - stop_async() after stop() completes without error.
     """
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_sets_not_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -48,8 +48,8 @@ class TestNewsSubscriptionStopBehavior:
         svc.stop()
         assert svc._running is False
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_cancels_fetch_task(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -60,8 +60,8 @@ class TestNewsSubscriptionStopBehavior:
         svc.stop()
         mock_task.cancel.assert_called_once()
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_idempotent_no_error_on_double_call(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -71,8 +71,8 @@ class TestNewsSubscriptionStopBehavior:
         svc.stop()
         assert svc._running is False
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_before_start_does_not_raise(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = False
@@ -82,8 +82,8 @@ class TestNewsSubscriptionStopBehavior:
         assert svc._running is False
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_stop_in_loop_eventually_cleans_up_processing_task(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -96,8 +96,8 @@ class TestNewsSubscriptionStopBehavior:
         assert processing_task.done()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_stop_does_not_cancel_processing_task_immediately(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -111,8 +111,8 @@ class TestNewsSubscriptionStopBehavior:
             await processing_task
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_stop_async_after_stop_completes(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True

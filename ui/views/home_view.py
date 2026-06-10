@@ -5,7 +5,7 @@ import flet as ft
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
-from data.external.news_subscription import NewsUpdateType
+from services.news_subscription_service import NewsUpdateType
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.i18n import I18n

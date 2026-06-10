@@ -287,7 +287,7 @@ class ShutdownCoordinator:
         logger.info("[Shutdown] Step 1: Stopping background services...")
 
         from data.domain_services.market_data_service import MarketDataService
-        from data.external.news_subscription import NewsSubscriptionService
+        from services.news_subscription_service import NewsSubscriptionService
         from utils.scheduler_service import SchedulerService
 
         if SchedulerService._instance is not None:

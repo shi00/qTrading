@@ -5,7 +5,7 @@ import pandas as pd
 
 from data.data_processor import DataProcessor
 from data.domain_services.market_data_service import MarketDataService
-from data.external.news_subscription import NewsSubscriptionService
+from services.news_subscription_service import NewsSubscriptionService
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 

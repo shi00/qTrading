@@ -110,7 +110,7 @@ class TestShutdownStepFailureRecovery:
 @pytest.fixture
 def mock_singletons():
     from services.task_manager import TaskManager
-    from data.external.news_subscription import NewsSubscriptionService
+    from services.news_subscription_service import NewsSubscriptionService
     from data.data_processor import DataProcessor
     from data.domain_services.market_data_service import MarketDataService
     from services.local_model_manager import LocalModelManager

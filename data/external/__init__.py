@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from data.external.news_fetcher import NewsFetcher
-    from data.external.news_subscription import NewsSubscriptionService
     from data.external.tushare_client import TushareClient
 
 
@@ -13,10 +12,6 @@ def __getattr__(name):
         from data.external.news_fetcher import NewsFetcher
 
         return NewsFetcher
-    if name == "NewsSubscriptionService":
-        from data.external.news_subscription import NewsSubscriptionService
-
-        return NewsSubscriptionService
     if name == "TushareClient":
         from data.external.tushare_client import TushareClient
 
@@ -24,4 +19,4 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["TushareClient", "NewsFetcher", "NewsSubscriptionService"]
+__all__ = ["TushareClient", "NewsFetcher"]

@@ -2,7 +2,7 @@ import logging
 from typing import TypedDict
 
 from data.domain_services.market_data_service import MarketDataService
-from data.external.news_subscription import NewsSubscriptionService
+from services.news_subscription_service import NewsSubscriptionService
 from data.persistence.db_migrator import DatabaseMigrationNeeded
 from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager

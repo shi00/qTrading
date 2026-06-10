@@ -2,7 +2,7 @@ from collections import OrderedDict
 
 
 def test_seen_hashes_initialized_as_ordered_dict():
-    from data.external.news_subscription import NewsSubscriptionService
+    from services.news_subscription_service import NewsSubscriptionService
 
     NewsSubscriptionService._instance = None
     svc = NewsSubscriptionService()

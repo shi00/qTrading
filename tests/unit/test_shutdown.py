@@ -159,7 +159,7 @@ class TestShutdownCoordinatorCleanupSteps:
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
             mock_sched.scheduler.running = False
@@ -172,7 +172,7 @@ class TestShutdownCoordinatorCleanupSteps:
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
             mock_sched._instance = mock_sched.return_value
@@ -187,7 +187,7 @@ class TestShutdownCoordinatorCleanupSteps:
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
             mock_sched.scheduler.running = False
@@ -203,7 +203,7 @@ class TestShutdownCoordinatorCleanupSteps:
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
             mock_sched.scheduler.running = False
@@ -358,7 +358,7 @@ class TestShutdownCoordinatorDoCleanup:
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
             patch("data.data_processor.DataProcessor") as mock_dp,
             patch("services.local_model_manager.LocalModelManager") as mock_lmm,
@@ -382,7 +382,7 @@ class TestShutdownCoordinatorDoCleanup:
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
             patch("data.data_processor.DataProcessor") as mock_dp,
             patch("services.local_model_manager.LocalModelManager") as mock_lmm,
@@ -558,7 +558,7 @@ class TestMainPyCleanupTimeouts:
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
             patch("data.data_processor.DataProcessor") as mock_dp,
             patch("services.local_model_manager.LocalModelManager") as mock_lmm,
@@ -584,7 +584,7 @@ class TestMainPyCleanupTimeouts:
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
-            patch("data.external.news_subscription.NewsSubscriptionService") as mock_news,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
         ):
             mock_instance = MagicMock()

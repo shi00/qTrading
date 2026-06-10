@@ -5,7 +5,7 @@ import pytest
 
 
 def _create_news_service():
-    from data.external.news_subscription import NewsSubscriptionService
+    from services.news_subscription_service import NewsSubscriptionService
 
     NewsSubscriptionService._instance = None
     svc = object.__new__(NewsSubscriptionService)
@@ -115,7 +115,7 @@ class TestNewsSubscriptionCorrelationId:
 
     @pytest.mark.asyncio
     async def test_fetch_and_notify_uses_correlation_scope(self):
-        from data.external.news_subscription import NewsSubscriptionService
+        from services.news_subscription_service import NewsSubscriptionService
 
         svc = _create_news_service()
         svc._running = True

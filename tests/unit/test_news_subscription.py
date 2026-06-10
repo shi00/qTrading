@@ -4,7 +4,7 @@ import contextlib
 from unittest.mock import patch, MagicMock, AsyncMock
 from collections import OrderedDict
 
-from data.external.news_subscription import NewsSubscriptionService, NewsUpdateType
+from services.news_subscription_service import NewsSubscriptionService, NewsUpdateType
 
 
 @pytest.fixture(autouse=True)
@@ -22,8 +22,8 @@ class TestNewsUpdateType:
 
 
 class TestNewsSubscriptionServiceInit:
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_init(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         assert svc._running is False
@@ -36,24 +36,24 @@ class TestNewsSubscriptionServiceInit:
 
 
 class TestNewsSubscriptionServiceListeners:
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_add_normal_listener(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock()
         svc.add_listener(cb, is_alert=False)
         assert cb in svc._listeners
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_add_alert_listener(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock()
         svc.add_listener(cb, is_alert=True)
         assert cb in svc._alert_listeners
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_remove_listener(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock()
@@ -61,8 +61,8 @@ class TestNewsSubscriptionServiceListeners:
         svc.remove_listener(cb)
         assert cb not in svc._listeners
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_remove_alert_listener(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock()
@@ -72,8 +72,8 @@ class TestNewsSubscriptionServiceListeners:
 
 
 class TestNewsSubscriptionServiceStop:
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_resets_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -81,8 +81,8 @@ class TestNewsSubscriptionServiceStop:
         assert svc._running is False
         assert result is None
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_clears_last_news_when_no_loop(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -94,16 +94,16 @@ class TestNewsSubscriptionServiceStop:
         assert svc._last_news_time is None
         assert svc._last_news_content is None
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_not_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = False
         svc.stop()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_stop_returns_task_when_loop_running(self, mock_cache, mock_ai):
         """C-P1-2: stop() should return asyncio.Task when event loop is running."""
         svc = NewsSubscriptionService()
@@ -114,8 +114,8 @@ class TestNewsSubscriptionServiceStop:
 
 class TestNewsSubscriptionServiceStart:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_start_sets_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         await svc.start()
@@ -123,8 +123,8 @@ class TestNewsSubscriptionServiceStart:
         svc._running = False
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_start_already_running(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -134,8 +134,8 @@ class TestNewsSubscriptionServiceStart:
 
 class TestNewsSubscriptionServiceSafeQueuePut:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_put_success(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc.processing_queue = asyncio.Queue(maxsize=10)
@@ -143,8 +143,8 @@ class TestNewsSubscriptionServiceSafeQueuePut:
         await svc._safe_queue_put({"content": "test"})
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_put_no_queue(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc.processing_queue = None
@@ -153,8 +153,8 @@ class TestNewsSubscriptionServiceSafeQueuePut:
 
 class TestNewsSubscriptionServiceNotifyListeners:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_with_update_type(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock()
@@ -163,8 +163,8 @@ class TestNewsSubscriptionServiceNotifyListeners:
         cb.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_removes_failing_listener(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock(side_effect=Exception("fail"))
@@ -175,8 +175,8 @@ class TestNewsSubscriptionServiceNotifyListeners:
         assert cb not in svc._listeners
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_timeout(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
 
@@ -186,7 +186,7 @@ class TestNewsSubscriptionServiceNotifyListeners:
         cb = slow_listener
         svc._listeners.add(cb)
         with patch(
-            "data.external.news_subscription.asyncio.wait_for",
+            "services.news_subscription_service.asyncio.wait_for",
             side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
         ):
             await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM)
@@ -194,8 +194,8 @@ class TestNewsSubscriptionServiceNotifyListeners:
 
 class TestNewsSubscriptionServiceFetchAndNotify:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_no_news(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._notify_listeners = AsyncMock()
@@ -205,8 +205,8 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc._notify_listeners.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_initial_sync(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._last_news_time = None
@@ -227,8 +227,8 @@ class TestNewsSubscriptionServiceFetchAndNotify:
             assert svc._last_news_content is not None
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_new_items_found(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._last_news_time = "10:00"
@@ -239,7 +239,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.cache.save_market_news = AsyncMock()
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
-            patch("data.external.news_subscription.ConfigHandler") as mock_ch,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = False
             mock_fetcher.get_latest_global_news = AsyncMock(
@@ -253,20 +253,20 @@ class TestNewsSubscriptionServiceFetchAndNotify:
 
 
 class TestNewsSubscriptionServiceSeenHashes:
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_initially_empty(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         assert len(svc._seen_hashes) == 0
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_max_seen_200(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         assert svc._MAX_SEEN == 200
 
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_eviction(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         for i in range(250):
@@ -278,8 +278,8 @@ class TestNewsSubscriptionServiceSeenHashes:
 
 class TestNewsSubscriptionServiceGenerateTags:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.CacheManager")
-    @patch("data.external.news_subscription.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    @patch("services.news_subscription_service.AIService")
     async def test_ai_tagging_success(self, mock_ai_cls, mock_cache_cls):
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
@@ -289,8 +289,8 @@ class TestNewsSubscriptionServiceGenerateTags:
             assert "政策" in result
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.CacheManager")
-    @patch("data.external.news_subscription.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    @patch("services.news_subscription_service.AIService")
     async def test_ai_tagging_failure_fallback(self, mock_ai_cls, mock_cache_cls):
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
@@ -300,8 +300,8 @@ class TestNewsSubscriptionServiceGenerateTags:
             assert len(result) > 0
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.CacheManager")
-    @patch("data.external.news_subscription.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    @patch("services.news_subscription_service.AIService")
     async def test_rule_based_policy_tag(self, mock_ai_cls, mock_cache_cls):
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
@@ -311,8 +311,8 @@ class TestNewsSubscriptionServiceGenerateTags:
             assert len(result) > 0
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.CacheManager")
-    @patch("data.external.news_subscription.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    @patch("services.news_subscription_service.AIService")
     async def test_rule_based_global_tag(self, mock_ai_cls, mock_cache_cls):
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
@@ -322,8 +322,8 @@ class TestNewsSubscriptionServiceGenerateTags:
             assert len(result) > 0
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.CacheManager")
-    @patch("data.external.news_subscription.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    @patch("services.news_subscription_service.AIService")
     async def test_rule_based_macro_tag(self, mock_ai_cls, mock_cache_cls):
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
@@ -333,8 +333,8 @@ class TestNewsSubscriptionServiceGenerateTags:
             assert len(result) > 0
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.CacheManager")
-    @patch("data.external.news_subscription.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    @patch("services.news_subscription_service.AIService")
     async def test_no_tag_match(self, mock_ai_cls, mock_cache_cls):
         svc = NewsSubscriptionService()
         svc.ai_client = MagicMock()
@@ -345,8 +345,8 @@ class TestNewsSubscriptionServiceGenerateTags:
 
 class TestNewsSubscriptionServiceNotifyAdvanced:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_sync_listener_no_params(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         called = [False]
@@ -359,8 +359,8 @@ class TestNewsSubscriptionServiceNotifyAdvanced:
         assert called[0]
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_async_listener_two_params(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         called = [False]
@@ -373,8 +373,8 @@ class TestNewsSubscriptionServiceNotifyAdvanced:
         assert called[0]
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_sync_listener_one_param(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         called = [False]
@@ -387,8 +387,8 @@ class TestNewsSubscriptionServiceNotifyAdvanced:
         assert called[0]
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_sync_listener_two_params(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         called = [False]
@@ -401,8 +401,8 @@ class TestNewsSubscriptionServiceNotifyAdvanced:
         assert called[0]
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_custom_listeners(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         cb = MagicMock()
@@ -411,8 +411,8 @@ class TestNewsSubscriptionServiceNotifyAdvanced:
         cb.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_notify_empty_target(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         await svc._notify_listeners(listeners=set(), update_type=NewsUpdateType.NEW_ITEM)
@@ -420,8 +420,8 @@ class TestNewsSubscriptionServiceNotifyAdvanced:
 
 class TestNewsSubscriptionServiceSafeFetchTask:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_not_running_returns(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = False
@@ -430,8 +430,8 @@ class TestNewsSubscriptionServiceSafeFetchTask:
         svc._fetch_and_notify.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_exception_handled(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -441,8 +441,8 @@ class TestNewsSubscriptionServiceSafeFetchTask:
 
 class TestNewsSubscriptionServiceFetchWithAlerts:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_new_item_with_alerts_enabled(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
         svc._last_news_time = "10:00"
@@ -455,7 +455,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc._alert_listeners.add(alert_cb)
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
-            patch("data.external.news_subscription.ConfigHandler") as mock_ch,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = True
             mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
@@ -465,8 +465,8 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             alert_cb.assert_called()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_new_item_alert_timeout(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
         svc._last_news_time = "10:00"
@@ -482,9 +482,9 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc._alert_listeners.add(slow_alert)
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
-            patch("data.external.news_subscription.ConfigHandler") as mock_ch,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
             patch(
-                "data.external.news_subscription.asyncio.wait_for",
+                "services.news_subscription_service.asyncio.wait_for",
                 side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
             ),
         ):
@@ -495,8 +495,8 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             await svc._fetch_and_notify()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_new_item_alert_error(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
         svc._last_news_time = "10:00"
@@ -509,7 +509,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc._alert_listeners.add(alert_cb)
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
-            patch("data.external.news_subscription.ConfigHandler") as mock_ch,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = True
             mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
@@ -519,8 +519,8 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
 
 
 class TestNewsSubscriptionServiceResetSingleton:
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_reset_singleton(self, mock_cache, mock_ai):
         svc1 = NewsSubscriptionService()
         NewsSubscriptionService._reset_singleton()
@@ -530,8 +530,8 @@ class TestNewsSubscriptionServiceResetSingleton:
 
 class TestNewsSubscriptionServiceProcessingLoop:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_processing_loop_empty_content(self, mock_cache_cls, mock_ai_cls):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -548,8 +548,8 @@ class TestNewsSubscriptionServiceProcessingLoop:
             await loop_task
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_processing_loop_normal_item(self, mock_cache_cls, mock_ai_cls):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -568,8 +568,8 @@ class TestNewsSubscriptionServiceProcessingLoop:
         svc.cache.save_market_news.assert_called()
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_processing_loop_exception(self, mock_cache_cls, mock_ai_cls):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -585,8 +585,8 @@ class TestNewsSubscriptionServiceProcessingLoop:
 
 
 class TestNewsSubscriptionServiceStopSync:
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     def test_stop_no_running_loop(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
@@ -600,8 +600,8 @@ class TestNewsSubscriptionServiceStopSync:
 
 class TestNewsSubscriptionServiceNotifyListenerErrors:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_listener_error_count_and_removal(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
 
@@ -614,8 +614,8 @@ class TestNewsSubscriptionServiceNotifyListenerErrors:
         assert bad_cb not in svc._listeners
 
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_listener_timeout(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
 
@@ -624,7 +624,7 @@ class TestNewsSubscriptionServiceNotifyListenerErrors:
 
         svc._listeners.add(slow_cb)
         with patch(
-            "data.external.news_subscription.asyncio.wait_for",
+            "services.news_subscription_service.asyncio.wait_for",
             side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
         ):
             await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM)
@@ -632,8 +632,8 @@ class TestNewsSubscriptionServiceNotifyListenerErrors:
 
 class TestNewsSubscriptionServiceInitialSync:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_initial_sync_saves_all_items(self, mock_cache_cls, mock_ai_cls):
         svc = NewsSubscriptionService()
         svc._last_news_time = None
@@ -657,8 +657,8 @@ class TestNewsSubscriptionServiceInitialSync:
 
 class TestNewsSubscriptionServiceFetchNoNews:
     @pytest.mark.asyncio
-    @patch("data.external.news_subscription.AIService")
-    @patch("data.external.news_subscription.CacheManager")
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
     async def test_fetch_returns_empty(self, mock_cache_cls, mock_ai_cls):
         svc = NewsSubscriptionService()
         svc._last_news_time = "10:00"

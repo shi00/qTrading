@@ -6,7 +6,7 @@ import flet as ft
 
 from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
 from data.cache.cache_manager import CacheManager
-from data.external.news_subscription import NewsSubscriptionService
+from services.news_subscription_service import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
 from core.i18n import I18n
 from ui.theme import apply_page_theme

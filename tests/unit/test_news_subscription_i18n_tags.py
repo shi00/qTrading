@@ -1,6 +1,6 @@
 import pytest
 
-from data.external.news_subscription import NewsSubscriptionService
+from services.news_subscription_service import NewsSubscriptionService
 
 
 def _make_i18n_mock(overrides=None):
@@ -38,7 +38,7 @@ async def test_generate_tags_uses_translated_category_from_ai(monkeypatch):
 
     svc.ai_client = type("AIClient", (), {"classify_news": staticmethod(_fake_classify)})()
 
-    from data.external import news_subscription as ns_mod
+    import services.news_subscription_service as ns_mod
 
     monkeypatch.setattr(ns_mod.I18n, "get", _make_i18n_mock())
 
@@ -56,7 +56,7 @@ async def test_generate_tags_rule_based_policy(monkeypatch):
 
     svc.ai_client = type("AIClient", (), {"classify_news": staticmethod(_raise_ai)})()
 
-    from data.external import news_subscription as ns_mod
+    import services.news_subscription_service as ns_mod
 
     monkeypatch.setattr(ns_mod.I18n, "get", _make_i18n_mock({"tag_policy": "政策"}))
 
@@ -74,7 +74,7 @@ async def test_generate_tags_rule_based_global(monkeypatch):
 
     svc.ai_client = type("AIClient", (), {"classify_news": staticmethod(_raise_ai)})()
 
-    from data.external import news_subscription as ns_mod
+    import services.news_subscription_service as ns_mod
 
     monkeypatch.setattr(ns_mod.I18n, "get", _make_i18n_mock({"tag_global": "外盘"}))
 
@@ -92,7 +92,7 @@ async def test_generate_tags_rule_based_macro(monkeypatch):
 
     svc.ai_client = type("AIClient", (), {"classify_news": staticmethod(_raise_ai)})()
 
-    from data.external import news_subscription as ns_mod
+    import services.news_subscription_service as ns_mod
 
     monkeypatch.setattr(ns_mod.I18n, "get", _make_i18n_mock({"tag_macro": "宏观"}))
 
@@ -110,7 +110,7 @@ async def test_generate_tags_no_match_returns_empty(monkeypatch):
 
     svc.ai_client = type("AIClient", (), {"classify_news": staticmethod(_raise_ai)})()
 
-    from data.external import news_subscription as ns_mod
+    import services.news_subscription_service as ns_mod
 
     monkeypatch.setattr(ns_mod.I18n, "get", _make_i18n_mock())
 

@@ -7,13 +7,14 @@ import threading
 import typing
 from collections import OrderedDict
 
+from core.i18n import I18n
+from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
+from utils.sanitizers import DataSanitizer
+from utils.singleton_registry import register_singleton
 from data.cache.cache_manager import CacheManager
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
-from core.i18n import I18n
-from utils.config_handler import ConfigHandler
-from utils.sanitizers import DataSanitizer
-from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,6 @@ class NewsUpdateType:
     NEW_ITEM = "new_item"
     TAG_UPDATE = "tag_update"
     INITIAL = "initial"
-
-
-from utils.singleton_registry import register_singleton
 
 
 @register_singleton
@@ -50,6 +48,15 @@ class NewsSubscriptionService:
         with cls._lock:
             cls._instance = None
             cls._initialized = False
+
+    @classmethod
+    def _atexit_cleanup(cls):
+        """Cleanup background tasks on process exit."""
+        if cls._instance is None:
+            return
+        for task in list(cls._instance._background_tasks):
+            if not task.done():
+                task.cancel()
 
     def __init__(self):
         if self._initialized:
