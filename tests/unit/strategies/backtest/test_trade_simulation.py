@@ -311,7 +311,7 @@ class TestRealizedPnl:
 
         from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
 
-        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
 
         signals = pl.DataFrame(
             {

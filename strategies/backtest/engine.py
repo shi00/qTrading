@@ -208,8 +208,9 @@ class VectorBacktestEngine:
         - True: 可交易（不在 suspend_d 表中）
         - False: 停牌（在 suspend_d 表中）
 
-        失败时保守策略：
-        - 所有股票标记为不可交易 (is_tradable=False)
+        失败时乐观降级策略：
+        - 所有股票标记为可交易 (is_tradable=True)
+        - 停牌股票可能在撮合时因无成交价被自然跳过
         - 返回 DataWarning 记录失败详情
 
         设计说明：
@@ -254,7 +255,9 @@ class VectorBacktestEngine:
                 affected_stock_count=quotes_df.height,
                 error_message=str(e),
             )
-            return quotes_df.with_columns(pl.lit(False).alias("is_tradable")), warning
+            # 乐观降级：标记为可交易，避免查询失败导致全市场零交易
+            # 停牌股票可能在撮合时因无成交价被自然跳过
+            return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), warning
 
     async def _enrich_limit_status(
         self,
@@ -265,9 +268,9 @@ class VectorBacktestEngine:
         """
         为行情数据增加涨跌停状态。
 
-        limit_status 值：
-        - 'U' (up_limit): 涨停
-        - 'D' (down_limit): 跌停
+        limit_status 值（统一枚举，供 PortfolioSimulator 撮合层判断）：
+        - 'up_limit': 涨停（Tushare 原始值 'U' 映射）
+        - 'down_limit': 跌停（Tushare 原始值 'D' 映射）
         - None: 正常交易
 
         失败时策略：
@@ -288,6 +291,16 @@ class VectorBacktestEngine:
 
             limit_df = pl.from_pandas(limit_list_pd)
             limit_df = limit_df.select(["ts_code", "trade_date", "limit"]).rename({"limit": "limit_status"})
+
+            # 映射 Tushare 原始枚举 → 撮合层统一枚举（使用 Polars 原生表达式，避免 Python 回调）
+            limit_df = limit_df.with_columns(
+                pl.when(pl.col("limit_status") == "U")
+                .then(pl.lit("up_limit"))
+                .when(pl.col("limit_status") == "D")
+                .then(pl.lit("down_limit"))
+                .otherwise(pl.col("limit_status"))
+                .alias("limit_status")
+            )
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
             return quotes_df, None
@@ -313,7 +326,18 @@ class VectorBacktestEngine:
         4. 收益计算和技术指标使用 qfq_close
 
         复权公式与 TechnicalAnalysis._get_qfq_df() 一致：
-        adjusted_price = raw_price * adj_factor / latest_adj_factor
+        adjusted_price = raw_price * adj_factor / base_adj_factor
+
+        前视偏差防护：
+        使用回测窗口首日的 adj_factor 作为基准（而非期末），
+        确保同一历史日期的复权价不随回测结束日变化。
+
+        关键说明：Tushare 的 adj_factor 是逐日记录的累积复权因子快照，
+        而非"期末回填"值。即同一交易日的 adj_factor 在不同查询窗口下
+        返回相同值。因此：
+        - 首日 qfq_ratio = adj_factor_D1 / adj_factor_D1 = 1.0（基准日自身不调整）
+        - 非首日 qfq_ratio = adj_factor_Dn / adj_factor_D1（仅反映 D1→Dn 间的除权事件）
+        - 不同回测窗口下，同一历史日期的 qfq_ratio 一致（只要起始日相同）
         """
         if "adj_factor" not in quotes_df.columns:
             return quotes_df.with_columns(
@@ -329,13 +353,14 @@ class VectorBacktestEngine:
                 ]
             )
 
-        latest_factors = (
-            quotes_df.sort("trade_date").group_by("ts_code").agg(pl.col("adj_factor").last().alias("latest_adj_factor"))
+        # 使用首日 adj_factor 作为基准，避免前视偏差
+        base_factors = (
+            quotes_df.sort("trade_date").group_by("ts_code").agg(pl.col("adj_factor").first().alias("base_adj_factor"))
         )
 
-        quotes_df = quotes_df.join(latest_factors, on="ts_code", how="left")
+        quotes_df = quotes_df.join(base_factors, on="ts_code", how="left")
 
-        qfq_ratio = pl.col("adj_factor") / pl.col("latest_adj_factor")
+        qfq_ratio = pl.col("adj_factor") / pl.col("base_adj_factor")
 
         return quotes_df.with_columns(
             [

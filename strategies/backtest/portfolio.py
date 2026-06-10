@@ -127,6 +127,9 @@ class PortfolioSimulator:
                 trade_date=exec_date,
             )
 
+            # 使用滑点调整后的成交价
+            actual_exit_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else exit_price
+
             realized_pnl = cost.net_amount - pos["cost_basis"]
 
             self.trades_list.append(
@@ -134,7 +137,7 @@ class PortfolioSimulator:
                     "trade_date": exec_date,
                     "ts_code": ts_code,
                     "action": "sell",
-                    "price": exit_price,
+                    "price": actual_exit_price,
                     "volume": volume,
                     "gross_amount": cost.gross_amount,
                     "total_cost": cost.total_cost,
@@ -226,6 +229,8 @@ class PortfolioSimulator:
                 qfq_entry_price = float(quote.select("qfq_open").item())
 
             target_value = available_cash * weight
+
+            # 先用原始价格估算股数，再通过 cost_model 获取滑点调整价后精确计算
             volume = int(target_value / entry_price / 100) * 100
 
             if volume <= 0:
@@ -249,6 +254,23 @@ class PortfolioSimulator:
                 trade_date=exec_date,
             )
 
+            # 使用滑点调整后的成交价重新计算股数（仅一次）
+            # 滑点导致买入价上浮，实际可买股数可能减少
+            if cost.slippage_adjusted_price > 0 and cost.slippage_adjusted_price != entry_price:
+                adjusted_volume = int(target_value / cost.slippage_adjusted_price / 100) * 100
+                if 0 < adjusted_volume < volume:
+                    volume = adjusted_volume
+                    cost = self.cost_model.calculate(
+                        price=entry_price,
+                        volume=volume,
+                        is_buy=True,
+                        avg_daily_volume=self._get_avg_daily_volume(quote),
+                        trade_date=exec_date,
+                    )
+
+            # 记录实际成交价（含滑点调整）
+            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else entry_price
+
             if cost.net_amount > self.cash:
                 self.skipped_list.append(
                     {
@@ -267,7 +289,7 @@ class PortfolioSimulator:
                     "trade_date": exec_date,
                     "ts_code": ts_code,
                     "action": "buy",
-                    "price": entry_price,
+                    "price": actual_price,
                     "volume": volume,
                     "gross_amount": cost.gross_amount,
                     "total_cost": cost.total_cost,
@@ -281,7 +303,7 @@ class PortfolioSimulator:
                 "volume": volume,
                 "cost_basis": cost.net_amount,
                 "entry_date": exec_date,
-                "entry_price": entry_price,
+                "entry_price": actual_price,
                 "qfq_entry_price": qfq_entry_price,
             }
 

@@ -541,6 +541,7 @@ class TestSlippageWithAvgDailyVolume:
 
         participation = volume / avg_daily_volume
         expected_slippage_pct = 10.0 / 10000 * (1 + participation * 10)
+        # slippage_cost 基于原始价格计算
         expected_slippage_cost = price * volume * expected_slippage_pct
 
         assert abs(cost.slippage_cost - expected_slippage_cost) < 1e-2

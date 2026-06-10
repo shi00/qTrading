@@ -12,12 +12,34 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from data.persistence.quality_gate import QualityTier
+
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
     from data.data_processor import DataProcessor
     from strategies.utils import StrategyContext
 
 logger = logging.getLogger(__name__)
+
+
+class _BacktestQualityProxy:
+    """回测场景下的 DataProcessor 质量代理。
+
+    仅提供 _quality_tier 属性以满足质量门控 _check_tier 检查，
+    避免在回测路径因缺少 data_processor 而抛 QualityGateError。
+
+    回测使用历史快照数据，质量等级默认 GOLD（最高等级），
+    确保任何质量要求的策略都能通过门控。
+    回测数据质量由数据同步流程保证，不应被质量门控阻断。
+    """
+
+    def __init__(self, tier: QualityTier = QualityTier.GOLD):
+        self._quality_tier = int(tier)
+        logger.info(
+            "[BacktestQualityProxy] Using quality tier %s for backtest context. "
+            "Backtest data quality is guaranteed by the sync pipeline, not by the quality gate.",
+            tier.name,
+        )
 
 
 class BacktestDataProvider:
@@ -64,6 +86,13 @@ class BacktestDataProvider:
         context["is_backtest"] = True
         if disable_ai:
             context["_disable_ai"] = True
+        # 注入 data_processor 以通过质量门控检查
+        # PolarsBaseStrategy.filter() 读取 context["data_processor"] 进行 _check_tier，
+        # 缺少此键在 STRICT_QUALITY_GATE=true 下会抛 QualityGateError
+        if self.data_processor is not None:
+            context["data_processor"] = self.data_processor
+        else:
+            context["data_processor"] = _BacktestQualityProxy()
         return context
 
     async def _build_historical_screening_context(

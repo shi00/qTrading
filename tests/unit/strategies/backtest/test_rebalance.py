@@ -292,7 +292,7 @@ class TestExecutionPrice:
         )
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
-        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
         return engine
 
     def test_next_open_execution(self):

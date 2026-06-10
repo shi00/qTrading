@@ -62,7 +62,7 @@ class BaseStrategy(ABC):
         "top_list": "top_list",
         "block_trade": "block_trade",
         "screening_data": "daily_quotes",
-        "fundamental_screening_data": "daily_indicators",
+        "fundamental_screening_data": "financial_reports",
     }
 
     def __init__(self, name_key: str, desc_key: str):

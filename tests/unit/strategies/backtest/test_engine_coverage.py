@@ -302,10 +302,10 @@ class TestApplyQfq:
         assert "qfq_open" in result.columns
 
         qfq_ratio_day1 = result.filter(pl.col("trade_date") == date(2024, 1, 2)).select("qfq_ratio").item()
-        assert qfq_ratio_day1 == 2.0
+        assert qfq_ratio_day1 == 1.0  # 首日基准=2.0, ratio=2.0/2.0=1.0
 
         qfq_ratio_day3 = result.filter(pl.col("trade_date") == date(2024, 1, 4)).select("qfq_ratio").item()
-        assert qfq_ratio_day3 == 1.0
+        assert qfq_ratio_day3 == 0.5  # 首日基准=2.0, ratio=1.0/2.0=0.5
 
     def test_multiple_stocks_different_adj_factors(self):
         engine = self._make_engine()
@@ -327,8 +327,8 @@ class TestApplyQfq:
         assert all(r == 1.0 for r in stock1_ratios)
 
         stock2_ratios = result.filter(pl.col("ts_code") == "000002.SZ").select("qfq_ratio").to_series().to_list()
-        assert stock2_ratios[0] == 2.0
-        assert stock2_ratios[1] == 1.0
+        assert stock2_ratios[0] == 1.0  # 首日基准=2.0, ratio=2.0/2.0=1.0
+        assert stock2_ratios[1] == 0.5  # 首日基准=2.0, ratio=1.0/2.0=0.5
 
 
 class TestCalcBenchmarkReturns:
@@ -914,7 +914,7 @@ class TestEnrichSuspendStatus:
         assert warning is None
 
     @pytest.mark.asyncio
-    async def test_exception_marks_all_not_tradable_and_creates_warning(self):
+    async def test_exception_marks_all_tradable_and_creates_warning(self):
 
         engine = self._make_engine()
         engine.cache = MagicMock()
@@ -931,7 +931,7 @@ class TestEnrichSuspendStatus:
         result, warning = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
 
         assert "is_tradable" in result.columns
-        assert not any(result["is_tradable"].to_list())
+        assert all(result["is_tradable"].to_list())
         assert warning is not None
         assert warning.warning_type == "suspend_enrich_failed"
         assert warning.start_date == "20240102"
@@ -998,7 +998,7 @@ class TestEnrichLimitStatus:
 
         assert "limit_status" in result.columns
         limit_status_list = result["limit_status"].to_list()
-        assert limit_status_list[0] == "U"
+        assert limit_status_list[0] == "up_limit"
         assert limit_status_list[1] is None
         assert warning is None
 
@@ -1026,3 +1026,152 @@ class TestEnrichLimitStatus:
         assert warning.end_date == "20240131"
         assert warning.affected_stock_count == 2
         assert "DB error" in warning.error_message
+
+
+class TestEngineEndToEndPipeline:
+    """引擎级端到端测试：验证 _enrich_* → _simulate_trades 全链路。
+
+    覆盖涨跌停限制、停牌过滤的完整数据流，
+    确保数据 enrich 层的枚举值与撮合层的判断逻辑一致。
+    """
+
+    def _make_engine(self, **kwargs):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            slippage_bps=0.0,
+            **kwargs,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_limit_up_skips_buy_in_simulation(self):
+        """涨停股票在撮合层被跳过：limit_status=up_limit → PortfolioSimulator 跳过买入"""
+        from strategies.backtest.portfolio import PortfolioSimulator
+
+        engine = self._make_engine(allow_limit_up_buy=False)
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "open": [10.0],
+                "high": [10.0],
+                "low": [10.0],
+                "close": [10.0],
+                "vol": [100000],
+                "is_tradable": [True],
+                "limit_status": ["up_limit"],
+                "raw_open": [10.0],
+                "raw_close": [10.0],
+                "qfq_open": [10.0],
+                "qfq_close": [10.0],
+            }
+        )
+
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 1)],
+                "execution_date": [date(2024, 1, 2)],
+                "ts_code": ["000001.SZ"],
+                "score": [1.0],
+                "signal_rank": [1],
+                "target_weight": [1.0],
+                "reason": [None],
+            }
+        )
+
+        simulator = PortfolioSimulator(engine.config, engine.cost_model)
+        day_signals = signals.filter(pl.col("execution_date") == date(2024, 1, 2))
+        day_quotes = quotes_df.filter(pl.col("trade_date") == date(2024, 1, 2))
+
+        simulator.process_day(date(2024, 1, 2), day_signals, day_quotes, is_rebalance=True)
+
+        assert len(simulator.positions) == 0
+        assert any("up_limit" in w for w in simulator.warnings)
+
+    @pytest.mark.asyncio
+    async def test_limit_down_skips_sell_in_simulation(self):
+        """跌停股票在撮合层被跳过卖出：limit_status=down_limit → PortfolioSimulator 跳过卖出"""
+        from strategies.backtest.portfolio import PortfolioSimulator
+
+        engine = self._make_engine(allow_limit_down_sell=False)
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "open": [10.0],
+                "high": [10.0],
+                "low": [10.0],
+                "close": [10.0],
+                "vol": [100000],
+                "is_tradable": [True],
+                "limit_status": ["down_limit"],
+                "raw_open": [10.0],
+                "raw_close": [10.0],
+                "qfq_open": [10.0],
+                "qfq_close": [10.0],
+            }
+        )
+
+        simulator = PortfolioSimulator(engine.config, engine.cost_model)
+        simulator.positions["000001.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1000.0,
+            "entry_date": date(2024, 1, 1),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+
+        day_quotes = quotes_df.filter(pl.col("trade_date") == date(2024, 1, 2))
+        simulator.process_day(date(2024, 1, 2), pl.DataFrame(), day_quotes, is_rebalance=True)
+
+        assert "000001.SZ" in simulator.positions
+        assert any("down_limit" in w for w in simulator.warnings)
+
+    @pytest.mark.asyncio
+    async def test_suspended_skips_trading(self):
+        """停牌股票在撮合层被跳过：is_tradable=False → 买入和卖出均跳过"""
+        from strategies.backtest.portfolio import PortfolioSimulator
+
+        engine = self._make_engine()
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "open": [10.0],
+                "high": [10.0],
+                "low": [10.0],
+                "close": [10.0],
+                "vol": [100000],
+                "is_tradable": [False],
+                "limit_status": [None],
+                "raw_open": [10.0],
+                "raw_close": [10.0],
+                "qfq_open": [10.0],
+                "qfq_close": [10.0],
+            }
+        )
+
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 1)],
+                "execution_date": [date(2024, 1, 2)],
+                "ts_code": ["000001.SZ"],
+                "score": [1.0],
+                "signal_rank": [1],
+                "target_weight": [1.0],
+                "reason": [None],
+            }
+        )
+
+        simulator = PortfolioSimulator(engine.config, engine.cost_model)
+        day_signals = signals.filter(pl.col("execution_date") == date(2024, 1, 2))
+        day_quotes = quotes_df.filter(pl.col("trade_date") == date(2024, 1, 2))
+
+        simulator.process_day(date(2024, 1, 2), day_signals, day_quotes, is_rebalance=True)
+
+        assert len(simulator.positions) == 0
+        assert any("suspended" in w for w in simulator.warnings)

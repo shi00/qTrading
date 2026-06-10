@@ -120,17 +120,28 @@ class BacktestMetrics:
 
     @staticmethod
     def calc_win_rate(trades: pl.DataFrame) -> float:
+        """计算胜率，仅统计卖出/平仓交易。
+
+        买入交易 realized_pnl=0.0 不计入分母，避免系统性压低胜率。
+        """
         if len(trades) == 0:
             return 0.0
-        profitable = trades.filter(pl.col("realized_pnl") > 0)
-        return len(profitable) / len(trades)
+        sell_trades = trades.filter(pl.col("action") == "sell")
+        if len(sell_trades) == 0:
+            return 0.0
+        profitable = sell_trades.filter(pl.col("realized_pnl") > 0)
+        return len(profitable) / len(sell_trades)
 
     @staticmethod
     def calc_profit_factor(trades: pl.DataFrame) -> float:
+        """计算盈亏比，仅统计卖出/平仓交易。"""
         if len(trades) == 0:
             return 0.0
-        gross_profit_raw = trades.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
-        gross_loss_raw = trades.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
+        sell_trades = trades.filter(pl.col("action") == "sell")
+        if len(sell_trades) == 0:
+            return 0.0
+        gross_profit_raw = sell_trades.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
+        gross_loss_raw = sell_trades.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
         gross_profit = float(gross_profit_raw) if gross_profit_raw is not None else 0.0
         gross_loss = abs(float(gross_loss_raw)) if gross_loss_raw is not None else 0.0
         if gross_loss == 0:

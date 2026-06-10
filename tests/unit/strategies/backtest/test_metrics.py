@@ -76,6 +76,7 @@ class TestBacktestMetrics:
     def test_calc_win_rate(self) -> None:
         trades = pl.DataFrame(
             {
+                "action": ["sell", "sell", "sell", "sell", "sell"],
                 "realized_pnl": [100.0, -50.0, 200.0, -30.0, 50.0],
             }
         )
@@ -88,6 +89,7 @@ class TestBacktestMetrics:
     def test_calc_profit_factor(self) -> None:
         trades = pl.DataFrame(
             {
+                "action": ["sell", "sell", "sell", "sell", "sell"],
                 "realized_pnl": [100.0, -50.0, 200.0, -30.0, 50.0],
             }
         )
@@ -97,6 +99,7 @@ class TestBacktestMetrics:
     def test_calc_profit_factor_no_loss(self) -> None:
         trades = pl.DataFrame(
             {
+                "action": ["sell", "sell", "sell"],
                 "realized_pnl": [100.0, 200.0, 50.0],
             }
         )
@@ -105,6 +108,7 @@ class TestBacktestMetrics:
     def test_calc_profit_factor_no_profit(self) -> None:
         trades = pl.DataFrame(
             {
+                "action": ["sell", "sell"],
                 "realized_pnl": [-100.0, -50.0],
             }
         )
@@ -156,6 +160,7 @@ class TestBacktestMetrics:
     ) -> None:
         trades = pl.DataFrame(
             {
+                "action": ["sell", "sell", "sell"],
                 "realized_pnl": [100.0, -50.0, 200.0],
             }
         )

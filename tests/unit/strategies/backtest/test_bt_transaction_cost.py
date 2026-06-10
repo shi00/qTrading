@@ -27,14 +27,16 @@ class TestTransactionCost:
         config = TransactionCostConfig(commission_rate=3e-4, commission_min=5.0)
         model = TransactionCostModel(config)
         cost = model.calculate(price=10.0, volume=10000, is_buy=True)
-        assert cost.commission == pytest.approx(30.0)
+        # 滑点调整后 gross_amount 包含滑点溢价，commission 基于 adjusted gross_amount
+        expected_gross = 10.0 * 10000 * (1 + config.slippage_bps / 10000)
+        assert cost.commission == pytest.approx(expected_gross * 3e-4)
         assert cost.stamp_duty == 0.0
 
     def test_sell_stamp_duty(self):
-        config = TransactionCostConfig(stamp_duty_rate=1e-3)
+        config = TransactionCostConfig(stamp_duty_rate=1e-3, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(price=10.0, volume=1000, is_buy=False)
-        assert cost.stamp_duty == 10.0
+        assert cost.stamp_duty == pytest.approx(10.0 * 1000 * 1e-3)
         assert cost.net_amount < cost.gross_amount
 
     def test_buy_no_stamp_duty(self):
@@ -44,10 +46,10 @@ class TestTransactionCost:
         assert cost.stamp_duty == 0.0
 
     def test_stamp_duty_buy_flag(self):
-        config = TransactionCostConfig(stamp_duty_rate=1e-3, stamp_duty_buy=True)
+        config = TransactionCostConfig(stamp_duty_rate=1e-3, stamp_duty_buy=True, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(price=10.0, volume=1000, is_buy=True)
-        assert cost.stamp_duty == 10.0
+        assert cost.stamp_duty == pytest.approx(10.0 * 1000 * 1e-3)
 
     def test_slippage_always_positive(self):
         config = TransactionCostConfig(slippage_model="fixed_bps", slippage_bps=5.0)
@@ -56,7 +58,10 @@ class TestTransactionCost:
         sell_cost = model.calculate(price=10.0, volume=1000, is_buy=False)
         assert buy_cost.slippage_cost > 0
         assert sell_cost.slippage_cost > 0
+        # slippage_cost 基于原始价格计算，买入卖出相同
         assert buy_cost.slippage_cost == sell_cost.slippage_cost
+        # 但成交价不同：买入上浮、卖出下浮
+        assert buy_cost.slippage_adjusted_price > sell_cost.slippage_adjusted_price
 
     def test_total_cost_property(self):
         config = TransactionCostConfig()
@@ -100,10 +105,10 @@ class TestTransactionCost:
         assert cost_no_vol.slippage_cost == cost_fixed.slippage_cost
 
     def test_transfer_fee(self):
-        config = TransactionCostConfig(transfer_fee_rate=1e-5)
+        config = TransactionCostConfig(transfer_fee_rate=1e-5, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(price=10.0, volume=1000, is_buy=True)
-        assert cost.transfer_fee == 10.0 * 1000 * 1e-5
+        assert cost.transfer_fee == pytest.approx(10.0 * 1000 * 1e-5)
 
     def test_sell_net_amount_deduction(self):
         config = TransactionCostConfig(
@@ -118,12 +123,12 @@ class TestTransactionCost:
         cost = model.calculate(price=10.0, volume=1000, is_buy=False)
         gross = 10.0 * 1000
         expected_net = gross - cost.commission - cost.stamp_duty - cost.transfer_fee
-        assert cost.net_amount == expected_net
+        assert cost.net_amount == pytest.approx(expected_net)
 
 
 class TestStampDutyScheduleIntegration:
     def test_stamp_duty_rate_before_2023_change(self):
-        config = TransactionCostConfig(stamp_duty_rate=None)
+        config = TransactionCostConfig(stamp_duty_rate=None, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(
             price=10.0,
@@ -135,7 +140,7 @@ class TestStampDutyScheduleIntegration:
         assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
 
     def test_stamp_duty_rate_after_2023_change(self):
-        config = TransactionCostConfig(stamp_duty_rate=None)
+        config = TransactionCostConfig(stamp_duty_rate=None, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(
             price=10.0,
@@ -147,7 +152,7 @@ class TestStampDutyScheduleIntegration:
         assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
 
     def test_stamp_duty_rate_on_change_date(self):
-        config = TransactionCostConfig(stamp_duty_rate=None)
+        config = TransactionCostConfig(stamp_duty_rate=None, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(
             price=10.0,
@@ -159,7 +164,7 @@ class TestStampDutyScheduleIntegration:
         assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
 
     def test_explicit_rate_overrides_schedule(self):
-        config = TransactionCostConfig(stamp_duty_rate=2e-3)
+        config = TransactionCostConfig(stamp_duty_rate=2e-3, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(
             price=10.0,
@@ -167,10 +172,10 @@ class TestStampDutyScheduleIntegration:
             is_buy=False,
             trade_date=date(2024, 1, 1),
         )
-        assert cost.stamp_duty == 20.0
+        assert cost.stamp_duty == pytest.approx(10.0 * 1000 * 2e-3)
 
     def test_no_trade_date_uses_current_rate(self):
-        config = TransactionCostConfig(stamp_duty_rate=None)
+        config = TransactionCostConfig(stamp_duty_rate=None, slippage_bps=0.0)
         model = TransactionCostModel(config)
         cost = model.calculate(price=10.0, volume=1000, is_buy=False)
         expected_rate = get_stamp_duty_rate(None)
