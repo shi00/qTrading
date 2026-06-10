@@ -242,6 +242,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             )
             # Fallback: 120 trading days ≈ 200 calendar days (conservative buffer for holidays/weekends)
             start_date_obj = end_date_obj - datetime.timedelta(days=200)
+            context.setdefault("_metadata", {})["calendar_fallback"] = True
 
         logger.info(
             f"[OversoldStrategy] Fetching history {start_date_obj} → {end_date_obj} for RSI calculation...",
@@ -377,6 +378,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     if not start_date:
                         # Fallback: 30 trading days ≈ 50 calendar days (conservative buffer for holidays/weekends)
                         start_date = end_date - datetime.timedelta(days=50)  # type: ignore[operator]
+                        context.setdefault("_metadata", {})["calendar_fallback"] = True
                     prefetched.indicators = await dp.cache.get_daily_indicators_bulk(
                         ts_code_list=ts_codes,
                         start_date=start_date,
@@ -400,6 +402,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     if not start_date:
                         # Fallback: 30 trading days ≈ 50 calendar days (conservative buffer for holidays/weekends)
                         start_date = trade_date - datetime.timedelta(days=50)  # type: ignore[operator]
+                        context.setdefault("_metadata", {})["calendar_fallback"] = True
 
                     indices = ["000001.SH", "399001.SZ", "399006.SZ"]
                     idx_df = await dp.cache.get_index_daily_range(

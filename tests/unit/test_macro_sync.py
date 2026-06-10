@@ -1007,6 +1007,13 @@ class TestPeriodToYyyymm:
         result = _period_to_yyyymm("20240301")
         assert result == "202403"
 
+    def test_iso_date_string(self):
+        """ISO format string like '2024-03-01' should parse correctly, not truncate to '2024-0'."""
+        from data.sync.macro import _period_to_yyyymm
+
+        result = _period_to_yyyymm("2024-03-01")
+        assert result == "202403"
+
     def test_december_wraps_year(self):
         from data.sync.macro import _period_to_yyyymm
 

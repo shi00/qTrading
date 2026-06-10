@@ -498,7 +498,12 @@ class TestHolderSyncSyncPledgeStat:
 
     @pytest.mark.asyncio
     async def test_preserves_existing_ann_date(self):
-        """If Tushare ever returns ann_date, it should be preserved as-is."""
+        """If Tushare ever returns ann_date, the sync layer preserves it in the DataFrame.
+
+        Note: The DAO layer (save_pledge_stat) currently excludes ann_date from upsert
+        columns (see MD-001). If Tushare starts returning ann_date, the DAO exclude
+        must be removed for the data to persist. This test verifies sync-layer behavior only.
+        """
         import datetime as _dt
 
         ctx = MagicMock()

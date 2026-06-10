@@ -1329,4 +1329,10 @@ class TushareClient:
         if not func:
             logger.error("[API] Macro API not found: %s", api_name)
             return None
+        # Defensive: ensure start_m/end_m are YYYYMM strings, not date objects.
+        # _handle_api_call formats date/datetime as YYYYMMDD, but macro APIs expect YYYYMM.
+        if isinstance(start_m, (datetime.date, datetime.datetime)):
+            start_m = f"{start_m.year}{start_m.month:02d}"
+        if isinstance(end_m, (datetime.date, datetime.datetime)):
+            end_m = f"{end_m.year}{end_m.month:02d}"
         return await self._handle_api_call(func, start_m=start_m, end_m=end_m)

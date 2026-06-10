@@ -55,6 +55,17 @@ def _period_to_yyyymm(period: typing.Any) -> str | None:
     if period is None:
         return None
     if isinstance(period, str):
+        # Already YYYYMM format (e.g. "202403")
+        if len(period) == 6 and period.isdigit():
+            return period
+        # ISO date string (e.g. "2024-03-01") or YYYYMMDD — parse then format
+        try:
+            dt = parse_date(period)
+            if hasattr(dt, "year") and hasattr(dt, "month"):
+                return f"{dt.year}{dt.month:02d}"
+        except (ValueError, TypeError):
+            pass
+        # Last resort: take first 6 digits
         return period[:6]
     if hasattr(period, "year") and hasattr(period, "month"):
         return f"{period.year}{period.month:02d}"

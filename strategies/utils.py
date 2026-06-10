@@ -51,3 +51,4 @@ class StrategyContext(TypedDict, total=False):
     _disable_ai: bool
     _dependency_status: dict[str, Any]
     _diagnostics: dict[str, Any]
+    _metadata: dict[str, Any]

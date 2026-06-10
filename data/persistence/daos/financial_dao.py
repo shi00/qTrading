@@ -110,6 +110,8 @@ class FinancialDao(BaseDao):
         )
 
     async def save_pledge_stat(self, df: pd.DataFrame):
+        # ann_date excluded: Tushare pledge_stat API does not return ann_date (MD-001).
+        # If Tushare ever starts returning it, remove this exclude to persist it.
         cols = get_model_columns(PledgeStat, exclude={"ann_date"})
         pk_columns = get_model_pk_columns(PledgeStat)
         return await self._save_upsert(
@@ -347,13 +349,13 @@ class FinancialDao(BaseDao):
                 for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
                     chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
                     placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                    ann_date_param = len(chunk) + 1
+                    as_of_param = len(chunk) + 1
                     sql = f"""
                         SELECT DISTINCT ON (ts_code)
                             ts_code, end_date, pledge_count, pledge_ratio
                         FROM pledge_stat
                         WHERE ts_code IN ({placeholders})
-                          AND end_date <= ${ann_date_param}
+                          AND end_date <= ${as_of_param}
                         ORDER BY ts_code, end_date DESC
                     """
                     df = await self._read_db(sql, chunk + [as_of_date])
