@@ -66,6 +66,20 @@ class SchedulerService:
                     logger.warning(f"[Scheduler] Error during shutdown: {e}")
             cls._instance = None
 
+    @classmethod
+    def _atexit_cleanup(cls):
+        """C-P2-3: Centralized atexit cleanup via singleton_registry.
+        Stops APScheduler as a last-resort fallback when normal async
+        shutdown is not taken.
+        """
+        inst = cls._instance
+        if inst is not None and hasattr(inst, "scheduler"):
+            try:
+                if inst.scheduler.running:
+                    inst.scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+
     def __init__(self):
         if self._initialized:
             return

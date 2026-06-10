@@ -8,6 +8,7 @@ from data.persistence.quality_gate import QualityGateError, QualityTier, _check_
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
 from strategies.utils import StrategyContext
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,12 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         try:
             lf = pl.from_pandas(df).lazy()
             result_lf = self._filter_logic(lf, context)
-            candidates_df = result_lf.collect().to_pandas()
+            # Offload CPU-intensive collect + conversion to thread pool
+            # to avoid blocking the Flet event loop during full-market screening
+            candidates_df = await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                lambda: result_lf.collect().to_pandas(),
+            )
         except QualityGateError:
             raise
         except Exception as e:

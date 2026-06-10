@@ -221,8 +221,12 @@ class ScreenerViewModel:
                 )
 
                 if inspect.iscoroutinefunction(strategy.filter):
+                    # Async strategy (e.g. PolarsBaseStrategy) — CPU-intensive work
+                    # is already offloaded inside the strategy's filter() method,
+                    # so awaiting here only blocks for IO (thread pool result, AI API calls)
                     result_df = await strategy.filter(context)
                 else:
+                    # Sync strategy — offload entire filter() to CPU thread pool
                     result_df = await ThreadPoolManager().run_async(
                         TaskType.CPU,
                         strategy.filter,

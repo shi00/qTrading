@@ -58,6 +58,21 @@ class CacheManager:
             cls._instance = None
             cls._initialized = False
 
+    @classmethod
+    def _atexit_cleanup(cls):
+        """C-P2-3: Centralized atexit cleanup via singleton_registry.
+        Disposes SQLAlchemy engine synchronously as a last-resort fallback
+        when the normal async shutdown path is not taken (e.g. SIGKILL, crash).
+        """
+        inst = cls._instance
+        if inst is not None and not inst._disposed:
+            try:
+                if hasattr(inst, "engine") and inst.engine is not None:
+                    inst.engine.sync_engine.dispose()
+                    inst._disposed = True
+            except Exception:
+                pass
+
     def __init__(self):
         with self._lock:
             if self.__class__._initialized:

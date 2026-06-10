@@ -11,6 +11,7 @@ from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from core.i18n import I18n
 from utils.technical_analysis import TechnicalAnalysis
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +240,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             logger.warning(
                 "[OversoldStrategy] Failed to get start date by trade days, falling back to calendar days.",
             )
-            start_date_obj = end_date_obj - datetime.timedelta(days=170)
+            # Fallback: 120 trading days ≈ 200 calendar days (conservative buffer for holidays/weekends)
+            start_date_obj = end_date_obj - datetime.timedelta(days=200)
 
         logger.info(
             f"[OversoldStrategy] Fetching history {start_date_obj} → {end_date_obj} for RSI calculation...",
@@ -307,7 +309,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 .alias("vol_ratio_5d")
             )
 
-            result_df = (
+            result_lf = (
                 df_lazy.with_columns(
                     [
                         rsi_expr.over("ts_code"),
@@ -319,7 +321,13 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 .filter(pl.col("day_count") >= rsi_period * 2)
                 .filter(pl.col(rsi_col_name) < rsi_threshold)
                 .filter(pl.col("vol_ratio_5d") >= float(vol_ratio_threshold))
-                .collect()
+            )
+
+            # Offload CPU-intensive collect + conversion to thread pool
+            # to avoid blocking the Flet event loop during full-market RSI screening
+            result_df = await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                lambda: result_lf.collect(),
             )
 
             if result_df.height == 0:
@@ -367,7 +375,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 if end_date:
                     start_date = await dp.trade_calendar.get_start_date_by_trade_days(end_date, 30)
                     if not start_date:
-                        start_date = end_date - datetime.timedelta(days=45)  # type: ignore[operator]
+                        # Fallback: 30 trading days ≈ 50 calendar days (conservative buffer for holidays/weekends)
+                        start_date = end_date - datetime.timedelta(days=50)  # type: ignore[operator]
                     prefetched.indicators = await dp.cache.get_daily_indicators_bulk(
                         ts_code_list=ts_codes,
                         start_date=start_date,
@@ -389,7 +398,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 if trade_date:
                     start_date = await dp.trade_calendar.get_start_date_by_trade_days(trade_date, 30)
                     if not start_date:
-                        start_date = trade_date - datetime.timedelta(days=45)  # type: ignore[operator]
+                        # Fallback: 30 trading days ≈ 50 calendar days (conservative buffer for holidays/weekends)
+                        start_date = trade_date - datetime.timedelta(days=50)  # type: ignore[operator]
 
                     indices = ["000001.SH", "399001.SZ", "399006.SZ"]
                     idx_df = await dp.cache.get_index_daily_range(

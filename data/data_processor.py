@@ -56,6 +56,24 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             cls._instance = None
             cls._initialized = False
 
+    @classmethod
+    def _atexit_cleanup(cls):
+        """C-P2-3: Centralized atexit cleanup via singleton_registry.
+        Sets cancel event as a last-resort fallback when normal async
+        shutdown is not taken. Uses strict=False because atexit runs
+        outside any event loop.
+        """
+        inst = cls._instance
+        if inst is not None:
+            try:
+                from utils.loop_local import get_loop_local
+
+                evt = get_loop_local("processor_cancel_evt", lambda: None, strict=False)
+                if evt is not None and hasattr(evt, "set"):
+                    evt.set()
+            except Exception:
+                pass
+
     def __init__(self):
         # Double-check initialization state with lock to prevent race conditions
         if self.__class__._initialized:

@@ -377,11 +377,18 @@ class TaskManager:
             self._schedule_coro(self._clear_finished_db(all_clear_ids))
         self._notify_subscribers()
 
-    async def cancel_all_running_async(self):
+    async def cancel_all_running_async(self, join_timeout: float = 3.0):
         """Async version: cancel all running tasks with guaranteed DB writes.
-        Called from main.py cleanup to ensure persistence before loop closes."""
+        Called from main.py cleanup to ensure persistence before loop closes.
+
+        Args:
+            join_timeout: Max seconds to wait for cancelled tasks to finish
+                their finally blocks. Prevents Step 3 (DB close) from
+                racing against still-running task runners.
+        """
         active_ids = [tid for tid, t in self._tasks.items() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)]
         persist_coros = []
+        tasks_to_join: list[asyncio.Task] = []
         for tid in active_ids:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
@@ -391,9 +398,22 @@ class TaskManager:
                 task._cancel_event.set()
             if task._asyncio_task and not task._asyncio_task.done():
                 task._asyncio_task.cancel()
+                tasks_to_join.append(task._asyncio_task)
             persist_coros.append(self._persist_task_async(task))
         if persist_coros:
             await gather_for_shutdown_cleanup(*persist_coros)
+        # Wait for cancelled task runners to exit their finally blocks,
+        # ensuring they don't access DAOs after DB engine is disposed.
+        if tasks_to_join:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks_to_join, return_exceptions=True),
+                    timeout=join_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    f"[TaskManager] {len(tasks_to_join)} task(s) did not exit within {join_timeout}s after cancellation"
+                )
         if active_ids:
             logger.info(
                 f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).",

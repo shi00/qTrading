@@ -6,6 +6,7 @@ import polars as pl
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +190,9 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
 
         try:
             flow_lf = pl.from_pandas(flow_df).lazy()
-            north_money_val = (
-                flow_lf.sort("trade_date", descending=True).select(pl.col("north_money").first()).collect().item()
-            )
+            gated_lf = flow_lf.sort("trade_date", descending=True).select(pl.col("north_money").first())
+            # Offload CPU-intensive collect to thread pool
+            north_money_val = (await ThreadPoolManager().run_async(TaskType.CPU, gated_lf.collect)).item()
 
             if north_money_val is None or north_money_val <= target_flow:
                 logger.debug(

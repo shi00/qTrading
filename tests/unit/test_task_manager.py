@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import logging
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -656,6 +657,119 @@ class TestTaskManagerCancelAllRunningAsync:
             mock_cm._instance.write_db = AsyncMock()
             await mgr.cancel_all_running_async()
             assert t.status == TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_waits_for_active_asyncio_task_to_complete(self, mock_i18n, mock_tp):
+        """SHUTDOWN-001: cancel_all_running_async 应等待活跃 asyncio_task 完成后再返回。"""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        cleanup_done = asyncio.Event()
+
+        async def cooperative_task():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                # 注意：不能在 except CancelledError 中 await，因为 _must_cancel 标志
+                # 会导致下一个 await 立即再次抛出 CancelledError
+                cleanup_done.set()
+                raise
+
+        real_task = asyncio.create_task(cooperative_task())
+        # 让 task 真正开始运行，进入 await asyncio.sleep(10)
+        await asyncio.sleep(0)
+        t._asyncio_task = real_task
+        mgr._tasks[t.id] = t
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            await mgr.cancel_all_running_async(join_timeout=2.0)
+
+        assert cleanup_done.is_set()
+        assert real_task.done()
+        assert t.status == TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_join_timeout_does_not_raise_only_warns(self, mock_i18n, mock_tp, caplog):
+        """SHUTDOWN-001: join_timeout 超时后不抛异常，只记录 warning 日志。"""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
+        t._cancel_event = asyncio.Event()
+
+        async def stubborn_task():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                # Python 3.9+ _must_cancel 标志会使下一个 await 再次抛出 CancelledError，
+                # 需要 uncancel() 才能在 handler 中执行耗时 await（模拟慢清理）
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                await asyncio.sleep(5)
+                raise
+
+        real_task = asyncio.create_task(stubborn_task())
+        # 让 task 真正开始运行，进入 await asyncio.sleep(10)
+        await asyncio.sleep(0)
+        t._asyncio_task = real_task
+        mgr._tasks[t.id] = t
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            caplog.at_level(logging.WARNING, logger="services.task_manager"),
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            # 不应抛异常，即使 timeout 极短
+            await mgr.cancel_all_running_async(join_timeout=0.01)
+
+        # 验证 warning 日志包含超时信息
+        assert any("did not exit" in r.message for r in caplog.records)
+
+        # 清理仍在运行的 task
+        real_task.cancel()
+        try:
+            await real_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_default_join_timeout_is_3(self, mock_i18n, mock_tp):
+        """SHUTDOWN-001: cancel_all_running_async 默认 join_timeout=3.0。"""
+        import inspect
+
+        sig = inspect.signature(TaskManager.cancel_all_running_async)
+        assert sig.parameters["join_timeout"].default == 3.0
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_completed_asyncio_task_not_joined(self, mock_i18n, mock_tp):
+        """SHUTDOWN-001: 已完成的 _asyncio_task 不应被 cancel 或加入 tasks_to_join。"""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
+        t._cancel_event = asyncio.Event()
+
+        mock_asyncio_task = MagicMock()
+        mock_asyncio_task.done.return_value = True
+        t._asyncio_task = mock_asyncio_task
+        mgr._tasks[t.id] = t
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            await mgr.cancel_all_running_async()
+
+        assert t.status == TaskStatus.CANCELLED
+        # 已完成的 task 不应被 cancel
+        mock_asyncio_task.cancel.assert_not_called()
 
 
 class TestTaskManagerPersistTask:
