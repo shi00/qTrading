@@ -430,14 +430,15 @@ class TestTushareClientIsTradingDayExtended:
             result = client.is_trading_day("20240614")
             assert isinstance(result, bool)
 
-    def test_invalid_date_string_returns_true(self):
+    def test_invalid_date_string_returns_false(self):
+        """MD-004: is_trading_day returns False for unparseable dates."""
         client = _make_client()
         client.pro = MagicMock()
         client.pro.trade_cal.side_effect = Exception("API error")
         with patch("data.domain_services.offline_calendar.OfflineCalendar") as mock_offline:
             mock_offline.is_trading_day.side_effect = Exception("offline error")
             result = client.is_trading_day("notadate")
-            assert result is True
+            assert result is False
 
     def test_no_pro_raises_in_lock(self):
         client = _make_client()

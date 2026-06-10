@@ -198,7 +198,8 @@ class TestOrmDaoAlignment:
         model_cols = get_model_columns(PledgeStat)
         dao_cols = extract_cols_from_method(FinancialDao.save_pledge_stat)
         assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
+        # ann_date excluded: Tushare pledge_stat API does not return it (MD-001)
+        expected = model_cols - {"updated_at", "created_at", "ann_date"}
         missing = expected - dao_cols
         assert not missing, f"save_pledge_stat missing: {missing}"
 
@@ -271,7 +272,8 @@ class TestOrmDaoAlignment:
         model_cols = get_model_columns(MacroEconomy)
         dao_cols = extract_cols_from_method(MacroDao.save_macro_economy)
         assert dao_cols is not None
-        expected = model_cols - {"created_at"}
+        # get_model_columns excludes updated_at by default; created_at excluded here
+        expected = model_cols - {"updated_at", "created_at"}
         missing = expected - dao_cols
         assert not missing, f"save_macro_economy missing: {missing}"
 
