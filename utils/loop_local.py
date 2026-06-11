@@ -28,11 +28,15 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = True)
                 f"get_loop_local('{key}') called outside event loop in strict mode. "
                 f"Callers must ensure they are inside an async context."
             ) from exc
-        logger.warning(
-            f"[loop_local] get_loop_local('{key}') called outside event loop; "
-            f"using module-level fallback cache. "
-            f"Callers should ensure they are inside an async context.",
-        )
+        # strict=False: caller explicitly accepts fallback; log at DEBUG to avoid
+        # noisy warnings and prevent ValueError during Python shutdown when log
+        # streams are already closed (e.g. atexit handlers).
+        try:
+            logger.debug(
+                f"[loop_local] get_loop_local('{key}') called outside event loop; using module-level fallback cache.",
+            )
+        except (ValueError, OSError):
+            pass
         with _fallback_lock:
             if key not in _fallback_store:
                 _fallback_store[key] = factory()

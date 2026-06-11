@@ -3,6 +3,14 @@ import pytest
 from services.news_subscription_service import NewsSubscriptionService
 
 
+@pytest.fixture(autouse=True)
+def _reset_singleton():
+    """Ensure singleton state is clean before and after each test."""
+    NewsSubscriptionService._reset_singleton()
+    yield
+    NewsSubscriptionService._reset_singleton()
+
+
 def _make_i18n_mock(overrides=None):
     overrides = overrides or {}
 
@@ -31,7 +39,7 @@ def _make_i18n_mock(overrides=None):
 @pytest.mark.asyncio
 async def test_generate_tags_uses_translated_category_from_ai(monkeypatch):
     """AI 分类返回的 category 已由 _parse_news_result 翻译，直接使用。"""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    svc = object.__new__(NewsSubscriptionService)
 
     async def _fake_classify(_content):
         return {"emoji": "📰", "category": "金融核心-贵金属"}
@@ -49,7 +57,7 @@ async def test_generate_tags_uses_translated_category_from_ai(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_tags_rule_based_policy(monkeypatch):
     """规则兜底：政策类新闻应显示本地化标签。"""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    svc = object.__new__(NewsSubscriptionService)
 
     async def _raise_ai(_content):
         raise RuntimeError("ai unavailable")
@@ -67,7 +75,7 @@ async def test_generate_tags_rule_based_policy(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_tags_rule_based_global(monkeypatch):
     """规则兜底：外盘类新闻应显示本地化标签。"""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    svc = object.__new__(NewsSubscriptionService)
 
     async def _raise_ai(_content):
         raise RuntimeError("ai unavailable")
@@ -85,7 +93,7 @@ async def test_generate_tags_rule_based_global(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_tags_rule_based_macro(monkeypatch):
     """规则兜底：宏观类新闻应显示本地化标签。"""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    svc = object.__new__(NewsSubscriptionService)
 
     async def _raise_ai(_content):
         raise RuntimeError("ai unavailable")
@@ -103,7 +111,7 @@ async def test_generate_tags_rule_based_macro(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_tags_no_match_returns_empty(monkeypatch):
     """AI 不可用且规则不匹配时，应返回空标签。"""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    svc = object.__new__(NewsSubscriptionService)
 
     async def _raise_ai(_content):
         raise RuntimeError("ai unavailable")

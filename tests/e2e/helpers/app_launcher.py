@@ -45,6 +45,43 @@ def _drain_stdout(proc: subprocess.Popen) -> None:
         sys.stderr.write(f"\n[E2E App Launcher Log Error]: {e}\n")
 
 
+_STARTUP_ERROR_PATTERNS = (
+    "Connection error getting revision",
+    "connection was closed in the middle of operation",
+    "[Bootstrap] Database initialization failed",
+    "db_init_failed",
+)
+
+
+def _check_startup_errors(log_path: Path, log_offset: int = 0, timeout_s: float = 8.0) -> None:
+    """Poll the app log for critical startup errors after HTTP ready.
+
+    If the Flet web server responds 200 but the app internally fails
+    (e.g. DB unreachable), the error is logged within a few seconds.
+    This function catches such errors early instead of waiting for
+    Playwright's 45s timeout.
+
+    Only checks content written after *log_offset* to avoid false
+    positives from previous app instances that wrote to the same file.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            with open(log_path, encoding="utf-8") as f:
+                f.seek(log_offset)
+                content = f.read()
+            for pattern in _STARTUP_ERROR_PATTERNS:
+                if pattern in content:
+                    raise RuntimeError(
+                        f"Flet app started (HTTP 200) but DB initialization failed. "
+                        f"Error pattern: '{pattern}'. "
+                        f"Check {log_path} for details."
+                    )
+        except FileNotFoundError:
+            pass
+        time.sleep(0.5)
+
+
 def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[subprocess.Popen, str]:
     port = _free_port()
     env = {
@@ -59,13 +96,22 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
         "AUTO_MIGRATE": "true",
         **env_overrides,
     }
+    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Record current log size so _check_startup_errors only inspects
+    # output from *this* app instance, not leftover from previous runs.
+    try:
+        log_offset = log_path.stat().st_size
+    except FileNotFoundError:
+        log_offset = 0
     proc = subprocess.Popen(
         [sys.executable, "main.py"],
         cwd=str(PROJECT_ROOT),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     drain_thread = threading.Thread(target=_drain_stdout, args=(proc,), daemon=True)
     drain_thread.start()
@@ -75,4 +121,8 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
     except Exception:  # noqa: BLE001
         proc.terminate()
         raise
+    # HTTP 200 only means the Flet web server is up; the app may still
+    # be failing internally (e.g. DB unreachable).  Poll the log for a
+    # few seconds to catch such errors early.
+    _check_startup_errors(log_path, log_offset)
     return proc, url

@@ -332,8 +332,8 @@ class TestBacktestQualityProxy:
         ctx1 = await provider.build_context(date(2024, 1, 2))
         ctx2 = await provider.build_context(date(2024, 1, 3))
 
-        assert ctx1["data_processor"] is ctx2["data_processor"]
-        assert ctx1["data_processor"] is provider._quality_proxy
+        assert ctx1.get("data_processor") is ctx2.get("data_processor")
+        assert ctx1.get("data_processor") is provider._quality_proxy
 
     def test_no_proxy_when_data_processor_provided(self) -> None:
         """当 data_processor 存在时，不应创建 proxy。"""

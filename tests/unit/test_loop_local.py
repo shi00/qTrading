@@ -36,8 +36,8 @@ class TestGetLoopLocal:
         with pytest.raises(RuntimeError, match="strict mode"):
             get_loop_local("default_strict_key", list)
 
-    def test_non_strict_outside_event_loop_logs_warning(self, caplog):
-        with caplog.at_level(logging.WARNING, logger="utils.loop_local"):
+    def test_non_strict_outside_event_loop_logs_debug(self, caplog):
+        with caplog.at_level(logging.DEBUG, logger="utils.loop_local"):
             result = get_loop_local("no_loop_key", list, strict=False)
             assert isinstance(result, list)
             assert any("outside event loop" in r.message for r in caplog.records)

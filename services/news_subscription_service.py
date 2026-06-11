@@ -54,7 +54,12 @@ class NewsSubscriptionService:
         """Cleanup background tasks on process exit."""
         if cls._instance is None:
             return
-        for task in list(cls._instance._background_tasks):
+        if not hasattr(cls._instance, "_background_tasks"):
+            return
+        tasks = cls._instance._background_tasks
+        if not isinstance(tasks, set):
+            return
+        for task in list(tasks):
             if not task.done():
                 task.cancel()
 

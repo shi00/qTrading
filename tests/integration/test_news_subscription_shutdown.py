@@ -6,10 +6,19 @@ import pytest
 from services.news_subscription_service import NewsSubscriptionService
 
 
+@pytest.fixture(autouse=True)
+def _reset_singleton():
+    """Ensure singleton state is clean before and after each test."""
+    NewsSubscriptionService._reset_singleton()
+    yield
+    NewsSubscriptionService._reset_singleton()
+
+
 @pytest.mark.asyncio
 async def test_safe_queue_put_timeout_path_drops_oldest_and_keeps_newest():
     """N-1: timeout fallback should drop oldest item and keep latest item safely."""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    # Use object.__new__ to create a bare instance without polluting cls._instance
+    svc = object.__new__(NewsSubscriptionService)
     svc.processing_queue = asyncio.Queue(maxsize=1)
     svc._queue_put_lock = asyncio.Lock()
     svc._running = True
@@ -34,7 +43,8 @@ async def test_safe_queue_put_timeout_path_drops_oldest_and_keeps_newest():
 @pytest.mark.asyncio
 async def test_stop_async_drains_queue_before_cancel_processing():
     """N-6: graceful stop should wait queue drain before cancelling processing task."""
-    svc = NewsSubscriptionService.__new__(NewsSubscriptionService)
+    # Use object.__new__ to create a bare instance without polluting cls._instance
+    svc = object.__new__(NewsSubscriptionService)
     svc._running = True
     svc._current_fetch_task = None
     svc._last_news_time = "20260430"
