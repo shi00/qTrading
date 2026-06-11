@@ -42,9 +42,18 @@ async def test_wizard_language_switch(wizard_page):
     assert zh_disappeared, f"中文欢迎词 '{welcome_guide_zh}' 未能在切换语言后消失"
 
     # 恢复中文，避免污染后续依赖中文 locale 的测试
-    # （wizard_app 是 session 级别 fixture，语言切换会持久化到 config）
+    # （wizard_app 是 session 级别 fixture，语言切换会持久化到内存缓存和配置文件）
     lang_zh = I18n.get("settings_lang_zh")
     await wizard_page.select_dropdown("language", lang_zh)
+
+    # 确认中文 UI 已恢复，避免后续测试读到中间状态
+    welcome_restored = False
+    for _ in range(25):
+        if await wizard_page.has_text(welcome_guide_zh):
+            welcome_restored = True
+            break
+        await wizard_page.page.wait_for_timeout(200)
+    assert welcome_restored, f"切换回中文后欢迎词 '{welcome_guide_zh}' 未出现"
 
 
 async def test_wizard_forward_then_back(wizard_page):

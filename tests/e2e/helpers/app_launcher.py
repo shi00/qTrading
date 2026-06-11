@@ -52,6 +52,12 @@ _STARTUP_ERROR_PATTERNS = (
     "db_init_failed",
 )
 
+_STARTUP_SUCCESS_PATTERNS = (
+    "[Bootstrap] Loaded",
+    "[TaskManager] init_db",
+    "Tushare capability warmup",
+)
+
 
 def _check_startup_errors(log_path: Path, log_offset: int = 0, timeout_s: float = 8.0) -> None:
     """Poll the app log for critical startup errors after HTTP ready.
@@ -63,6 +69,8 @@ def _check_startup_errors(log_path: Path, log_offset: int = 0, timeout_s: float 
 
     Only checks content written after *log_offset* to avoid false
     positives from previous app instances that wrote to the same file.
+
+    Exits early if a success pattern is found (app initialized OK).
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -77,6 +85,9 @@ def _check_startup_errors(log_path: Path, log_offset: int = 0, timeout_s: float 
                         f"Error pattern: '{pattern}'. "
                         f"Check {log_path} for details."
                     )
+            for pattern in _STARTUP_SUCCESS_PATTERNS:
+                if pattern in content:
+                    return  # App initialized successfully, no need to wait
         except FileNotFoundError:
             pass
         time.sleep(0.5)
@@ -124,5 +135,9 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
     # HTTP 200 only means the Flet web server is up; the app may still
     # be failing internally (e.g. DB unreachable).  Poll the log for a
     # few seconds to catch such errors early.
-    _check_startup_errors(log_path, log_offset)
+    try:
+        _check_startup_errors(log_path, log_offset)
+    except Exception:
+        proc.terminate()
+        raise
     return proc, url

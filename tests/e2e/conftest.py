@@ -54,10 +54,9 @@ def pytest_runtest_makereport(item, call):
 def _spawn(tmp_path_factory, config: dict, env_overrides: dict):
     cfg_dir = tmp_path_factory.mktemp("e2e_cfg")
     cfg_file = cfg_dir / "user_settings.json"
-    original_config = json.dumps(config)
-    cfg_file.write_text(original_config, encoding="utf-8")
+    cfg_file.write_text(json.dumps(config), encoding="utf-8")
     proc, url = start_flet_app(cfg_file, env_overrides)
-    return proc, url, cfg_file, original_config
+    return proc, url
 
 
 def _terminate(proc):
@@ -69,11 +68,9 @@ def _terminate(proc):
 
 
 class AppServer:
-    def __init__(self, proc, url: str, config_file: Path | None = None, original_config: str | None = None):
+    def __init__(self, proc, url: str):
         self.proc = proc
         self.url = url
-        self.config_file = config_file
-        self.original_config = original_config
 
     def is_alive(self) -> bool:
         return self.proc.poll() is None
@@ -86,13 +83,8 @@ class AppServer:
                 f"URL was {self.url}. Check logs/e2e-flet-app.log for details."
             )
 
-    def reset_config(self) -> None:
-        """Reset the config file to its original content (undo test-side changes)."""
-        if self.config_file and self.original_config is not None:
-            self.config_file.write_text(self.original_config, encoding="utf-8")
 
-
-async def _make_page(app: AppServer, request) -> FletPage:
+async def _make_page(app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
     from playwright.async_api import async_playwright
 
     app.assert_alive()
@@ -118,20 +110,21 @@ async def _make_page(app: AppServer, request) -> FletPage:
 
     # Fail-fast: detect error UI (e.g. "数据库初始化失败") instead of
     # waiting for Playwright's 45s timeout on subsequent interactions.
-    # Give Flet a moment to render the error UI before checking.
-    try:
-        await page.wait_for_timeout(2000)
-        error_text = I18n.get("error_db_init_failed")
-        if await fp.has_text(error_text):
-            raise RuntimeError(
-                "Flet app shows DB initialization error UI. "
-                "The database is likely unreachable. "
-                "Check logs/e2e-flet-app.log for details."
-            )
-    except RuntimeError:
-        raise
-    except Exception:  # noqa: BLE001
-        pass  # Don't fail if the check itself fails
+    # Only enabled for flet_app (which calls initialize_services).
+    if check_db_error:
+        try:
+            await page.wait_for_timeout(2000)
+            error_text = I18n.get("error_db_init_failed")
+            if await fp.has_text(error_text):
+                raise RuntimeError(
+                    "Flet app shows DB initialization error UI. "
+                    "The database is likely unreachable. "
+                    "Check logs/e2e-flet-app.log for details."
+                )
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass  # Don't fail if the check itself fails
 
     fp.bind_context((p, browser, context, page, request))
     return fp
@@ -162,7 +155,7 @@ async def _teardown_page(fp: FletPage) -> None:
 
 @pytest.fixture(scope="session")
 def flet_app(tmp_path_factory):
-    proc, url, cfg_file, original_config = _spawn(
+    proc, url = _spawn(
         tmp_path_factory,
         config={
             "onboarding_complete": True,
@@ -174,35 +167,32 @@ def flet_app(tmp_path_factory):
             "DATABASE_URL": TEST_DATABASE_URL,
         },
     )
-    app = AppServer(proc, url, config_file=cfg_file, original_config=original_config)
+    app = AppServer(proc, url)
     yield app
     _terminate(proc)
 
 
 @pytest.fixture(scope="session")
 def wizard_app(tmp_path_factory):
-    proc, url, cfg_file, original_config = _spawn(
+    proc, url = _spawn(
         tmp_path_factory,
         config={"locale": "zh"},
         env_overrides={"DATABASE_URL": TEST_DATABASE_URL},
     )
-    app = AppServer(proc, url, config_file=cfg_file, original_config=original_config)
+    app = AppServer(proc, url)
     yield app
     _terminate(proc)
 
 
 @pytest.fixture
 async def e2e_page(flet_app: AppServer, request):
-    fp = await _make_page(flet_app, request)
+    fp = await _make_page(flet_app, request, check_db_error=True)
     yield fp
     await _teardown_page(fp)
 
 
 @pytest.fixture
 async def wizard_page(wizard_app: AppServer, request):
-    # Reset config file to original state before each test to prevent
-    # session-level state pollution (e.g. locale changed by a previous test).
-    wizard_app.reset_config()
     fp = await _make_page(wizard_app, request)
     yield fp
     await _teardown_page(fp)
