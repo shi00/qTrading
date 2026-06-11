@@ -746,6 +746,7 @@ class TestPaginatedTable:
 
         # Simulate clicking the first row by invoking its on_click handler
         first_row = table.rendered_row_controls[0]
+        assert first_row.on_click is not None  # type: ignore[reportAttributeAccessIssue]
         first_row.on_click(None)
 
         assert len(callback_calls) == 1
@@ -759,6 +760,7 @@ class TestPaginatedTable:
         table.set_rows([{"name": "AAPL"}, {"name": "GOOG"}])
 
         second_row = table.rendered_row_controls[1]
+        assert second_row.on_click is not None  # type: ignore[reportAttributeAccessIssue]
         second_row.on_click(None)
 
         assert len(callback_calls) == 1
