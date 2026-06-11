@@ -39,6 +39,11 @@
       "description": "Pin flet and flet-desktop to 0.28.3 - UI framework stability critical",
       "matchPackageNames": ["flet", "flet-desktop"],
       "enabled": false
+    },
+    {
+      "description": "Disable github-actions manager - managed by Dependabot",
+      "matchManagers": ["github-actions"],
+      "enabled": false
     }
   ],
   "lockFileMaintenance": {

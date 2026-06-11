@@ -155,10 +155,13 @@ jobs:
       - name: Run pre-commit hooks
         run: pre-commit run --all-files
 
+      - name: Verify Version Consistency
+        run: python scripts/verify_versions.py
+
       - name: Security Audit (pip-audit)
         run: |
           python scripts/run_pip_audit.py \
-            --requirements requirements.txt requirements-optional.txt \
+            --requirements requirements.txt requirements-optional.txt requirements-dev.txt \
             --allowlist .security/audit-allowlist.yml \
             --sources pypi osv
 
@@ -360,8 +363,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-    outputs:
-      pre_commit_outcome: ${{ steps.pre-commit.outcome }}
 
     steps:
       - name: Checkout Code
@@ -418,19 +419,7 @@ jobs:
           restore-keys: ruff-${{ runner.os }}-
 
       - name: Run pre-commit hooks
-        id: pre-commit
-        continue-on-error: true
         run: pre-commit run --all-files
-
-      - name: Check if pre-commit failed
-        if: steps.pre-commit.outcome == 'failure'
-        run: |
-          echo "::warning::pre-commit hooks failed. requirements*.txt may need updating."
-          echo "PRE_COMMIT_FAILED=true" >> $GITHUB_ENV
-
-      - name: Fail if pre-commit failed (non-main branch)
-        if: steps.pre-commit.outcome == 'failure' && github.ref != 'refs/heads/main'
-        run: exit 1
 
       - name: Pyright Type Check
         continue-on-error: false
@@ -453,10 +442,51 @@ jobs:
             junit-*.xml
           retention-days: 14
 
+  requirements-drift:
+    name: Detect requirements drift
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      drift: ${{ steps.check-drift.outputs.drift }}
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Recompile requirements
+        shell: bash
+        run: |
+          uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
+          uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
+          uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
+
+      - name: Check for drift
+        id: check-drift
+        shell: bash
+        run: |
+          if git diff --exit-code requirements.txt requirements-dev.txt requirements-optional.txt; then
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+            echo "No requirements drift detected."
+          else
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::requirements*.txt drift detected. An update PR will be created."
+          fi
+
   update-requirements:
     name: Update requirements*.txt
-    needs: ci-checks-windows
-    if: always() && needs.ci-checks-windows.outputs.pre_commit_outcome == 'failure' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch')
+    needs: requirements-drift
+    if: needs.requirements-drift.outputs.drift == 'true'
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:

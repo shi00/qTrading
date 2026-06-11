@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.5.0"
 #endif
 
 #ifndef TargetVariant
