@@ -1280,7 +1280,7 @@ class TestPaginatedTableVirtualization:
         table._on_scroll(_Evt())
         assert table._win_start > 0
         assert len(table.rendered_row_controls) <= first_count
-        assert table.rendered_row_controls[0].top == table._win_start * ROW_HEIGHT
+        assert table.rendered_row_controls[0].top == table._win_start * ROW_HEIGHT  # type: ignore[union-attr]
 
     def test_row_pool_is_reused_on_scroll(self):
         from ui.components.virtual_table import ROW_HEIGHT

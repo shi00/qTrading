@@ -76,9 +76,9 @@ class PaginatedTable(ft.Column):
         self.controls = [self.horizontal_wrapper]
 
     @property
-    def rendered_row_controls(self) -> list[ft.Container]:
+    def rendered_row_controls(self) -> Sequence[ft.Control]:
         """Rows currently attached to the virtual canvas."""
-        return list(self._canvas.controls)
+        return self._canvas.controls
 
     def set_columns(self, columns: Sequence[dict[str, Any]]):
         """Set column definitions. Caller is responsible for page.update()."""
