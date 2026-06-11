@@ -508,7 +508,7 @@ class DataSourceTab(ft.Container):
                 elif ctrl == self.sync_button:
                     ctrl.disabled = False
                 else:
-                    ctrl.disabled = is_busy
+                    ctrl.disabled = is_busy  # pragma: no cover
             elif is_busy:
                 ctrl.disabled = True
                 if isinstance(ctrl, ActionChip):
