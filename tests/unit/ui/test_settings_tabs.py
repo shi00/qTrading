@@ -1095,9 +1095,7 @@ class TestDataSourceTab:
             patch("ui.views.settings_tabs.data_source_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.data_source_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.data_source_tab.AppStyles", self.mock_as),
-            patch("ui.views.settings_tabs.data_source_tab.ConfigHandler", self.mock_ch),
-            patch("ui.views.settings_tabs.data_source_tab.CacheManager"),
-            patch("ui.views.settings_tabs.data_source_tab.DataProcessor"),
+            patch("ui.views.settings_tabs.data_source_tab.DataSourceViewModel"),
             patch("ui.views.settings_tabs.data_source_tab.TaskManager"),
             patch("ui.views.settings_tabs.data_source_tab.TushareConfigPanel", MagicMock()),
             patch("ui.views.settings_tabs.data_source_tab.DashboardCard", MagicMock()),
@@ -1117,58 +1115,54 @@ class TestDataSourceTab:
 
         return DataSourceTab(show_snack_callback=MagicMock())
 
-    def test_on_tushare_save_saves_token(self, mock_page):
+    def test_on_tushare_save_delegates_to_vm(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        with patch("data.external.tushare_client.TushareClient"):
-            tab._on_tushare_save({"token": "abc123"})
-        self.mock_ch.save_token.assert_called_with("abc123")
+        tab._on_tushare_save({"token": "abc123"})
+        tab.vm.save_tushare_token.assert_called_with("abc123")
 
-    def test_on_tushare_save_empty_token_does_not_save(self, mock_page):
+    def test_on_tushare_save_empty_token_skips(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab._on_tushare_save({"token": "  "})
-        self.mock_ch.save_token.assert_not_called()
+        tab.vm.save_tushare_token.assert_not_called()
 
-    def test_on_history_years_change_saves(self, mock_page):
+    def test_on_history_years_change_delegates_to_vm(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         e = MagicMock()
         e.control.value = "3"
         tab.on_history_years_change(e)
-        self.mock_ch.set_init_history_years.assert_called_with(3)
+        tab.vm.set_history_years.assert_called_with(3)
 
-    def test_set_sync_busy_true(self, mock_page):
+    def test_vm_sync_busy_changes_buttons(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._set_sync_busy(True)
-        assert tab.is_syncing is True
+        # Simulate the callback directly
+        tab._on_vm_sync_busy_changed(True, "daily_sync")
+        assert tab.action_full_sync.disabled is True or tab.action_full_sync.opacity == 0.5
 
-    def test_set_sync_busy_false(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.is_syncing = True
-        tab._set_sync_busy(False)
-        assert tab.is_syncing is False
-
-    def test_did_mount_subscribes(self, mock_page):
+    def test_did_mount_binds_vm(self, mock_page):
         tab = self._make_tab()
         tab.tushare_panel = MagicMock()
         tab._tm = MagicMock()
         tab._on_mount()
+        tab.vm.bind.assert_called_once()
         self.mock_i18n.subscribe.assert_called_once()
 
-    def test_will_unmount_unsubscribes(self, mock_page):
+    def test_will_unmount_disposes_vm(self, mock_page):
         tab = self._make_tab()
         tab._tm = MagicMock()
         tab._on_unmount()
+        tab.vm.dispose.assert_called_once()
         self.mock_i18n.unsubscribe.assert_called_once()
 
-    def test_recover_stale_state_no_active_tasks(self, mock_page):
+    def test_vm_recover_stale_state_called_on_mount(self, mock_page):
         tab = self._make_tab()
-        tab.is_syncing = False
-        tab._active_task_ids = {}
-        tab._recover_stale_state()
+        tab.tushare_panel = MagicMock()
+        tab._tm = MagicMock()
+        tab._on_mount()
+        tab.vm.recover_stale_state.assert_called_once()
 
     def test_update_theme(self, mock_page):
         tab = self._make_tab()

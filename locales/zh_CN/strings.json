@@ -893,6 +893,7 @@
     "health_missing_sample": "未覆盖股票示例",
     "ds_val_placeholder_count": "5000+ 股票",
     "ds_sync_in_progress": "后台数据同步或处理中，请等待当前操作完成",
+    "ds_clear_cache_syncing": "请先等待执行中任务完成或取消后，再清空缓存",
     "ds_text_cov_detail": "覆盖率: {cov} | 财报覆盖: {fin_cov} (近期: {recent}) | 滞后: {lag}天",
     "ds_health_summary_sys": "系统指标: 全局覆盖 {cov} | 滞后 {lag} 天",
     "ds_health_summary_core": "完整性: {miss} 个核心表缺失",

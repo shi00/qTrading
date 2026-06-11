@@ -948,6 +948,7 @@
     "sys_opt_error": "ERROR",
     "health_missing_sample": "Missing Samples",
     "ds_sync_in_progress": "System is busy processing data. Please wait for completion.",
+    "ds_clear_cache_syncing": "Please wait for running tasks to complete or cancel before clearing cache",
     "ds_cache_cleared": "Cache Cleared!",
     "ds_clean_fail": "Clean Failed: {error}",
     "ds_verify_fail_fmt": "Verify Failed: {error}",
