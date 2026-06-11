@@ -135,7 +135,6 @@ class TestScreenerView:
             patch("ui.views.screener_view.AppStyles", self.mock_as),
             patch("ui.views.screener_view.ScreenerViewModel", return_value=self.mock_vm),
             patch("ui.views.screener_view.PaginatedTable", MagicMock()),
-            patch("ui.views.screener_view.TaskManager", return_value=MagicMock()),
             patch("ui.views.screener_view.UILogger"),
             patch("ui.views.screener_view.MetaDataManager"),
             patch("ui.views.screener_view.StockDetailDialog"),
@@ -364,6 +363,11 @@ class TestScreenerView:
         view.did_mount()
         assert view._mounted is True
 
+    def test_did_mount_subscribes_via_viewmodel(self, mock_page):
+        view = self._make_view(mock_page)
+        view.did_mount()
+        view.vm.subscribe_task_manager.assert_called_once()
+
     def test_did_mount_skips_if_already_mounted(self, mock_page):
         view = self._make_view(mock_page)
         view._mounted = True
@@ -375,6 +379,11 @@ class TestScreenerView:
         view._mounted = True
         view.will_unmount()
         assert view._mounted is False
+
+    def test_will_unmount_unsubscribes_via_viewmodel(self, mock_page):
+        view = self._make_view(mock_page)
+        view.will_unmount()
+        view.vm.unsubscribe_task_manager.assert_called_once()
 
     def test_will_unmount_disposes_vm(self, mock_page):
         view = self._make_view(mock_page)
@@ -410,19 +419,18 @@ class TestScreenerView:
         params = view._collect_params()
         assert params["choice_param"] == "option_a"
 
-    def test_on_tasks_updated_unlocks_ui(self, mock_page):
+    def test_on_task_unlock_unlocks_ui(self, mock_page):
         view = self._make_view(mock_page)
-        view.selected_strategy = "momentum"
         view.run_btn.disabled = True
         view.progress_ring.visible = True
-        view._on_tasks_updated([])
+        view._on_task_unlock()
         mock_page.run_task.assert_called()
 
-    def test_on_tasks_updated_no_action_without_strategy(self, mock_page):
+    def test_on_task_unlock_no_action_without_page(self, mock_page):
         view = self._make_view(mock_page)
-        view.selected_strategy = None
-        view._on_tasks_updated([])
-        mock_page.run_task.assert_not_called()
+        view._Control__page = None  # type: ignore[attr-defined]
+        view._on_task_unlock()
+        # Should not raise and should not call run_task
 
     @pytest.mark.asyncio
     async def test_select_and_run_strategy_queues_when_not_loaded(self, mock_page):

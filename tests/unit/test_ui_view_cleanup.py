@@ -37,9 +37,8 @@ class TestHomeViewCleanup(unittest.TestCase):
 
 
 class TestScreenerViewCleanup(unittest.TestCase):
-    @patch("ui.views.screener_view.TaskManager")
     @patch("ui.views.screener_view.ScreenerViewModel")
-    def test_will_unmount_clears_overlay_and_table_references(self, mock_vm_cls, mock_task_manager):
+    def test_will_unmount_clears_overlay_and_table_references(self, mock_vm_cls):
         page = MagicMock()
         page.overlay = []
         page.update = MagicMock()
@@ -55,7 +54,7 @@ class TestScreenerViewCleanup(unittest.TestCase):
 
         view.will_unmount()
 
-        mock_task_manager.return_value.unsubscribe.assert_called_once_with(view._on_tasks_updated)
+        mock_vm_cls.return_value.unsubscribe_task_manager.assert_called_once()
         mock_vm_cls.return_value.dispose.assert_called_once()
         assert view.result_table.rendered_row_controls == []
         assert view.result_table._row_pool == []

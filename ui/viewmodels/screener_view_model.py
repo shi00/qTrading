@@ -65,9 +65,13 @@ class ScreenerViewModel:
         self.on_progress: Callable[[float], None] | None = None
         self.on_log_stream_start: Callable[[str], Callable] | None = None
         self.on_ai_card_start: Callable[[str], None] | None = None
+        self.on_task_unlock: Callable[[], None] | None = None
         self._main_loop = None
         self._background_tasks: set = set()
         self._threadsafe_futures: set = set()
+
+        # TaskManager subscription state
+        self._strategy_submitted = False
 
     def bind(
         self,
@@ -77,6 +81,7 @@ class ScreenerViewModel:
         on_progress,
         on_log_stream_start=None,
         on_ai_card_start=None,
+        on_task_unlock=None,
     ):
         self.on_update = on_update
         self.on_log = on_log
@@ -84,6 +89,7 @@ class ScreenerViewModel:
         self.on_progress = on_progress
         self.on_log_stream_start = on_log_stream_start
         self.on_ai_card_start = on_ai_card_start
+        self.on_task_unlock = on_task_unlock
         try:
             self._main_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -95,12 +101,14 @@ class ScreenerViewModel:
 
     def dispose(self):
         """Cleanup resources and ensure aggressive GC of large dataframes"""
+        self.unsubscribe_task_manager()
         self.on_update = None
         self.on_log = None
         self.on_status = None
         self.on_progress = None
         self.on_log_stream_start = None
         self.on_ai_card_start = None
+        self.on_task_unlock = None
         self._main_loop = None
 
         for f in self._threadsafe_futures:
@@ -341,6 +349,8 @@ class ScreenerViewModel:
                 self.on_progress(False)
             if self.on_status:
                 self.on_status(I18n.get("screener_task_rejected"), "orange")
+        else:
+            self._strategy_submitted = True
 
     # --- Sorting & Pagination ---
 
@@ -662,3 +672,21 @@ class ScreenerViewModel:
             logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export failed traceback", exc_info=True)
             return None, str(e)
+
+    # --- TaskManager Subscription ---
+
+    def subscribe_task_manager(self):
+        """Subscribe to TaskManager for strategy task monitoring."""
+        TaskManager().subscribe(self._on_tasks_updated)
+
+    def unsubscribe_task_manager(self):
+        """Unsubscribe from TaskManager."""
+        TaskManager().unsubscribe(self._on_tasks_updated)
+
+    def _on_tasks_updated(self, tasks: list):
+        """TaskManager subscriber: detect strategy task completion and notify View."""
+        running = [t for t in tasks if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")]
+        if not running and self._strategy_submitted:
+            self._strategy_submitted = False
+            if self.on_task_unlock:
+                self.on_task_unlock()

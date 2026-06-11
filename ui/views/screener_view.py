@@ -9,12 +9,11 @@ import flet as ft
 import pandas as pd
 
 from data.persistence.metadata_manager import MetaDataManager
-from services.task_manager import TaskManager
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
 from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.screener_view_model import TASK_NAME_PREFIX, ScreenerViewModel
+from ui.viewmodels.screener_view_model import ScreenerViewModel
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -308,16 +307,17 @@ class ScreenerView(ft.Container):
             on_progress=self._toggle_progress,
             on_log_stream_start=self._on_log_stream_start,
             on_ai_card_start=self._on_ai_card_start,
+            on_task_unlock=self._on_task_unlock,
         )
 
-        # Subscribe to TaskManager to unlock UI on background task completion
-        TaskManager().subscribe(self._on_tasks_updated)
+        # Subscribe to TaskManager via ViewModel to unlock UI on background task completion
+        self.vm.subscribe_task_manager()
 
         # Load Strategies Async
         self.page.run_task(self._load_strategies)  # type: ignore[untyped]
 
     def will_unmount(self):  # pragma: no cover
-        TaskManager().unsubscribe(self._on_tasks_updated)
+        self.vm.unsubscribe_task_manager()
         self.vm.dispose()
 
         if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
@@ -342,30 +342,21 @@ class ScreenerView(ft.Container):
         # U-1 fix: Reset mounted state for proper re-mount handling
         self._mounted = False
 
-    def _on_tasks_updated(self, tasks):  # pragma: no cover
-        """Monitor TaskManager for the currently running AI Strategy execution"""
+    def _on_task_unlock(self):  # pragma: no cover
+        """Called by ViewModel when strategy task completes."""
         if not self.page:
             return
 
-        # Determine if we have any running strategy task
-        running_strategy_tasks = [
-            t for t in tasks if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")
-        ]
+        async def _unlock():
+            if self.run_btn.disabled:
+                self.run_btn.disabled = False
+                self.run_btn.update()
 
-        # If there are no active strategy tasks, unlock the UI
-        # Only unlock if we actually disabled it previously
-        if not running_strategy_tasks and getattr(self, "selected_strategy", None):
+            if self.progress_ring.visible:
+                self.progress_ring.visible = False
+                self.progress_ring.update()
 
-            async def _unlock():
-                if self.run_btn.disabled:
-                    self.run_btn.disabled = False
-                    self.run_btn.update()
-
-                if self.progress_ring.visible:
-                    self.progress_ring.visible = False
-                    self.progress_ring.update()
-
-            self.page.run_task(_unlock)
+        self.page.run_task(_unlock)
 
     async def _load_strategies(self):  # pragma: no cover
         try:

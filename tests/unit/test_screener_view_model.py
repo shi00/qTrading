@@ -689,3 +689,83 @@ class TestExportResultsEmpty:
         path, msg = await vm.export_results("/tmp/test.csv")
         assert path is None
         assert msg == "No data to export"
+
+
+class TestTaskManagerSubscription:
+    """Tests for TaskManager subscribe/unsubscribe moved from View to ViewModel."""
+
+    @patch("ui.viewmodels.screener_view_model.TaskManager")
+    def test_subscribe_task_manager(self, mock_tm_cls, vm):
+        vm.subscribe_task_manager()
+        mock_tm_cls.return_value.subscribe.assert_called_once_with(vm._on_tasks_updated)
+
+    @patch("ui.viewmodels.screener_view_model.TaskManager")
+    def test_unsubscribe_task_manager(self, mock_tm_cls, vm):
+        vm.unsubscribe_task_manager()
+        mock_tm_cls.return_value.unsubscribe.assert_called_once_with(vm._on_tasks_updated)
+
+    def test_on_tasks_updated_triggers_unlock_when_no_running_tasks(self, vm):
+        vm._strategy_submitted = True
+        vm.on_task_unlock = MagicMock()
+        vm._on_tasks_updated([])
+        vm.on_task_unlock.assert_called_once()
+        assert vm._strategy_submitted is False
+
+    def test_on_tasks_updated_no_unlock_when_tasks_running(self, vm):
+        vm._strategy_submitted = True
+        vm.on_task_unlock = MagicMock()
+        mock_task = MagicMock()
+        mock_task.name = f"{TASK_NAME_PREFIX}: test"
+        mock_task.status.name = "RUNNING"
+        vm._on_tasks_updated([mock_task])
+        vm.on_task_unlock.assert_not_called()
+        assert vm._strategy_submitted is True
+
+    def test_on_tasks_updated_no_unlock_without_submission(self, vm):
+        vm._strategy_submitted = False
+        vm.on_task_unlock = MagicMock()
+        vm._on_tasks_updated([])
+        vm.on_task_unlock.assert_not_called()
+
+    def test_on_tasks_updated_no_unlock_when_queued(self, vm):
+        vm._strategy_submitted = True
+        vm.on_task_unlock = MagicMock()
+        mock_task = MagicMock()
+        mock_task.name = f"{TASK_NAME_PREFIX}: test"
+        mock_task.status.name = "QUEUED"
+        vm._on_tasks_updated([mock_task])
+        vm.on_task_unlock.assert_not_called()
+
+    def test_on_tasks_updated_unlocks_when_task_completed(self, vm):
+        vm._strategy_submitted = True
+        vm.on_task_unlock = MagicMock()
+        mock_task = MagicMock()
+        mock_task.name = f"{TASK_NAME_PREFIX}: test"
+        mock_task.status.name = "COMPLETED"
+        vm._on_tasks_updated([mock_task])
+        vm.on_task_unlock.assert_called_once()
+        assert vm._strategy_submitted is False
+
+    def test_on_tasks_updated_ignores_non_strategy_tasks(self, vm):
+        vm._strategy_submitted = True
+        vm.on_task_unlock = MagicMock()
+        mock_task = MagicMock()
+        mock_task.name = "other_task"
+        mock_task.status.name = "RUNNING"
+        vm._on_tasks_updated([mock_task])
+        vm.on_task_unlock.assert_called_once()
+
+    @patch("ui.viewmodels.screener_view_model.TaskManager")
+    def test_dispose_unsubscribes(self, mock_tm_cls, vm):
+        vm.dispose()
+        mock_tm_cls.return_value.unsubscribe.assert_called_once_with(vm._on_tasks_updated)
+
+    def test_strategy_submitted_flag_initially_false(self, vm):
+        assert vm._strategy_submitted is False
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_on_task_unlock_initially_none(self, mock_dp, mock_sm, mock_rm):
+        vm = ScreenerViewModel()
+        assert vm.on_task_unlock is None
