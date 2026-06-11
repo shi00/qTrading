@@ -1,102 +1,165 @@
+import math
+from collections.abc import Sequence
+from typing import Any
+
 import flet as ft
 
 from ui.theme import AppColors, AppStyles
 
+ROW_HEIGHT = 30
+HEADER_HEIGHT = 35
+BUFFER_ROWS = 8
+RERENDER_THRESHOLD = 4
+DEFAULT_VIEWPORT_ROWS = 30
+MIN_TABLE_WIDTH = 800
+_TREND_COLS = frozenset({"pct_chg", "change", "chg"})
+_CODE_COLS = frozenset({"ts_code", "symbol"})
+
 
 class PaginatedTable(ft.Column):
-    """
-    Paginated table using ListView with column sorting support.
+    """Viewport-virtualized table with sorting support.
 
-    Note: This is NOT a true virtualized table (viewport-based row recycling).
-    It renders all rows of the current page in memory. For large datasets,
-    use pagination to limit rows per page.
+    `set_rows()` stores the full current page but renders only a window of row
+    controls. A single Stack with virtual height preserves scroll extent; pooled
+    row controls are absolutely positioned inside the Stack.
     """
 
     def __init__(self, on_sort=None):
         super().__init__(expand=True, spacing=0)
         self.on_sort = on_sort
-        self.columns_def = []
-        self.sort_col = None
+        self.on_row_click = None
+
+        self.columns_def: list[dict[str, Any]] = []
+        self.sort_col: str | None = None
         self.sort_asc = True
 
-        # Header (static relative to vertical scroll, scrolls horizontally)
+        self._rows: list[dict[str, Any]] = []
+        self._total_width = MIN_TABLE_WIDTH
+        self._row_pool: list[ft.Container] = []
+        self._win_start = 0
+        self._win_end = 0
+        self._last_rendered_first = -1
+        self._viewport_h = 0.0
+
         self.header_row = ft.Row(spacing=0)
         self.header_container = ft.Container(
             content=self.header_row,
             bgcolor=AppColors.TABLE_HEADER_BG,
-            height=35,  # Compact header
-            border=ft.border.only(
-                bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER),
-            ),
+            height=HEADER_HEIGHT,
+            border=ft.border.only(bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER)),
         )
 
-        # Body (vertical scrolling)
+        self._canvas = ft.Stack(
+            controls=[],
+            height=0,
+            width=MIN_TABLE_WIDTH,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
         self.list_view = ft.ListView(
+            controls=[self._canvas],
             expand=True,
             spacing=0,
-            item_extent=30,  # Compact rows
+            on_scroll=self._on_scroll,
+            on_scroll_interval=100,
         )
 
-        # Wrapping both Header and ListView inside a single Row that scrolls horizontally
         self.inner_column = ft.Column(
             controls=[self.header_container, self.list_view],
             spacing=0,
-            # DO NOT set expand=True horizontally inside a scrolling Row, or Flutter layout will crash.
-            # We explicitly define width in _build_header.
         )
-
-        # This is the magic wrapper: One single scrollbar for the entire table content
         self.horizontal_wrapper = ft.Row(
             controls=[self.inner_column],
             expand=True,
             scroll=ft.ScrollMode.ALWAYS,
             vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-
         self.controls = [self.horizontal_wrapper]
 
-        # Expose a generic on_row_click callback that ScreenerView can listen to
-        self.on_row_click = None
+    @property
+    def rendered_row_controls(self) -> list[ft.Container]:
+        """Rows currently attached to the virtual canvas."""
+        return list(self._canvas.controls)
 
-    def set_columns(self, columns):
+    def set_columns(self, columns: Sequence[dict[str, Any]]):
+        """Set column definitions. Caller is responsible for page.update()."""
+        self.columns_def = list(columns)
+        self._total_width = max(sum(int(col.get("width", 100)) for col in self.columns_def), MIN_TABLE_WIDTH)
+        self._build_header()
+        self._sync_canvas_size()
+
+        # Column layout changed, so old pooled rows have the wrong cell tree.
+        # Re-render current data window without changing the scroll contract.
+        self._row_pool.clear()
+        self._last_rendered_first = -1
+        if self._rows:
+            self._render_window(target_first=max(self._win_start, 0))
+        else:
+            self._canvas.controls = []
+
+    def set_rows(self, data_rows, sort_col=None, sort_asc=True):
+        """Store full page rows and render the first visible window.
+
+        This remains a pure data setter. Do not call page.update() here; the
+        parent view already owns the update cycle.
         """
-        columns: list of {"id": "col1", "label": "Col 1", "width": 100}
-        If width is missing, expands.
-        Pure data-setter: caller is responsible for calling page.update().
-        """
-        self.columns_def = columns
+        self.sort_col = sort_col
+        self.sort_asc = sort_asc
         self._build_header()
 
+        self._rows = list(data_rows)
+        self._last_rendered_first = -1
+        self._win_start = 0
+        self._win_end = 0
+        self._sync_canvas_size()
+        self._render_window(target_first=0)
+
+        if self.page:
+            # Best-effort only. `set_rows` must still be valid before mount.
+            try:
+                self.list_view.scroll_to(offset=0, duration=0)
+            except Exception:
+                pass
+
+    def clear(self):
+        """Detach all row controls and reset window state.
+
+        Used by the parent view's `will_unmount()` to break references to row
+        Containers. IMPORTANT: never clear `list_view.controls` directly — the
+        ListView must keep the single `_canvas` child, otherwise re-mount loses
+        the scroll canvas and renders nothing.
+        """
+        self._rows = []
+        self._win_start = 0
+        self._win_end = 0
+        self._last_rendered_first = -1
+        self._canvas.controls = []
+        self._row_pool.clear()
+        self._sync_canvas_size()
+
     def update_theme(self):
-        """Refresh styles on theme change"""
+        """Refresh theme-dependent styles."""
         self.header_container.bgcolor = AppColors.TABLE_HEADER_BG
-        self.header_container.border = ft.border.only(
-            bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER),
-        )
-        self._build_header()  # Rebuild header text colors
-        # Re-render rows to update cell colors
-        # We don't store row data here easily (we build controls directly),
-        # but list_view.controls has the rows.
-        # We can theoretically iterate controls and update colors, but that's hard.
-        # Better: let parent re-call set_rows(), or we store data.
-        # Given ScreenerView stores memory data, it will call set_rows().
-        # So we just update header here.
+        self.header_container.border = ft.border.only(bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER))
+        self._build_header()
+
+        # Rebind current window because cell colors and row backgrounds are theme-dependent.
+        first = max(self._win_start, 0)
+        self._last_rendered_first = -1
+        self._render_window(target_first=first)
+
         if self.page:
             self.header_container.update()
+            self._canvas.update()
 
     def _build_header(self):
         row_controls = []
         total_width = 0
-
         for col in self.columns_def:
-            col_id = col["id"]
-            label = col.get("label", col_id)
-
-            # Sort Indicator
+            col_id = str(col["id"])
+            label = str(col.get("label", col_id))
             if self.sort_col == col_id:
                 label += " ↑" if self.sort_asc else " ↓"
 
-            # Clickable header
             text = ft.Text(
                 label,
                 weight=ft.FontWeight.BOLD,
@@ -104,159 +167,173 @@ class PaginatedTable(ft.Column):
                 color=AppColors.TABLE_HEADER_TEXT,
                 no_wrap=True,
             )
-
-            # Use a transparent container to capture clicks
-            # Using GestureDetector might be better but Container on_click works
             content = ft.Container(
                 content=text,
                 alignment=ft.alignment.center_left,
                 padding=ft.padding.only(left=8, right=8),
                 on_click=lambda e, cid=col_id: self._handle_sort_click(cid),
             )
-
-            width = col.get(
-                "width",
-                100,
-            )  # Default to 100 if missing for safe width calculation
+            width = int(col.get("width", 100))
             total_width += width
-
             row_controls.append(ft.Container(content, width=width))
 
         self.header_row.controls = row_controls
+        self._total_width = max(total_width, MIN_TABLE_WIDTH)
+        self.inner_column.width = self._total_width
+        self.header_container.width = self._total_width
+        self._canvas.width = self._total_width
 
-        # Enforce minimum width to trigger horizontal scrolling in the parent Row
-        self.inner_column.width = max(
-            total_width,
-            800,
-        )  # Ensure it doesn't shrink too small on empty
-        self.header_container.width = max(total_width, 800)
-
-    def _handle_sort_click(self, col_id):
+    def _handle_sort_click(self, col_id: str):
         if self.sort_col == col_id:
             self.sort_asc = not self.sort_asc
         else:
             self.sort_col = col_id
-            self.sort_asc = True  # Default asc
+            self.sort_asc = True
 
         self._build_header()
         if self.page:
             self.header_container.update()
-
         if self.on_sort:
             self.on_sort(col_id, self.sort_asc)
 
-    def set_rows(self, data_rows, sort_col=None, sort_asc=True):
-        """
-        data_rows: list of dicts.
-        """
-        self.sort_col = sort_col
-        self.sort_asc = sort_asc
-        # Rebuild header to sync sort state
-        self._build_header()
+    def _build_cells(self, row_data: dict[str, Any]) -> list[ft.Container]:
+        cells = []
+        for col in self.columns_def:
+            col_id = str(col["id"])
+            val = str(row_data.get(col_id, ""))
 
-        self.list_view.controls = []
-        for i, row_data in enumerate(data_rows):
-            cells = []
-            for col in self.columns_def:
-                col_id = col["id"]
-                val = str(row_data.get(col_id, ""))
+            numeric_val: float | None = None
+            is_numeric = False
+            try:
+                numeric_val = float(val.replace("%", "").replace(",", ""))
+                is_numeric = True
+            except ValueError:
+                pass
 
-                # Check for numeric-like content for alignment/color (Simple heuristic)
-                is_numeric = False
-                try:
-                    float(
-                        val.replace("%", "").replace(",", ""),
-                    )  # Handle commas in numbers
-                    is_numeric = True
-                except ValueError:
-                    pass
+            text_color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
+            alignment = ft.alignment.center_right if is_numeric else ft.alignment.center_left
 
-                text_color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
-                alignment = ft.alignment.center_right if is_numeric else ft.alignment.center_left
+            is_trend = col_id in _TREND_COLS
+            if is_trend and numeric_val is not None:
+                if numeric_val > 0:
+                    text_color = AppColors.UP_RED if hasattr(AppColors, "UP_RED") else "#F44336"
+                elif numeric_val < 0:
+                    text_color = AppColors.DOWN_GREEN if hasattr(AppColors, "DOWN_GREEN") else "#4CAF50"
 
-                # Content
-                # Red/Green numeric coloring for A-share (Red up, Green down)
-                is_trend = col_id in ["pct_chg", "change", "chg"]
-                if is_trend and is_numeric:
-                    try:
-                        num_val = float(val.replace("%", "").replace(",", ""))
-                        if num_val > 0:
-                            text_color = AppColors.UP_RED if hasattr(AppColors, "UP_RED") else "#F44336"
-                        elif num_val < 0:
-                            text_color = AppColors.DOWN_GREEN if hasattr(AppColors, "DOWN_GREEN") else "#4CAF50"
-                    except (ValueError, TypeError):
-                        pass
-
-                # Dim stock code extensions (.SH, .SZ)
-                if col_id in ["ts_code", "symbol"] and "." in val:
-                    parts = val.split(".")
-                    # We can use formatted text here
-                    text = ft.Text(
-                        spans=[
-                            ft.TextSpan(
-                                parts[0],
-                                ft.TextStyle(
-                                    weight=ft.FontWeight.BOLD,
-                                    color=text_color,
-                                ),
+            if col_id in _CODE_COLS and "." in val:
+                parts = val.split(".", maxsplit=1)
+                text = ft.Text(
+                    spans=[
+                        ft.TextSpan(parts[0], ft.TextStyle(weight=ft.FontWeight.BOLD, color=text_color)),
+                        ft.TextSpan(
+                            "." + parts[1],
+                            ft.TextStyle(
+                                size=10,
+                                color=AppColors.TEXT_TERTIARY  # type: ignore[untyped]
+                                if hasattr(AppColors, "TEXT_TERTIARY")
+                                else "#888888",
                             ),
-                            ft.TextSpan(
-                                "." + parts[1],
-                                ft.TextStyle(
-                                    size=10,
-                                    color=AppColors.TEXT_TERTIARY  # type: ignore[untyped]
-                                    if hasattr(AppColors, "TEXT_TERTIARY")
-                                    else "#888888",
-                                ),
-                            ),
-                        ],
-                        size=12,
-                        no_wrap=True,
-                    )
-                else:
-                    text_weight = ft.FontWeight.BOLD if is_trend else None
-                    text = ft.Text(
-                        val,
-                        size=12,
-                        no_wrap=True,
-                        weight=text_weight,
-                        color=text_color,
-                        font_family="Roboto Mono, monospace" if is_numeric else None,
-                    )
-
-                content = ft.Container(
-                    content=text,
-                    alignment=alignment,
-                    padding=ft.padding.only(left=8, right=8),
+                        ),
+                    ],
+                    size=12,
+                    no_wrap=True,
+                )
+            else:
+                text = ft.Text(
+                    val,
+                    size=12,
+                    no_wrap=True,
+                    weight=ft.FontWeight.BOLD if is_trend else None,
+                    color=text_color,
+                    font_family="Roboto Mono, monospace" if is_numeric else None,
                 )
 
-                width = col.get("width")
-                if width:
-                    cells.append(ft.Container(content, width=width))
-                else:
-                    cells.append(ft.Container(content, expand=1))
-
-            # Alternating colors via AppStyles
-            bg = AppStyles.data_table_row(i)
-
-            # Use sum of column widths to define exact row width and prevent cutoff on scroll
-            total_width = sum([col.get("width", 100) for col in self.columns_def])
-
-            row = ft.Container(
-                content=ft.Row(cells, spacing=0),
-                height=30,  # Compact row height
-                width=max(total_width, 800),  # Ensure width matches header
-                bgcolor=bg,
-                # remove bottom border for cleaner look, relying on zebra striping
-                on_click=lambda e, r=row_data: self._handle_row_click(r),
-                ink=True,  # Visual ripple effect on click
+            content = ft.Container(
+                content=text,
+                alignment=alignment,
+                padding=ft.padding.only(left=8, right=8),
             )
-            self.list_view.controls.append(row)
+            width = col.get("width")
+            cells.append(ft.Container(content, width=int(width)) if width else ft.Container(content, expand=1))
+        return cells
 
-        # Note: caller is responsible for calling page.update().
-        # Do NOT call self.update() or self.page.update() here — it creates
-        # a double-update race with the caller's page.update(), causing Flet
-        # to encounter newly-created controls before UIDs are assigned.
+    def _sync_canvas_size(self):
+        self._canvas.height = len(self._rows) * ROW_HEIGHT
+        self._canvas.width = self._total_width
+
+    def _window_capacity(self) -> int:
+        if self._viewport_h > 0:
+            viewport_rows = math.ceil(self._viewport_h / ROW_HEIGHT)
+        else:
+            viewport_rows = DEFAULT_VIEWPORT_ROWS
+        return max(1, viewport_rows + 2 * BUFFER_ROWS)
+
+    def _render_window(self, target_first: int):
+        row_count = len(self._rows)
+        if row_count == 0:
+            self._canvas.controls = []
+            self._win_start = 0
+            self._win_end = 0
+            self._last_rendered_first = -1
+            self._sync_canvas_size()
+            return
+
+        capacity = self._window_capacity()
+        start = max(0, min(target_first - BUFFER_ROWS, max(0, row_count - capacity)))
+        end = min(row_count, start + capacity)
+
+        visible_rows: list[ft.Container] = []
+        for pool_idx, abs_idx in enumerate(range(start, end)):
+            row = self._get_pool_row(pool_idx)
+            self._bind_row(row, abs_idx, self._rows[abs_idx])
+            visible_rows.append(row)
+
+        self._canvas.controls = visible_rows
+        self._sync_canvas_size()
+        self._win_start = start
+        self._win_end = end
+        self._last_rendered_first = target_first
+
+    def _get_pool_row(self, pool_idx: int) -> ft.Container:
+        if pool_idx < len(self._row_pool):
+            return self._row_pool[pool_idx]
+
+        row = ft.Container(
+            left=0,
+            top=0,
+            height=ROW_HEIGHT,
+            width=self._total_width,
+            ink=True,
+        )
+        self._row_pool.append(row)
+        return row
+
+    def _bind_row(self, row: ft.Container, abs_idx: int, row_data: dict[str, Any]):
+        row.left = 0
+        row.top = abs_idx * ROW_HEIGHT
+        row.height = ROW_HEIGHT
+        row.width = self._total_width
+        row.bgcolor = AppStyles.data_table_row(abs_idx)
+        row.content = ft.Row(self._build_cells(row_data), spacing=0)
+        row.on_click = lambda e, r=row_data: self._handle_row_click(r)
+
+    def _on_scroll(self, e):
+        viewport_h = getattr(e, "viewport_dimension", None)
+        if viewport_h:
+            self._viewport_h = float(viewport_h)
+
+        # KNOWN LIMITATION: _viewport_h only updates on scroll events.
+        # If the user resizes the window taller without scrolling, the bottom
+        # of the table may show blank rows until the next scroll triggers an
+        # update. To fix this, the parent could call a public refresh_viewport()
+        # method from a resize callback — but that method is not introduced in
+        # this iteration to avoid over-engineering.
+        offset = float(getattr(e, "pixels", None) or 0.0)
+        new_first = max(0, int(offset // ROW_HEIGHT))
+        if self._last_rendered_first < 0 or abs(new_first - self._last_rendered_first) >= RERENDER_THRESHOLD:
+            self._render_window(target_first=new_first)
+            if self.page:
+                self._canvas.update()
 
     def _handle_row_click(self, row_data):
         if self.on_row_click:

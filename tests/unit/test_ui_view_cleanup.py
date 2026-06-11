@@ -46,7 +46,10 @@ class TestScreenerViewCleanup(unittest.TestCase):
 
         view = ScreenerView(page)
         view._Control__page = page  # type: ignore[attr-defined]
-        view.result_table.list_view.controls = [MagicMock(), MagicMock()]
+        # Populate the virtualized table with real data so clear() has something to release
+        view.result_table.set_columns([{"id": "name", "label": "Name", "width": 100}])
+        view.result_table.set_rows([{"name": "A"}, {"name": "B"}])
+        assert view.result_table.rendered_row_controls  # rows exist before unmount
         view.detail_dialog = MagicMock()
         page.overlay.extend([view.save_file_picker, view.detail_dialog])
 
@@ -54,7 +57,10 @@ class TestScreenerViewCleanup(unittest.TestCase):
 
         mock_task_manager.return_value.unsubscribe.assert_called_once_with(view._on_tasks_updated)
         mock_vm_cls.return_value.dispose.assert_called_once()
-        self.assertEqual(view.result_table.list_view.controls, [])
+        assert view.result_table.rendered_row_controls == []
+        assert view.result_table._row_pool == []
+        # Key regression: _canvas must remain in list_view.controls for re-mount
+        assert view.result_table.list_view.controls == [view.result_table._canvas]
         self.assertNotIn(view.save_file_picker, page.overlay)
         self.assertIsNone(view.detail_dialog)
         page.update.assert_called_once()

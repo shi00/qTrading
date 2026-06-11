@@ -325,8 +325,11 @@ class ScreenerView(ft.Container):
             self.page.update()
 
         # Detach Flet Row references inside PaginatedTable to prevent memory leak
+        # IMPORTANT: use clear() instead of list_view.controls.clear() — the new
+        # virtualized table keeps a single _canvas Stack inside list_view.controls;
+        # clearing that would break re-mount (blank table on tab switch back).
         if hasattr(self, "result_table") and self.result_table:
-            self.result_table.list_view.controls.clear()
+            self.result_table.clear()
 
         # Cleanup overlay to prevent memory leak
         if self.detail_dialog and self.page:

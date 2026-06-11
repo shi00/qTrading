@@ -647,24 +647,25 @@ class TestPaginatedTable:
         text = cell.content.content
         assert "↓" in text.value
 
-    def test_set_rows_with_empty_data_clears_list_view(self):
+    def test_set_rows_with_empty_data_clears_canvas(self):
         table = PaginatedTable()
         table.set_columns([{"id": "name", "label": "Name", "width": 100}])
         table.set_rows([{"name": "test"}])
         table.set_rows([])
-        assert len(table.list_view.controls) == 0
+        assert len(table.rendered_row_controls) == 0
+        assert table._canvas.height == 0
 
     def test_set_rows_creates_row_controls(self):
         table = PaginatedTable()
         table.set_columns([{"id": "name", "label": "Name", "width": 100}])
         table.set_rows([{"name": "AAPL"}, {"name": "GOOG"}])
-        assert len(table.list_view.controls) == 2
+        assert len(table.rendered_row_controls) == 2
 
     def test_set_rows_numeric_data_right_aligned(self):
         table = PaginatedTable()
         table.set_columns([{"id": "price", "label": "Price", "width": 80}])
         table.set_rows([{"price": "123.45"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
         assert cell_container.content.alignment == ft.alignment.center_right
 
@@ -672,7 +673,7 @@ class TestPaginatedTable:
         table = PaginatedTable()
         table.set_columns([{"id": "name", "label": "Name", "width": 100}])
         table.set_rows([{"name": "AAPL"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
         assert cell_container.content.alignment == ft.alignment.center_left
 
@@ -680,7 +681,7 @@ class TestPaginatedTable:
         table = PaginatedTable()
         table.set_columns([{"id": "pct_chg", "label": "Change", "width": 80}])
         table.set_rows([{"pct_chg": "5.2%"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
         text = cell_container.content.content
         assert text.color == AppColors.UP_RED
@@ -689,7 +690,7 @@ class TestPaginatedTable:
         table = PaginatedTable()
         table.set_columns([{"id": "pct_chg", "label": "Change", "width": 80}])
         table.set_rows([{"pct_chg": "-3.1%"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
         text = cell_container.content.content
         assert text.color == AppColors.DOWN_GREEN
@@ -710,7 +711,7 @@ class TestPaginatedTable:
             ]
         )
         table.set_rows([{"name": "AAPL"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         price_cell = row.content.controls[1]
         text = price_cell.content.content
         assert text.value == ""
@@ -719,7 +720,7 @@ class TestPaginatedTable:
         table = PaginatedTable()
         table.set_columns([{"id": "ts_code", "label": "Code", "width": 100}])
         table.set_rows([{"ts_code": "000001.SZ"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
         text = cell_container.content.content
         assert isinstance(text, ft.Text)
@@ -730,11 +731,38 @@ class TestPaginatedTable:
         table = PaginatedTable()
         table.set_columns([{"id": "price", "label": "Price", "width": 80}])
         table.set_rows([{"price": "123.45"}])
-        row = table.list_view.controls[0]
+        row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
         text = cell_container.content.content
         assert text.font_family is not None
         assert "monospace" in text.font_family
+
+    def test_on_row_click_callback_receives_correct_row_data(self):
+        callback_calls = []
+        table = PaginatedTable()
+        table.on_row_click = lambda r: callback_calls.append(r)
+        table.set_columns([{"id": "name", "label": "Name", "width": 100}])
+        table.set_rows([{"name": "AAPL"}, {"name": "GOOG"}])
+
+        # Simulate clicking the first row by invoking its on_click handler
+        first_row = table.rendered_row_controls[0]
+        first_row.on_click(None)
+
+        assert len(callback_calls) == 1
+        assert callback_calls[0] == {"name": "AAPL"}
+
+    def test_on_row_click_callback_receives_second_row_data(self):
+        callback_calls = []
+        table = PaginatedTable()
+        table.on_row_click = lambda r: callback_calls.append(r)
+        table.set_columns([{"id": "name", "label": "Name", "width": 100}])
+        table.set_rows([{"name": "AAPL"}, {"name": "GOOG"}])
+
+        second_row = table.rendered_row_controls[1]
+        second_row.on_click(None)
+
+        assert len(callback_calls) == 1
+        assert callback_calls[0] == {"name": "GOOG"}
 
 
 class TestToastCard:
@@ -1206,3 +1234,90 @@ class TestCoverageDetailTable:
         }
         table = CoverageDetailTable(tables=tables)
         assert table.spacing == 10
+
+
+class TestPaginatedTableVirtualization:
+    def _cols(self):
+        return [{"id": "name", "label": "Name", "width": 100}]
+
+    def test_large_page_renders_bounded_row_controls(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        # DEFAULT_VIEWPORT_ROWS=30 + 2*BUFFER_ROWS=16 = 46
+        assert len(table.rendered_row_controls) == 46
+
+    def test_canvas_height_represents_full_page_height(self):
+        from ui.components.virtual_table import ROW_HEIGHT
+
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        assert table._canvas.height == 500 * ROW_HEIGHT
+
+    def test_initial_rows_are_positioned_at_absolute_offsets(self):
+        from ui.components.virtual_table import ROW_HEIGHT
+
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        rows = table.rendered_row_controls
+        assert rows[0].top == 0
+        assert rows[1].top == ROW_HEIGHT
+
+    def test_scroll_shifts_window_without_growing_attached_rows(self):
+        from ui.components.virtual_table import ROW_HEIGHT
+
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        first_count = len(table.rendered_row_controls)
+
+        class _Evt:
+            pixels = 200 * ROW_HEIGHT
+            viewport_dimension = 20 * ROW_HEIGHT
+
+        table._on_scroll(_Evt())
+        assert table._win_start > 0
+        assert len(table.rendered_row_controls) <= first_count
+        assert table.rendered_row_controls[0].top == table._win_start * ROW_HEIGHT
+
+    def test_row_pool_is_reused_on_scroll(self):
+        from ui.components.virtual_table import ROW_HEIGHT
+
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        first_row_id = id(table.rendered_row_controls[0])
+
+        class _Evt:
+            pixels = 200 * ROW_HEIGHT
+            viewport_dimension = 20 * ROW_HEIGHT
+
+        table._on_scroll(_Evt())
+        assert id(table.rendered_row_controls[0]) == first_row_id
+
+    def test_set_columns_rebuilds_pool_without_dropping_rows(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": "A"}])
+        assert table._row_pool
+        first_row_id = id(table.rendered_row_controls[0])
+
+        table.set_columns([{"id": "price", "label": "Price", "width": 80}])
+        assert table.rendered_row_controls
+        assert id(table.rendered_row_controls[0]) != first_row_id
+        assert len(table._row_pool) == len(table.rendered_row_controls)
+
+    def test_clear_releases_rows_but_preserves_canvas_in_list_view(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": "A"}, {"name": "B"}])
+        assert table.rendered_row_controls
+
+        table.clear()
+        assert table.rendered_row_controls == []
+        assert table._row_pool == []
+        # _canvas must remain in list_view.controls for re-mount
+        assert table.list_view.controls == [table._canvas]
+        assert table._canvas.height == 0
