@@ -19,7 +19,7 @@ class TestDataExplorerView:
             patch("ui.views.data_view.I18n", self.mock_i18n),
             patch("ui.views.data_view.AppColors", self.mock_ac),
             patch("ui.views.data_view.AppStyles", self.mock_as),
-            patch("ui.views.data_view.DatabaseManager", MagicMock()),
+            patch("ui.views.data_view.DataExplorerViewModel"),
             patch("ui.views.data_view.ThreadPoolManager", MagicMock()),
             patch("ui.views.data_view.MetaDataManager", MagicMock()),
         ]
@@ -57,22 +57,22 @@ class TestDataExplorerView:
         view._mounted = True
         view.will_unmount()
         assert view._mounted is False
+        view.vm.dispose.assert_called_once()
 
     def test_on_broadcast_message_cache_cleared(self, mock_page):
         view = self._make_view()
         set_page(view, mock_page)
         view._ui_built = True
-        view.table_tab = MagicMock()
         view._on_broadcast_message("cache_cleared")
-        assert view.table_tab._tables_loaded is False
+        assert view.vm.tables_loaded is False
 
     def test_on_broadcast_message_ignores_other(self, mock_page):
         view = self._make_view()
         set_page(view, mock_page)
         view._ui_built = True
-        view.table_tab = MagicMock()
+        view.vm.tables_loaded = True
         view._on_broadcast_message("other_message")
-        view.table_tab._tables_loaded = True
+        assert view.vm.tables_loaded is True
 
     def test_update_theme_propagates_to_tabs(self, mock_page):
         view = self._make_view()
@@ -141,7 +141,6 @@ class TestTableViewerTab:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
-        self.mock_db = MagicMock()
         self.patches = [
             patch("ui.views.data_view.I18n", self.mock_i18n),
             patch("ui.views.data_view.AppColors", self.mock_ac),
@@ -156,27 +155,43 @@ class TestTableViewerTab:
     def _make_tab(self):
         from ui.views.data_view import TableViewerTab
 
-        return TableViewerTab(self.mock_db)
+        mock_vm = MagicMock()
+        mock_vm.current_table = "stock_basic"
+        mock_vm.current_page = 1
+        mock_vm.page_size = 50
+        mock_vm.total_rows = 0
+        mock_vm.table_columns = []
+        mock_vm.numeric_cols = set()
+        mock_vm.sort_col_index = None
+        mock_vm.sort_asc = True
+        mock_vm.is_loading = False
+        mock_vm.tables_loaded = False
+        mock_vm.current_data = pd.DataFrame()
+        mock_vm.error_message = None
+        mock_vm.filter_col = None
+        mock_vm.filter_op = "="
+        mock_vm.filter_val = ""
+        return TableViewerTab(mock_vm)
 
     def test_instantiation_default_table(self):
         tab = self._make_tab()
-        assert tab.current_table == "stock_basic"
+        assert tab.vm.current_table == "stock_basic"
 
     def test_instantiation_default_page_size(self):
         tab = self._make_tab()
-        assert tab.page_size == 50
+        assert tab.vm.page_size == 50
 
     def test_instantiation_initial_page(self):
         tab = self._make_tab()
-        assert tab.current_page == 1
+        assert tab.vm.current_page == 1
 
     def test_instantiation_not_loading(self):
         tab = self._make_tab()
-        assert tab._is_loading is False
+        assert tab.vm.is_loading is False
 
     def test_instantiation_tables_not_loaded(self):
         tab = self._make_tab()
-        assert tab._tables_loaded is False
+        assert tab.vm.tables_loaded is False
 
     def test_did_mount_sets_flag(self, mock_page):
         tab = self._make_tab()
@@ -209,29 +224,31 @@ class TestTableViewerTab:
     async def test_did_mount_async_loads_tables(self, mock_page):
         tab = self._make_tab()
         set_page(tab, wrap_mock_page(mock_page))
-        mock_tpm = MagicMock()
-        mock_tpm.run_async = AsyncMock(return_value=["stock_basic", "daily_quotes"])
-        with patch("ui.views.data_view.ThreadPoolManager", return_value=mock_tpm):
-            tab._load_schema_and_data = AsyncMock()
-            await tab.did_mount_async()
-        assert tab._tables_loaded is True
+
+        async def _mock_init_tables():
+            tab.vm.tables_loaded = True
+            return ["stock_basic", "daily_quotes"]
+
+        tab.vm.init_tables = AsyncMock(side_effect=_mock_init_tables)
+        tab.vm.current_table = "stock_basic"
+        tab._load_schema_and_data = AsyncMock()
+        await tab.did_mount_async()
+        assert tab.vm.tables_loaded is True
         assert tab.table_selector.value == "stock_basic"
 
     @pytest.mark.asyncio
     async def test_did_mount_async_handles_error(self, mock_page):
         tab = self._make_tab()
         set_page(tab, wrap_mock_page(mock_page))
-        mock_tpm = MagicMock()
-        mock_tpm.run_async = AsyncMock(side_effect=Exception("DB error"))
-        with patch("ui.views.data_view.ThreadPoolManager", return_value=mock_tpm):
-            await tab.did_mount_async()
-        assert tab._tables_loaded is False
+        tab.vm.init_tables = AsyncMock(side_effect=Exception("DB error"))
+        await tab.did_mount_async()
+        assert tab.vm.tables_loaded is False
 
     @pytest.mark.asyncio
     async def test_did_mount_async_skips_if_already_loaded(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._tables_loaded = True
+        tab.vm.tables_loaded = True
         await tab.did_mount_async()
 
     @pytest.mark.asyncio
@@ -241,26 +258,17 @@ class TestTableViewerTab:
         tab.table_selector.value = "daily_quotes"
         tab._load_schema_and_data = AsyncMock()
         await tab._on_table_changed(None)
-        assert tab.current_table == "daily_quotes"
-        assert tab.current_page == 1
+        assert tab.vm.current_table == "daily_quotes"
+        assert tab.vm.current_page == 1
 
     @pytest.mark.asyncio
-    async def test_refresh_data_rows_with_data(self, mock_page):
+    async def test_rebuild_table_rows_with_data(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.table_columns = ["col1", "col2"]
-        tab.numeric_cols = {"col1"}
-        tab.filter_val.value = ""
-        mock_tpm = MagicMock()
-        mock_tpm.run_async = AsyncMock(
-            side_effect=[
-                10,
-                pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]}),
-            ]
-        )
-        with patch("ui.views.data_view.ThreadPoolManager", return_value=mock_tpm):
-            await tab._refresh_data_rows()
-        assert tab.total_rows == 10
+        tab.vm.table_columns = ["col1", "col2"]
+        tab.vm.numeric_cols = {"col1"}
+        tab.vm.current_data = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
+        tab._rebuild_table_rows()
         assert len(tab.data_table.rows) == 2
 
 
@@ -272,7 +280,6 @@ class TestSQLConsoleTab:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
-        self.mock_db = MagicMock()
         self.patches = [
             patch("ui.views.data_view.I18n", self.mock_i18n),
             patch("ui.views.data_view.AppColors", self.mock_ac),
@@ -287,7 +294,10 @@ class TestSQLConsoleTab:
     def _make_tab(self):
         from ui.views.data_view import SQLConsoleTab
 
-        return SQLConsoleTab(self.mock_db)
+        mock_vm = MagicMock()
+        mock_vm.sql_result = None
+        mock_vm.sql_is_executing = False
+        return SQLConsoleTab(mock_vm)
 
     def test_instantiation_creates_editor(self):
         tab = self._make_tab()
@@ -322,10 +332,8 @@ class TestSQLConsoleTab:
         set_page(tab, mock_page)
         tab.sql_editor.value = "SELECT * FROM stock_basic LIMIT 10"
         df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
-        mock_tpm = MagicMock()
-        mock_tpm.run_async = AsyncMock(return_value={"success": True, "data": df})
-        with patch("ui.views.data_view.ThreadPoolManager", return_value=mock_tpm):
-            await tab._run_query(None)
+        tab.vm.execute_sql = AsyncMock(return_value={"success": True, "data": df})
+        await tab._run_query(None)
         assert tab.result_table.visible is True
         assert tab.empty_state.visible is False
         assert len(tab.result_table.rows) == 2
@@ -335,10 +343,8 @@ class TestSQLConsoleTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.sql_editor.value = "SELECT * FROM nonexistent"
-        mock_tpm = MagicMock()
-        mock_tpm.run_async = AsyncMock(return_value={"success": False, "error": "Table not found"})
-        with patch("ui.views.data_view.ThreadPoolManager", return_value=mock_tpm):
-            await tab._run_query(None)
+        tab.vm.execute_sql = AsyncMock(return_value={"success": False, "error": "Table not found"})
+        await tab._run_query(None)
         assert tab.result_table.visible is False
         assert tab.empty_state.visible is True
 
@@ -347,9 +353,7 @@ class TestSQLConsoleTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.sql_editor.value = "INVALID SQL"
-        mock_tpm = MagicMock()
-        mock_tpm.run_async = AsyncMock(side_effect=Exception("Connection error"))
-        with patch("ui.views.data_view.ThreadPoolManager", return_value=mock_tpm):
-            await tab._run_query(None)
+        tab.vm.execute_sql = AsyncMock(side_effect=Exception("Connection error"))
+        await tab._run_query(None)
         assert tab.result_table.visible is False
         assert tab.empty_state.visible is True

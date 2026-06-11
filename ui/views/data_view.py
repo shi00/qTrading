@@ -1,16 +1,16 @@
 import asyncio
-import functools
+import datetime
 import logging
 import os
-import re
 import time
 
 import flet as ft
+import pandas as pd
 
-from data.persistence.database_manager import DatabaseManager
 from data.persistence.metadata_manager import MetaDataManager
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
 from utils.correlation import ensure_correlation_id
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -25,21 +25,9 @@ class TableViewerTab(ft.Container):
     Async implementation to prevent UI freezing.
     """
 
-    def __init__(self, db_manager: DatabaseManager):
+    def __init__(self, viewmodel: DataExplorerViewModel):
         super().__init__()
-        self.db_manager = db_manager
-        self.current_table = "stock_basic"  # Default table
-        self.current_page = 1
-        self.page_size = 50
-        self.total_rows = 0
-        self.table_columns = []
-        self.numeric_cols = set()  # Track numeric columns for alignment
-
-        # Sorting state
-        self.sort_col_index = None  # Currently sorted column index (Safe INT)
-        self.sort_asc = True  # Sort direction (True = ASC, False = DESC)
-        self._is_loading = False  # Prevent concurrent data loading
-        self._tables_loaded = False  # Skip re-loading when switching back to this view
+        self.vm = viewmodel
         self._pending_export_df = None  # Temp storage for export data
 
         self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)  # pragma: no cover
@@ -324,28 +312,13 @@ class TableViewerTab(ft.Container):
             self.page.update()
 
     async def did_mount_async(self):  # pragma: no cover
-        import time as _time
-
         # Skip re-loading if tables already loaded (switching back to this view)
-        if self._tables_loaded:
+        if self.vm.tables_loaded:
             logger.debug("[TableViewerTab] Skipping re-load - tables already loaded")
             return
 
-        _t_start = _time.perf_counter()
-        logger.debug("[PERF] >>> TableViewerTab.did_mount_async START")
-        # Note: standard did_mount is sync. we call this manually or use create_task in init if possible.
-        # But safest is to trigger from a known start point.
-        # In this architecture, we can just launch the task.
         try:
-            # Run db fetch in executor (CPU Pool)
-            _t0 = _time.perf_counter()
-            tables = await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                self.db_manager.get_all_tables,
-            )
-            logger.debug(
-                f"[PERF] TableViewerTab: get_all_tables() took {(_time.perf_counter() - _t0) * 1000:.1f}ms",
-            )
+            tables = await self.vm.init_tables()
 
             # Update UI on main thread
             self.table_selector.options = [
@@ -354,31 +327,20 @@ class TableViewerTab(ft.Container):
             self.table_selector.disabled = False
 
             if tables:
-                default_t = "stock_basic" if "stock_basic" in tables else tables[0]
-                self.table_selector.value = default_t
-                self.current_table = default_t
-
-                _t0 = _time.perf_counter()
+                self.table_selector.value = self.vm.current_table
                 await self._load_schema_and_data()
-                logger.debug(
-                    f"[PERF] TableViewerTab: _load_schema_and_data() took {(_time.perf_counter() - _t0) * 1000:.1f}ms",
-                )
 
-            self._tables_loaded = True  # Mark as loaded
             if self.page:
                 self.update()
 
-            logger.debug(
-                f"[PERF] <<< TableViewerTab.did_mount_async END, TOTAL={(_time.perf_counter() - _t_start) * 1000:.1f}ms",
-            )
         except Exception as e:
             logger.error(f"Error loading tables: {e}")
             if self.page:
                 self.page.show_toast(f"Error loading tables: {e}", "error")  # type: ignore[untyped]
 
     async def _on_table_changed(self, e):  # pragma: no cover
-        self.current_table = self.table_selector.value
-        self.current_page = 1
+        self.vm.current_table = self.table_selector.value
+        self.vm.reset_table_state()
         self.filter_val.value = ""  # Clear filters
         await self._load_schema_and_data()
 
@@ -396,7 +358,7 @@ class TableViewerTab(ft.Container):
 
         self.btn_query.disabled = loading
         self.btn_refresh.disabled = loading
-        self.btn_prev.disabled = loading or self.current_page <= 1
+        self.btn_prev.disabled = loading or self.vm.current_page <= 1
         self.btn_next.disabled = loading  # Will be updated after load
         self.table_selector.disabled = loading
         # Guard: only call update() if control is mounted to page
@@ -405,84 +367,28 @@ class TableViewerTab(ft.Container):
 
     async def _load_schema_and_data(self):  # pragma: no cover
         # Prevent concurrent loading (race condition guard)
-        if self._is_loading:
+        if self.vm.is_loading:
             logger.debug("[TableViewerTab] Skipped load - already loading")
             return
-        self._is_loading = True
 
         try:
             await self._toggle_loading(True)
 
-            # 1. Get Schema
-            schema = await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                self.db_manager.get_table_schema,
-                self.current_table,
-            )
-            self.table_columns = [col["name"] for col in schema]
+            # 1. Load schema via ViewModel
+            await self.vm.load_table_schema(self.vm.current_table)
 
-            # Detect numeric columns
-            self.numeric_cols.clear()
-            for col in schema:
-                c_name = col["name"]
-                c_type = col.get("type", "").upper()
-                if any(x in c_type for x in ["INT", "REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL"]):
-                    self.numeric_cols.add(c_name)
+            # 2. Populate filter dropdown from vm state
+            self._populate_filter_columns()
 
-            # Update Filter Dropdown
-            self.filter_col.options = [
-                ft.dropdown.Option(
-                    key=col,
-                    text=MetaDataManager.get_column_alias(self.current_table, col),
-                )
-                for col in self.table_columns
-            ]
-            if self.table_columns:
-                self.filter_col.value = self.table_columns[0]
+            # 3. Build DataTable columns from vm state
+            self._rebuild_table_columns()
 
-            # Update DataTable Columns
-            self.data_table.columns = []
-            for idx, col in enumerate(self.table_columns):
-                is_numeric = col in self.numeric_cols
-                header_text = MetaDataManager.get_column_alias(self.current_table, col)
+            # 4. Load data
+            await self.vm.query_data()
 
-                # Bind click event with closure
-                # Note: Flet events are simple, need to bridge to async
-                self.data_table.columns.append(
-                    ft.DataColumn(
-                        ft.Container(
-                            content=ft.Text(
-                                header_text,
-                                weight=ft.FontWeight.W_600,
-                                size=13,
-                                color=AppColors.TABLE_HEADER_TEXT,
-                                text_align=ft.TextAlign.CENTER,
-                            ),
-                            alignment=ft.alignment.center,
-                            expand=True,
-                            # Allow clicking header to sort
-                            # Use page.run_task to bridge sync event to async method
-                            # Pass INDEX, not name
-                            on_click=lambda e, i=idx: self.page.run_task(  # type: ignore[untyped]
-                                self._on_sort,
-                                i,
-                            ),
-                        ),
-                        numeric=is_numeric,
-                        on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),  # type: ignore[untyped]
-                    ),
-                )
-
-            # Reset sorting (View State)
-            self.sort_col_index = None
-            self.sort_asc = True
-
-            # Reset DataTable sorting state immediately to prevent stale index vs new columns mismatch
-            self.data_table.sort_column_index = None
-            self.data_table.sort_ascending = True
-
-            # 2. Get Data
-            await self._refresh_data_rows()
+            # 5. Render rows
+            self._rebuild_table_rows()
+            self._update_pagination_ui()
 
         except Exception as e:
             logger.error(f"Error loading schema: {e}", exc_info=True)
@@ -496,170 +402,149 @@ class TableViewerTab(ft.Container):
                 await self._toggle_loading(False)
             except Exception as toggle_err:
                 logger.debug(f"[_toggle_loading] finalization ignored: {toggle_err}")
-            self._is_loading = False  # Release loading lock
 
-    async def _refresh_data_rows(self):  # pragma: no cover
-        try:
-            # Build Filters
-            filters = []
-            if self.filter_val.value:
-                filter_col = self.filter_col.value
-                filter_val = self.filter_val.value
-
-                # Date format conversion
-                if filter_col and "date" in filter_col.lower():
-                    if re.match(r"^\d{4}-\d{2}-\d{2}$", filter_val):
-                        filter_val = filter_val.replace("-", "")
-
-                filters.append((filter_col, self.filter_op.value, filter_val))
-
-            # Run SQL queries in Executor
-            self.total_rows = await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                self.db_manager.get_table_count,
-                self.current_table,
-                filters,
+    def _populate_filter_columns(self):  # pragma: no cover
+        """Fill filter column dropdown from vm.table_columns."""
+        self.filter_col.options = [
+            ft.dropdown.Option(
+                key=col,
+                text=MetaDataManager.get_column_alias(self.vm.current_table, col),
             )
+            for col in self.vm.table_columns
+        ]
+        if self.vm.table_columns:
+            self.filter_col.value = self.vm.table_columns[0]
 
-            total_pages = max(1, (self.total_rows // self.page_size) + 1)
+    def _rebuild_table_columns(self):  # pragma: no cover
+        """Rebuild DataTable columns from vm.table_columns and vm.numeric_cols."""
+        self.data_table.columns = []
+        for idx, col in enumerate(self.vm.table_columns):
+            is_numeric = col in self.vm.numeric_cols
+            header_text = MetaDataManager.get_column_alias(self.vm.current_table, col)
 
-            # SNAPSHOT STATE: Capture sort state AND columns to prevent race conditions
-            current_sort_index = self.sort_col_index
-            current_sort_asc = self.sort_asc
-            # SNAPSHOT Columns: Ensure we render with the same columns we resolved sorting against
-            # This protects against table_columns changing mid-query (though UI is locked, this is safer)
-            current_columns = list(self.table_columns)
-
-            # Resolve Sort Column Name from Index (Using Snapshot)
-            sort_col_name = None
-            if (
-                current_sort_index is not None
-                and isinstance(current_sort_index, int)
-                and 0 <= current_sort_index < len(current_columns)
-            ):
-                sort_col_name = current_columns[current_sort_index]
-
-            df = await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                functools.partial(
-                    self.db_manager.query_table,
-                    self.current_table,  # type: ignore[arg-type]
-                    page=self.current_page,
-                    page_size=self.page_size,
-                    filters=filters,
-                    sort_col=sort_col_name,
-                    sort_asc=current_sort_asc,
+            self.data_table.columns.append(
+                ft.DataColumn(
+                    ft.Container(
+                        content=ft.Text(
+                            header_text,
+                            weight=ft.FontWeight.W_600,
+                            size=13,
+                            color=AppColors.TABLE_HEADER_TEXT,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        alignment=ft.alignment.center,
+                        expand=True,
+                        on_click=lambda e, i=idx: self.page.run_task(  # type: ignore[untyped]
+                            self._on_sort,
+                            i,
+                        ),
+                    ),
+                    numeric=is_numeric,
+                    on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),  # type: ignore[untyped]
                 ),
             )
 
-            # Render Rows (Main Thread) using SNAPSHOT columns
-            self.data_table.rows = []
-            for idx, (_, row) in enumerate(df.iterrows()):
-                cells = []
-                for col_name in current_columns:
-                    val = row.get(col_name)  # Safe get
-                    is_numeric = col_name in self.numeric_cols
+        # Reset sort state display
+        self.data_table.sort_column_index = self.vm.sort_col_index
+        self.data_table.sort_ascending = self.vm.sort_asc
 
-                    # Formatting
-                    str_val = str(val)
-                    if val is None:
-                        str_val = "-"
-                    elif "date" in col_name.lower():
-                        import datetime
+    def _rebuild_table_rows(self):  # pragma: no cover
+        """Rebuild DataTable rows from vm.current_data."""
+        df = self.vm.current_data
+        current_columns = self.vm.table_columns
+        self.data_table.rows = []
+        for idx, (_, row) in enumerate(df.iterrows()):
+            cells = []
+            for col_name in current_columns:
+                val = row.get(col_name)
+                is_numeric = col_name in self.vm.numeric_cols
 
-                        if isinstance(val, (datetime.date, datetime.datetime)):
-                            str_val = val.strftime("%Y-%m-%d")
-                        elif isinstance(val, str) and len(val) == 8 and val.isdigit():
-                            str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
+                # Formatting
+                str_val = str(val)
+                if val is None:
+                    str_val = "-"
+                elif "date" in col_name.lower():
+                    if isinstance(val, (datetime.date, datetime.datetime)):
+                        str_val = val.strftime("%Y-%m-%d")
+                    elif isinstance(val, str) and len(val) == 8 and val.isdigit():
+                        str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
 
-                    # 仅对 market_news 表的长文本字段使用左对齐和自动换行
-                    is_news_table = self.current_table == "market_news"
-                    is_long_text = is_news_table and col_name.lower() in (
-                        "content",
-                        "tags",
-                    )
-
-                    cell_text = ft.Text(
-                        str_val,
-                        size=13,
-                        max_lines=None if is_long_text else 1,  # 新闻内容不限制行数
-                        overflow=ft.TextOverflow.VISIBLE if is_long_text else ft.TextOverflow.ELLIPSIS,
-                        font_family="Roboto Mono"
-                        if is_numeric or "code" in col_name.lower() or "date" in col_name.lower()
-                        else None,
-                        color=AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT,
-                        text_align=ft.TextAlign.LEFT if is_long_text else ft.TextAlign.CENTER,  # 新闻内容左对齐
-                    )
-
-                    # 新闻内容使用左对齐容器，并设置固定宽度保证换行
-                    if is_long_text:
-                        cell_container = ft.Container(
-                            content=cell_text,
-                            alignment=ft.alignment.top_left,
-                            width=400,  # 固定宽度确保换行
-                            padding=ft.padding.symmetric(vertical=5),
-                        )
-                    else:
-                        cell_container = ft.Container(
-                            content=cell_text,
-                            alignment=ft.alignment.center,
-                            expand=True,
-                        )
-
-                    cells.append(ft.DataCell(cell_container))
-
-                row_color = AppColors.TABLE_ROW_ODD if idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
-                self.data_table.rows.append(ft.DataRow(cells=cells, color=row_color))
-
-            # Update Info Labels
-            self.txt_count_info.value = I18n.get("data_total_rows").format(
-                count=self.total_rows,
-            )
-            self.txt_page.value = I18n.get("data_page_num").format(
-                current=self.current_page,
-                total=total_pages,
-            )
-
-            # Update Pagination Buttons
-            self.btn_prev.disabled = self.current_page <= 1
-            self.btn_next.disabled = self.current_page >= total_pages
-
-            # Update DataTable Sort State (Show sort arrow)
-            # Use SNAPSHOT to ensure consistency with the data displayed
-            if isinstance(current_sort_index, int):
-                self.data_table.sort_column_index = current_sort_index
-            else:
-                self.data_table.sort_column_index = None
-
-            self.data_table.sort_ascending = current_sort_asc
-
-            # OPTIMIZATION: Removed self.update() here because _toggle_loading(False)
-            # (which is always called after this) will trigger the update.
-            # This reduces double-render flicker.
-
-        except Exception as e:
-            logger.error(f"Error fetching data: {e}", exc_info=True)
-            if self.page:
-                self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get("data_err_fetch", error="内部读取错误"),
-                    "error",
+                # 仅对 market_news 表的长文本字段使用左对齐和自动换行
+                is_news_table = self.vm.current_table == "market_news"
+                is_long_text = is_news_table and col_name.lower() in (
+                    "content",
+                    "tags",
                 )
+
+                cell_text = ft.Text(
+                    str_val,
+                    size=13,
+                    max_lines=None if is_long_text else 1,  # 新闻内容不限制行数
+                    overflow=ft.TextOverflow.VISIBLE if is_long_text else ft.TextOverflow.ELLIPSIS,
+                    font_family="Roboto Mono"
+                    if is_numeric or "code" in col_name.lower() or "date" in col_name.lower()
+                    else None,
+                    color=AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT,
+                    text_align=ft.TextAlign.LEFT if is_long_text else ft.TextAlign.CENTER,  # 新闻内容左对齐
+                )
+
+                # 新闻内容使用左对齐容器，并设置固定宽度保证换行
+                if is_long_text:
+                    cell_container = ft.Container(
+                        content=cell_text,
+                        alignment=ft.alignment.top_left,
+                        width=400,  # 固定宽度确保换行
+                        padding=ft.padding.symmetric(vertical=5),
+                    )
+                else:
+                    cell_container = ft.Container(
+                        content=cell_text,
+                        alignment=ft.alignment.center,
+                        expand=True,
+                    )
+
+                cells.append(ft.DataCell(cell_container))
+
+            row_color = AppColors.TABLE_ROW_ODD if idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
+            self.data_table.rows.append(ft.DataRow(cells=cells, color=row_color))
+
+    def _update_pagination_ui(self):  # pragma: no cover
+        """Update pagination controls from vm state."""
+        total_pages = max(1, -(-self.vm.total_rows // self.vm.page_size))  # ceil division
+        self.txt_count_info.value = I18n.get("data_total_rows").format(
+            count=self.vm.total_rows,
+        )
+        self.txt_page.value = I18n.get("data_page_num").format(
+            current=self.vm.current_page,
+            total=total_pages,
+        )
+        self.btn_prev.disabled = self.vm.current_page <= 1
+        self.btn_next.disabled = self.vm.current_page >= total_pages
+        self.data_table.sort_column_index = self.vm.sort_col_index
+        self.data_table.sort_ascending = self.vm.sort_asc
 
     async def _on_query_click(self, e):  # pragma: no cover
         ensure_correlation_id()
-        self.current_page = 1
-        await self._toggle_loading(True)
-        await self._refresh_data_rows()
-        await self._toggle_loading(False)
+        self.vm.set_filter(self.filter_col.value, self.filter_op.value, self.filter_val.value)
+        try:
+            await self._toggle_loading(True)
+            await self.vm.query_data(page=1)
+            self._rebuild_table_rows()
+            self._update_pagination_ui()
+        finally:
+            await self._toggle_loading(False)
 
     async def _on_refresh_click(self, e):  # pragma: no cover
         ensure_correlation_id()
-        await self._toggle_loading(True)
-        await self._refresh_data_rows()
-        await self._toggle_loading(False)
+        try:
+            await self._toggle_loading(True)
+            await self.vm.query_data()
+            self._rebuild_table_rows()
+            self._update_pagination_ui()
+        finally:
+            await self._toggle_loading(False)
 
     async def _on_sort(self, col_index):  # pragma: no cover
-        # Ensure col_index is int
         # Type Guard: Ensure col_index is an integer
         if not isinstance(col_index, int):
             logger.warning(
@@ -667,31 +552,41 @@ class TableViewerTab(ft.Container):
             )
             return
 
-        if self.sort_col_index == col_index:
-            self.sort_asc = not self.sort_asc
+        # Toggle sort direction
+        if self.vm.sort_col_index == col_index:
+            self.vm.set_sort(col_index, not self.vm.sort_asc)
         else:
-            self.sort_col_index = col_index
-            self.sort_asc = True
+            self.vm.set_sort(col_index, True)
 
-        self.current_page = 1
-        await self._toggle_loading(True)
-        await self._refresh_data_rows()
-        await self._toggle_loading(False)
+        try:
+            await self._toggle_loading(True)
+            self.vm.clear_error()
+            await self.vm.query_data(page=1)
+            self._rebuild_table_rows()
+            self._update_pagination_ui()
+        finally:
+            await self._toggle_loading(False)
 
     async def _on_prev_page(self, e):  # pragma: no cover
-        if self.current_page > 1:
-            self.current_page -= 1
-            await self._toggle_loading(True)
-            await self._refresh_data_rows()
-            await self._toggle_loading(False)
+        if self.vm.current_page > 1:
+            try:
+                await self._toggle_loading(True)
+                await self.vm.query_data(page=self.vm.current_page - 1)
+                self._rebuild_table_rows()
+                self._update_pagination_ui()
+            finally:
+                await self._toggle_loading(False)
 
     async def _on_next_page(self, e):  # pragma: no cover
-        total_pages = (self.total_rows // self.page_size) + 1
-        if self.current_page < total_pages:
-            self.current_page += 1
-            await self._toggle_loading(True)
-            await self._refresh_data_rows()
-            await self._toggle_loading(False)
+        total_pages = -(-self.vm.total_rows // self.vm.page_size)  # ceil division
+        if self.vm.current_page < total_pages:
+            try:
+                await self._toggle_loading(True)
+                await self.vm.query_data(page=self.vm.current_page + 1)
+                self._rebuild_table_rows()
+                self._update_pagination_ui()
+            finally:
+                await self._toggle_loading(False)
 
     async def _export_csv(self, current_page=True):  # pragma: no cover
         try:
@@ -699,40 +594,16 @@ class TableViewerTab(ft.Container):
                 return
             await self._toggle_loading(True)
 
-            filters = []
-            if self.filter_val.value:
-                filter_col = self.filter_col.value
-                filter_val = self.filter_val.value
-                if filter_col and "date" in filter_col.lower() and re.match(r"^\d{4}-\d{2}-\d{2}$", filter_val):
-                    filter_val = filter_val.replace("-", "")
-                filters.append((filter_col, self.filter_op.value, filter_val))
-
-            sort_col_name = None
-            if self.sort_col_index is not None and 0 <= self.sort_col_index < len(
-                self.table_columns,
-            ):
-                sort_col_name = self.table_columns[self.sort_col_index]
-
-            query_func = functools.partial(
-                self.db_manager.query_table,
-                self.current_table,  # type: ignore[arg-type]
-                page=self.current_page if current_page else 1,
-                page_size=self.page_size if current_page else 50000,
-                filters=filters,
-                sort_col=sort_col_name,
-                sort_asc=self.sort_asc,
-            )
-
-            df = await ThreadPoolManager().run_async(TaskType.CPU, query_func)
+            df = await self.vm.export_data(current_page_only=current_page)
 
             if df.empty:
                 self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore[untyped]
                 await self._toggle_loading(False)
                 return
 
-            suffix = f"_p{self.current_page}" if current_page else "_all"
+            suffix = f"_p{self.vm.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"{self.current_table}{suffix}_{timestamp}.csv"
+            default_filename = f"{self.vm.current_table}{suffix}_{timestamp}.csv"
 
             self._pending_export_df = df
             self.save_file_picker.save_file(
@@ -832,9 +703,9 @@ class SQLConsoleTab(ft.Container):
     Async implementation.
     """
 
-    def __init__(self, db_manager: DatabaseManager):
+    def __init__(self, viewmodel: DataExplorerViewModel):
         super().__init__()
-        self.db_manager = db_manager
+        self.vm = viewmodel
 
         self.sql_editor = ft.TextField(  # pragma: no cover
             multiline=True,  # pragma: no cover
@@ -988,12 +859,8 @@ class SQLConsoleTab(ft.Container):
         try:
             start_time = time.time()
 
-            # Execute in Background
-            result = await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                self.db_manager.execute_sql,
-                sql,
-            )
+            # Execute via ViewModel
+            result = await self.vm.execute_sql(sql)
 
             elapsed = time.time() - start_time
 
@@ -1031,7 +898,7 @@ class SQLConsoleTab(ft.Container):
                     cells = []
                     for idx, val in enumerate(row):
                         col_name = display_df.columns[idx]
-                        if val is None or __import__("pandas").isna(val):
+                        if val is None or pd.isna(val):
                             str_val = "-"
                         else:
                             str_val = str(val)
@@ -1130,10 +997,10 @@ class DataExplorerView(ft.Container):
     Refactored to use Lazy Loading to prevent UI freeze during tab switch.
     """
 
-    def __init__(self):
+    def __init__(self, viewmodel: DataExplorerViewModel | None = None):
         super().__init__()
         self.expand = True
-        self.db_manager = DatabaseManager()
+        self.vm = viewmodel or DataExplorerViewModel()
         self._ui_built = False  # Track if UI has been built
         self._pubsub_subscribed = False
         self._mount_task = None
@@ -1180,6 +1047,7 @@ class DataExplorerView(ft.Container):
         if self._mount_task:
             self._mount_task.cancel()
             self._mount_task = None
+        self.vm.dispose()
 
     async def did_mount_async(self):  # pragma: no cover
         import time as _time
@@ -1226,8 +1094,8 @@ class DataExplorerView(ft.Container):
                 return
 
             # Create complex tabs here
-            self.table_tab = TableViewerTab(self.db_manager)
-            self.sql_tab = SQLConsoleTab(self.db_manager)
+            self.table_tab = TableViewerTab(self.vm)
+            self.sql_tab = SQLConsoleTab(self.vm)
 
             self.tabs = ft.Tabs(  # pragma: no cover
                 selected_index=0,  # pragma: no cover
@@ -1250,11 +1118,6 @@ class DataExplorerView(ft.Container):
 
             # Swap content
             self.content = self.tabs
-
-            # 1. Init child tabs
-            # Note: We clear the loading spinner and add tabs
-            # self.content.controls.clear() # Not needed if we replace self.content
-            # self.content.controls.append(self.tabs)
 
             if self.page:
                 self.update()
@@ -1285,7 +1148,7 @@ class DataExplorerView(ft.Container):
         if message == "cache_cleared":
             # Reset tables_loaded flag to force reload on next mount
             if self._ui_built:
-                self.table_tab._tables_loaded = False
+                self.vm.tables_loaded = False
             logger.debug(
                 "[DataExplorerView] Cache cleared - will reload data on next view",
             )

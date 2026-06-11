@@ -66,8 +66,8 @@ class TestScreenerViewCleanup(unittest.TestCase):
 
 
 class TestDataExplorerViewCleanup(unittest.TestCase):
-    @patch("ui.views.data_view.DatabaseManager")
-    def test_will_unmount_unsubscribes_pubsub_and_cancels_mount_task(self, _mock_db_manager):
+    @patch("ui.views.data_view.DataExplorerViewModel")
+    def test_will_unmount_unsubscribes_pubsub_and_cancels_mount_task(self, mock_vm_cls):
         view = DataExplorerView()
         page = MagicMock()
         page.pubsub = MagicMock()
@@ -78,6 +78,7 @@ class TestDataExplorerViewCleanup(unittest.TestCase):
 
         view.will_unmount()
 
+        mock_vm_cls.return_value.dispose.assert_called_once()
         page.pubsub.unsubscribe.assert_called_once_with(view._on_broadcast_message)
         mock_mount_task.cancel.assert_called_once()
         self.assertFalse(view._pubsub_subscribed)
