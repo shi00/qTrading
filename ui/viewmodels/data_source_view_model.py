@@ -163,8 +163,9 @@ class DataSourceViewModel:
                 raise
             except Exception as e:
                 logger.error(f"[DataSourceVM] Health check failed: {e}", exc_info=True)
+                error_info = classify_error(e, context="general")
                 if self.on_health_error:
-                    self.on_health_error(str(e))
+                    self.on_health_error(get_error_message(error_info))
                 raise
             finally:
                 if self.on_health_finished:
@@ -215,6 +216,8 @@ class DataSourceViewModel:
                         "error",
                     )
                 raise
+            finally:
+                self._set_sync_busy(False)
 
         task_id = self._tm.submit_task(
             name=I18n.get("task_name_daily_sync"),
@@ -262,6 +265,8 @@ class DataSourceViewModel:
                         "error",
                     )
                 raise
+            finally:
+                self._set_sync_busy(False)
 
         task_id = self._tm.submit_task(
             name=I18n.get("task_name_doubao_rebuild"),

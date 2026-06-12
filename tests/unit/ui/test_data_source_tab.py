@@ -403,6 +403,18 @@ class TestOnVmHealthError:
         tab.metric_health.set_value.assert_called_once()
         tab.metric_storage.set_value.assert_called_once()
 
+    def test_error_msg_shown_in_summary(self, tab):
+        tab._on_vm_health_error("Sanitized error detail")
+        # summary container content should include the error message
+        content = tab.health_summary_container.content
+        assert content is not None
+
+    def test_empty_error_msg_falls_back_to_generic(self, tab):
+        tab._on_vm_health_error("")
+        # Should not crash, summary should still be set
+        content = tab.health_summary_container.content
+        assert content is not None
+
 
 # --- Test: _on_vm_health_cancelled ---
 

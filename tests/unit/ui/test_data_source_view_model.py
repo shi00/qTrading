@@ -163,10 +163,20 @@ class TestDataSourceViewModelCheckHealth:
         await bound_vm.check_health()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(RuntimeError, match="DB down"):
-            await factory(task_id="task_123")
+        with (
+            patch("ui.viewmodels.data_source_view_model.classify_error") as mock_classify,
+            patch("ui.viewmodels.data_source_view_model.get_error_message") as mock_get_msg,
+        ):
+            mock_classify.return_value = {"code": "runtime", "message_key": "common_op_fail"}
+            mock_get_msg.return_value = "Sanitized error"
 
-        bound_vm.on_health_error.assert_called_once()
+            with pytest.raises(RuntimeError, match="DB down"):
+                await factory(task_id="task_123")
+
+            mock_classify.assert_called_once()
+            mock_get_msg.assert_called_once()
+            bound_vm.on_health_error.assert_called_once_with("Sanitized error")
+
         bound_vm.on_health_finished.assert_called()
 
     async def test_check_health_cancelled(self, bound_vm, mock_processor, mock_task_manager):
@@ -212,6 +222,8 @@ class TestDataSourceViewModelFullDailySync:
             await factory(task_id="task_123")
 
         bound_vm.on_show_snack.assert_called()
+        assert bound_vm.is_syncing is False
+        bound_vm.on_sync_busy_changed.assert_called_with(False, None)
 
     async def test_daily_sync_error(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.run_daily_update = AsyncMock(side_effect=RuntimeError("Network error"))
@@ -223,6 +235,8 @@ class TestDataSourceViewModelFullDailySync:
             await factory(task_id="task_123")
 
         bound_vm.on_show_snack.assert_called()
+        assert bound_vm.is_syncing is False
+        bound_vm.on_sync_busy_changed.assert_called_with(False, None)
 
     def test_task_rejected_resets_busy(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
@@ -256,6 +270,9 @@ class TestDataSourceViewModelDoubaoRebuild:
 
         with pytest.raises(asyncio.CancelledError):
             await factory(task_id="task_123")
+
+        assert bound_vm.is_syncing is False
+        bound_vm.on_sync_busy_changed.assert_called_with(False, None)
 
     def test_task_rejected_resets_busy(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
