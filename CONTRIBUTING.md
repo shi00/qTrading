@@ -53,6 +53,7 @@
 - Python 3.13+
 - PostgreSQL 16+
 - Git
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (依赖管理工具)
 
 ### 安装步骤
 
@@ -62,17 +63,19 @@ git clone https://github.com/louis2sin/AStockScreener.git
 cd AStockScreener
 
 # 创建虚拟环境
-python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# 或 .venv\Scripts\activate  # Windows
+uv venv
+.venv\Scripts\activate  # Windows
+# 或 source .venv/bin/activate  # Linux/macOS
 
-# 安装开发依赖
-pip install -r requirements.txt
-pip install -r requirements-optional.txt
-pip install -r requirements-dev.txt
+# 安装依赖
+uv pip install --system -r requirements.txt
+uv pip install --system -r requirements-optional.txt
+uv pip install --system -r requirements-dev.txt
 
 # 安装 pre-commit hooks
 pre-commit install
+
+# 项目使用 6 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、requirements 同步)，详见 CLAUDE.md §8.1 或 `.pre-commit-config.yaml`。
 
 # 运行测试验证环境
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
@@ -173,11 +176,10 @@ Closes #123
 
 | 检查项 | 说明 |
 |--------|------|
-| **lint-fast** | Ruff lint + format 检查（~60s） |
-| **ci-checks (Linux)** | 完整测试套件（Linux 环境） |
-| **ci-checks-windows** | 完整测试套件（Windows 环境） |
-| **CodeQL** | 安全漏洞扫描 |
-| **Gitleaks** | 密钥泄露扫描 |
+| **lint-fast** | Ruff lint + format 检查 (Python 3.13 + 3.14) |
+| **ci-checks** | Linux 完整流水线 (pre-commit、安全审计、Pyright、Alembic 迁移、单元/集成测试、覆盖率) |
+| **ci-checks-windows** | Windows 单元测试 + Pyright + 覆盖率 |
+| **e2e-tests-windows** | Windows E2E 测试 (MS Edge + PostgreSQL) |
 
 ### 覆盖率要求
 
@@ -250,7 +252,7 @@ Closes #123
 # 格式化与静态检查
 python -m ruff check . --fix
 python -m ruff format .
-npx pyright
+python -m pyright
 
 # 运行测试
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
@@ -287,7 +289,7 @@ python main.py
 2. 在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册：表名 → 同步配置、质量监控配置、依赖关系。
 3. 运行 `python -m alembic revision --autogenerate -m "add xxx table"`，**人工检查** 生成的迁移文件。
 4. 运行 `python -m alembic upgrade head` 验证。
-5. 若需要 DAO 访问，参考“新增一个 DAO”。
+5. 若需要 DAO 访问，参考"新增一个 DAO"。
 
 #### 2. 新增一个 DAO
 1. 在 `data/persistence/daos/` 下创建 `xxx_dao.py`，继承 `BaseDao`。
@@ -338,12 +340,22 @@ python main.py
 | Pyright 报错但运行时正常 | Optional 未判空 / 泛型推断失败 | 用 `assert x is not None` 收窄类型，或显式标注 |
 | Ruff `UP*` 报错 | 使用了过时语法 | 跑 `ruff check . --fix` 自动升级 |
 | Tushare 限流 | 短时调用过多 | 看 `utils/rate_limiter.py` 配置；考虑加缓存 |
+| 优雅停机卡住/超时 | `CancelledError` 被吞没 | 搜索 `except asyncio.CancelledError` 后无 `raise`；参见 CLAUDE.md R2 |
 
 #### 8. 新增回测配置
 1. 在 `strategies/backtest/config.py` 中定义回测参数 (`BacktestConfig`)。
 2. 在 `strategies/backtest/adapter.py` 中适配待回测的策略。
 3. 通过 `services/backtest_service.py` 的 `run_backtest()` 启动。
 4. 结果通过 `BacktestDAO` 持久化，由 `ui/views/backtest_view.py` 展示。
+
+#### 9. 新增一个单例
+1. 使用 `@register_singleton` 装饰器注册类。
+2. 实现 `_reset_singleton()` 类方法 (测试隔离必须)。
+3. 实例创建必须受 `threading.Lock` 保护 (优先在 `__new__` 中持锁)。
+4. 支持 `_initialized` 标志防止重复初始化。
+5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
+6. 在 CLAUDE.md §4.3 的单例列表中补充新单例名称。
+7. 在 `tests/unit/` 下使用 `reset_singleton` 上下文管理器编写单测。
 
 ## 获取帮助
 

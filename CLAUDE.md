@@ -3,7 +3,7 @@
 > 本文件为 LLM 对话上下文文件，每次在 Trae/Cursor 等 IDE 中与 AI 对话时自动加载。
 > 请严格遵循以下交互准则、架构原则、设计规则和编码规范。
 >
-> **阅读顺序建议**：§1 (AI 助手交互准则) → §3 (红线，先读后写) → §11 (目录速查，定位代码) → §10 (标准工作流，操作模板) → 其他章节按需查阅。
+> **阅读顺序建议**：§1 (AI 助手交互准则) → §3 (红线，先读后写) → §9 (目录结构，定位代码) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](file:///d:/workspace/qTrading/CONTRIBUTING.md)。
 
 ---
 
@@ -71,15 +71,15 @@
 
 | 任务类型 | 必读章节 / 文件 |
 |---------|----------------|
-| 新增/修改策略 | §6.1、§6.2、§6.3、§10.3、`strategies/base_strategy.py` |
-| 新增/修改 DAO 或数据表 | §6.4、§10.1、§10.2、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py` |
+| 新增/修改策略 | §6.1、§6.2、§6.3、`strategies/base_strategy.py`；工作流见 CONTRIBUTING.md「新增一个策略」 |
+| 新增/修改 DAO 或数据表 | §6.4、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 CONTRIBUTING.md「新增一张数据表」/「新增一个 DAO」 |
 | 新增/修改数据同步 | §6.5、`data/sync/base.py` |
-| 新增/修改 UI 视图 | §6.8、§10.4、`ui/app_layout.py`、对应 ViewModel |
+| 新增/修改 UI 视图 | §6.8、`ui/app_layout.py`、对应 ViewModel；工作流见 CONTRIBUTING.md「新增一个 UI 视图」 |
 | 修改异常处理 | §5.7、§3 红线、`utils/error_classifier.py` |
 | 修改单例 / 资源生命周期 | §4.3、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | §6.7 性能红线、`utils/log_decorators.py` |
-| 调整 CI / 依赖 | §8、§10.6、`pyproject.toml`、`.github/workflows/ci_cd.yml` |
-| 新增/修改回测 | §6.4、§10.8、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py` |
+| 调整 CI / 依赖 | §8、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
+| 新增/修改回测 | §6.4、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
 
 ---
 
@@ -112,7 +112,7 @@
 
 | # | 红线 | 说明 |
 |---|------|------|
-| R1 | **架构越界** | `core/` 中导入业务层模块；`data/` 或 `services/` 中导入 `ui/`；`strategies/` 导入 `ui/` |
+| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/`/`strategies/`/`ui/`；`services/` 导入 `strategies/`/`ui/`；`strategies/` 导入 `ui/` |
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) |
 | R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[reason]` 注释 (pre-commit 强制拦截) |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) |
@@ -179,7 +179,7 @@ app → 编排所有层，仅被 main.py 调用
 
 `core/` 是架构核心层，只包含被所有层共享的基础设施 (目前仅 `i18n`)。
 
-- **不得依赖** `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块。
+- **不得依赖** `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块。`utils/` 虽然标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖。
 - 如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`。
 - `ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
 
@@ -253,7 +253,7 @@ class MyService:
 
 ### 5.2 类型标注
 
-- **类型检查器**: Pyright (`basic` 模式，CI 固定安装 `pyright==1.1.410`；完整配置见 `pyrightconfig.json`，优先级高于 `pyproject.toml`)
+- **类型检查器**: Pyright (`basic` 模式，版本见 `.github/workflows/ci_cd.yml`；完整配置见 `pyrightconfig.json`，优先级高于 `pyproject.toml`)
 - **关键 Pyright 规则**:
 
 | 规则 | 级别 | 说明 |
@@ -566,15 +566,10 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ## 9. 核心目录结构
 
-为保持 Token 高效使用，本节仅列出顶层模块的架构分工。详细文件及 API 请通过项目检索工具（如 `list_dir` / `grep_search`）动态获取。关于常用命令与新增模块的工作流，请参阅 [CONTRIBUTING.md](file:///d:/workspace/qTrading/CONTRIBUTING.md)。
+分层架构及各层职责见 §4.1。以下补充 §4.1 未覆盖的目录：
 
 ```text
-core/             ← 架构核心层 (目前仅 i18n 国际化工具，不依赖任何其他层)
-app/              ← 应用引导层 (启动初始化、服务编排，仅 main.py 调用)
-data/             ← 数据层 (DAO 访问、外部 API 抓取、数据同步策略、缓存管理器)
-services/         ← 服务层 (AI 大模型服务、异步任务调度、本地模型管理)
-strategies/       ← 策略层 (选股策略基类、AI 策略混入、回测引擎)
-ui/               ← 表现层 (基于 Flet 的 MVVM 模式：Views + ViewModels + Components)
-utils/            ← 工具层 (配置管理、优雅退出的看门狗、统一单例注册、性能监控等)
 tests/            ← 测试目录 (unit/ 单元测试, integration/ 集成测试, e2e/ 端到端测试)
+scripts/          ← 工具脚本 (覆盖率检查、安全审计、依赖同步等)
+locales/          ← 国际化资源文件
 ```
