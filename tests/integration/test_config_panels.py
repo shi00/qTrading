@@ -858,7 +858,7 @@ class TestDatabaseConfigPanelSaveConfig:
 
 
 class TestOnboardingWizardDatabaseValidation:
-    """Tests for OnboardingWizard._validate_and_save_database"""
+    """Tests for OnboardingWizard database validation via ViewModel"""
 
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):
@@ -892,7 +892,7 @@ class TestOnboardingWizardDatabaseValidation:
 
     @pytest.mark.asyncio
     async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, test_engine):
-        """Test _validate_and_save_database delegates to database_panel.save_config"""
+        """Test fn_validate_database delegates to database_panel.save_config"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         wizard = OnboardingWizard(mock_page)
@@ -901,15 +901,16 @@ class TestOnboardingWizardDatabaseValidation:
 
         wizard.database_panel = MagicMock()
         wizard.database_panel.save_config = AsyncMock(return_value=True)
+        wizard.vm.fn_validate_database = wizard.database_panel.save_config
 
-        result = await wizard._validate_and_save_database()
+        result = await wizard.vm.fn_validate_database()
 
         assert result is True
         wizard.database_panel.save_config.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_validate_and_save_database_handles_failure(self, mock_page, isolated_config):
-        """Test _validate_and_save_database returns False when save_config fails"""
+        """Test fn_validate_database returns False when save_config fails"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         wizard = OnboardingWizard(mock_page)
@@ -918,8 +919,9 @@ class TestOnboardingWizardDatabaseValidation:
 
         wizard.database_panel = MagicMock()
         wizard.database_panel.save_config = AsyncMock(return_value=False)
+        wizard.vm.fn_validate_database = wizard.database_panel.save_config
 
-        result = await wizard._validate_and_save_database()
+        result = await wizard.vm.fn_validate_database()
 
         assert result is False
         wizard.database_panel.save_config.assert_called_once()
