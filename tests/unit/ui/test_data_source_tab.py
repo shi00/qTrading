@@ -51,8 +51,8 @@ def _make_mock_metric_card():
 
 def _make_tab() -> DataSourceTab:
     """Create a DataSourceTab with mocked internals, skipping __init__."""
-    with patch.object(DataSourceTab, "__init__", lambda self: None):
-        tab = DataSourceTab()
+    with patch.object(DataSourceTab, "__init__", lambda self, show_snack_callback=None: None):
+        tab = DataSourceTab(show_snack_callback=MagicMock())
 
     # Mock required attributes
     tab.show_snack = MagicMock()
