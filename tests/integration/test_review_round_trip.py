@@ -159,6 +159,7 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         """Verify conn=None path compiles SQLAlchemy stmt into valid SQL with correct params."""
         from data.persistence.daos.screener_dao import ScreenerDao
         from sqlalchemy.ext.asyncio import create_async_engine
+        from contextlib import asynccontextmanager
 
         # Use a real asyncpg engine so dialect.compile() works correctly
         real_engine = create_async_engine("postgresql+asyncpg://test:test@localhost/test")
@@ -168,16 +169,13 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
 
-        captured_sql = None
-        captured_params = None
+        mock_conn = AsyncMock()
 
-        async def mock_write_db(sql, params, *, suppress_errors=False):
-            nonlocal captured_sql, captured_params
-            captured_sql = sql
-            captured_params = params
-            return 1
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
 
-        dao._write_db = AsyncMock(side_effect=mock_write_db)
+        dao._guarded_begin = mock_guarded_begin
 
         import asyncio
 
@@ -193,6 +191,15 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
                 alpha=2.0,
             )
         )
+
+        mock_conn.execute.assert_called_once()
+        executed_stmt = mock_conn.execute.call_args[0][0]
+        compiled = executed_stmt.compile(
+            dialect=real_engine.dialect,
+            compile_kwargs={"literal_binds": False},
+        )
+        captured_sql = str(compiled)
+        captured_params = list(compiled.params.values())
 
         # Verify SQL was compiled and contains UPDATE ... SET ... WHERE
         self.assertIsNotNone(captured_sql)
