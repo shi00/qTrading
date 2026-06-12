@@ -440,7 +440,7 @@ class DataSourceTab(ft.Container):
         ensure_correlation_id()
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
         if self.vm.is_syncing:
-            self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
+            self.show_snack(I18n.get("ds_clear_cache_syncing"), color=AppColors.WARNING)
             return
         await self._show_confirm_dialog(
             title_key="dialog_confirm_clear_title",
