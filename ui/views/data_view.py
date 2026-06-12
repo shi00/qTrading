@@ -12,6 +12,7 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
 from utils.correlation import ensure_correlation_id
+from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
@@ -340,6 +341,7 @@ class TableViewerTab(ft.Container):
 
     async def _on_table_changed(self, e):  # pragma: no cover
         self.vm.current_table = self.table_selector.value
+        UILogger.log_action("TableViewerTab", "Select", f"table={self.vm.current_table}")
         self.vm.reset_table_state()
         self.filter_val.value = ""  # Clear filters
         await self._load_schema_and_data()
@@ -525,6 +527,7 @@ class TableViewerTab(ft.Container):
 
     async def _on_query_click(self, e):  # pragma: no cover
         ensure_correlation_id()
+        UILogger.log_action("TableViewerTab", "Click", "btn_query")
         self.vm.set_filter(self.filter_col.value, self.filter_op.value, self.filter_val.value)
         try:
             await self._toggle_loading(True)
@@ -536,6 +539,7 @@ class TableViewerTab(ft.Container):
 
     async def _on_refresh_click(self, e):  # pragma: no cover
         ensure_correlation_id()
+        UILogger.log_action("TableViewerTab", "Click", "btn_refresh")
         try:
             await self._toggle_loading(True)
             await self.vm.query_data()
@@ -568,6 +572,7 @@ class TableViewerTab(ft.Container):
             await self._toggle_loading(False)
 
     async def _on_prev_page(self, e):  # pragma: no cover
+        UILogger.log_action("TableViewerTab", "Click", "btn_prev_page")
         if self.vm.current_page > 1:
             try:
                 await self._toggle_loading(True)
@@ -578,6 +583,7 @@ class TableViewerTab(ft.Container):
                 await self._toggle_loading(False)
 
     async def _on_next_page(self, e):  # pragma: no cover
+        UILogger.log_action("TableViewerTab", "Click", "btn_next_page")
         total_pages = -(-self.vm.total_rows // self.vm.page_size)  # ceil division
         if self.vm.current_page < total_pages:
             try:
@@ -589,6 +595,8 @@ class TableViewerTab(ft.Container):
                 await self._toggle_loading(False)
 
     async def _export_csv(self, current_page=True):  # pragma: no cover
+        scope = "current_page" if current_page else "all"
+        UILogger.log_action("TableViewerTab", "Click", f"export_csv={scope}")
         try:
             if self.progress_bar.visible:
                 return
@@ -846,6 +854,7 @@ class SQLConsoleTab(ft.Container):
         if not sql:
             return
 
+        UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
         self.btn_run.disabled = True
         self.progress_ring.visible = True
         self.status_text.value = I18n.get("data_status_executing")
@@ -1136,6 +1145,9 @@ class DataExplorerView(ft.Container):
     def _on_tab_changed(self, e):  # pragma: no cover
         if not self._ui_built:
             return
+
+        tab_name = "table_viewer" if self.tabs.selected_index == 0 else "sql_console"
+        UILogger.log_action("DataExplorerView", "Navigate", f"tab={tab_name}")
 
         # Trigger async mount for logic if needed
         # We can use the page task to run async methods

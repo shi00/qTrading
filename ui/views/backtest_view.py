@@ -17,6 +17,7 @@ from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +127,12 @@ class BacktestView(ft.Container):
     def _on_strategy_change(self, e):
         """策略选择变更。"""
         self._selected_strategy = e.control.value
+        UILogger.log_action("BacktestView", "Select", f"strategy={self._selected_strategy}")
         self.config_panel.set_strategy_key(self._selected_strategy)
 
     def _on_run_backtest(self, config: dict):
         """运行回测按钮点击。"""
+        UILogger.log_action("BacktestView", "Click", "btn_run_backtest")
         if not self._selected_strategy:
             self.status_text.value = I18n.get("backtest_no_strategy")
             self.status_text.color = AppColors.ERROR
@@ -177,6 +180,7 @@ class BacktestView(ft.Container):
             self.update()
 
     def _on_cancel_backtest(self, e):
+        UILogger.log_action("BacktestView", "Click", "btn_cancel_backtest")
         self.vm.cancel_backtest()
         self.cancel_button.visible = False
         self.status_text.value = I18n.get("common_cancelling")

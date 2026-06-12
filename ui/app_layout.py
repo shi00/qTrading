@@ -7,6 +7,7 @@ import flet as ft
 
 from ui.i18n import I18n
 from ui.theme import AppColors
+from utils.log_decorators import UILogger
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
@@ -302,6 +303,9 @@ class AppLayout(ft.Container):
         index = self._pending_tab_index
         if index is None or index == self._current_tab_index:
             return
+
+        tab_name = NavTabs(index).name.lower()
+        UILogger.log_action("AppLayout", "Navigate", f"tab={tab_name}")
 
         _t0 = _time.perf_counter()
         logger.debug(f"[AppLayout] Switching to tab index {index}")

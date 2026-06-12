@@ -30,6 +30,7 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
@@ -330,13 +331,11 @@ class OnboardingWizard(ft.Container):
             color=AppColors.ERROR,  # pragma: no cover
             visible=False,  # pragma: no cover
         )  # pragma: no cover
-        self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(
-            self.vm.start_sync, quick=True
+        self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(self._on_quick_sync)  # pragma: no cover
+        self.btn_full_sync.on_click = lambda e: self.app_page.run_task(self._on_full_sync)  # pragma: no cover
+        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(
+            self._on_cancel_sync_wizard
         )  # pragma: no cover
-        self.btn_full_sync.on_click = lambda e: self.app_page.run_task(
-            self.vm.start_sync, quick=False
-        )  # pragma: no cover
-        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(self.vm.cancel_sync)  # pragma: no cover
 
     def _init_schedule_controls(self):  # pragma: no cover
         self.schedule_enabled = ft.Checkbox(  # pragma: no cover
@@ -970,13 +969,28 @@ class OnboardingWizard(ft.Container):
         )  # pragma: no cover
 
     async def _next_step(self):  # pragma: no cover
+        UILogger.log_action("OnboardingWizard", "Click", f"next_step={self.vm.current_step}")
         await self.vm.next_step()
 
     async def _prev_step(self):  # pragma: no cover
+        UILogger.log_action("OnboardingWizard", "Click", f"prev_step={self.vm.current_step}")
         await self.vm.prev_step()
 
     async def _skip_step(self):  # pragma: no cover
+        UILogger.log_action("OnboardingWizard", "Click", f"skip_step={self.vm.current_step}")
         await self.vm.skip_step()
+
+    async def _on_quick_sync(self):  # pragma: no cover
+        UILogger.log_action("OnboardingWizard", "Click", "btn_quick_sync")
+        await self.vm.start_sync(quick=True)
+
+    async def _on_full_sync(self):  # pragma: no cover
+        UILogger.log_action("OnboardingWizard", "Click", "btn_full_sync")
+        await self.vm.start_sync(quick=False)
+
+    async def _on_cancel_sync_wizard(self):  # pragma: no cover
+        UILogger.log_action("OnboardingWizard", "Click", "btn_cancel_sync")
+        await self.vm.cancel_sync()
 
     def _update_wizard(self):  # pragma: no cover
         self.step_indicators.controls = self._build_step_indicators()
