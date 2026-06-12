@@ -239,6 +239,112 @@ Closes #123
 3. 在队列中会与 main 最新代码组合后重新运行 CI
 4. 通过后自动合并
 
+## 核心开发工作流与命令参考
+
+> [!NOTE]
+> 本节汇集了项目开发中常用的命令以及标准的代码开发流程，供开发人员（及 AI 编码助手）参考。当 AI 助手需要创建 DAO、数据表、策略或视图时，应随时查阅此文档。
+
+### 常用开发与测试命令
+
+```bash
+# 格式化与静态检查
+python -m ruff check . --fix
+python -m ruff format .
+npx pyright
+
+# 运行测试
+python -m pytest tests/unit/ -v --tb=short -m "not slow"
+python -m pytest tests/integration/ -n auto -v --tb=short
+python -m pytest tests/e2e/ -v --tb=short
+
+# 覆盖率
+python -m pytest tests/ --cov --cov-report=term-missing --cov-report=json
+python scripts/check_per_file_coverage.py
+
+# 数据库与安全
+python -m alembic upgrade head
+python -m alembic check
+python -m alembic downgrade base
+python -m alembic upgrade head
+python scripts/run_pip_audit.py --requirements requirements.txt requirements-optional.txt --allowlist .security/audit-allowlist.yml --sources pypi osv
+
+# 依赖同步 (通常由 pre-commit 自动触发)
+uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
+uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
+uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
+
+# Pre-commit
+pre-commit run --all-files
+
+# 启动应用
+python main.py
+```
+
+### 标准开发工作流 (How-To)
+
+#### 1. 新增一张数据表
+1. 在 `data/persistence/models.py` 中添加 SQLAlchemy ORM 模型 (继承 `Base`)。
+2. 在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册：表名 → 同步配置、质量监控配置、依赖关系。
+3. 运行 `python -m alembic revision --autogenerate -m "add xxx table"`，**人工检查** 生成的迁移文件。
+4. 运行 `python -m alembic upgrade head` 验证。
+5. 若需要 DAO 访问，参考“新增一个 DAO”。
+
+#### 2. 新增一个 DAO
+1. 在 `data/persistence/daos/` 下创建 `xxx_dao.py`，继承 `BaseDao`。
+2. 实现读写方法，**只用** `_read_db_select` / `_save_upsert` / `chunked_in_query`，禁止裸 SQL 字符串拼接。
+3. 在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 中实例化：`self.xxx_dao = XxxDao(self.engine)`。
+4. 在 `CacheManager._create_engine` 中更新 `.engine` 引用：`self.xxx_dao.engine = self.engine`。
+5. 在 `tests/unit/` 下编写对应单测，使用 mock engine 隔离 DB。
+
+#### 3. 新增一个策略
+1. 在 `strategies/` 下创建 `xxx_strategy.py`。
+2. 使用 `@register_strategy("key")` 装饰器注册；继承 `BaseStrategy` (普通) 或 `PolarsBaseStrategy` (向量化)。
+3. 声明 `required_context_keys` / `required_tables` / `required_history_days`。
+4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。
+5. 在 `strategies/all_strategies.py` 中导入该模块以触发自动注册。
+6. 在 `locales/` 添加 `strategy_xxx` / `strategy_xxx_desc` 等 i18n key。
+7. 在 `tests/unit/` 下编写单测。
+
+#### 4. 新增一个 UI 视图
+1. 在 `ui/views/` 下创建 `xxx_view.py`，View 只构建控件树。
+2. 在 `ui/viewmodels/` 下创建对应 ViewModel，持有业务状态、调用 services/data 层。
+3. 在 `ui/app_layout.py` 中注册新标签页 (如需)。
+4. UI 事件回调使用 `@log_ui_action` 装饰器埋点。
+5. 异步耗时操作必须通过 `ThreadPoolManager.run_async()` 或 `TaskManager.submit_task()` 提交。
+
+#### 5. 新增一个外部数据源
+1. 在 `data/external/` 下创建客户端模块，封装第三方 SDK 或 HTTP API。
+2. 使用 `utils/rate_limiter.py` 提供的限流器避免触发对方风控。
+3. 网络错误必须用 `classify_error(e, context="general")` 分类，自动处理重试。
+4. 方法挂 `@log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)`。
+5. 若需走代理，使用 `utils/proxy_manager.py`。
+
+#### 6. 新增依赖
+1. 编辑 `pyproject.toml`：
+   - 运行时依赖加到 `[project] dependencies`
+   - 开发依赖加到 `[project.optional-dependencies] dev`
+   - 可选依赖加到 `[project.optional-dependencies] optional`
+2. `git commit` 时 pre-commit 会自动运行 `uv pip compile --universal` 重新生成对应的 `requirements*.txt`。
+3. 本地安装新依赖: `uv pip install --system -r requirements.txt -r requirements-dev.txt`；如需可选功能，再安装 `requirements-optional.txt`。
+
+#### 7. 排查典型问题
+
+| 现象 | 可能原因 | 排查点 |
+|------|---------|--------|
+| 测试间状态污染 | 单例未隔离 | `reset_singleton` 包裹；检查 `extra_attrs` |
+| `RuntimeError: no running event loop` | 跨循环使用同步原语 | 改用 `get_loop_local` |
+| `EngineDisposedError` | 关机期间继续访问 DB | 在调用方捕获并降级，或检查 `_disposed` 早退 |
+| 慢查询告警 | SQL 缺索引 / 数据量过大 / N+1 | 看 `[ClassName] Slow Read/Write` 日志，结合 `EXPLAIN` |
+| Pyright 报错但运行时正常 | Optional 未判空 / 泛型推断失败 | 用 `assert x is not None` 收窄类型，或显式标注 |
+| Ruff `UP*` 报错 | 使用了过时语法 | 跑 `ruff check . --fix` 自动升级 |
+| Tushare 限流 | 短时调用过多 | 看 `utils/rate_limiter.py` 配置；考虑加缓存 |
+
+#### 8. 新增回测配置
+1. 在 `strategies/backtest/config.py` 中定义回测参数 (`BacktestConfig`)。
+2. 在 `strategies/backtest/adapter.py` 中适配待回测的策略。
+3. 通过 `services/backtest_service.py` 的 `run_backtest()` 启动。
+4. 结果通过 `BacktestDAO` 持久化，由 `ui/views/backtest_view.py` 展示。
+
 ## 获取帮助
 
 - **GitHub Issues**: 提问或报告问题
