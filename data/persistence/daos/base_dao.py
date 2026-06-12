@@ -623,33 +623,6 @@ class BaseDao:
                 # Fetch all rows
                 rows = result.fetchall()
                 cols = list(result.keys())
-
-                if max_rows is not None and len(rows) > max_rows:
-                    raise ValueError(
-                        f"[{self.__class__.__name__}] Query returned {len(rows)} rows, "
-                        f"exceeding max_rows limit of {max_rows}. "
-                        "Add WHERE filters or increase max_rows."
-                    )
-
-                # Offload DF creation
-                df = await ThreadPoolManager().run_async(
-                    TaskType.CPU,
-                    pd.DataFrame,
-                    rows,
-                    columns=cols,
-                )
-
-                elapsed = (time.perf_counter() - start_time) * 1000
-                if elapsed > _SLOW_READ_THRESHOLD_MS:
-                    logger.warning(
-                        f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
-                    )
-                else:
-                    logger.debug(
-                        f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
-                    )
-
-                return df
         except asyncio.CancelledError:
             logger.warning(
                 f"[{self.__class__.__name__}] Read cancelled during shutdown.",
@@ -679,6 +652,33 @@ class BaseDao:
             if not suppress_errors:
                 raise
             return pd.DataFrame()
+
+        if max_rows is not None and len(rows) > max_rows:
+            raise ValueError(
+                f"[{self.__class__.__name__}] Query returned {len(rows)} rows, "
+                f"exceeding max_rows limit of {max_rows}. "
+                "Add WHERE filters or increase max_rows."
+            )
+
+        # Offload DF creation
+        df = await ThreadPoolManager().run_async(
+            TaskType.CPU,
+            pd.DataFrame,
+            rows,
+            columns=cols,
+        )
+
+        elapsed = (time.perf_counter() - start_time) * 1000
+        if elapsed > _SLOW_READ_THRESHOLD_MS:
+            logger.warning(
+                f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
+            )
+        else:
+            logger.debug(
+                f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
+            )
+
+        return df
 
     async def _read_db_select(
         self,
