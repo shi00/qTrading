@@ -903,6 +903,7 @@ class TestOnboardingWizardDatabaseValidation:
         wizard.database_panel.save_config = AsyncMock(return_value=True)
         wizard.vm.fn_validate_database = wizard.database_panel.save_config
 
+        assert wizard.vm.fn_validate_database is not None
         result = await wizard.vm.fn_validate_database()
 
         assert result is True
@@ -921,6 +922,7 @@ class TestOnboardingWizardDatabaseValidation:
         wizard.database_panel.save_config = AsyncMock(return_value=False)
         wizard.vm.fn_validate_database = wizard.database_panel.save_config
 
+        assert wizard.vm.fn_validate_database is not None
         result = await wizard.vm.fn_validate_database()
 
         assert result is False
