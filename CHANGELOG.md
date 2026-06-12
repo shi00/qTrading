@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.6.0](https://github.com/shi00/qTrading/compare/v0.5.0...v0.6.0) (2026-06-12)
+
+
+### Features
+
+* **i18n:** add snack_full_sync_done_simple localization string ([fe4c596](https://github.com/shi00/qTrading/commit/fe4c596d3d06507ac8f522e824fe27ac852a54b8))
+
+
+### Bug Fixes
+
+* **async:** propagate CancelledError in gather and fix index_daily missing ts_code ([8b65018](https://github.com/shi00/qTrading/commit/8b65018ffba3aa26d0800465f97c46c37d1ee15e))
+* **backtest:** cache BacktestQualityProxy and add missing test coverage ([836af36](https://github.com/shi00/qTrading/commit/836af36645629ff11479be25f6b2991748d86a49))
+* **backtest:** resolve 7 audit findings in backtest engine and strategies ([2660ee8](https://github.com/shi00/qTrading/commit/2660ee844ae03a32b9fa0f9df0213f5a98c9230c))
+* **backtest:** update test fixtures to use first-day QFQ base (missed in prev commit) ([0dab10e](https://github.com/shi00/qTrading/commit/0dab10e84c2377ea7fbe5ca4154f44b30ad53fc9))
+* **dao:** convert all scalar NaN variants to None in _save_upsert ([bf402ec](https://github.com/shi00/qTrading/commit/bf402ec498d3669224ca33f6c9bb64cf5cf36905))
+* **i18n:** add missing backtest col_* translation keys for zh_CN and en_US ([09f3570](https://github.com/shi00/qTrading/commit/09f357006ca7b406c9fde1d9282c4cf52bdcd75c))
+* **marketdata:** address review findings from marketdata audit ([66ad460](https://github.com/shi00/qTrading/commit/66ad4601392970e0cc5d042b7af1bb9dece47ac7))
+* **marketdata:** eliminate lookahead bias in as_of queries ([15a3545](https://github.com/shi00/qTrading/commit/15a35451ec6075a781848508750add1e940ad25e))
+* **news:** improve hot concepts error handling and preserve UI state on failure ([bb0bfd0](https://github.com/shi00/qTrading/commit/bb0bfd06819facb96b79e96644ee053bc5aadbff))
+* **news:** reset failure counter on successful empty response ([ac424bf](https://github.com/shi00/qTrading/commit/ac424bfbe38d0d267e7aecd79d1da6f5fc8763cc))
+* **news:** return empty list on TimeoutError in get_hot_concepts ([f7f3071](https://github.com/shi00/qTrading/commit/f7f3071c21b087967915d50795c034f04d8cce71))
+* **onboarding:** correct optional step blocking and sync double notification ([9ece732](https://github.com/shi00/qTrading/commit/9ece73252e063c874947ee5df4b7488240ad9820))
+* **shutdown,async,singleton:** resolve event loop blocking and shutdown race conditions ([9c4040a](https://github.com/shi00/qTrading/commit/9c4040a786466d91138ba623f61378380031d372))
+* **sync:** standardize error handling and address data_sync review findings ([2cec92b](https://github.com/shi00/qTrading/commit/2cec92b73dcb73be01fc35f33475a689316eba42))
+* **test:** add null check for on_click to satisfy pyright ([032e326](https://github.com/shi00/qTrading/commit/032e3262af69bdfb0a21fc51bf1a87d4ab06cc0f))
+* **test:** add type narrowing for optional callback in test ([a072ee8](https://github.com/shi00/qTrading/commit/a072ee83e81c131a5978a6c1e51f909cb1c4ecc3))
+* **test:** pass show_snack_callback to DataSourceTab mock constructor ([df12952](https://github.com/shi00/qTrading/commit/df129527547c2b82fbe8dc0a76f78794ef06096b))
+* **test:** resolve singleton pollution and atexit cleanup issues ([87a87b1](https://github.com/shi00/qTrading/commit/87a87b16dce4a3572885ba9c1b4b2689334d8c3a))
+* **test:** update OnboardingWizard database validation tests for ViewModel ([1c63019](https://github.com/shi00/qTrading/commit/1c630197262228edf0d0583614ea3f32cafcba83))
+* **ui/data-source:** sanitize health check errors and ensure busy state reset ([7347530](https://github.com/shi00/qTrading/commit/7347530af2d74ca03a1c0f644b0642c952f32bea))
+* **ui/onboarding:** overlay state asymmetry and remove dead code ([82afdb0](https://github.com/shi00/qTrading/commit/82afdb02dbdbe038d56c9fb5046893abfccd4e52))
+* **ui:** add disposed check in DataExplorerViewModel.export_data ([96c4d8e](https://github.com/shi00/qTrading/commit/96c4d8e8410a4e181e370bffdf12585d1f534fae))
+* **ui:** add disposed guard in DataExplorerViewModel methods ([6c27f1e](https://github.com/shi00/qTrading/commit/6c27f1edd2e562da7f2091585b0a0666b5dbcaa2))
+* **ui:** add UILogger logging for key interaction paths ([1ad18e7](https://github.com/shi00/qTrading/commit/1ad18e7c4d10f605be1f46b2432bfd4b32f274e5))
+* **ui:** remove incomplete import statement in data_view.py ([f805484](https://github.com/shi00/qTrading/commit/f8054847a5e3d8d01d08e271f7fbe769c07665c9))
+* **ui:** resolve Pyright type error in failover config panel ([cfd152c](https://github.com/shi00/qTrading/commit/cfd152c59fae26a27e3963d3436bcb89375b4bb6))
+* **ui:** use dedicated i18n key for clear-cache sync warning ([a19ef98](https://github.com/shi00/qTrading/commit/a19ef980c842b21923aefca283734f020e659b49))
+* **ui:** use Sequence[Control] return type for rendered_row_controls ([205c8fe](https://github.com/shi00/qTrading/commit/205c8fe4c4ba42d28f843c0325c8e2092b1beda4))
+
+
+### Performance Improvements
+
+* **ui:** implement viewport virtualization for PaginatedTable ([b2d8cf2](https://github.com/shi00/qTrading/commit/b2d8cf2568a0fb302920060cc547550f701e6b90))
+
+
+### Documentation
+
+* consolidate workflow documentation in CONTRIBUTING.md ([1ac2684](https://github.com/shi00/qTrading/commit/1ac268481072c1914ef9db99d15020d3620fc9dc))
+* refine AI assistant interaction guidelines in CLAUDE.md ([c6a6b7e](https://github.com/shi00/qTrading/commit/c6a6b7efed31929abcedb311dac8fde0ba75db36))
+* **shutdown:** add thread-safety and atexit cleanup clarifications from audit review ([0057267](https://github.com/shi00/qTrading/commit/005726773e9fc4ae4d8886e81bef2ca373ebc60b))
+* update CLAUDE.md and CONTRIBUTING.md guidelines ([6fa9599](https://github.com/shi00/qTrading/commit/6fa9599acd6271f2cb98eb937c8d34d8bc32eaf1))
+
 ## [0.5.0](https://github.com/shi00/qTrading/compare/v0.4.2...v0.5.0) (2026-06-09)
 
 
