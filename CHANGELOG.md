@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/shi00/qTrading/compare/v0.6.0...v0.6.1) (2026-06-12)
+
+
+### Documentation
+
+* use relative path for CONTRIBUTING.md link in CLAUDE.md ([35b38cb](https://github.com/shi00/qTrading/commit/35b38cbdedeb6c1924d2d46d25f8a1f7ea157b59))
+
 ## [0.6.0](https://github.com/shi00/qTrading/compare/v0.5.0...v0.6.0) (2026-06-12)
 
 
