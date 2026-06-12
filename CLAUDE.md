@@ -3,7 +3,7 @@
 > 本文件为 LLM 对话上下文文件，每次在 Trae/Cursor 等 IDE 中与 AI 对话时自动加载。
 > 请严格遵循以下交互准则、架构原则、设计规则和编码规范。
 >
-> **阅读顺序建议**：§1 (AI 助手交互准则) → §3 (红线，先读后写) → §9 (目录结构，定位代码) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](file:///d:/workspace/qTrading/CONTRIBUTING.md)。
+> **阅读顺序建议**：§1 (AI 助手交互准则) → §3 (红线，先读后写) → §9 (目录结构，定位代码) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ---
 
