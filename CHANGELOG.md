@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.3](https://github.com/shi00/qTrading/compare/v0.6.2...v0.6.3) (2026-06-12)
+
+
+### Bug Fixes
+
+* **db:** prevent max_rows check ValueError from being swallowed by suppress_errors ([299b21d](https://github.com/shi00/qTrading/commit/299b21d5f921a2cbd123d3dd4e22315650787723))
+* **db:** resolve database DAO and data synchronization quality issues ([51fb6e9](https://github.com/shi00/qTrading/commit/51fb6e9786d780549053a1b82393a9fdb63457e3))
+* **ui:** translate strategy names in backtest selection dropdown ([1b4f5ee](https://github.com/shi00/qTrading/commit/1b4f5ee75f327045f1a37f12e70b9936f8bfd6a5))
+
 ## [0.6.2](https://github.com/shi00/qTrading/compare/v0.6.1...v0.6.2) (2026-06-12)
 
 
