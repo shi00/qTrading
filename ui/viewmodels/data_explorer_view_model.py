@@ -5,11 +5,12 @@ import re
 
 import pandas as pd
 
-from data.persistence.database_manager import DatabaseManager
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error, classify_severity, get_error_message
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
+
+from data.persistence.database_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,8 @@ class DataExplorerViewModel:
     async def export_data(self, current_page_only: bool = True):
         """Export table data for CSV download."""
         ensure_correlation_id()
+        if self._disposed:
+            return pd.DataFrame()
         try:
             tbl = self.current_table
             flt = self._build_filters()

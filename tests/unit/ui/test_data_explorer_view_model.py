@@ -117,6 +117,11 @@ class TestDispose:
         result = await vm.execute_sql("SELECT 1")
         assert result["success"] is False
 
+    async def test_export_data_after_dispose_returns_empty_df(self, vm):
+        vm.dispose()
+        result = await vm.export_data()
+        assert result.empty
+
 
 class TestInitTables:
     async def test_success_populates_tables_list(self, vm, mock_db):
