@@ -32,6 +32,21 @@ I18n.set_locale("zh")
 
 
 @pytest.fixture(scope="session")
+async def e2e_playwright():
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        yield p
+
+
+@pytest.fixture(scope="session")
+async def e2e_browser(e2e_playwright):
+    browser = await e2e_playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+    yield browser
+    await browser.close()
+
+
+@pytest.fixture(scope="session")
 def event_loop_policy():
     if sys.platform == "win32":
         return asyncio.WindowsProactorEventLoopPolicy()
@@ -84,13 +99,9 @@ class AppServer:
             )
 
 
-async def _make_page(app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
-    from playwright.async_api import async_playwright
-
+async def _make_page(browser, app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
     app.assert_alive()
 
-    p = await async_playwright().start()
-    browser = await p.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
     context = await browser.new_context(viewport={"width": 1400, "height": 900})
     await context.tracing.start(screenshots=True, snapshots=True)
     page = await context.new_page()
@@ -106,6 +117,7 @@ async def _make_page(app: AppServer, request, *, check_db_error: bool = False) -
                 app.proc.pid,
                 app.proc.returncode,
             )
+        await context.close()
         raise
 
     # Fail-fast: detect error UI (e.g. "数据库初始化失败") instead of
@@ -122,11 +134,12 @@ async def _make_page(app: AppServer, request, *, check_db_error: bool = False) -
                     "Check logs/e2e-flet-app.log for details."
                 )
         except RuntimeError:
+            await context.close()
             raise
         except Exception:  # noqa: BLE001
             pass  # Don't fail if the check itself fails
 
-    fp.bind_context((p, browser, context, page, request))
+    fp.bind_context((None, None, context, page, request))
     return fp
 
 
@@ -134,7 +147,7 @@ async def _teardown_page(fp: FletPage) -> None:
     pw_context = fp.get_context()
     if not pw_context:
         return
-    p, browser, context, page, request = pw_context
+    _, _, context, page, request = pw_context
     failed = any(
         getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
         for when in ("setup", "call")
@@ -149,8 +162,6 @@ async def _teardown_page(fp: FletPage) -> None:
             await context.tracing.stop()
     finally:
         await context.close()
-        await browser.close()
-        await p.stop()
 
 
 @pytest.fixture(scope="session")
@@ -185,14 +196,14 @@ def wizard_app(tmp_path_factory):
 
 
 @pytest.fixture
-async def e2e_page(flet_app: AppServer, request):
-    fp = await _make_page(flet_app, request, check_db_error=True)
+async def e2e_page(e2e_browser, flet_app: AppServer, request):
+    fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
     yield fp
     await _teardown_page(fp)
 
 
 @pytest.fixture
-async def wizard_page(wizard_app: AppServer, request):
-    fp = await _make_page(wizard_app, request)
+async def wizard_page(e2e_browser, wizard_app: AppServer, request):
+    fp = await _make_page(e2e_browser, wizard_app, request)
     yield fp
     await _teardown_page(fp)
