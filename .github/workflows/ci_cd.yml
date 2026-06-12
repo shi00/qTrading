@@ -346,6 +346,15 @@ jobs:
         run: |
           python -m pytest tests/e2e/ -v --tb=short --junitxml=junit-e2e.xml
 
+      - name: Sanitize E2E log
+        if: always()
+        shell: pwsh
+        run: |
+          $logPath = "logs/e2e-flet-app.log"
+          if (Test-Path $logPath) {
+            (Get-Content $logPath) -replace 'postgresql\+asyncpg://[^@]+@', 'postgresql+asyncpg://postgres:***@' | Set-Content $logPath
+          }
+
       - name: Upload E2E test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

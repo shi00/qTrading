@@ -13,6 +13,7 @@ from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
+from utils.log_decorators import log_async_operation, PerfThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -482,6 +483,11 @@ class TushareClient:
         await self.persist_capabilities_to_app_state()
         return results
 
+    @log_async_operation(
+        operation_name="tushare_api_call",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+        log_level=logging.DEBUG,
+    )
     async def _handle_api_call(self, func: typing.Callable, **kwargs: typing.Any):
         """Async wrapper that yields to event loop during rate limit / backoff
 
@@ -538,11 +544,14 @@ class TushareClient:
                         "Tushare Token not set. Please set your token in settings.",
                     )
 
+                import contextvars
+
+                ctx = contextvars.copy_context()
                 loop = asyncio.get_running_loop()
                 result = await asyncio.wait_for(
                     loop.run_in_executor(
                         ThreadPoolManager().io_pool,
-                        functools.partial(func, **kwargs),
+                        lambda ctx=ctx: ctx.run(functools.partial(func, **kwargs)),
                     ),
                     timeout=self.timeout * self._ASYNC_TIMEOUT_MULTIPLIER,
                 )

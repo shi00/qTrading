@@ -108,6 +108,25 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     page.on("console", lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text))
     page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
     fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
+
+    async def intercept_canvaskit(route):
+        url = route.request.url
+        if "fonts.gstatic.com" in url:
+            await route.abort()
+            return
+        if "canvaskit" in url:
+            filename = url.split("/")[-1]
+            from pathlib import Path
+
+            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
+            if local_path.exists():
+                content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
+                await route.fulfill(status=200, content_type=content_type, body=local_path.read_bytes())
+                return
+        await route.continue_()
+
+    await page.route("**/*", intercept_canvaskit)
+
     try:
         await fp.open(app.url)
     except Exception:

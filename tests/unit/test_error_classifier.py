@@ -436,6 +436,43 @@ class TestClassifySeverityIntegration:
         assert task.status == TaskStatus.FAILED
         assert any("operational" in r.message.lower() for r in caplog.records)
 
+    @pytest.mark.asyncio
+    async def test_task_manager_running_log_is_info(self, caplog):
+        import logging
+        from services.task_manager import TaskManager, AppTask, TaskStatus
+
+        tm = TaskManager()
+        tm._initialized = True
+        tm._tasks = {}
+        tm._subscribers = []
+        tm._background_tasks = set()
+        tm._db_ready = False
+
+        task = AppTask(
+            name="test_running_info_log",
+            task_type="System",
+            cancellable=True,
+        )
+        task.status = TaskStatus.RUNNING
+        task.started_at = get_now()
+        task._cancel_event = asyncio.Event()
+
+        async def dummy_coro():
+            return "ok"
+
+        task._coroutine_gen = dummy_coro
+
+        tm._tasks[task.id] = task
+
+        with caplog.at_level(logging.INFO, logger="services.task_manager"):
+            await tm._task_runner(task.id)
+
+        assert task.status == TaskStatus.COMPLETED
+        # Verify there is an INFO log starting with "[TaskManager] Running:"
+        running_logs = [r for r in caplog.records if r.levelno == logging.INFO and "Running:" in r.message]
+        assert len(running_logs) == 1
+        assert "[TaskManager] Running:" in running_logs[0].message
+
     @staticmethod
     async def _raise_system():
         raise MemoryError("out of memory")

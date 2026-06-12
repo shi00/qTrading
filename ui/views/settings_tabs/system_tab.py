@@ -197,6 +197,19 @@ class SystemTab(ft.Container):
             border_radius=8,  # pragma: no cover
             multiline=False,  # pragma: no cover
         )  # pragma: no cover
+
+        # System Diagnostics Button  # pragma: no cover
+        self.diagnostics_button = ft.ElevatedButton(  # pragma: no cover
+            text=I18n.get("settings_diagnostics_btn"),  # pragma: no cover
+            icon=ft.Icons.DOWNLOAD_ROUNDED,  # pragma: no cover
+            on_click=lambda e: (
+                self.page.run_task(self.on_export_diagnostics) if self.page else None
+            ),  # pragma: no cover
+            style=ft.ButtonStyle(  # pragma: no cover
+                shape=ft.RoundedRectangleBorder(radius=8),  # pragma: no cover
+            ),  # pragma: no cover
+        )  # pragma: no cover
+
         # --- Instantiate Rows (for theme updates) ---  # pragma: no cover
 
         # 0. Language Selector  # pragma: no cover
@@ -349,6 +362,17 @@ class SystemTab(ft.Container):
             subtitle_key="settings_no_proxy_desc",  # pragma: no cover
         )  # pragma: no cover
 
+        # 8. System Diagnostics  # pragma: no cover
+        self.row_diagnostics = SettingRow(  # pragma: no cover
+            icon=ft.Icons.ANALYTICS_ROUNDED,  # pragma: no cover
+            icon_color=ft.Colors.RED,  # pragma: no cover
+            title=I18n.get("settings_diagnostics"),  # pragma: no cover
+            subtitle=I18n.get("settings_diagnostics_desc"),  # pragma: no cover
+            control=self.diagnostics_button,  # pragma: no cover
+            title_key="settings_diagnostics",  # pragma: no cover
+            subtitle_key="settings_diagnostics_desc",  # pragma: no cover
+        )  # pragma: no cover
+
         self.content = ft.ListView(  # pragma: no cover
             controls=[  # pragma: no cover
                 DashboardCard(  # pragma: no cover
@@ -383,6 +407,11 @@ class SystemTab(ft.Container):
                                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),  # pragma: no cover
                             ),  # pragma: no cover
                             self.row_proxy,  # pragma: no cover
+                            ft.Divider(  # pragma: no cover
+                                height=20,  # pragma: no cover
+                                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),  # pragma: no cover
+                            ),  # pragma: no cover
+                            self.row_diagnostics,  # pragma: no cover
                         ],  # pragma: no cover
                         spacing=10,  # pragma: no cover
                     ),  # pragma: no cover
@@ -450,6 +479,7 @@ class SystemTab(ft.Container):
             self.rate_limit_input.label = I18n.get("settings_rate_limit")
             self.rate_limit_input.suffix_text = I18n.get("common_times_min")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
+            self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
 
             for row in [
                 self.row_language,
@@ -460,6 +490,7 @@ class SystemTab(ft.Container):
                 self.row_db_pool,
                 self.row_limit,
                 self.row_proxy,
+                self.row_diagnostics,
             ]:
                 row.update_locale()
 
@@ -722,3 +753,32 @@ class SystemTab(ft.Container):
 
         except Exception as ex:
             self.show_snack(f"Save failed: {ex}", color=AppColors.ERROR)
+
+    async def on_export_diagnostics(self, e=None):
+        """异步导出系统诊断包"""
+        UILogger.log_action("SystemTab", "Click", "export_diagnostics")
+        self.diagnostics_button.disabled = True
+        self.diagnostics_button.text = I18n.get("settings_diagnostics_exporting")
+        self._safe_update()
+
+        try:
+            from utils.diagnostics import SystemDiagnosticsCollector
+
+            # 运行导出
+            zip_path = await SystemDiagnosticsCollector.export()
+
+            self.show_snack(
+                I18n.get("settings_diagnostics_success").format(path=zip_path),
+                color=AppColors.SUCCESS,
+            )
+        except Exception as ex:
+            logger.error("[SystemTab] Diagnostics | Export failed: %s", DataSanitizer.sanitize_error(ex))
+            logger.debug("[SystemTab] Diagnostics | Export failed traceback", exc_info=True)
+            self.show_snack(
+                I18n.get("settings_diagnostics_failed").format(error=DataSanitizer.sanitize_error(ex)),
+                color=AppColors.ERROR,
+            )
+        finally:
+            self.diagnostics_button.disabled = False
+            self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
+            self._safe_update()

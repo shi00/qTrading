@@ -471,7 +471,7 @@ class TaskManager:
             async with self._get_semaphore():
                 # Capture the current asyncio task to allow forceful cancellation
                 task._asyncio_task = asyncio.current_task()
-                logger.debug(f"[TaskManager] Running: [{task.id}] {task.name}")
+                logger.info(f"[TaskManager] Running: [{task.id}] {task.name}")
 
                 # Execute user logic
                 coro = task._coroutine_gen()

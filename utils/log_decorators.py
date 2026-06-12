@@ -119,6 +119,7 @@ def log_async_operation(
     def decorator(func: F) -> F:
         # 确定操作名称
         op_name = operation_name or func.__name__
+        target_logger = logging.getLogger(func.__module__)
 
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -132,9 +133,9 @@ def log_async_operation(
                     sensitive_patterns=sanitize_params or [],
                     **kwargs,
                 )
-                logger.debug(f"[{op_name}] args: {clean_kwargs}")
+                target_logger.debug(f"[{op_name}] args: {clean_kwargs}", stacklevel=2)
 
-            logger.log(log_level, f"[{op_name}] started")
+            target_logger.log(log_level, f"[{op_name}] started", stacklevel=2)
 
             try:
                 # 执行原函数
@@ -159,9 +160,10 @@ def log_async_operation(
                     final_level = logging.WARNING
                     perf_warning = f" [SLOW: >{threshold_ms}ms threshold]"
 
-                logger.log(
+                target_logger.log(
                     final_level,
                     f"[{op_name}] completed in {elapsed_str}{result_info}{perf_warning}",
+                    stacklevel=2,
                 )
 
                 return result
@@ -173,11 +175,27 @@ def log_async_operation(
                 if log_exceptions:
                     # 脱敏异常信息
                     error_msg = DataSanitizer.sanitize_error(e)
-                    # Always log traceback for errors to ensure debuggability
-                    logger.error(
-                        f"[{op_name}] failed after {elapsed_str}: {type(e).__name__} - {error_msg}",
-                        exc_info=True,
-                    )
+                    from utils.error_classifier import classify_severity
+
+                    severity = classify_severity(e)
+                    if severity == "system":
+                        target_logger.critical(
+                            f"[{op_name}] system failure after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                            exc_info=True,
+                            stacklevel=2,
+                        )
+                    elif severity == "recoverable":
+                        # 可恢复异常记为 WARNING，不打印长 traceback
+                        target_logger.warning(
+                            f"[{op_name}] recoverable failure after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                            stacklevel=2,
+                        )
+                    else:
+                        target_logger.error(
+                            f"[{op_name}] failed after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                            exc_info=True,
+                            stacklevel=2,
+                        )
 
                 # 重新抛出异常
                 raise
@@ -211,6 +229,7 @@ def track_performance(
     def decorator(func: F) -> F:
         op_name = operation_name or func.__name__
         level = getattr(logging, alert_level.upper(), logging.WARNING)
+        target_logger = logging.getLogger(func.__module__)
 
         if inspect.iscoroutinefunction(func):
 
@@ -222,9 +241,10 @@ def track_performance(
                 elapsed_ms = elapsed * 1000
 
                 if elapsed_ms > threshold_ms:
-                    logger.log(
+                    target_logger.log(
                         level,
                         f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)",
+                        stacklevel=2,
                     )
 
                 return result
@@ -239,9 +259,10 @@ def track_performance(
             elapsed_ms = elapsed * 1000
 
             if elapsed_ms > threshold_ms:
-                logger.log(
+                target_logger.log(
                     level,
                     f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)",
+                    stacklevel=2,
                 )
 
             return result
@@ -269,18 +290,20 @@ class AsyncOperationLogger:
         operation: str,
         context: dict | None = None,
         log_level: int = logging.DEBUG,
+        logger_name: str | None = None,
     ):
         """
         Args:
             operation: 操作名称
             context: 上下文信息
             log_level: 日志级别
+            logger_name: 日志记录器名称
         """
         self.operation = operation
         self.context = context or {}
         self.metrics = {}
         self.start_time = None
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(logger_name or __name__)
         self.log_level = log_level
 
     async def __aenter__(self):
@@ -290,7 +313,7 @@ class AsyncOperationLogger:
         # 记录开始
         context_str = ", ".join(f"{k}={v}" for k, v in self.context.items())
         params_str = f" | {context_str}" if context_str else ""
-        self.logger.log(self.log_level, f"[{self.operation}] started{params_str}")
+        self.logger.log(self.log_level, f"[{self.operation}] started{params_str}", stacklevel=2)
 
         return self
 
@@ -315,14 +338,31 @@ class AsyncOperationLogger:
             self.logger.log(
                 self.log_level,
                 f"[{self.operation}] completed in {elapsed:.1f}s{metrics_str}",
+                stacklevel=2,
             )
         else:
             # 异常情况
             error_msg = DataSanitizer.sanitize_error(exc_val)
-            self.logger.error(
-                f"[{self.operation}] failed after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
-                exc_info=True,
-            )
+            from utils.error_classifier import classify_severity
+
+            severity = classify_severity(exc_val)
+            if severity == "system":
+                self.logger.critical(
+                    f"[{self.operation}] system failure after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                    exc_info=True,
+                    stacklevel=2,
+                )
+            elif severity == "recoverable":
+                self.logger.warning(
+                    f"[{self.operation}] recoverable failure after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                    stacklevel=2,
+                )
+            else:
+                self.logger.error(
+                    f"[{self.operation}] failed after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                    exc_info=True,
+                    stacklevel=2,
+                )
 
         return False  # 不抑制异常
 
@@ -336,7 +376,7 @@ class AsyncOperationLogger:
         """
         info_str = ", ".join(f"{k}={v}" for k, v in kwargs.items())
         params_str = f" | {info_str}" if info_str else ""
-        self.logger.log(self.log_level, f"[{self.operation}] {milestone}{params_str}")
+        self.logger.log(self.log_level, f"[{self.operation}] {milestone}{params_str}", stacklevel=2)
 
     def add_metric(self, key: str, value: Any):
         """

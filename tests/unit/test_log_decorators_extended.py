@@ -299,3 +299,72 @@ class TestUILogger:
             UILogger.log_action("Button", "Click", details="extra info")
             msg = mock_info.call_args[0][0]
             assert "extra info" in msg
+
+
+class TestObservabilityFixes:
+    """验证 OBS-001 和 OBS-003 的修复"""
+
+    @pytest.mark.asyncio
+    async def test_decorator_logger_name_and_stacklevel(self, log_capture):
+        @log_async_operation(operation_name="test_obs001")
+        async def dummy_operation():
+            return "ok"
+
+        await dummy_operation()
+
+        # 验证日志中的 logger 名称应该为当前测试模块的名称 (tests.unit.test_log_decorators_extended)
+        # 并且文件名应该为当前测试文件 (test_log_decorators_extended.py)，而不是 log_decorators.py
+        records = [r for r in log_capture.records if "test_obs001" in r.message]
+        assert len(records) >= 2  # started and completed
+
+        for record in records:
+            assert record.name == __name__
+            assert record.filename == "test_log_decorators_extended.py"
+
+    @pytest.mark.asyncio
+    async def test_recoverable_exception_severity(self, log_capture):
+        # TimeoutError 被 classify_severity 归类为 recoverable (可恢复)
+        @log_async_operation(operation_name="test_obs003")
+        async def failing_operation():
+            raise TimeoutError("Connection timed out")
+
+        with pytest.raises(TimeoutError):
+            await failing_operation()
+
+        records = [r for r in log_capture.records if "test_obs003" in r.message]
+        error_records = [r for r in records if r.levelno >= logging.WARNING]
+
+        assert len(error_records) == 1
+        record = error_records[0]
+
+        # 应记录为 WARNING 级，而不是 ERROR 或 CRITICAL
+        assert record.levelno == logging.WARNING
+        # 不应附带 traceback (exc_info 为空或 None)
+        assert record.exc_info is None
+
+    @pytest.mark.asyncio
+    async def test_system_exception_severity(self, log_capture):
+        # MemoryError 属于 system-level，应记录为 CRITICAL 并附带 exc_info
+        @log_async_operation(operation_name="test_system_err")
+        async def system_error_op():
+            raise MemoryError("Out of memory")
+
+        with pytest.raises(MemoryError):
+            await system_error_op()
+
+        records = [r for r in log_capture.records if "test_system_err" in r.message]
+        critical_records = [r for r in records if r.levelno == logging.CRITICAL]
+
+        assert len(critical_records) == 1
+        record = critical_records[0]
+        assert record.exc_info is not None
+
+    @pytest.mark.asyncio
+    async def test_async_operation_logger_custom_name(self, log_capture):
+        async with AsyncOperationLogger("test_custom_logger", logger_name="custom.logger") as op:
+            op.log_milestone("milestone_1")
+
+        records = [r for r in log_capture.records if "test_custom_logger" in r.message]
+        assert len(records) >= 2
+        for r in records:
+            assert r.name == "custom.logger"

@@ -54,8 +54,8 @@ def _get_formatter(use_json: bool = False) -> logging.Formatter:
 def setup_logging(name="astock_screener"):
     """
     Setup structured logging with rotation.
-    - Console: INFO level
-    - File: DEBUG level, max 5MB per file, keep last 5 files
+    - Console: user configured level (default: INFO)
+    - File: user configured level (default: INFO)
     - Supports JSON format via ConfigHandler.get_log_format()
     """
     if not os.path.exists(LOG_DIR):
@@ -111,7 +111,7 @@ def setup_logging(name="astock_screener"):
         backup_count = ConfigHandler.get_log_backup_count()
     except (ValueError, OSError, RuntimeError):
         max_mb = 5
-        backup_count = 5
+        backup_count = 10
     max_bytes = int(max_mb * 1024 * 1024)
 
     # 3. Console Handler (user configured level)
@@ -126,22 +126,6 @@ def setup_logging(name="astock_screener"):
     if not has_app_log:
         log_file_path = os.path.join(LOG_DIR, "app.log")
         try:
-            # Force rollover on startup if file exists and has content
-            # This ensures each run starts with a fresh log file, while keeping history via rotation
-            if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0:
-                try:
-                    # Create a temporary handler to force rollover
-                    temp_handler = RotatingFileHandler(
-                        log_file_path,
-                        maxBytes=max_bytes,
-                        backupCount=backup_count,
-                        encoding="utf-8",
-                    )
-                    temp_handler.doRollover()
-                    temp_handler.close()
-                except Exception as e:
-                    sys.stderr.write(f"Failed to rotate old log: {e}\n")
-
             file_handler = RotatingFileHandler(
                 log_file_path,
                 maxBytes=max_bytes,
@@ -159,20 +143,6 @@ def setup_logging(name="astock_screener"):
     if not has_error_log:
         error_log_path = os.path.join(LOG_DIR, "error.log")
         try:
-            # Force rollover for error log as well
-            if os.path.exists(error_log_path) and os.path.getsize(error_log_path) > 0:
-                try:
-                    temp_err_handler = RotatingFileHandler(
-                        error_log_path,
-                        maxBytes=max_bytes,
-                        backupCount=backup_count,
-                        encoding="utf-8",
-                    )
-                    temp_err_handler.doRollover()
-                    temp_err_handler.close()
-                except (OSError, ValueError):
-                    pass
-
             error_handler = RotatingFileHandler(
                 error_log_path,
                 maxBytes=max_bytes,
@@ -220,7 +190,7 @@ def update_log_level(level_str):
     logger.setLevel(new_level)
 
     for h in logger.handlers:
-        # Update file handler (excluding error.log which is always ERROR)
+        # Update file handler (excluding error.log which is always ERROR for monitoring tools)
         if (isinstance(h, RotatingFileHandler) and "error.log" not in h.baseFilename) or isinstance(
             h, logging.StreamHandler
         ):

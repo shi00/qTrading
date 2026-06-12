@@ -679,7 +679,11 @@ class TestMainWindowCloseShowDialogSkipped:
         logger_spy = _LoggerSpy()
         monkeypatch.setattr(app_main, "logger", logger_spy)
 
-        with patch("main.check_onboarding_needed", return_value=False):
+        with (
+            patch("main.check_onboarding_needed", return_value=False),
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+        ):
+            mock_init.return_value = {"success": False, "error": "db_init_failed"}
             page = _DummyPage()
             await app_main.main(page)
 

@@ -208,56 +208,27 @@ class TestSetupLoggingDegradation:
         assert len(file_handlers) == 1
         assert file_handlers[0].maxBytes == 5 * 1024 * 1024
 
-    def test_app_log_rollover_on_startup(self, tmp_path):
+    def test_no_app_log_rollover_on_startup(self, tmp_path):
+        """验证启动时不再强制轮转日志，而是直接追加日志并输出运行周期标志"""
         log_dir = tmp_path / "test_logs"
         log_dir.mkdir()
         app_log = log_dir / "app.log"
-        app_log.write_text("old log content", encoding="utf-8")
+        app_log.write_text("old log content\n", encoding="utf-8")
         with (
             patch("utils.logger.LOG_DIR", str(log_dir)),
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
             patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
         ):
-            setup_logging("rollover_test")
-        assert (log_dir / "app.log.1").exists()
+            setup_logging("no_rollover_test")
 
-    def test_app_log_rollover_failure_continues(self, tmp_path):
-        log_dir = tmp_path / "test_logs"
-        log_dir.mkdir()
-        app_log = log_dir / "app.log"
-        app_log.write_text("old content", encoding="utf-8")
-        with (
-            patch("utils.logger.LOG_DIR", str(log_dir)),
-            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
-            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
-            patch("logging.handlers.RotatingFileHandler.doRollover", side_effect=OSError("locked")),
-        ):
-            logger = setup_logging("rollover_fail_test")
-        assert logger is not None
+        # 验证 app.log.1 不应被创建 (即没有发生 rollover)
+        assert not (log_dir / "app.log.1").exists()
 
-    def test_error_log_rollover_silent_failure(self, tmp_path):
-        log_dir = tmp_path / "test_logs"
-        log_dir.mkdir()
-        error_log = log_dir / "error.log"
-        error_log.write_text("old error", encoding="utf-8")
-        original_rfh = logging.handlers.RotatingFileHandler
-
-        def selective_rollover(self):
-            if "error.log" in self.baseFilename:
-                raise ValueError("cannot rotate")
-            return original_rfh.doRollover(self)
-
-        with (
-            patch("utils.logger.LOG_DIR", str(log_dir)),
-            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
-            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
-            patch("logging.handlers.RotatingFileHandler.doRollover", selective_rollover),
-        ):
-            logger = setup_logging("error_rollover_fail_test")
-        assert logger is not None
+        # 验证原 app.log 中依然保留旧内容，并追加了新会话日志
+        content = app_log.read_text(encoding="utf-8")
+        assert "old log content" in content
+        assert "--- Log Session Started" in content
 
 
 class TestJSONFormatter:

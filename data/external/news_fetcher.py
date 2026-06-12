@@ -12,6 +12,7 @@ from cachetools import TTLCache
 
 from core.i18n import I18n
 from utils.sanitizers import DataSanitizer
+from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import CST_TZ, get_now
 
@@ -47,6 +48,10 @@ class NewsFetcher:
     """
 
     @staticmethod
+    @log_async_operation(
+        operation_name="news_get_stock_news",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def get_stock_news(ts_code: str | None, limit: int | None = 5, as_of: date | None = None):
         """
         Fetch specific stock news using a dual-layer strategy:
@@ -186,6 +191,10 @@ class NewsFetcher:
             return []
 
     @staticmethod
+    @log_async_operation(
+        operation_name="news_get_latest_global_news",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def get_latest_global_news(limit: int | None = 20, as_of: date | None = None):
         """
         Get major financial news (CCTV / Major Portals)
@@ -282,6 +291,10 @@ class NewsFetcher:
             return []
 
     @staticmethod
+    @log_async_operation(
+        operation_name="news_get_us_major_moves",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def get_us_major_moves(as_of: date | None = None):
         """
         Fetch major US Tech giants performance (NVDA, TSLA, AAPL, MSFT, GOOGL, AMZN, META).
@@ -437,6 +450,10 @@ class NewsFetcher:
             return "Global data error."
 
     @staticmethod
+    @log_async_operation(
+        operation_name="news_get_hot_concepts",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def get_hot_concepts(limit: int | None = 8):
         """
         Get top performing concept boards.
