@@ -713,6 +713,7 @@
     "snack_daily_sync_nodata": "未获取到数据，请检查Token或网络",
     "snack_full_sync_start": "正在执行完整日更新...",
     "snack_full_sync_done": "完整日更新完成！共同步 {total} 条记录",
+    "snack_full_sync_done_simple": "完整日更新完成！",
     "progress_sync_prepare": "准备同步...",
     "snack_sync_not_completed": "同步未完成，请重试",
     "progress_sync_market": "正在同步行情: {date}",
