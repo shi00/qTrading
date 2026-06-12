@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/shi00/qTrading/compare/v0.6.1...v0.6.2) (2026-06-12)
+
+
+### Documentation
+
+* resolve documentation alignment findings from review1.md ([aab2d05](https://github.com/shi00/qTrading/commit/aab2d0594bc5cf0162f08dfb04be4e183cb5f778))
+
 ## [0.6.1](https://github.com/shi00/qTrading/compare/v0.6.0...v0.6.1) (2026-06-12)
 
 
