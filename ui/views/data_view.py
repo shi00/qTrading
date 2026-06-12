@@ -903,8 +903,6 @@ class SQLConsoleTab(ft.Container):
                         else:
                             str_val = str(val)
                         if "date" in col_name.lower():
-                            import datetime
-
                             if isinstance(val, (datetime.date, datetime.datetime)):
                                 str_val = val.strftime("%Y-%m-%d")
                             elif isinstance(val, str) and len(val) == 8 and val.isdigit():
