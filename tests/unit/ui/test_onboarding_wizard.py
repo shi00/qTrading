@@ -292,14 +292,3 @@ class TestOnboardingWizard:
         wizard._update_wizard = MagicMock()
         wizard._on_vm_step_changed()
         wizard._update_wizard.assert_called_once()
-
-    def test_on_vm_step_changed_step7_syncs_schedule_time(self, mock_page):
-        """步骤 7 且 schedule 已校验 → 同步时间到 View 控件"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 7
-        wizard.vm.step_validated["schedule"] = True
-        wizard.vm._schedule_time = "08:00"
-        wizard._update_wizard = MagicMock()
-        wizard._on_vm_step_changed()
-        assert wizard.schedule_time.value == "08:00"

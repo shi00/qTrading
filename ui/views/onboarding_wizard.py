@@ -49,6 +49,7 @@ class OnboardingWizard(ft.Container):
 
         self.vm = OnboardingViewModel()
         self._locale_subscription_id = None
+        self._panel_loading: bool = False
 
         self._init_database_controls()
         self._init_token_controls()
@@ -205,8 +206,6 @@ class OnboardingWizard(ft.Container):
     # --- ViewModel → View notification callbacks ---
 
     def _on_vm_step_changed(self):  # pragma: no cover
-        if self.vm.current_step == 7 and self.vm.step_validated.get("schedule") and hasattr(self, "schedule_time"):
-            self.schedule_time.value = self.vm.normalized_schedule_time
         self._update_wizard()
 
     def _on_vm_sync_progress(self, progress: float, message: str):  # pragma: no cover
@@ -225,7 +224,10 @@ class OnboardingWizard(ft.Container):
         self._safe_update()
 
     def _on_vm_validation_state_changed(self):  # pragma: no cover
-        self._show_loading_overlay(self.vm.validation_in_progress)
+        if self.vm.validation_in_progress:
+            self._show_loading_overlay(True)
+        elif not self._panel_loading:
+            self._show_loading_overlay(False)
 
     def _init_database_controls(self):  # pragma: no cover
         self.database_panel = DatabaseConfigPanel(
@@ -266,6 +268,7 @@ class OnboardingWizard(ft.Container):
 
     def _on_panel_loading_change(self, loading: bool):  # pragma: no cover
         """通用面板加载状态回调 - 仅控制遮罩显隐"""
+        self._panel_loading = loading
         if loading:
             self._show_loading_overlay(True)
         elif not self.vm.validation_in_progress:

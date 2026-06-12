@@ -3,7 +3,6 @@
 TDD RED phase: these tests define the expected ViewModel contract.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,24 +18,6 @@ def _mock_i18n():
     with patch("ui.viewmodels.onboarding_view_model.I18n") as mock_i18n:
         mock_i18n.get = MagicMock(side_effect=lambda key, **kwargs: key)
         yield mock_i18n
-
-
-# --- Helpers ---
-
-
-def _make_future(result=None, exc=None):
-    fut = asyncio.Future()
-    if exc:
-        fut.set_exception(exc)
-    else:
-        fut.set_result(result)
-    return fut
-
-
-def _async_return(value):
-    fut = asyncio.Future()
-    fut.set_result(value)
-    return fut
 
 
 # --- Fixtures ---
