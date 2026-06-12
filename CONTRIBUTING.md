@@ -83,6 +83,12 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 
 ### 数据库设置
 
+> [!NOTE]
+> 项目的数据库命名约定如下：
+> - **项目名**：`AStockScreener`
+> - **本地生产/开发库**：`astock_screener`（使用 `createdb astock_screener` 创建，由 Alembic 迁移驱动）
+> - **本地集成测试库**：`test_astock`（由测试配置自动加载与清空，详见 `CLAUDE.md` §7.2）
+
 ```bash
 # 创建数据库
 createdb astock_screener
@@ -183,8 +189,10 @@ Closes #123
 
 ### 覆盖率要求
 
-- **整体覆盖率**: ≥ 85%（硬性门禁）
-- **单文件覆盖率**: ≥ 80%（每个文件必须达标）
+> [!NOTE]
+> 覆盖率阈值的单一事实源位于 `pyproject.toml`。
+> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%，为硬性门禁）。
+> - **单文件覆盖率**：具体数值见 `pyproject.toml` 中的 `per_file_minimum`（目前为 ≥ 80%，由 `scripts/check_per_file_coverage.py` 检查，每个文件必须达标）。
 
 ### 数据库迁移
 
@@ -303,7 +311,7 @@ python main.py
 2. 使用 `@register_strategy("key")` 装饰器注册；继承 `BaseStrategy` (普通) 或 `PolarsBaseStrategy` (向量化)。
 3. 声明 `required_context_keys` / `required_tables` / `required_history_days`。
 4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。
-5. 在 `strategies/all_strategies.py` 中导入该模块以触发自动注册。
+5. 在 `strategies/all_strategies.py` 的 `_import_all_strategies()` 中导入该模块以触发自动注册。
 6. 在 `locales/` 添加 `strategy_xxx` / `strategy_xxx_desc` 等 i18n key。
 7. 在 `tests/unit/` 下编写单测。
 
