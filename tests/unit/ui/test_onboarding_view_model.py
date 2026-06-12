@@ -399,6 +399,16 @@ class TestOnboardingVMSync:
         sync_vm.next_step.assert_awaited_once()
         sync_vm.on_sync_progress.assert_any_call(1.0, "wizard_status_done")
 
+    async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor):
+        """on_sync_state_changed must be called exactly twice on success: once for start, once for end.
+        Before the fix, it was called 3 times (start + manual end + finally end)."""
+        sync_vm.current_step = 5
+        sync_vm.next_step = AsyncMock()
+        with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
+            await sync_vm.start_sync(quick=True)
+        # 2 calls: sync_in_progress=True at start, sync_in_progress=False in finally
+        assert sync_vm.on_sync_state_changed.call_count == 2
+
     async def test_start_sync_cancelled_result(self, sync_vm, mock_data_processor):
         mock_data_processor.initialize_system = AsyncMock(return_value=False)
         sync_vm.next_step = AsyncMock()
@@ -537,11 +547,11 @@ class TestOnboardingVMUnboundValidator:
         result = await vm.validate_and_persist_current_step()
         assert result is False
 
-    async def test_unbound_local_model_validator_blocks(self, vm):
-        """local_model has validate_before_next=True; unbound validator must block."""
+    async def test_unbound_local_model_validator_passes(self, vm):
+        """local_model is optional (block_on_missing_validator=False); unbound validator allows pass."""
         vm.current_step = 4  # local_model
         result = await vm.validate_and_persist_current_step()
-        assert result is False
+        assert result is True
 
     async def test_dispose_then_validate_blocks(self, bound_vm):
         """After dispose(), injected validators are None → must block."""

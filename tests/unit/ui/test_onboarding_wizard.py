@@ -284,14 +284,13 @@ class TestOnboardingWizard:
         assert wizard.vm.fn_validate_database is wizard.database_panel.save_config
         assert wizard.vm.fn_validate_token is wizard.tushare_panel.verify_token
 
-    def test_on_vm_step_changed_syncs_current_step(self, mock_page):
+    def test_on_vm_step_changed_triggers_update_wizard(self, mock_page):
         """VM 步骤变更回调触发 View 更新"""
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         wizard.vm.current_step = 3
         wizard._update_wizard = MagicMock()
         wizard._on_vm_step_changed()
-        assert wizard.vm.current_step == 3
         wizard._update_wizard.assert_called_once()
 
     def test_on_vm_step_changed_step7_syncs_schedule_time(self, mock_page):

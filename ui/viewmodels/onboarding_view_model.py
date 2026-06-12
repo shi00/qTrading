@@ -37,6 +37,7 @@ class StepConfig:
     skip_text_key: str = ""
     required: bool = False
     validate_before_next: bool = False
+    block_on_missing_validator: bool = True
 
 
 STEP_CONFIGS = [
@@ -49,6 +50,7 @@ STEP_CONFIGS = [
         next_icon="ARROW_FORWARD",
         required=False,
         validate_before_next=False,
+        block_on_missing_validator=False,
     ),
     StepConfig(
         id="database",
@@ -91,6 +93,7 @@ STEP_CONFIGS = [
         skip_text_key="wizard_btn_skip",
         required=False,
         validate_before_next=True,
+        block_on_missing_validator=False,
     ),
     StepConfig(
         id="data_sync",
@@ -101,6 +104,7 @@ STEP_CONFIGS = [
         next_icon="ARROW_FORWARD",
         required=False,
         validate_before_next=False,
+        block_on_missing_validator=False,
     ),
     StepConfig(
         id="schedule",
@@ -121,6 +125,7 @@ STEP_CONFIGS = [
         next_icon="ROCKET_LAUNCH",
         required=False,
         validate_before_next=False,
+        block_on_missing_validator=False,
     ),
 ]
 
@@ -283,8 +288,8 @@ class OnboardingViewModel:
 
         validator = validators.get(config.id)
         if validator is None:
-            if config.validate_before_next:
-                logger.error(f"[OnboardingVM] Validator missing for step requiring validation: {config.id}")
+            if config.block_on_missing_validator:
+                logger.warning(f"[OnboardingVM] Validator for '{config.id}' not bound, blocking step")
                 return False
             return True
 
@@ -362,9 +367,6 @@ class OnboardingViewModel:
             if result:
                 if self.on_sync_progress:
                     self.on_sync_progress(1.0, I18n.get("wizard_status_done"))
-                self.sync_in_progress = False
-                if self.on_sync_state_changed:
-                    self.on_sync_state_changed()
                 await asyncio.sleep(1)
                 await self.next_step()
             else:

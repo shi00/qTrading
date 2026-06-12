@@ -990,6 +990,8 @@ class OnboardingWizard(ft.Container):
         if self._locale_subscription_id:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
+        # Fire-and-forget: dispose() is synchronous and fast; Flet guarantees
+        # the page is still alive during will_unmount, so run_task is safe here.
         if self.app_page:
             self.app_page.run_task(self._cleanup_vm)
 
