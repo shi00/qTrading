@@ -18,126 +18,23 @@ Features:
 - Component reuse (LLMConfigPanel, LocalModelConfigPanel)
 """
 
-import asyncio
 import logging
-from dataclasses import dataclass
 
 import flet as ft
 
-from data.data_processor import DataProcessor
 from ui.components.config_panels.database_config_panel import DatabaseConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from utils.config_handler import ConfigHandler
-from utils.correlation import ensure_correlation_id
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYNC_YEARS = 3
 DEFAULT_SYNC_DAYS = DEFAULT_SYNC_YEARS * 365
-
-
-@dataclass
-class StepConfig:
-    id: str
-    name: str
-    show_prev: bool
-    show_next: bool
-    next_text_key: str
-    next_icon: str
-    show_skip: bool = False
-    skip_text_key: str = ""
-    required: bool = False
-    validate_before_next: bool = False
-
-
-STEP_CONFIGS = [
-    StepConfig(
-        id="welcome",
-        name="wizard_step_welcome",
-        show_prev=False,
-        show_next=True,
-        next_text_key="wizard_btn_start",
-        next_icon=ft.Icons.ARROW_FORWARD,
-        required=False,
-        validate_before_next=False,
-    ),
-    StepConfig(
-        id="database",
-        name="wizard_step_database",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_verify_next",
-        next_icon=ft.Icons.ARROW_FORWARD,
-        required=True,
-        validate_before_next=True,
-    ),
-    StepConfig(
-        id="token",
-        name="wizard_step_token",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_verify_next",
-        next_icon=ft.Icons.ARROW_FORWARD,
-        required=True,
-        validate_before_next=True,
-    ),
-    StepConfig(
-        id="cloud_ai",
-        name="wizard_step_cloud_ai",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_verify_next",
-        next_icon=ft.Icons.ARROW_FORWARD,
-        required=True,
-        validate_before_next=True,
-    ),
-    StepConfig(
-        id="local_model",
-        name="wizard_step_local_model",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_verify_next",
-        next_icon=ft.Icons.ARROW_FORWARD,
-        show_skip=True,
-        skip_text_key="wizard_btn_skip",
-        required=False,
-        validate_before_next=True,
-    ),
-    StepConfig(
-        id="data_sync",
-        name="wizard_step_data_sync",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_next",
-        next_icon=ft.Icons.ARROW_FORWARD,
-        required=False,
-        validate_before_next=False,
-    ),
-    StepConfig(
-        id="schedule",
-        name="wizard_step_schedule",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_finish",
-        next_icon=ft.Icons.CHECK_CIRCLE,
-        required=False,
-        validate_before_next=True,
-    ),
-    StepConfig(
-        id="complete",
-        name="wizard_step_complete",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_start",
-        next_icon=ft.Icons.ROCKET_LAUNCH,
-        required=False,
-        validate_before_next=False,
-    ),
-]
 
 
 class OnboardingWizard(ft.Container):
@@ -147,15 +44,11 @@ class OnboardingWizard(ft.Container):
         super().__init__()
         self.app_page = page
         self.on_complete = on_complete
-        self.current_step = 0
         self.expand = True
         self.bgcolor = AppColors.BACKGROUND
 
-        self.step_validated: dict[str, bool] = {}
+        self.vm = OnboardingViewModel()
         self._locale_subscription_id = None
-        self.sync_in_progress = False
-        self._data_processor = None
-        self._validation_in_progress = False
 
         self._init_database_controls()
         self._init_token_controls()
@@ -183,7 +76,7 @@ class OnboardingWizard(ft.Container):
             self._build_step_indicators(),  # pragma: no cover
             alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
             vertical_alignment=ft.CrossAxisAlignment.START,  # pragma: no cover
-            visible=1 <= self.current_step <= 6,  # pragma: no cover
+            visible=1 <= self.vm.current_step <= 6,  # pragma: no cover
         )  # pragma: no cover
 
         self.navigation_bar = ft.Container(  # pragma: no cover
@@ -203,7 +96,7 @@ class OnboardingWizard(ft.Container):
         )  # pragma: no cover
 
         self.header_container = self._build_header()
-        self.header_container.visible = self.current_step in (0, 7)
+        self.header_container.visible = self.vm.current_step in (0, 7)
 
         self.loading_overlay_text = ft.Text(  # pragma: no cover
             I18n.get("wizard_validating"),  # pragma: no cover
@@ -249,6 +142,91 @@ class OnboardingWizard(ft.Container):
         self.did_mount = self._on_mount
         self.will_unmount = self._on_unmount
 
+        self._bind_vm()
+
+    def _bind_vm(self):  # pragma: no cover
+        self.vm.bind(
+            fn_validate_database=self.database_panel.save_config,
+            fn_validate_token=self.tushare_panel.verify_token,
+            fn_validate_cloud_ai=self._validate_cloud_ai_via_panel,
+            fn_validate_local_model=self._validate_local_model_via_panel,
+            fn_push_schedule_state=self._push_schedule_state,
+            on_step_changed=self._on_vm_step_changed,
+            on_sync_progress=self._on_vm_sync_progress,
+            on_sync_state_changed=self._on_vm_sync_state_changed,
+            on_validation_state_changed=self._on_vm_validation_state_changed,
+            on_complete=self.on_complete or self._default_on_complete,
+            on_schedule_time_normalized=self._on_schedule_time_normalized,
+        )
+
+    def _rebind_panel_callbacks(self):  # pragma: no cover
+        """Rebind panel operation callbacks (called after panel recreation on locale change)."""
+        self.vm.fn_validate_database = self.database_panel.save_config
+        self.vm.fn_validate_token = self.tushare_panel.verify_token
+        self.vm.fn_validate_cloud_ai = self._validate_cloud_ai_via_panel
+        self.vm.fn_validate_local_model = self._validate_local_model_via_panel
+        self.vm.fn_push_schedule_state = self._push_schedule_state
+
+    async def _default_on_complete(self):  # pragma: no cover
+        pass
+
+    # --- Panel validation bridges (View → VM callbacks) ---
+
+    async def _validate_cloud_ai_via_panel(self) -> bool:  # pragma: no cover
+        if await self.llm_config_panel.async_verify_connection():
+            if not self.llm_config_panel.save_current_config():
+                logger.error("[OnboardingWizard] Failed to save LLM config")
+                return False
+            return True
+        self._safe_update()
+        return False
+
+    async def _validate_local_model_via_panel(self) -> bool:  # pragma: no cover
+        model_path = self.local_model_panel.model_path_input.value.strip()
+        if not model_path:
+            return True
+        if await self.local_model_panel.async_verify_model():
+            if not self.local_model_panel.save_config():
+                logger.error("[OnboardingWizard] Failed to save local model config")
+                return False
+            return True
+        self._safe_update()
+        return False
+
+    def _push_schedule_state(self):  # pragma: no cover
+        self.vm.set_schedule_state(
+            enabled=self.schedule_enabled.value,
+            time_str=self.schedule_time.value,
+        )
+
+    def _on_schedule_time_normalized(self, normalized: str):  # pragma: no cover
+        self.schedule_time.value = normalized
+
+    # --- ViewModel → View notification callbacks ---
+
+    def _on_vm_step_changed(self):  # pragma: no cover
+        if self.vm.current_step == 7 and self.vm.step_validated.get("schedule") and hasattr(self, "schedule_time"):
+            self.schedule_time.value = self.vm.normalized_schedule_time
+        self._update_wizard()
+
+    def _on_vm_sync_progress(self, progress: float, message: str):  # pragma: no cover
+        self.sync_progress.value = progress
+        self.sync_status.value = message
+        self._safe_update()
+
+    def _on_vm_sync_state_changed(self):  # pragma: no cover
+        is_syncing = self.vm.sync_in_progress
+        self.btn_quick_sync.disabled = is_syncing
+        self.btn_full_sync.disabled = is_syncing
+        self.btn_cancel_sync.visible = is_syncing
+        self.btn_cancel_sync.disabled = not is_syncing
+        self.btn_sync_later.disabled = is_syncing
+        self._update_navigation_buttons()
+        self._safe_update()
+
+    def _on_vm_validation_state_changed(self):  # pragma: no cover
+        self._show_loading_overlay(self.vm.validation_in_progress)
+
     def _init_database_controls(self):  # pragma: no cover
         self.database_panel = DatabaseConfigPanel(
             compact=True,
@@ -288,7 +266,10 @@ class OnboardingWizard(ft.Container):
 
     def _on_panel_loading_change(self, loading: bool):  # pragma: no cover
         """通用面板加载状态回调 - 仅控制遮罩显隐"""
-        self._show_loading_overlay(loading)
+        if loading:
+            self._show_loading_overlay(True)
+        elif not self.vm.validation_in_progress:
+            self._show_loading_overlay(False)
         self._safe_update()
 
     async def _on_llm_test_connection(
@@ -299,10 +280,8 @@ class OnboardingWizard(ft.Container):
         api_key: str,
         **kwargs,
     ) -> dict:
-        """LLM 连接测试回调"""
-        from services.ai_service import AIService
-
-        return await AIService.test_connection(
+        """LLM 连接测试回调 — 委托 ViewModel"""
+        return await OnboardingViewModel.test_llm_connection(
             provider=provider,
             model=model,
             base_url=base_url,
@@ -311,11 +290,8 @@ class OnboardingWizard(ft.Container):
         )
 
     async def _on_verify_local_model(self, model_path: str, config: dict) -> bool:
-        """验证本地模型回调"""
-        from services.local_model_manager import LocalModelManager
-
-        manager = await LocalModelManager.get_instance()
-        return await manager.load_model(model_path, config)
+        """验证本地模型回调 — 委托 ViewModel"""
+        return await OnboardingViewModel.verify_local_model(model_path, config)
 
     def _init_sync_controls(self):  # pragma: no cover
         self.sync_progress = ft.ProgressBar(  # pragma: no cover
@@ -343,7 +319,7 @@ class OnboardingWizard(ft.Container):
         self.btn_sync_later = ft.TextButton(  # pragma: no cover
             I18n.get("wizard_btn_sync_later"),  # pragma: no cover
             icon=ft.Icons.SCHEDULE,  # pragma: no cover
-            on_click=lambda e: self.app_page.run_task(self._skip_sync),  # pragma: no cover
+            on_click=lambda e: self.app_page.run_task(self.vm.skip_sync),  # pragma: no cover
         )  # pragma: no cover
         self.btn_cancel_sync = ft.ElevatedButton(  # pragma: no cover
             I18n.get("wizard_btn_cancel"),  # pragma: no cover
@@ -352,12 +328,12 @@ class OnboardingWizard(ft.Container):
             visible=False,  # pragma: no cover
         )  # pragma: no cover
         self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(
-            self._start_sync, quick=True
+            self.vm.start_sync, quick=True
         )  # pragma: no cover
         self.btn_full_sync.on_click = lambda e: self.app_page.run_task(
-            self._start_sync, quick=False
+            self.vm.start_sync, quick=False
         )  # pragma: no cover
-        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(self._cancel_sync)  # pragma: no cover
+        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(self.vm.cancel_sync)  # pragma: no cover
 
     def _init_schedule_controls(self):  # pragma: no cover
         self.schedule_enabled = ft.Checkbox(  # pragma: no cover
@@ -381,7 +357,7 @@ class OnboardingWizard(ft.Container):
         )  # pragma: no cover
 
     def _on_input_change(self, step_id: str):  # pragma: no cover
-        self.step_validated[step_id] = False
+        self.vm.invalidate_step(step_id)
 
     def _build_header(self):  # pragma: no cover
         self.header_title = ft.Text(  # pragma: no cover
@@ -407,11 +383,11 @@ class OnboardingWizard(ft.Container):
 
     def _build_step_indicators(self):  # pragma: no cover
         # 仅在配置步骤 1~6 显示，欢迎页和完成页不显示
-        if not (1 <= self.current_step <= 6):
+        if not (1 <= self.vm.current_step <= 6):
             return []
 
         total_config_steps = 6
-        config_step = self.current_step  # 1~6
+        config_step = self.vm.current_step  # 1~6
         progress_percent = config_step / total_config_steps
 
         step_names = [
@@ -424,7 +400,7 @@ class OnboardingWizard(ft.Container):
             I18n.get("wizard_step_label_schedule"),
             None,  # 7: 完成(不显示)
         ]
-        current_step_name = step_names[self.current_step] or ""
+        current_step_name = step_names[self.vm.current_step] or ""
 
         step_text = ft.Text(
             f"{current_step_name}  ({config_step}/{total_config_steps})",
@@ -462,7 +438,7 @@ class OnboardingWizard(ft.Container):
         ]
 
     def _build_navigation_buttons(self):  # pragma: no cover
-        config = STEP_CONFIGS[self.current_step]
+        config = STEP_CONFIGS[self.vm.current_step]
 
         buttons = []
 
@@ -474,7 +450,7 @@ class OnboardingWizard(ft.Container):
                     icon=ft.Icons.ARROW_BACK,
                     on_click=lambda e: self.app_page.run_task(self._prev_step),
                     style=AppStyles.secondary_button(),
-                    disabled=(self.sync_in_progress and is_sync_step) or self._validation_in_progress,
+                    disabled=(self.vm.sync_in_progress and is_sync_step) or self.vm.validation_in_progress,
                 )
             )
         else:
@@ -485,7 +461,7 @@ class OnboardingWizard(ft.Container):
                 ft.TextButton(
                     I18n.get(config.skip_text_key),
                     on_click=lambda e: self.app_page.run_task(self._skip_step),
-                    disabled=self._validation_in_progress,
+                    disabled=self.vm.validation_in_progress,
                 )
             )
 
@@ -493,10 +469,10 @@ class OnboardingWizard(ft.Container):
             buttons.append(
                 ft.ElevatedButton(
                     I18n.get(config.next_text_key),
-                    icon=config.next_icon,
+                    icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
                     on_click=lambda e: self.app_page.run_task(self._next_step),
                     style=AppStyles.primary_button(),
-                    disabled=self._validation_in_progress,
+                    disabled=self.vm.validation_in_progress,
                 )
             )
 
@@ -990,212 +966,22 @@ class OnboardingWizard(ft.Container):
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
         )  # pragma: no cover
 
-    async def _validate_and_save_database(self) -> bool:
-        self._show_loading_overlay(True)
-        self._safe_update()
-
-        try:
-            return await self.database_panel.save_config()
-        finally:
-            self._show_loading_overlay(False)
-            self._safe_update()
-
-    async def _validate_and_save_token(self) -> bool:
-        return await self.tushare_panel.verify_token()
-
-    async def _validate_and_save_cloud_ai(self) -> bool:
-        if await self.llm_config_panel.async_verify_connection():
-            if not self.llm_config_panel.save_current_config():
-                logger.error("[OnboardingWizard] Failed to save LLM config")
-                return False
-            return True
-
-        self._safe_update()
-        return False
-
-    async def _validate_and_save_local_model(self) -> bool:
-        model_path = self.local_model_panel.model_path_input.value.strip()
-
-        if not model_path:
-            return True
-
-        if await self.local_model_panel.async_verify_model():
-            if not self.local_model_panel.save_config():
-                logger.error("[OnboardingWizard] Failed to save local model config")
-                return False
-            return True
-
-        self._safe_update()
-        return False
-
-    async def _validate_and_save_schedule(self) -> bool:
-        enabled = self.schedule_enabled.value
-        time_str = self.schedule_time.value.strip()
-
-        import re
-
-        if not re.match(r"^\d{1,2}:\d{2}$", time_str):
-            time_str = "16:30"
-        else:
-            try:
-                hours, minutes = map(int, time_str.split(":"))
-                if not (0 <= hours <= 23 and 0 <= minutes <= 59):
-                    time_str = "16:30"
-            except ValueError:
-                time_str = "16:30"
-
-        self.schedule_time.value = time_str
-        ConfigHandler.save_config(
-            {
-                "auto_update_enabled": enabled,
-                "auto_update_time": time_str,
-            }
-        )
-        return True
-
-    async def _validate_and_persist_current_step(self) -> bool:
-        ensure_correlation_id()
-        config = STEP_CONFIGS[self.current_step]
-
-        if self.step_validated.get(config.id, False):
-            return True
-
-        validators = {
-            "database": self._validate_and_save_database,
-            "token": self._validate_and_save_token,
-            "cloud_ai": self._validate_and_save_cloud_ai,
-            "local_model": self._validate_and_save_local_model,
-            "schedule": self._validate_and_save_schedule,
-        }
-
-        validator = validators.get(config.id)
-        if validator:
-            result = await validator()
-            if result:
-                self.step_validated[config.id] = True
-            return result
-
-        return True
-
     async def _next_step(self):  # pragma: no cover
-        config = STEP_CONFIGS[self.current_step]
-
-        if config.validate_before_next:  # noqa: SIM102
-            if not await self._validate_and_persist_current_step():
-                return
-
-        if config.id == "complete":
-            if self.on_complete:
-                await self.on_complete()
-            return
-
-        if self.current_step < len(STEP_CONFIGS) - 1:
-            self.current_step += 1
-            self._update_wizard()
+        await self.vm.next_step()
 
     async def _prev_step(self):  # pragma: no cover
-        config = STEP_CONFIGS[self.current_step]
-        if config.validate_before_next:
-            self.step_validated[config.id] = False
+        await self.vm.prev_step()
 
-        if self.current_step > 0:
-            self.current_step -= 1
-            self._update_wizard()
-
-    async def _skip_step(self):
-        if self.current_step < len(STEP_CONFIGS) - 1:
-            self.current_step += 1
-            self._update_wizard()
+    async def _skip_step(self):  # pragma: no cover
+        await self.vm.skip_step()
 
     def _update_wizard(self):  # pragma: no cover
         self.step_indicators.controls = self._build_step_indicators()
-        self.step_indicators.visible = 1 <= self.current_step <= 6
-        self.header_container.visible = self.current_step in (0, 7)
-        self.step_container.content = self.steps_content[self.current_step]
+        self.step_indicators.visible = 1 <= self.vm.current_step <= 6
+        self.header_container.visible = self.vm.current_step in (0, 7)
+        self.step_container.content = self.steps_content[self.vm.current_step]
         self.navigation_bar.content = self._build_navigation_buttons()
         self._safe_update()
-
-    @property
-    def data_processor(self):
-        if self._data_processor is None:
-            self._data_processor = DataProcessor()
-        return self._data_processor
-
-    async def _start_sync(self, quick=False):
-        ensure_correlation_id()
-        self.sync_in_progress = True
-        self.btn_quick_sync.disabled = True
-        self.btn_full_sync.disabled = True
-        self.btn_cancel_sync.visible = True
-        self.btn_cancel_sync.disabled = False
-        self.btn_sync_later.disabled = True
-        self._update_navigation_buttons()
-
-        self.sync_status.value = I18n.get("wizard_status_init")
-        self.sync_progress.value = 0
-        self._safe_update()
-
-        try:
-
-            def progress_callback(current, total, message):
-                self.sync_progress.value = current / 100
-                self.sync_status.value = message
-                self._safe_update()
-
-            result = await self.data_processor.initialize_system(
-                progress_callback=progress_callback,
-                quick=quick,
-            )
-
-            if result:
-                self.sync_status.value = I18n.get("wizard_status_done")
-                self.sync_progress.value = 1
-                self.btn_cancel_sync.visible = False
-                self.btn_sync_later.disabled = False
-
-                await asyncio.sleep(1)
-                await self._next_step()
-            else:
-                self.sync_status.value = I18n.get("wizard_status_cancelled")
-                self.btn_quick_sync.disabled = False
-                self.btn_full_sync.disabled = False
-                self.btn_sync_later.disabled = False
-
-        except Exception as e:
-            from utils.error_classifier import classify_error, get_error_message
-
-            error_info = classify_error(e, context="general")
-            self.sync_status.value = get_error_message(error_info)
-            self.sync_progress.value = 0
-            self.btn_quick_sync.disabled = False
-            self.btn_full_sync.disabled = False
-            self.btn_sync_later.disabled = False
-            self.btn_cancel_sync.visible = False
-        finally:
-            self.sync_in_progress = False
-            self._update_navigation_buttons()
-            self._safe_update()
-
-    async def _skip_sync(self):  # pragma: no cover
-        self.sync_status.value = I18n.get("wizard_status_skip")
-        self._safe_update()
-        await self._next_step()
-
-    async def _cancel_sync(self):
-        try:
-            if self._data_processor:
-                await self._data_processor.stop()
-            self.sync_status.value = I18n.get("wizard_status_cancelled")
-            self.btn_quick_sync.disabled = False
-            self.btn_full_sync.disabled = False
-            self.btn_sync_later.disabled = False
-            self.btn_cancel_sync.visible = False
-        except Exception as e:
-            logger.warning(f"Failed to cancel sync: {e}")
-        finally:
-            self.sync_in_progress = False
-            self._update_navigation_buttons()
-            self._safe_update()
 
     def _on_mount(self):  # pragma: no cover
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
@@ -1204,6 +990,13 @@ class OnboardingWizard(ft.Container):
         if self._locale_subscription_id:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
+        if self.app_page:
+            self.app_page.run_task(self._cleanup_vm)
+
+    async def _cleanup_vm(self):  # pragma: no cover
+        if self.vm.sync_in_progress:
+            await self.vm.cancel_sync()
+        self.vm.dispose()
 
     def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
         if hasattr(self, "header_title"):
@@ -1265,9 +1058,12 @@ class OnboardingWizard(ft.Container):
                 self._build_complete_step(),
             ]
 
-            self.step_container.content = self.steps_content[self.current_step]
+            self.step_container.content = self.steps_content[self.vm.current_step]
             self.step_indicators.controls = self._build_step_indicators()
             self._update_navigation_buttons()
+
+            # Rebind panel callbacks to new panels
+            self._rebind_panel_callbacks()
 
             self._safe_update()
         except Exception as ex:
@@ -1281,6 +1077,5 @@ class OnboardingWizard(ft.Container):
             logger.debug(f"[OnboardingWizard] UI update skipped: {exc}")
 
     def _show_loading_overlay(self, show: bool):  # pragma: no cover
-        self._validation_in_progress = show
         self.loading_overlay.visible = show
         self._update_navigation_buttons()

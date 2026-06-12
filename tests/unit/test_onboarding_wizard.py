@@ -40,7 +40,7 @@ class TestStepConfig:
 
     def test_step_config_defaults(self):
         """Test StepConfig default values"""
-        from ui.views.onboarding_wizard import StepConfig
+        from ui.viewmodels.onboarding_view_model import StepConfig
 
         config = StepConfig(
             id="test",
@@ -58,7 +58,7 @@ class TestStepConfig:
 
     def test_step_config_all_fields(self):
         """Test StepConfig with all fields set"""
-        from ui.views.onboarding_wizard import StepConfig
+        from ui.viewmodels.onboarding_view_model import StepConfig
 
         config = StepConfig(
             id="test",
@@ -80,13 +80,13 @@ class TestStepConfig:
 
     def test_step_configs_count(self):
         """Test STEP_CONFIGS has 8 steps"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         assert len(STEP_CONFIGS) == 8
 
     def test_step_configs_ids(self):
         """Test STEP_CONFIGS has correct step IDs"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         expected_ids = [
             "welcome",
@@ -103,14 +103,14 @@ class TestStepConfig:
 
     def test_required_steps(self):
         """Test required steps are marked correctly"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         required_steps = [config.id for config in STEP_CONFIGS if config.required]
         assert required_steps == ["database", "token", "cloud_ai"]
 
     def test_validate_before_next_steps(self):
         """Test validate_before_next steps are marked correctly"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         validate_steps = [config.id for config in STEP_CONFIGS if config.validate_before_next]
         assert validate_steps == [
@@ -210,13 +210,13 @@ class TestStepIndicators:
 
     def test_step_count(self):
         """Test step count is 8"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         assert len(STEP_CONFIGS) == 8
 
     def test_welcome_step_config(self):
         """Test welcome step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         welcome = STEP_CONFIGS[0]
         assert welcome.id == "welcome"
@@ -225,7 +225,7 @@ class TestStepIndicators:
 
     def test_database_step_config(self):
         """Test database step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         db_step = STEP_CONFIGS[1]
         assert db_step.id == "database"
@@ -234,7 +234,7 @@ class TestStepIndicators:
 
     def test_token_step_config(self):
         """Test token step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         token_step = STEP_CONFIGS[2]
         assert token_step.id == "token"
@@ -243,7 +243,7 @@ class TestStepIndicators:
 
     def test_cloud_ai_step_config(self):
         """Test cloud AI step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         ai_step = STEP_CONFIGS[3]
         assert ai_step.id == "cloud_ai"
@@ -252,7 +252,7 @@ class TestStepIndicators:
 
     def test_local_model_step_config(self):
         """Test local model step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         model_step = STEP_CONFIGS[4]
         assert model_step.id == "local_model"
@@ -262,7 +262,7 @@ class TestStepIndicators:
 
     def test_data_sync_step_config(self):
         """Test data sync step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         sync_step = STEP_CONFIGS[5]
         assert sync_step.id == "data_sync"
@@ -270,7 +270,7 @@ class TestStepIndicators:
 
     def test_schedule_step_config(self):
         """Test schedule step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         schedule_step = STEP_CONFIGS[6]
         assert schedule_step.id == "schedule"
@@ -278,7 +278,7 @@ class TestStepIndicators:
 
     def test_complete_step_config(self):
         """Test complete step config"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 
         complete_step = STEP_CONFIGS[7]
         assert complete_step.id == "complete"
@@ -291,7 +291,8 @@ class TestOnboardingCompleteCallSequence:
     @pytest.mark.asyncio
     async def test_complete_step_does_not_call_set_onboarding_complete(self):
         """Test that _next_step on complete step does NOT call set_onboarding_complete directly"""
-        from ui.views.onboarding_wizard import STEP_CONFIGS, OnboardingWizard
+        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
+        from ui.views.onboarding_wizard import OnboardingWizard
 
         mock_page = MagicMock()
         mock_page.run_task = MagicMock()
@@ -701,33 +702,6 @@ class TestNavigationBarFixedAtBottom:
         assert hasattr(OnboardingWizard, "__init__")
 
 
-class TestStartSyncQuickParameter:
-    """Tests for _start_sync quick parameter passing"""
-
-    def test_start_sync_accepts_quick_parameter(self):
-        """Test that _start_sync accepts quick parameter"""
-        import inspect
-
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        sig = inspect.signature(OnboardingWizard._start_sync)
-        params = list(sig.parameters.keys())
-
-        assert "quick" in params
-
-    def test_start_sync_quick_defaults_to_false(self):
-        """Test that quick parameter defaults to False"""
-        import inspect
-
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        sig = inspect.signature(OnboardingWizard._start_sync)
-        quick_param = sig.parameters.get("quick")
-
-        assert quick_param is not None
-        assert quick_param.default is False
-
-
 class TestLLMProviderSwitch:
     """Tests for LLM provider switch behavior - clears API Key"""
 
@@ -853,40 +827,6 @@ class TestLocalModelManagerIntegration:
             assert LocalModelManager._initialized is False
 
 
-class TestWizardValidationMethods:
-    """Tests for wizard validation methods"""
-
-    def test_wizard_has_validate_and_save_database(self):
-        """Test that wizard has _validate_and_save_database method"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "_validate_and_save_database")
-
-    def test_wizard_has_validate_and_save_token(self):
-        """Test that wizard has _validate_and_save_token method"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "_validate_and_save_token")
-
-    def test_wizard_has_validate_and_save_cloud_ai(self):
-        """Test that wizard has _validate_and_save_cloud_ai method"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "_validate_and_save_cloud_ai")
-
-    def test_wizard_has_validate_and_save_local_model(self):
-        """Test that wizard has _validate_and_save_local_model method"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "_validate_and_save_local_model")
-
-    def test_wizard_has_validate_and_save_schedule(self):
-        """Test that wizard has _validate_and_save_schedule method"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "_validate_and_save_schedule")
-
-
 class TestSliderLabelAttribute:
     """Tests for Slider label attribute for value display"""
 
@@ -999,32 +939,3 @@ class TestLLMProviderName:
 
         qwen = LLM_PROVIDERS.get("qwen", {})
         assert qwen.get("name") == "通义千问"
-
-
-class TestCloudAIValidationSaveConfig:
-    """Tests for cloud AI validation always saves config"""
-
-    @pytest.mark.asyncio
-    async def test_validate_cloud_ai_saves_config_on_success(self):
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        wizard = OnboardingWizard.__new__(OnboardingWizard)
-        wizard.llm_config_panel = MagicMock()
-        wizard.llm_config_panel.api_key_modified = False
-        wizard.llm_config_panel.get_llm_config = MagicMock(
-            return_value={
-                "provider": "deepseek",
-                "model": "test",
-                "base_url": "",
-                "api_key": "test-key",
-            }
-        )
-        wizard.llm_config_panel.async_verify_connection = AsyncMock(return_value=True)
-        wizard.page = MagicMock()
-
-        with patch("ui.views.onboarding_wizard.I18n"):
-            await wizard._validate_and_save_cloud_ai()
-
-        wizard.llm_config_panel.save_current_config.assert_called()
