@@ -813,6 +813,18 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_fina_indicator.return_value = mock_indicator
         self.mock_api.get_cashflow.return_value = mock_cashflow
 
+        from unittest.mock import AsyncMock, MagicMock
+        from contextlib import asynccontextmanager
+
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        self.mock_cache.financial_dao = MagicMock()
+        self.mock_cache.financial_dao._guarded_begin = mock_guarded_begin
+
         self.mock_cache.save_financial_reports = AsyncMock(return_value=1)
         self.mock_cache.update_sync_status = AsyncMock()
 
