@@ -196,7 +196,7 @@ class DataSourceViewModel:
                 await self._processor.run_daily_update(progress_callback=_progress)
                 if self.on_show_snack:
                     self.on_show_snack(
-                        I18n.get("snack_full_sync_done", total="全部"),
+                        I18n.get("snack_full_sync_done_simple"),
                         "success",
                     )
                 return I18n.get("ds_daily_update_done")

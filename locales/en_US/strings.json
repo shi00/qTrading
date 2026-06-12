@@ -795,6 +795,7 @@
     "snack_daily_sync_nodata": "No data found, check Token or Network",
     "snack_full_sync_start": "Starting full sync...",
     "snack_full_sync_done": "Full sync complete! {total} records",
+    "snack_full_sync_done_simple": "Full sync complete!",
     "progress_sync_prepare": "Preparing...",
     "snack_sync_not_completed": "Sync incomplete, retry",
     "progress_sync_market": "Syncing quotes: {date}",

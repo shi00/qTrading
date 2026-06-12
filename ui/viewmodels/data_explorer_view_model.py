@@ -64,6 +64,8 @@ class DataExplorerViewModel:
 
     def dispose(self):
         """Release resources held by this ViewModel."""
+        if self._disposed:
+            return
         self._disposed = True
         self.current_data = pd.DataFrame()
         self.sql_result = None
@@ -79,6 +81,8 @@ class DataExplorerViewModel:
     async def init_tables(self):
         """Load the list of all database tables."""
         ensure_correlation_id()
+        if self._disposed:
+            return []
         try:
             tables = await self._tp.run_async(TaskType.CPU, self._db.get_all_tables)
             self.tables_list = tables
@@ -108,6 +112,8 @@ class DataExplorerViewModel:
     async def load_table_schema(self, table_name: str):
         """Load column schema for a given table."""
         ensure_correlation_id()
+        if self._disposed:
+            return []
         try:
             schema = await self._tp.run_async(TaskType.CPU, self._db.get_table_schema, table_name)
             new_columns = [col["name"] for col in schema]
@@ -195,6 +201,8 @@ class DataExplorerViewModel:
     ):
         """Query total row count for a table."""
         ensure_correlation_id()
+        if self._disposed:
+            return 0
         try:
             tbl = table_name or self.current_table
             flt = filters if filters is not None else self._build_filters()
