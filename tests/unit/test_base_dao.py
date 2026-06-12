@@ -475,15 +475,16 @@ class TestMissingColsExcludedFromUpdate:
                 await dao._read_db("SELECT * FROM t", suppress_errors=False)
 
     @pytest.mark.asyncio
-    async def test_read_default_suppress_errors_is_false(self):
+    async def test_read_default_suppress_errors_is_true(self):
         mock_conn = AsyncMock()
         mock_conn.exec_driver_sql.side_effect = Exception("Read Error")
         mock_engine = _setup_mock_engine_connect(mock_conn)
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            with pytest.raises(Exception, match="Read Error"):
-                await dao._read_db("SELECT * FROM t")
+            result = await dao._read_db("SELECT * FROM t")
+            assert isinstance(result, pd.DataFrame)
+            assert result.empty
 
 
 class TestBaseDaoSaveUpsert:

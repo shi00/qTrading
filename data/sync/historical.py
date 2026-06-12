@@ -327,6 +327,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         abort_sync = False
         processed_count = 0
         BATCH_SIZE = 20
+        counter_lock = asyncio.Lock()
 
         async def sync_one_day(date: datetime.date):
             nonlocal abort_sync, processed_count, consecutive_failures
@@ -334,25 +335,27 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 return
 
             async with semaphore:
-                if self._shutdown_event.is_set() or abort_sync:
-                    return
+                async with counter_lock:
+                    if self._shutdown_event.is_set() or abort_sync:
+                        return
 
-                if consecutive_failures > CB_THRESHOLD:
-                    abort_sync = True
-                    result.status = "failed"
-                    result.errors.append(
-                        f"Circuit breaker triggered: {consecutive_failures} consecutive failures",
-                    )
-                    logger.error(
-                        f"[HistoricalSync] CircuitBreaker | ❌ Abort: {consecutive_failures} consecutive failures exceeded threshold {CB_THRESHOLD}",
-                    )
-                    return
+                    if consecutive_failures > CB_THRESHOLD:
+                        abort_sync = True
+                        result.status = "failed"
+                        result.errors.append(
+                            f"Circuit breaker triggered: {consecutive_failures} consecutive failures",
+                        )
+                        logger.error(
+                            f"[HistoricalSync] CircuitBreaker | ❌ Abort: {consecutive_failures} consecutive failures exceeded threshold {CB_THRESHOLD}",
+                        )
+                        return
 
                 try:
                     await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
-                    processed_count += 1
-                    result.added += 1
-                    consecutive_failures = 0
+                    async with counter_lock:
+                        processed_count += 1
+                        result.added += 1
+                        consecutive_failures = 0
                     if progress_callback:
                         progress_callback(
                             processed_count,
@@ -366,8 +369,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         f"[HistoricalSync] DaySync | ⚠️ Failed {date}: {e}",
                         exc_info=True,
                     )
-                    consecutive_failures += 1
-                    failed_dates.append(date)
+                    async with counter_lock:
+                        consecutive_failures += 1
+                        failed_dates.append(date)
 
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):

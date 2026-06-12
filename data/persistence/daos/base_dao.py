@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import datetime
 import logging
 import time
@@ -46,40 +47,99 @@ class BaseDao:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
             )
-        if getattr(self.engine, "_disposed", False):
+        from data.cache.cache_manager import CacheManager
+
+        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed. Call CacheManager.init_db() to reinitialize."
             )
 
+    @asynccontextmanager
+    async def _guarded_begin(self, conn: typing.Any = None):
+        """Unified transaction/connection context manager with engine disposal guard.
+
+        If an existing conn is provided, it yields it and does not start a new transaction.
+        Otherwise, it starts an engine.begin() transaction.
+        """
+        self._check_engine()
+        await self._get_maintenance_event().wait()
+
+        if conn is not None:
+            yield conn
+            return
+
+        try:
+            async with self.engine.begin() as tx_conn:
+                yield tx_conn
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            err_str = str(e)
+            if any(
+                msg in err_str
+                for msg in [
+                    "no active connection",
+                    "database is closed",
+                    "ConnectionDoesNotExistError",
+                ]
+            ):
+                raise EngineDisposedError(
+                    f"[{self.__class__.__name__}] Engine disposed during guarded begin: {e}"
+                ) from e
+            raise
+
     @staticmethod
-    async def chunked_in_query(read_db_fn, sql_template, values, *, chunk_size=_IN_CHUNK_SIZE, params_fn=None):
+    async def chunked_in_query(
+        read_db_fn,
+        sql_template,
+        values,
+        *,
+        chunk_size=_IN_CHUNK_SIZE,
+        params_fn=None,
+        start_idx=1,
+        extra_params=None,
+        **read_db_kwargs,
+    ):
         """
         Execute a SQL query with IN clause in chunks to avoid PostgreSQL parameter limit.
 
         Args:
-            read_db_fn: async _read_db method
-            sql_template: SQL with {placeholders} marker
+            read_db_fn: async _read_db method (or equivalent)
+            sql_template: SQL with {placeholders} marker or a callable(placeholders, chunk_len) -> sql_string
             values: list of values for the IN clause
             chunk_size: maximum items per IN clause (default 500)
             params_fn: callable(values_chunk) -> extra params list, appended after values
+            start_idx: starting index for placeholders (default 1)
+            extra_params: prefix parameters list to prepend to query arguments
+            **read_db_kwargs: extra kwargs to pass to read_db_fn (e.g., suppress_errors=True)
         """
         if not values:
             return pd.DataFrame()
 
+        extra_prefix = extra_params or []
+        prefix_len = len(extra_prefix)
+        actual_start_idx = start_idx if extra_params is None else prefix_len + 1
+
         if len(values) <= chunk_size:
-            placeholders = ",".join([f"${i + 1}" for i in range(len(values))])
-            extra = params_fn(values) if params_fn else []
-            sql = sql_template.format(placeholders=placeholders)
-            df = await read_db_fn(sql, values + extra)
+            placeholders = ",".join([f"${actual_start_idx + i}" for i in range(len(values))])
+            extra_suffix = params_fn(values) if params_fn else []
+            if callable(sql_template):
+                sql = sql_template(placeholders, len(values))
+            else:
+                sql = sql_template.format(placeholders=placeholders)
+            df = await read_db_fn(sql, extra_prefix + values + extra_suffix, **read_db_kwargs)
             return df if df is not None else pd.DataFrame()
 
         all_results = []
         for i in range(0, len(values), chunk_size):
             chunk = values[i : i + chunk_size]
-            placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-            extra = params_fn(chunk) if params_fn else []
-            sql = sql_template.format(placeholders=placeholders)
-            df = await read_db_fn(sql, chunk + extra)
+            placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
+            extra_suffix = params_fn(chunk) if params_fn else []
+            if callable(sql_template):
+                sql = sql_template(placeholders, len(chunk))
+            else:
+                sql = sql_template.format(placeholders=placeholders)
+            df = await read_db_fn(sql, extra_prefix + chunk + extra_suffix, **read_db_kwargs)
             if df is not None and not df.empty:
                 all_results.append(df)
 
@@ -523,7 +583,7 @@ class BaseDao:
         return val
 
     async def _read_db(
-        self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = False, max_rows: int | None = None
+        self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = True, max_rows: int | None = None
     ):
         """Generic Read returning DataFrame (Offloaded CSV conversion)
 
@@ -566,11 +626,9 @@ class BaseDao:
 
                 if max_rows is not None and len(rows) > max_rows:
                     raise ValueError(
-                        "[%s] Query returned %d rows, exceeding max_rows limit of %d. "
-                        "Add WHERE filters or increase max_rows.",
-                        self.__class__.__name__,
-                        len(rows),
-                        max_rows,
+                        f"[{self.__class__.__name__}] Query returned {len(rows)} rows, "
+                        f"exceeding max_rows limit of {max_rows}. "
+                        "Add WHERE filters or increase max_rows."
                     )
 
                 # Offload DF creation

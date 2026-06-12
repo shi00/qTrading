@@ -14,7 +14,7 @@ from data.persistence.models import (
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +189,7 @@ class StockDao(BaseDao):
         )
 
         try:
-            # Gate: wait for maintenance before direct engine access
-            await self._get_maintenance_event().wait()
-            async with self.engine.begin() as conn:
+            async with self._guarded_begin() as conn:
                 # 1. Clear old data
                 await conn.exec_driver_sql("DELETE FROM stock_concepts")
 
@@ -203,13 +201,9 @@ class StockDao(BaseDao):
         except asyncio.CancelledError:
             logger.warning("[StockDao] Cancelled during overwrite_concepts.")
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
-            err_str = str(e)
-            if any(
-                msg in err_str for msg in ["no active connection", "database is closed", "ConnectionDoesNotExistError"]
-            ):
-                logger.warning(f"[StockDao] DB closed during overwrite_concepts (shutdown): {e}")
-                return 0
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
             raise
 
@@ -257,16 +251,11 @@ class StockDao(BaseDao):
                 [ts_codes[0]],
             )
         else:
-            _CHUNK = 500
-            all_dfs = []
-            for i in range(0, len(ts_codes), _CHUNK):
-                chunk = ts_codes[i : i + _CHUNK]
-                placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-                sql = f"SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code IN ({placeholders})"
-                df = await self._read_db(sql, chunk)
-                if df is not None and not df.empty:
-                    all_dfs.append(df)
-            rows = pd.concat(all_dfs, ignore_index=True) if all_dfs else None
+            rows = await self.chunked_in_query(
+                self._read_db,
+                "SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code IN ({placeholders})",
+                ts_codes,
+            )
 
         result = {}
         if rows is None or rows.empty:

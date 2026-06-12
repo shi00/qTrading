@@ -154,28 +154,20 @@ class MarketDao(BaseDao):
             params.append(ed)
             idx += 1
 
-        chunk_size = 500
-        if len(ts_code_list) > chunk_size:
-            all_results = []
-            base_sql = sql
-            base_params = params.copy()
-            base_idx = idx
-            for i in range(0, len(ts_code_list), chunk_size):
-                chunk = ts_code_list[i : i + chunk_size]
-                placeholders = ",".join([f"${base_idx + j}" for j in range(len(chunk))])
-                chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
-                df_chunk = await self._read_db(chunk_sql, base_params + chunk)
-                if df_chunk is not None and not df_chunk.empty:
-                    all_results.append(df_chunk)
-            if all_results:
-                import pandas as pd
+        if ts_code_list:
+            sql_template = sql + " AND ts_code IN ({placeholders})"
+            df = await self.chunked_in_query(
+                self._read_db,
+                sql_template,
+                ts_code_list,
+                extra_params=params,
+            )
+            if not df.empty:
+                sort_cols = [c for c in ["ts_code", "trade_date"] if c in df.columns]
+                if sort_cols:
+                    df = df.sort_values(sort_cols, ignore_index=True)
+            return df
 
-                return pd.concat(all_results, ignore_index=True)
-            return await self._read_db("SELECT * FROM daily_indicators WHERE 1=0", [])
-
-        placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])
-        sql += f" AND ts_code IN ({placeholders})"
-        params.extend(ts_code_list)
         sql += " ORDER BY ts_code, trade_date"
         return await self._read_db(sql, params)
 
@@ -216,6 +208,7 @@ class MarketDao(BaseDao):
         # Postgres asyncpg is strictly typed (FLOAT). We must forcibly coerce them.
         import pandas as pd
 
+        df = df.copy()
         for col in columns[1:]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")

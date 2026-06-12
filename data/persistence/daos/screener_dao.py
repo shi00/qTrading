@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
 from data.persistence.models import Base, ScreeningHistory, get_model_columns
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -230,15 +230,25 @@ class ScreenerDao(BaseDao):
             if isinstance(as_of, datetime.datetime):
                 as_of = as_of.date()
             sql = f"""
-                {_LEARNING_CONTEXT_BASE_SQL}
-                AND trade_date < $2
+                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
+                FROM screening_history
+                WHERE prediction_result = $1
+                  AND alpha IS NOT NULL
+                  AND t5_pct IS NOT NULL
+                  AND review_status = $4
+                  AND trade_date < $2
                 ORDER BY alpha {order}, t1_pct {order}
                 LIMIT $3
             """
             df = await self._read_db(sql, (label, as_of, limit, REVIEW_STATUS_COMPLETED))
         else:
             sql = f"""
-                {_LEARNING_CONTEXT_BASE_SQL}
+                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
+                FROM screening_history
+                WHERE prediction_result = $1
+                  AND alpha IS NOT NULL
+                  AND t5_pct IS NOT NULL
+                  AND review_status = $3
                 ORDER BY alpha {order}, t1_pct {order}
                 LIMIT $2
             """
@@ -289,15 +299,13 @@ class ScreenerDao(BaseDao):
         if conn is not None:
             await conn.execute(stmt)
         else:
-            compiled = stmt.compile(
-                dialect=self.engine.dialect,
-                compile_kwargs={"literal_binds": False},
-            )
-            await self._write_db(
-                str(compiled),
-                tuple(compiled.params[key] for key in compiled.positiontup),  # type: ignore[union-attr]
-                suppress_errors=True,
-            )
+            try:
+                async with self._guarded_begin() as tx_conn:
+                    await tx_conn.execute(stmt)
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                logger.warning(f"[ScreenerDao] Failed to update prediction result: {e}")
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:

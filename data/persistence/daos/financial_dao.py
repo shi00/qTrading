@@ -194,14 +194,12 @@ class FinancialDao(BaseDao):
             return pd.DataFrame()
 
         try:
-            all_results = []
-            for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
-                chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
-                placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                if as_of_date is not None:
-                    ann_date_param = len(chunk) + 1
-                    limit_param = len(chunk) + 2
-                    sql = f"""
+            if as_of_date is not None:
+
+                def sql_template_fn(placeholders, chunk_len):
+                    ann_date_param = chunk_len + 1
+                    limit_param = chunk_len + 2
+                    return f"""
                         SELECT * FROM (
                             SELECT
                                 ts_code, end_date, ann_date, report_type,
@@ -217,9 +215,18 @@ class FinancialDao(BaseDao):
                         WHERE rn <= ${limit_param}
                         ORDER BY ts_code, end_date DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date, periods])
-                else:
-                    sql = f"""
+
+                df = await self.chunked_in_query(
+                    self._read_db,
+                    sql_template_fn,
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date, periods],
+                )
+            else:
+
+                def sql_template_fn_no_as_of(placeholders, chunk_len):
+                    limit_param = chunk_len + 1
+                    return f"""
                         SELECT * FROM (
                             SELECT
                                 ts_code, end_date, ann_date, report_type,
@@ -232,17 +239,16 @@ class FinancialDao(BaseDao):
                             FROM financial_reports
                             WHERE ts_code IN ({placeholders})
                         ) sub
-                        WHERE rn <= ${len(chunk) + 1}
+                        WHERE rn <= ${limit_param}
                         ORDER BY ts_code, end_date DESC
                     """
-                    df = await self._read_db(sql, chunk + [periods])
-                if df is not None and not df.empty:
-                    all_results.append(df)
 
-            if all_results:
-                df = pd.concat(all_results, ignore_index=True)
-            else:
-                df = pd.DataFrame()
+                df = await self.chunked_in_query(
+                    self._read_db,
+                    sql_template_fn_no_as_of,
+                    ts_codes,
+                    params_fn=lambda chunk: [periods],
+                )
 
             if df is not None and not df.empty and "rn" in df.columns:
                 df = df.drop(columns=["rn"])

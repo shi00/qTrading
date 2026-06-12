@@ -185,7 +185,8 @@ class QuoteDao(BaseDao):
             safe_tables.append(table)
 
         if not safe_tables:
-            return True
+            logger.warning("[QuoteDao] check_data_exists: safe_tables is empty (all tables filtered out)")
+            return False
 
         metadata = Base.metadata
         union_parts = []
@@ -308,37 +309,19 @@ class QuoteDao(BaseDao):
             idx += 1
 
         if ts_code_list:
-            # Split into chunks of 500 for large queries
-            chunk_size = 500
-            if len(ts_code_list) > chunk_size:
-                logger.debug(f"[QuoteDao] Chunking query for {len(ts_code_list)} codes")
-                all_results = []
-
-                # Base SQL without the IN clause
-                base_sql = sql
-                base_params = params.copy()
-                base_idx = idx
-
-                for i in range(0, len(ts_code_list), chunk_size):
-                    chunk = ts_code_list[i : i + chunk_size]
-                    placeholders = ",".join(
-                        [f"${base_idx + j}" for j in range(len(chunk))],
-                    )
-                    chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
-                    chunk_params = base_params + chunk
-
-                    df_chunk = await self._read_db(chunk_sql, chunk_params, suppress_errors=suppress_errors)
-                    if not df_chunk.empty:
-                        all_results.append(df_chunk)
-
-                if all_results:
-                    return pd.concat(all_results, ignore_index=True)
-                return pd.DataFrame()
-            placeholders = ",".join(
-                [f"${idx + j}" for j in range(len(ts_code_list))],
+            sql_template = sql + " AND ts_code IN ({placeholders})"
+            df = await self.chunked_in_query(
+                self._read_db,
+                sql_template,
+                ts_code_list,
+                extra_params=params,
+                suppress_errors=suppress_errors,
             )
-            sql += f" AND ts_code IN ({placeholders})"
-            params.extend(ts_code_list)
+            if not df.empty:
+                sort_cols = [c for c in ["ts_code", "trade_date"] if c in df.columns]
+                if sort_cols:
+                    df = df.sort_values(sort_cols, ignore_index=True)
+            return df
 
         return await self._read_db(sql, params, suppress_errors=suppress_errors)
 
@@ -488,26 +471,20 @@ class QuoteDao(BaseDao):
             params.append(ed)
             idx += 1
 
-        chunk_size = 500
-        if len(ts_code_list) > chunk_size:
-            all_results = []
-            base_sql = sql
-            base_params = params.copy()
-            base_idx = idx
-            for i in range(0, len(ts_code_list), chunk_size):
-                chunk = ts_code_list[i : i + chunk_size]
-                placeholders = ",".join([f"${base_idx + j}" for j in range(len(chunk))])
-                chunk_sql = base_sql + f" AND ts_code IN ({placeholders})"
-                df_chunk = await self._read_db(chunk_sql, base_params + chunk)
-                if df_chunk is not None and not df_chunk.empty:
-                    all_results.append(df_chunk)
-            if all_results:
-                return pd.concat(all_results, ignore_index=True)
-            return pd.DataFrame()
+        if ts_code_list:
+            sql_template = sql + " AND ts_code IN ({placeholders})"
+            df = await self.chunked_in_query(
+                self._read_db,
+                sql_template,
+                ts_code_list,
+                extra_params=params,
+            )
+            if not df.empty:
+                sort_cols = [c for c in ["ts_code", "trade_date"] if c in df.columns]
+                if sort_cols:
+                    df = df.sort_values(sort_cols, ignore_index=True)
+            return df
 
-        placeholders = ",".join([f"${idx + j}" for j in range(len(ts_code_list))])
-        sql += f" AND ts_code IN ({placeholders})"
-        params.extend(ts_code_list)
         sql += " ORDER BY ts_code, trade_date"
         return await self._read_db(sql, params)
 

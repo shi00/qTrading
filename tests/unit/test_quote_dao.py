@@ -349,7 +349,7 @@ class TestQuoteDaoCheckDataExists:
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=[]):
             result = await dao.check_data_exists("20240615", tables=[])
-            assert result is True
+            assert result is False
 
     @pytest.mark.asyncio
     async def test_none_trade_date_returns_false(self):

@@ -363,7 +363,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     if not has_error:
                         has_actual_data = df_merged is not None and not df_merged.empty
                         if has_actual_data:
-                            async with self.context.cache.engine.begin() as tx_conn:
+                            async with self.context.cache.financial_dao._guarded_begin() as tx_conn:
                                 await self.context.cache.save_financial_reports(
                                     df_merged[FINANCIAL_REPORT_SCHEMA_COLS],  # type: ignore[optional-subscript]
                                     conn=tx_conn,
@@ -567,6 +567,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
             tasks = [sync_one_target(item) for item in target_list]
 
+            day_saved = 0
             _BATCH_SIZE = 100
             for batch_start in range(0, len(tasks), _BATCH_SIZE):
                 batch = tasks[batch_start : batch_start + _BATCH_SIZE]
@@ -575,6 +576,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     if isinstance(r, Exception):
                         logger.warning(f"[FinancialSync] Batch task failed: {r}")
                         continue
+                    day_saved += r["saved"]  # type: ignore[index]
                     total_saved += r["saved"]  # type: ignore[index]
                     total_mainbz_rows += r["mainbz"]  # type: ignore[index]
                     total_audit_rows += r["audit"]  # type: ignore[index]
@@ -583,7 +585,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             await self.context.cache.update_sync_status(
                 "financial_reports",
                 day_date,
-                total_saved,
+                day_saved,
             )
 
             if progress_callback:
@@ -759,6 +761,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                 period=period,
             )
 
+        # Note: Auxiliary tables (mainbz, audit) are written best-effort (尽力而为)
+        # during the fetch phase and are not atomic with the main financial tables transaction.
+        # However, they are fully idempotent when re-run.
         async def fetch_aux(api_func, save_func, **kwargs) -> int:
             try:
                 df = await api_func(**kwargs)
@@ -773,7 +778,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     f"[FinancialSync] Fetch | Permission denied for aux table on {ts_code}",
                 )
                 return 0
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[FinancialSync] Fetch | Failed to fetch aux table on {ts_code}: {e}")
                 return 0
 
         try:

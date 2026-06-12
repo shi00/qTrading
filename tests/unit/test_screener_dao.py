@@ -251,11 +251,21 @@ class TestScreenerDaoGetLearningContext:
 class TestScreenerDaoUpdatePredictionResult:
     @pytest.mark.asyncio
     async def test_basic(self):
+        from contextlib import asynccontextmanager
+
         mock_engine = MagicMock()
         dao = ScreenerDao(mock_engine)
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
-        dao._write_db = AsyncMock(return_value=1)
+
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+
         await dao.update_prediction_result(
             record_id=1,
             pct=5.0,
@@ -266,22 +276,32 @@ class TestScreenerDaoUpdatePredictionResult:
             index_pct=1.0,
             alpha=4.0,
         )
-        dao._write_db.assert_called_once()
+        mock_conn.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_with_review_status(self):
+        from contextlib import asynccontextmanager
+
         mock_engine = MagicMock()
         dao = ScreenerDao(mock_engine)
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
-        dao._write_db = AsyncMock(return_value=1)
+
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+
         await dao.update_prediction_result(
             record_id=1,
             pct=5.0,
             label="WIN",
             review_status="completed",
         )
-        dao._write_db.assert_called_once()
+        mock_conn.execute.assert_called_once()
 
 
 class TestScreenerDaoSaveScreeningResults:
@@ -443,15 +463,25 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
 
     @pytest.mark.asyncio
     async def test_default_status_t1_done_when_no_t5(self):
+        from contextlib import asynccontextmanager
+
         mock_engine = MagicMock()
         dao = ScreenerDao(mock_engine)
         dao._check_engine = MagicMock()
         dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
-        dao._write_db = AsyncMock(return_value=1)
+
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+
         with patch("data.persistence.daos.screener_dao.sa.update") as mock_update:
             mock_update.return_value.where.return_value.values.return_value = MagicMock()
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
-        dao._write_db.assert_called_once()
+        mock_conn.execute.assert_called_once()
 
 
 class TestScreenerDaoSaveScreeningResultsTuple:

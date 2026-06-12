@@ -123,6 +123,7 @@ class CacheManager:
 
     def _create_engine(self, connection_string: str):
         """Create async engine and update DAO references."""
+        self._disposed = False
         try:
             db_pool_size = int(ConfigHandler.get_db_connection_pool_size())
         except (TypeError, ValueError):
@@ -198,6 +199,15 @@ class CacheManager:
         if self.engine is not None:
             await self.engine.dispose()
             self.engine = None
+            self.stock_dao.engine = None
+            self.quote_dao.engine = None
+            self.financial_dao.engine = None
+            self.sync_dao.engine = None
+            self.market_dao.engine = None
+            self.screener_dao.engine = None
+            self.macro_dao.engine = None
+            self.holder_dao.engine = None
+            self.backtest_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。

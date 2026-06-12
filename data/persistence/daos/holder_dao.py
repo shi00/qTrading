@@ -171,12 +171,10 @@ class HolderDao(BaseDao):
 
         try:
             if as_of_date is not None:
-                all_results = []
-                for i in range(0, len(ts_codes), 500):
-                    chunk = ts_codes[i : i + 500]
-                    placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-                    ann_date_param = len(chunk) + 1
-                    sql = f"""
+
+                def sql_template_fn(placeholders, chunk_len):
+                    ann_date_param = chunk_len + 1
+                    return f"""
                         SELECT DISTINCT ON (ts_code, end_date)
                             ts_code, end_date, ann_date, holder_name, hold_ratio
                         FROM top10_holders
@@ -184,12 +182,13 @@ class HolderDao(BaseDao):
                           AND ann_date <= ${ann_date_param}
                         ORDER BY ts_code, end_date DESC, hold_ratio DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date])
-                    if df is not None and not df.empty:
-                        all_results.append(df)
-                if all_results:
-                    return pd.concat(all_results, ignore_index=True)
-                return pd.DataFrame()
+
+                return await self.chunked_in_query(
+                    self._read_db,
+                    sql_template_fn,
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
             else:
                 return await self.chunked_in_query(
                     self._read_db,
@@ -213,13 +212,11 @@ class HolderDao(BaseDao):
             return pd.DataFrame()
 
         try:
-            all_results = []
-            for i in range(0, len(ts_codes), 500):
-                chunk = ts_codes[i : i + 500]
-                placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-                if as_of_date is not None:
-                    ann_date_param = len(chunk) + 1
-                    sql = f"""
+            if as_of_date is not None:
+
+                def sql_template_fn(placeholders, chunk_len):
+                    ann_date_param = chunk_len + 1
+                    return f"""
                         SELECT ts_code, end_date, ann_date, holder_num,
                                holder_num_change, holder_num_ratio
                         FROM (
@@ -231,29 +228,34 @@ class HolderDao(BaseDao):
                         WHERE rn <= 5
                         ORDER BY ts_code, end_date DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date])
-                else:
-                    sql = f"""
-                        SELECT ts_code, end_date, ann_date, holder_num,
-                               holder_num_change, holder_num_ratio
-                        FROM (
-                            SELECT *,
-                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                            FROM stk_holdernumber
-                            WHERE ts_code IN ({placeholders})
-                        ) sub
-                        WHERE rn <= 5
-                        ORDER BY ts_code, end_date DESC
-                    """
-                    df = await self._read_db(sql, chunk)
-                if df is not None and not df.empty:
-                    if "rn" in df.columns:
-                        df = df.drop(columns=["rn"])
-                    all_results.append(df)
 
-            if all_results:
-                return pd.concat(all_results, ignore_index=True)
-            return pd.DataFrame()
+                df = await self.chunked_in_query(
+                    self._read_db,
+                    sql_template_fn,
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
+            else:
+                df = await self.chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT ts_code, end_date, ann_date, holder_num,
+                           holder_num_change, holder_num_ratio
+                    FROM (
+                        SELECT *,
+                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                        FROM stk_holdernumber
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE rn <= 5
+                    ORDER BY ts_code, end_date DESC
+                    """,
+                    ts_codes,
+                )
+            if df is not None and not df.empty:
+                if "rn" in df.columns:
+                    df = df.drop(columns=["rn"])
+            return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
         except Exception as e:
