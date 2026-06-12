@@ -106,6 +106,27 @@ class TestDispose:
         assert vm._db is None
         assert vm._disposed is True
 
+    def test_dispose_idempotent(self, vm, mock_db):
+        vm.dispose()
+        mock_db.close.assert_called_once()
+        vm.dispose()  # Second call should be a no-op
+        mock_db.close.assert_called_once()  # Still only one close call
+
+    async def test_init_tables_after_dispose_returns_empty(self, vm):
+        vm.dispose()
+        result = await vm.init_tables()
+        assert result == []
+
+    async def test_load_table_schema_after_dispose_returns_empty(self, vm):
+        vm.dispose()
+        result = await vm.load_table_schema("stock_basic")
+        assert result == []
+
+    async def test_query_count_after_dispose_returns_zero(self, vm):
+        vm.dispose()
+        result = await vm.query_count()
+        assert result == 0
+
     async def test_query_data_after_dispose_returns_current(self, vm):
         vm.dispose()
         vm.current_data = pd.DataFrame({"existing": [1]})
