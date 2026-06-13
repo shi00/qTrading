@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.4](https://github.com/shi00/qTrading/compare/v0.6.3...v0.6.4) (2026-06-13)
+
+
+### Bug Fixes
+
+* **test:** fix CI timeouts and eliminate pyproject coverage config warning ([5a18fb5](https://github.com/shi00/qTrading/commit/5a18fb5eb362a4a2a6e5a28f07add53684d8dd23))
+* **test:** prevent flet_app URL rebuild bypassing DATABASE_URL ([98c5e4d](https://github.com/shi00/qTrading/commit/98c5e4d77c97dcd782bf7a1ca76f923797b41bed))
+* **test:** restrict external service mocks to unit tests ([87a0ba9](https://github.com/shi00/qTrading/commit/87a0ba95123c7b8018635eb0330e535dc999ab93))
+* **test:** use step DATABASE_URL to avoid db auth failure in E2E tests ([5e68ca6](https://github.com/shi00/qTrading/commit/5e68ca611a5cd70215df998ba8bc7c1d5dd7cb4a))
+
+
+### Documentation
+
+* **config:** add warning about DATABASE_URL bypass due to db_host default ([a3531c2](https://github.com/shi00/qTrading/commit/a3531c2e7af3a579f7ae5a109e50814f2e7e7bc8))
+* **test:** add detailed explanation for db_host hack in E2E conftest ([30d04b1](https://github.com/shi00/qTrading/commit/30d04b160c76e13cc2033cfde6e322da445e74d7))
+* **test:** add explanation for E2E canvaskit request interception workaround ([2ce324a](https://github.com/shi00/qTrading/commit/2ce324a6ee59055eb2d9e35ea111e5bd0dcb71dc))
+
 ## [0.6.3](https://github.com/shi00/qTrading/compare/v0.6.2...v0.6.3) (2026-06-12)
 
 
