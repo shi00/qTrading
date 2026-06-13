@@ -14,7 +14,7 @@ from tests.conftest import _get_test_db_url
 
 logger = logging.getLogger(__name__)
 
-TEST_DATABASE_URL = os.environ.get(
+TEST_DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get(
     "E2E_DATABASE_URL",
     _get_test_db_url(),
 )
