@@ -18,6 +18,7 @@ DefaultDirName={localappdata}\Programs\AStockScreener
 DefaultGroupName=AStockScreener
 DisableProgramGroupPage=yes
 OutputBaseFilename=AStockScreener-Setup-{#TargetVariant}
+OutputDir=Output
 Compression=lzma2/ultra64
 SolidCompression=yes
 PrivilegesRequired=lowest
