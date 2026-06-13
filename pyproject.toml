@@ -106,9 +106,6 @@ omit = [
 # fail_under: 流水线整体覆盖率阈值，低于此值时 CI 失败
 # 用于确保整体代码质量，防止覆盖率下降
 fail_under = 85
-# per_file_minimum: 单文件覆盖率阈值，用于流水线检查单个文件的覆盖率
-# 确保每个模块都有足够的测试覆盖，避免某些文件覆盖率过低
-per_file_minimum = 80
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
@@ -116,3 +113,8 @@ exclude_lines = [
     "raise NotImplementedError",
     "\\.\\.\\.",
 ]
+
+[tool.custom_coverage]
+# 单个文件覆盖率阈值，由 scripts/check_per_file_coverage.py 读取，不属于 coverage.py 的原生选项
+per_file_minimum = 80
+

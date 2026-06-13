@@ -229,3 +229,52 @@ def _reset_mock_keyring_store():
     if _MOCK_LITELLM is not None:
         _MOCK_LITELLM.success_callback.clear()
         _MOCK_LITELLM.failure_callback.clear()
+
+
+@pytest.fixture(autouse=True)
+def mock_external_services(request):
+    """
+    Globally mock external network and DB calls for unit tests to prevent CI timeouts.
+    Avoids patching when testing the respective modules themselves.
+    """
+    from unittest.mock import patch, AsyncMock
+
+    module_name = getattr(request.module, "__name__", "")
+
+    patches = []
+
+    # Mock NewsFetcher network calls (async)
+    if "test_news_fetcher" not in module_name and "test_news_subscription" not in module_name:
+        try:
+            from data.external.news_fetcher import NewsFetcher
+
+            patches.append(patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock, return_value=[]))
+            patches.append(patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock, return_value=""))
+        except ImportError:
+            pass
+
+    # Mock ReviewManager database calls (async)
+    if "test_review_manager" not in module_name:
+        try:
+            from data.persistence.review_manager import ReviewManager
+
+            patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
+        except ImportError:
+            pass
+
+    # Mock FinancialSync ConfigHandler delay to 0 to prevent asyncio.sleep timeouts
+    if "test_financial_sync" in module_name:
+        try:
+            from utils.config_handler import ConfigHandler
+
+            patches.append(patch.object(ConfigHandler, "get_sync_request_delay", return_value=0))
+        except ImportError:
+            pass
+
+    for p in patches:
+        p.start()
+
+    yield
+
+    for p in patches:
+        p.stop()

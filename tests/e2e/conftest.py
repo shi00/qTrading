@@ -147,11 +147,14 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             await page.wait_for_timeout(2000)
             error_text = I18n.get("error_db_init_failed")
             if await fp.has_text(error_text):
-                raise RuntimeError(
-                    "Flet app shows DB initialization error UI. "
-                    "The database is likely unreachable. "
-                    "Check logs/e2e-flet-app.log for details."
-                )
+                log_contents = ""
+                try:
+                    log_path = Path("logs/e2e-flet-app.log")
+                    if log_path.exists():
+                        log_contents = log_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+                raise RuntimeError(f"Flet app shows DB initialization error UI.\nApp Log:\n{log_contents}")
         except RuntimeError:
             await context.close()
             raise

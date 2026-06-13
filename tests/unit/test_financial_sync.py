@@ -196,7 +196,8 @@ class TestFinancialSyncRunModes:
     @pytest.mark.asyncio
     async def test_incremental_with_disclosure_dates(self):
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 6, 1)})
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {

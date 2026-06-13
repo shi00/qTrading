@@ -10,8 +10,8 @@ def load_threshold():
     pyproject = ROOT / "pyproject.toml"
     with open(pyproject, "rb") as f:
         cfg = tomllib.load(f)
-    report = cfg.get("tool", {}).get("coverage", {}).get("report", {})
-    return report.get("per_file_minimum", 80)
+    custom = cfg.get("tool", {}).get("custom_coverage", {})
+    return custom.get("per_file_minimum", 80)
 
 
 def main():
