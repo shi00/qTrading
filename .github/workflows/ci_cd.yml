@@ -632,7 +632,7 @@ jobs:
         uses: Minionguyjpro/Inno-Setup-Action@202dd0c4950ef315b6ba13359998fe120179b147  # v1.2.8
         with:
           path: installer.iss
-          options: /O"Output" /DMyAppVersion=${{ github.ref_name }} /DTargetVariant=${{ matrix.variant }}
+          options: /DMyAppVersion=${{ github.ref_name }} /DTargetVariant=${{ matrix.variant }}
 
       - name: Smoke Test - Verify Installer Exists
         shell: pwsh
