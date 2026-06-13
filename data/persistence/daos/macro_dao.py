@@ -78,6 +78,8 @@ class MacroDao(BaseDao):
             DataFrame with latest shibor rates (date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y)
         """
         try:
+            # [DB-005] ShiborDaily contains reserved words ('on') and columns starting with digits ('1w' etc.).
+            # We use SQLAlchemy Core instead of raw SQL to automatically handle identifier quoting.
             t = ShiborDaily.__table__
             cols = [
                 t.c.date,

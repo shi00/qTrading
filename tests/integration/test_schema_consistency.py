@@ -5,7 +5,7 @@ This test suite ensures that:
 2. Both approaches create identical column sets
 3. Indexes are correctly created by both approaches
 
-Uses isolated PostgreSQL databases for testing (not SQLite or schema isolation).
+Uses isolated PostgreSQL databases for testing.
 Each test creates isolated databases to compare the two approaches.
 """
 

@@ -775,7 +775,7 @@ def _create_all_tables() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("history_id", sa.Integer(), nullable=False),
         sa.Column("thinking", sa.String(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.func.now()),
+        sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("history_id", name=op.f("uq_screening_thinking_history_id")),
         sa.ForeignKeyConstraint(
@@ -1067,7 +1067,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.func.now(),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("key", name=op.f("pk_app_state")),
@@ -1106,7 +1106,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "executed_at",
             sa.DateTime(timezone=False),
-            server_default=sa.func.now(),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column("duration_ms", sa.Integer(), nullable=True),

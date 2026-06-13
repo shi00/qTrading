@@ -64,9 +64,9 @@ class TestCacheManagerCreateEngine:
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
-        mgr._create_engine("sqlite:///test.db")
+        mgr._create_engine("postgresql+asyncpg://user:pass@localhost/testdb")
         mock_create.assert_called_once_with(
-            "sqlite:///test.db",
+            "postgresql+asyncpg://user:pass@localhost/testdb",
             echo=False,
             pool_size=10,
             max_overflow=5,
@@ -89,9 +89,9 @@ class TestCacheManagerCreateEngine:
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
-        mgr._create_engine("sqlite:///test.db")
+        mgr._create_engine("postgresql+asyncpg://user:pass@localhost/testdb")
         mock_create.assert_called_once_with(
-            "sqlite:///test.db",
+            "postgresql+asyncpg://user:pass@localhost/testdb",
             echo=False,
             pool_size=10,
             max_overflow=5,
@@ -113,9 +113,9 @@ class TestCacheManagerCreateEngine:
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
-        mgr._create_engine("sqlite:///test.db")
+        mgr._create_engine("postgresql+asyncpg://user:pass@localhost/testdb")
         mock_create.assert_called_once_with(
-            "sqlite:///test.db",
+            "postgresql+asyncpg://user:pass@localhost/testdb",
             echo=False,
             pool_size=10,
             max_overflow=5,
@@ -170,7 +170,7 @@ class TestCacheManagerInitDb:
         mgr = _make_mgr()
         mgr._schema_initialized = False
         mgr.engine = None
-        mgr._get_connection_string = MagicMock(return_value="sqlite:///test.db")
+        mgr._get_connection_string = MagicMock(return_value="postgresql+asyncpg://user:pass@localhost/testdb")
         mock_lock = AsyncMock()
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
@@ -181,7 +181,7 @@ class TestCacheManagerInitDb:
         ):
             mock_migrator.init_db = AsyncMock()
             await mgr.init_db()
-            mock_create.assert_called_once_with("sqlite:///test.db")
+            mock_create.assert_called_once_with("postgresql+asyncpg://user:pass@localhost/testdb")
 
     @pytest.mark.asyncio
     async def test_init_db_migrator_failure(self):
@@ -660,14 +660,14 @@ class TestCacheManagerCheckTableHasData:
 
 
 class TestCacheManagerGetConnectionString:
-    @patch("config.DB_URL", "sqlite:///fallback.db")
+    @patch("config.DB_URL", "postgresql+asyncpg://user:pass@localhost/fallbackdb")
     def test_fallback_to_config(self):
         mgr = CacheManager.__new__(CacheManager)
         with patch.object(CacheManager, "__init__", lambda self: None):
             mgr._initialized = False
             with patch("utils.config_handler.ConfigHandler.get_db_url", return_value=None):
                 result = mgr._get_connection_string()
-                assert result == "sqlite:///fallback.db"
+                assert result == "postgresql+asyncpg://user:pass@localhost/fallbackdb"
 
     @patch("config.DB_URL", None)
     def test_no_url_available(self):
@@ -877,7 +877,10 @@ class TestCacheManagerInit:
         mgr = CacheManager()
         assert mgr.engine is None
 
-    @patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value="sqlite:///test.db")
+    @patch(
+        "data.cache.cache_manager.ConfigHandler.get_db_url",
+        return_value="postgresql+asyncpg://user:pass@localhost/testdb",
+    )
     @patch("data.cache.cache_manager.create_async_engine")
     def test_init_with_connection_string(self, mock_create, mock_url):
         CacheManager._instance = None
@@ -1725,8 +1728,8 @@ class TestCacheManagerSanitizeUrl:
 
     def test_url_without_password(self):
         mgr = CacheManager.__new__(CacheManager)
-        result = mgr._sanitize_url("sqlite:///test.db")
-        assert "test.db" in result
+        result = mgr._sanitize_url("postgresql+asyncpg://user@localhost/testdb")
+        assert "testdb" in result
 
 
 class TestCacheManagerUsesMetadataTables:
