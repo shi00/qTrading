@@ -1025,6 +1025,7 @@ class TestSystemTab:
         tab.language_dropdown.value = "en_US"
         tab.on_language_change(None)
         self.mock_i18n.set_locale.assert_called_with("en_US")
+        self.mock_ch.set_locale.assert_called_with("en_US")
 
     def test_on_language_change_calls_snack(self, mock_page):
         snack = MagicMock()

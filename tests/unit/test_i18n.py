@@ -216,6 +216,14 @@ class TestI18nAPICompatibility:
         assert "en_US" in locales
         assert isinstance(locales, list)
 
+    def test_initialize_with_explicit_locale(self):
+        I18n.initialize("en_US")
+        assert I18n.current_locale() == "en_US"
+
+    def test_initialize_with_none_fallback(self):
+        I18n.initialize(None)
+        assert I18n.current_locale() == DEFAULT_LOCALE
+
 
 class TestI18nDynamicLoading:
     """Test dynamic loading and caching mechanisms."""
