@@ -652,6 +652,7 @@ def validate_schema_definitions(strict: bool = False):
         strict: If True, raises ValueError on any schema inconsistency.
     """
     import logging
+    import os
 
     logger = logging.getLogger(__name__)
 
@@ -666,22 +667,20 @@ def validate_schema_definitions(strict: bool = False):
             "alembic_version",
         }
 
+        errors = []
         missing_defs = db_tables - defined_tables - IGNORED_TABLES
         if missing_defs:
             msg = f"The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}"
             logger.warning(f"[DataDict] {msg}")
             logger.warning("[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.")
-            if strict:
-                raise ValueError(msg)
+            errors.append(msg)
 
         extra_defs = defined_tables - db_tables - IGNORED_TABLES
         if extra_defs:
             msg = f"The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}"
             logger.warning(f"[DataDict] {msg}")
-            if strict:
-                raise ValueError(msg)
+            errors.append(msg)
 
-        errors = []
         for table_name in defined_tables - IGNORED_TABLES:
             if table_name not in db_tables:
                 continue
@@ -705,13 +704,17 @@ def validate_schema_definitions(strict: bool = False):
                 logger.warning(f"[DataDict] {msg}")
                 errors.append(msg)
 
-        if strict and errors:
-            raise ValueError("Schema inconsistencies found:\n" + "\n".join(errors))
-
         logger.info(
             f"[DataDict] Schema validation completed. {len(db_tables)} tables verified.",
         )
 
+        is_strict = strict or os.environ.get("STRICT_SCHEMA_GATE") == "1"
+        if is_strict and errors:
+            raise RuntimeError("Schema inconsistencies found:\n" + "\n".join(errors))
+
+    except RuntimeError as e:
+        logger.error(f"[DataDict] Schema validation failed in strict mode: {e}")
+        raise
     except Exception as e:
         logger.error(f"[DataDict] ORM validation failed: {e}")
         if strict:

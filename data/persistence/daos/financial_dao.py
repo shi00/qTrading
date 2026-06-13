@@ -16,7 +16,7 @@ from data.persistence.models import (
 )
 from utils.sanitizers import DataSanitizer
 
-from .base_dao import _IN_CHUNK_SIZE, BaseDao
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -265,26 +265,22 @@ class FinancialDao(BaseDao):
 
         try:
             if as_of_date is not None:
-                all_results = []
-                for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
-                    chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
-                    placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                    ann_date_param = len(chunk) + 1
-                    sql = f"""
+                return await self.chunked_in_query(
+                    self._read_db,
+                    lambda placeholders, chunk_len: (
+                        f"""
                         SELECT DISTINCT ON (ts_code)
                             ts_code, end_date, ann_date, audit_result, audit_sign, audit_fees, audit_agency
                         FROM fina_audit
                         WHERE ts_code IN ({placeholders})
                           AND audit_result IS NOT NULL
-                          AND ann_date <= ${ann_date_param}
+                          AND ann_date <= ${chunk_len + 1}
                         ORDER BY ts_code, end_date DESC, ann_date DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date])
-                    if df is not None and not df.empty:
-                        all_results.append(df)
-                if all_results:
-                    return pd.concat(all_results, ignore_index=True)
-                return pd.DataFrame()
+                    ),
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
             else:
                 return await self.chunked_in_query(
                     self._read_db,
@@ -310,24 +306,20 @@ class FinancialDao(BaseDao):
 
         try:
             if as_of_date is not None:
-                all_results = []
-                for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
-                    chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
-                    placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                    ann_date_param = len(chunk) + 1
-                    sql = f"""
+                return await self.chunked_in_query(
+                    self._read_db,
+                    lambda placeholders, chunk_len: (
+                        f"""
                         SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
                         FROM dividend
                         WHERE ts_code IN ({placeholders})
-                          AND ann_date <= ${ann_date_param}
+                          AND ann_date <= ${chunk_len + 1}
                         ORDER BY ts_code, end_date DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date])
-                    if df is not None and not df.empty:
-                        all_results.append(df)
-                if all_results:
-                    return pd.concat(all_results, ignore_index=True)
-                return pd.DataFrame()
+                    ),
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
             else:
                 return await self.chunked_in_query(
                     self._read_db,
@@ -351,25 +343,21 @@ class FinancialDao(BaseDao):
 
         try:
             if as_of_date is not None:
-                all_results = []
-                for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
-                    chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
-                    placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                    as_of_param = len(chunk) + 1
-                    sql = f"""
+                return await self.chunked_in_query(
+                    self._read_db,
+                    lambda placeholders, chunk_len: (
+                        f"""
                         SELECT DISTINCT ON (ts_code)
                             ts_code, end_date, pledge_count, pledge_ratio
                         FROM pledge_stat
                         WHERE ts_code IN ({placeholders})
-                          AND end_date <= ${as_of_param}
+                          AND end_date <= ${chunk_len + 1}
                         ORDER BY ts_code, end_date DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date])
-                    if df is not None and not df.empty:
-                        all_results.append(df)
-                if all_results:
-                    return pd.concat(all_results, ignore_index=True)
-                return pd.DataFrame()
+                    ),
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
             else:
                 return await self.chunked_in_query(
                     self._read_db,
@@ -426,43 +414,43 @@ class FinancialDao(BaseDao):
             return pd.DataFrame()
 
         try:
-            all_results = []
-            for i in range(0, len(ts_codes), _IN_CHUNK_SIZE):
-                chunk = ts_codes[i : i + _IN_CHUNK_SIZE]
-                placeholders = ", ".join([f"${j + 1}" for j in range(len(chunk))])
-                if as_of_date is not None:
-                    ann_date_param = len(chunk) + 1
-                    sql = f"""
+            if as_of_date is not None:
+                df = await self.chunked_in_query(
+                    self._read_db,
+                    lambda placeholders, chunk_len: (
+                        f"""
                         SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                         FROM (
                             SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
                             FROM fina_mainbz
-                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
+                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${chunk_len + 1}
                         ) sub
-                        WHERE dr = 1
+                        WHERE sub.dr = 1
                         ORDER BY ts_code, bz_sales DESC
                     """
-                    df = await self._read_db(sql, chunk + [as_of_date])
-                else:
-                    sql = f"""
-                        SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                        FROM (
-                            SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
-                            FROM fina_mainbz
-                            WHERE ts_code IN ({placeholders})
-                        ) sub
-                        WHERE dr = 1
-                        ORDER BY ts_code, bz_sales DESC
+                    ),
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
+            else:
+                df = await self.chunked_in_query(
+                    self._read_db,
                     """
-                    df = await self._read_db(sql, chunk)
-                if df is not None and not df.empty:
-                    if "dr" in df.columns:
-                        df = df.drop(columns=["dr"])
-                    all_results.append(df)
-
-            if all_results:
-                return pd.concat(all_results, ignore_index=True)
-            return pd.DataFrame()
+                    SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                    FROM (
+                        SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                        FROM fina_mainbz
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE sub.dr = 1
+                    ORDER BY ts_code, bz_sales DESC
+                    """,
+                    ts_codes,
+                )
+            if df is not None and not df.empty:
+                if "dr" in df.columns:
+                    df = df.drop(columns=["dr"])
+            return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
         except Exception as e:

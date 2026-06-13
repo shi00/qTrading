@@ -23,7 +23,7 @@ from sqlalchemy import create_engine, inspect
 
 from data.persistence.models import Base
 
-EXCLUDED_COLS = {"updated_at", "created_at"}
+EXCLUDED_COLS = set()
 
 
 def _get_pg_connection_params() -> dict:

@@ -26,6 +26,10 @@ class EngineDisposedError(RuntimeError):
     """
 
 
+class DatabaseQueryError(RuntimeError):
+    """Raised when a database query or write operation fails."""
+
+
 _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
 _SLOW_WRITE_THRESHOLD_MS = 2000
@@ -345,7 +349,7 @@ class BaseDao:
                 )
 
             if not suppress_errors:
-                raise
+                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database write failed: {e}") from e
             return -1
 
     @staticmethod
@@ -650,7 +654,7 @@ class BaseDao:
                 f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
             )
             if not suppress_errors:
-                raise
+                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
             return pd.DataFrame()
 
         if max_rows is not None and len(rows) > max_rows:
@@ -758,5 +762,5 @@ class BaseDao:
                 f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
             )
             if not suppress_errors:
-                raise
+                raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
             return pd.DataFrame()

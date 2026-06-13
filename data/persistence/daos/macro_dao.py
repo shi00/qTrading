@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import pandas as pd
+import sqlalchemy as sa
 
 from data.persistence.models import MacroEconomy, ShiborDaily, get_model_columns, get_model_pk_columns
 
@@ -78,17 +79,25 @@ class MacroDao(BaseDao):
         """
         try:
             # [DB-005] ShiborDaily contains reserved words ('on') and columns starting with digits ('1w' etc.).
-            # Since we are using raw SQL via _read_db (which uses exec_driver_sql), we MUST wrap these
-            # identifiers in double quotes to prevent syntax errors in PostgreSQL.
+            # We use SQLAlchemy Core instead of raw SQL to automatically handle identifier quoting.
+            t = ShiborDaily.__table__
+            cols = [
+                t.c.date,
+                t.c.on,
+                getattr(t.c, "1w"),
+                getattr(t.c, "2w"),
+                getattr(t.c, "1m"),
+                getattr(t.c, "3m"),
+                getattr(t.c, "6m"),
+                getattr(t.c, "9m"),
+                getattr(t.c, "1y"),
+            ]
+            stmt = sa.select(*cols)
             if as_of_date is not None:
-                df = await self._read_db(
-                    'SELECT date, "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y" FROM shibor_daily WHERE date <= $1 ORDER BY date DESC LIMIT 1',
-                    as_of_date,
-                )
-            else:
-                df = await self._read_db(
-                    'SELECT date, "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y" FROM shibor_daily ORDER BY date DESC LIMIT 1'
-                )
+                stmt = stmt.where(t.c.date <= as_of_date)
+            stmt = stmt.order_by(t.c.date.desc()).limit(1)
+
+            df = await self._read_db_select(stmt)
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
@@ -109,15 +118,25 @@ class MacroDao(BaseDao):
             DataFrame with latest macro economy data (period, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi)
         """
         try:
+            t = MacroEconomy.__table__
+            cols = [
+                t.c.period,
+                t.c.publish_date,
+                t.c.m2,
+                t.c.m2_yoy,
+                t.c.m1,
+                t.c.m1_yoy,
+                t.c.m0,
+                t.c.m0_yoy,
+                t.c.cpi,
+                t.c.ppi,
+            ]
+            stmt = sa.select(*cols)
             if as_of_date is not None:
-                df = await self._read_db(
-                    "SELECT period, publish_date, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi FROM macro_economy WHERE publish_date <= $1 ORDER BY publish_date DESC LIMIT 1",
-                    as_of_date,
-                )
-            else:
-                df = await self._read_db(
-                    "SELECT period, publish_date, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi FROM macro_economy ORDER BY publish_date DESC LIMIT 1"
-                )
+                stmt = stmt.where(t.c.publish_date <= as_of_date)
+            stmt = stmt.order_by(t.c.publish_date.desc()).limit(1)
+
+            df = await self._read_db_select(stmt)
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise

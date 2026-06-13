@@ -14,14 +14,7 @@ from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
-_LEARNING_CONTEXT_BASE_SQL = """
-    SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
-    FROM screening_history
-    WHERE prediction_result = $1
-      AND alpha IS NOT NULL
-      AND t5_pct IS NOT NULL
-      AND review_status = $4
-"""
+# _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
 
 class ScreenerDao(BaseDao):
@@ -224,35 +217,28 @@ class ScreenerDao(BaseDao):
         as_of: datetime.date | datetime.datetime | None = None,
     ):
         label = "WIN" if is_win else "LOSS"
-        order = "DESC" if is_win else "ASC"
-
+        t = Base.metadata.tables["screening_history"]
+        order_dir = sa.desc if is_win else sa.asc
+        stmt = sa.select(
+            t.c.ts_code,
+            t.c.name,
+            t.c.alpha,
+            t.c.t1_pct,
+            t.c.t5_pct,
+            t.c.ai_score,
+            t.c.ai_reason,
+        ).where(
+            t.c.prediction_result == label,
+            t.c.alpha.isnot(None),
+            t.c.t5_pct.isnot(None),
+            t.c.review_status == REVIEW_STATUS_COMPLETED,
+        )
         if as_of is not None:
             if isinstance(as_of, datetime.datetime):
                 as_of = as_of.date()
-            sql = f"""
-                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
-                FROM screening_history
-                WHERE prediction_result = $1
-                  AND alpha IS NOT NULL
-                  AND t5_pct IS NOT NULL
-                  AND review_status = $4
-                  AND trade_date < $2
-                ORDER BY alpha {order}, t1_pct {order}
-                LIMIT $3
-            """
-            df = await self._read_db(sql, (label, as_of, limit, REVIEW_STATUS_COMPLETED))
-        else:
-            sql = f"""
-                SELECT ts_code, name, alpha, t1_pct, t5_pct, ai_score, ai_reason
-                FROM screening_history
-                WHERE prediction_result = $1
-                  AND alpha IS NOT NULL
-                  AND t5_pct IS NOT NULL
-                  AND review_status = $3
-                ORDER BY alpha {order}, t1_pct {order}
-                LIMIT $2
-            """
-            df = await self._read_db(sql, (label, limit, REVIEW_STATUS_COMPLETED))
+            stmt = stmt.where(t.c.trade_date < as_of)
+        stmt = stmt.order_by(order_dir(t.c.alpha), order_dir(t.c.t1_pct)).limit(limit)
+        df = await self._read_db_select(stmt)
         return df if df is not None else pd.DataFrame()
 
     async def update_prediction_result(

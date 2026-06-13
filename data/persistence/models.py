@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
 
+
 # Naming convention for Alembic migrations
 # Ensures consistent constraint naming across environments
 naming_convention = {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import pandas as pd
@@ -172,33 +171,14 @@ class BacktestDAO(BaseDao):
             logger.warning("[BacktestDAO] Engine disposed, skipping delete for %s", run_id)
             return False
 
-        from data.cache.cache_manager import CacheManager
-
-        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
-            logger.warning("[BacktestDAO] Engine disposed, skipping delete for %s", run_id)
-            return False
-
-        await self._get_maintenance_event().wait()
-
         stmt = sa.delete(BacktestResultModel).where(BacktestResultModel.run_id == run_id)
         try:
-            async with self.engine.begin() as conn:
+            async with self._guarded_begin() as conn:
                 await conn.execute(stmt)
-            return True
-        except asyncio.CancelledError:
-            logger.warning("[BacktestDAO] Delete cancelled during shutdown for %s", run_id)
-            raise
+                return True
+        except EngineDisposedError:
+            logger.warning("[BacktestDAO] Engine disposed during delete_result for %s", run_id)
+            return False
         except Exception as e:
-            err_str = str(e)
-            if any(
-                msg in err_str
-                for msg in [
-                    "no active connection",
-                    "database is closed",
-                    "ConnectionDoesNotExistError",
-                ]
-            ):
-                logger.warning("[BacktestDAO] Engine disposed during delete for %s: %s", run_id, e)
-                return False
-            logger.error("[BacktestDAO] Failed to delete result %s: %s", run_id, e)
+            logger.error("[BacktestDAO] delete_result failed for %s: %s", run_id, e)
             return False

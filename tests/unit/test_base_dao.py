@@ -8,7 +8,7 @@ import numpy as np
 import sqlalchemy as sa
 from sqlalchemy import Date
 
-from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
+from data.persistence.daos.base_dao import BaseDao, EngineDisposedError, DatabaseQueryError
 
 
 def _setup_mock_engine_connect(mock_conn):
@@ -471,7 +471,7 @@ class TestMissingColsExcludedFromUpdate:
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            with pytest.raises(Exception, match="Read Error"):
+            with pytest.raises(DatabaseQueryError, match="Database read failed"):
                 await dao._read_db("SELECT * FROM t", suppress_errors=False)
 
     @pytest.mark.asyncio
@@ -610,7 +610,7 @@ class TestBaseDaoWriteDbExtended:
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            with pytest.raises(Exception, match="Write failed"):
+            with pytest.raises(DatabaseQueryError, match="Database write failed"):
                 await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn, suppress_errors=False)
 
     @pytest.mark.asyncio
@@ -654,7 +654,7 @@ class TestBaseDaoWriteDbExtended:
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            with pytest.raises(Exception, match="Write failed"):
+            with pytest.raises(DatabaseQueryError, match="Database write failed"):
                 await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn)
 
     @pytest.mark.asyncio
