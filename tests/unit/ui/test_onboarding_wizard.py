@@ -50,11 +50,12 @@ class TestOnboardingWizard:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
+        self.mock_ch = MagicMock()
         self.patches = [
             patch("ui.views.onboarding_wizard.I18n", self.mock_i18n),
             patch("ui.views.onboarding_wizard.AppColors", self.mock_ac),
             patch("ui.views.onboarding_wizard.AppStyles", self.mock_as),
-            patch("ui.views.onboarding_wizard.ConfigHandler"),
+            patch("ui.views.onboarding_wizard.ConfigHandler", self.mock_ch),
             patch("ui.viewmodels.onboarding_view_model.DataProcessor"),
             patch("ui.views.onboarding_wizard.DatabaseConfigPanel", MagicMock()),
             patch("ui.views.onboarding_wizard.TushareConfigPanel", MagicMock()),
@@ -223,6 +224,7 @@ class TestOnboardingWizard:
         assert original_desc.value == "en_wizard_welcome_desc_with_time"
         assert wizard.header_title is original_title
         assert wizard.header_desc is original_desc
+        self.mock_ch.set_locale.assert_called_with("en_US")
 
     def test_on_panel_loading_change_shows_overlay_when_loading(self, mock_page):
         """面板加载中 → 遮罩显示"""

@@ -36,7 +36,7 @@ async def main(page: ft.Page):
 
     ProxyManager.apply_smart_proxy_policy()
 
-    I18n.initialize()
+    I18n.initialize(ConfigHandler.get_locale())
 
     cache_manager = CacheManager()
 

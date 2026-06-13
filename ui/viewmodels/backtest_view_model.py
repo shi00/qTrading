@@ -18,7 +18,7 @@ from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from services.backtest_service import BacktestService
 from strategies.base_strategy import get_strategy_registry
-from ui.i18n import I18n
+from core.i18n import I18n
 
 logger = logging.getLogger(__name__)
 

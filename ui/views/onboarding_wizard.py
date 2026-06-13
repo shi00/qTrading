@@ -1044,6 +1044,7 @@ class OnboardingWizard(ft.Container):
         try:
             new_locale = self.wizard_language_dropdown.value
             I18n.set_locale(new_locale)
+            ConfigHandler.set_locale(new_locale)
 
             if hasattr(self, "header_title"):
                 self.header_title.value = I18n.get("wizard_welcome_title")

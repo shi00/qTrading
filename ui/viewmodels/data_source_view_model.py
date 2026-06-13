@@ -13,7 +13,7 @@ from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
 from services.task_manager import AppTask, TaskManager, TaskStatus
-from ui.i18n import I18n
+from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message
 
