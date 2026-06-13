@@ -193,6 +193,7 @@ def flet_app(tmp_path_factory):
         config={
             "onboarding_complete": True,
             "locale": "zh",
+            "db_host": "",
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
