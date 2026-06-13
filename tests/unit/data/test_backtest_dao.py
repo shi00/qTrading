@@ -343,8 +343,6 @@ class TestBacktestDAO:
 
     @pytest.mark.asyncio
     async def test_delete_result_cache_manager_disposed(self, dao: BacktestDAO) -> None:
-        dao._check_engine = MagicMock()
-
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_instance = MagicMock()
             mock_instance._disposed = True

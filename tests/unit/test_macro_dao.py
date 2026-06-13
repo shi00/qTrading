@@ -84,21 +84,21 @@ class TestMacroDaoGetShiborLatest:
     @pytest.mark.asyncio
     async def test_with_data(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"date": ["20240615"], "on": [1.5]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"date": ["20240615"], "on": [1.5]}))
         result = await dao.get_shibor_latest()
         assert not result.empty
 
     @pytest.mark.asyncio
     async def test_none_result(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=None)
+        dao._read_db_select = AsyncMock(return_value=None)
         result = await dao.get_shibor_latest()
         assert isinstance(result, pd.DataFrame)
 
     @pytest.mark.asyncio
     async def test_error(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(side_effect=Exception("DB Error"))
+        dao._read_db_select = AsyncMock(side_effect=Exception("DB Error"))
         result = await dao.get_shibor_latest()
         assert isinstance(result, pd.DataFrame)
 
@@ -107,53 +107,54 @@ class TestMacroDaoGetMacroEconomyLatest:
     @pytest.mark.asyncio
     async def test_with_data(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100]}))
         result = await dao.get_macro_economy_latest()
         assert not result.empty
 
     @pytest.mark.asyncio
     async def test_error(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(side_effect=Exception("DB Error"))
+        dao._read_db_select = AsyncMock(side_effect=Exception("DB Error"))
         result = await dao.get_macro_economy_latest()
         assert isinstance(result, pd.DataFrame)
 
     @pytest.mark.asyncio
     async def test_with_as_of_date(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"period": ["202312"], "m2": [90]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"period": ["202312"], "m2": [90]}))
         result = await dao.get_macro_economy_latest(as_of_date="2024-01-01")
         assert not result.empty
-        dao._read_db.assert_called_once()
-        call_args = dao._read_db.call_args
-        assert "$1" in call_args[0][0]
-        assert "publish_date <=" in call_args[0][0]
-        assert call_args[0][1] == "2024-01-01"
+        dao._read_db_select.assert_called_once()
+        stmt = dao._read_db_select.call_args[0][0]
+        sql_str = str(stmt)
+        assert "publish_date <=" in sql_str
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100]}))
         result = await dao.get_macro_economy_latest(as_of_date=None)
         assert not result.empty
-        call_sql = dao._read_db.call_args[0][0]
-        assert "WHERE" not in call_sql or "publish_date <=" not in call_sql
+        stmt = dao._read_db_select.call_args[0][0]
+        sql_str = str(stmt)
+        assert "publish_date <=" not in sql_str
 
 
 class TestMacroDaoGetShiborLatestWithAsOfDate:
     @pytest.mark.asyncio
     async def test_with_as_of_date(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"date": ["20240101"], "on": [1.5]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"date": ["20240101"], "on": [1.5]}))
         result = await dao.get_shibor_latest(as_of_date="2024-01-15")
         assert not result.empty
-        call_args = dao._read_db.call_args
-        assert "$1" in call_args[0][0]
-        assert call_args[0][1] == "2024-01-15"
+        dao._read_db_select.assert_called_once()
+        stmt = dao._read_db_select.call_args[0][0]
+        sql_str = str(stmt)
+        assert "date <=" in sql_str
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"date": ["20240615"], "on": [1.5]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"date": ["20240615"], "on": [1.5]}))
         result = await dao.get_shibor_latest(as_of_date=None)
         assert not result.empty

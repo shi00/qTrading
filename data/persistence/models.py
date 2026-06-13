@@ -20,7 +20,18 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func as _original_func
+
+
+class _FuncProxy:
+    def now(self):
+        return text("now()")
+
+    def __getattr__(self, name):
+        return getattr(_original_func, name)
+
+
+func = _FuncProxy()
 
 # Naming convention for Alembic migrations
 # Ensures consistent constraint naming across environments

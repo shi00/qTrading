@@ -649,8 +649,10 @@ def validate_schema_definitions():
     Also validates column-level consistency between ORM and data dictionary.
     """
     import logging
+    import os
 
     logger = logging.getLogger(__name__)
+    has_errors = False
 
     try:
         from data.persistence.models import Base
@@ -672,12 +674,14 @@ def validate_schema_definitions():
             logger.warning(
                 "[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.",
             )
+            has_errors = True
 
         extra_defs = defined_tables - db_tables - IGNORED_TABLES
         if extra_defs:
             logger.warning(
                 f"[DataDict] The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}",
             )
+            has_errors = True
 
         for table_name in defined_tables - IGNORED_TABLES:
             if table_name not in db_tables:
@@ -695,16 +699,24 @@ def validate_schema_definitions():
                 logger.warning(
                     f"[DataDict] Table '{table_name}': ORM columns missing from data dictionary: {missing_cols}",
                 )
+                has_errors = True
 
             phantom_cols = dd_table_cols - orm_cols
             if phantom_cols:
                 logger.warning(
                     f"[DataDict] Table '{table_name}': Data dictionary has phantom columns not in ORM: {phantom_cols}",
                 )
+                has_errors = True
 
         logger.info(
             f"[DataDict] Schema validation completed. {len(db_tables)} tables verified.",
         )
 
+        if has_errors and os.environ.get("STRICT_SCHEMA_GATE") == "1":
+            raise RuntimeError("Schema validation failed in strict mode due to dictionary/ORM mismatch")
+
+    except RuntimeError as e:
+        logger.error(f"[DataDict] Schema validation failed in strict mode: {e}")
+        raise
     except Exception as e:
         logger.error(f"[DataDict] ORM validation failed: {e}")

@@ -163,7 +163,7 @@ class TestScreenerDaoGetLearningContext:
     @pytest.mark.asyncio
     async def test_win(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(
+        dao._read_db_select = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -178,7 +178,7 @@ class TestScreenerDaoGetLearningContext:
     @pytest.mark.asyncio
     async def test_loss(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(
+        dao._read_db_select = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -195,57 +195,67 @@ class TestScreenerDaoGetLearningContext:
         import datetime
 
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         as_of_date = datetime.date(2024, 6, 1)
         await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date)
-        call_args = dao._read_db.call_args
-        sql = call_args[0][0]
-        assert "trade_date < $2" in sql
-        assert call_args[0][1] == ("WIN", as_of_date, 3, REVIEW_STATUS_COMPLETED)
+        call_args = dao._read_db_select.call_args
+        stmt = call_args[0][0]
+        sql = str(stmt)
+        assert "trade_date <" in sql
+        compiled = stmt.compile()
+        assert compiled.params["prediction_result_1"] == "WIN"
+        assert compiled.params["review_status_1"] == REVIEW_STATUS_COMPLETED
+        assert compiled.params["trade_date_1"] == as_of_date
+        assert "LIMIT :PARAM_1" in sql.upper() or "LIMIT 3" in sql.upper()
+        assert compiled.params.get("param_1") == 3 or compiled.params.get("limit_1") == 3
 
     @pytest.mark.asyncio
     async def test_no_as_of_no_date_filter(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         await dao.get_learning_context(limit=3, is_win=True)
-        call_args = dao._read_db.call_args
-        sql = call_args[0][0]
+        call_args = dao._read_db_select.call_args
+        stmt = call_args[0][0]
+        sql = str(stmt)
         assert "trade_date <" not in sql
 
     @pytest.mark.asyncio
     async def test_sql_includes_t5_pct_filter(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         await dao.get_learning_context(limit=3, is_win=True)
-        call_args = dao._read_db.call_args
-        sql = call_args[0][0]
+        call_args = dao._read_db_select.call_args
+        stmt = call_args[0][0]
+        sql = str(stmt)
         assert "t5_pct IS NOT NULL" in sql
 
     @pytest.mark.asyncio
     async def test_sql_includes_review_status_filter(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         await dao.get_learning_context(limit=3, is_win=True)
-        call_args = dao._read_db.call_args
-        sql = call_args[0][0]
+        call_args = dao._read_db_select.call_args
+        stmt = call_args[0][0]
+        sql = str(stmt)
         assert "review_status" in sql
-        params = call_args[0][1]
-        assert REVIEW_STATUS_COMPLETED in params
+        compiled = stmt.compile()
+        assert REVIEW_STATUS_COMPLETED in compiled.params.values()
 
     @pytest.mark.asyncio
     async def test_as_of_sql_includes_t5_pct_and_review_status(self):
         import datetime
 
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         as_of_date = datetime.date(2024, 6, 1)
         await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date)
-        call_args = dao._read_db.call_args
-        sql = call_args[0][0]
+        call_args = dao._read_db_select.call_args
+        stmt = call_args[0][0]
+        sql = str(stmt)
         assert "t5_pct IS NOT NULL" in sql
         assert "review_status" in sql
-        params = call_args[0][1]
-        assert REVIEW_STATUS_COMPLETED in params
+        compiled = stmt.compile()
+        assert REVIEW_STATUS_COMPLETED in compiled.params.values()
 
 
 class TestScreenerDaoUpdatePredictionResult:

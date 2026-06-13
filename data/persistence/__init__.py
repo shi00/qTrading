@@ -16,6 +16,17 @@ def __getattr__(name):
         from data.persistence.models import Base
 
         return Base
+    if name == "models":
+        import importlib
+
+        globals()["models"] = None
+        try:
+            mod = importlib.import_module("data.persistence.models")
+            globals()["models"] = mod
+            return mod
+        except Exception:
+            del globals()["models"]
+            raise
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

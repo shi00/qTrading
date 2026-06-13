@@ -10,6 +10,30 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 
+# Intercept sa.text and sa.func.now to normalize server default expressions
+_original_text = sa.text
+
+
+def _custom_text(text_str):
+    if isinstance(text_str, str) and text_str.upper() in ("CURRENT_TIMESTAMP", "NOW()"):
+        return _original_text("now()")
+    return _original_text(text_str)
+
+
+sa.text = _custom_text
+
+_original_func_now = sa.func.now
+
+
+def _custom_now(*args, **kwargs):
+    return _original_text("now()")
+
+
+try:
+    sa.func.now = _custom_now
+except Exception:
+    sa.func.now = _custom_now
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
