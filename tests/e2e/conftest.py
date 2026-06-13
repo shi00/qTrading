@@ -193,6 +193,16 @@ def flet_app(tmp_path_factory):
         config={
             "onboarding_complete": True,
             "locale": "zh",
+            # CRITICAL WORKAROUND:
+            # We pass db_host="" here to prevent Pydantic from filling in the default value "127.0.0.1".
+            # If db_host is populated, ConfigHandler.get_db_url() assumes the user has configured
+            # a database and ignores the DATABASE_URL environment variable, attempting instead
+            # to rebuild the URL from db_host/db_user/astock and the password from keyring/env.
+            # Since CI_PG_PASSWORD doesn't automatically map to DB_PASSWORD in Python, the password
+            # evaluates to empty, and ConfigHandler produces an invalid connection string,
+            # leading to a mysterious 'password authentication failed' error.
+            # Passing db_host="" forces ConfigHandler to fallback to the explicitly provided
+            # DATABASE_URL from the E2E environment overrides.
             "db_host": "",
         },
         env_overrides={
