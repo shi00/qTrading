@@ -264,11 +264,11 @@ jobs:
             ~/.cache/ms-playwright
             ~\AppData\Local\ms-playwright
             ~/Library/Caches/ms-playwright
-          key: playwright-${{ runner.os }}-msedge-${{ env.PLAYWRIGHT_VERSION }}
+          key: playwright-${{ runner.os }}-chromium-${{ env.PLAYWRIGHT_VERSION }}
 
-      - name: Install Playwright msedge
+      - name: Install Playwright chromium
         if: steps.cache-playwright.outputs.cache-hit != 'true'
-        run: playwright install msedge
+        run: playwright install chromium
 
       - name: Start PostgreSQL Service (Windows)
         shell: pwsh
@@ -340,7 +340,6 @@ jobs:
         env:
           E2E_TEST_DB: 1
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-          E2E_BROWSER_CHANNEL: "msedge"
           E2E_ARTIFACT_DIR: "e2e-artifacts"
           E2E_TIMEOUT_MULTIPLIER: "3.0"
         run: |
