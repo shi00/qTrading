@@ -184,6 +184,58 @@ class TestValidateSchemaDefinitions:
                 del TABLE_DEFINITIONS["stock_basic"]["columns"]["phantom_col"]
 
 
+class TestValidateSchemaDefinitionsStrict:
+    @patch("data.persistence.models.Base")
+    def test_strict_raises_value_error_on_missing_def(self, mock_base):
+        mock_table = MagicMock()
+        mock_table.columns = []
+        mock_metadata = MagicMock()
+        mock_metadata.tables = {"unknown_table": mock_table}
+        mock_base.metadata = mock_metadata
+
+        import pytest
+
+        with pytest.raises(
+            ValueError,
+            match="The following tables are in ORM models but missing from TABLE_DEFINITIONS: {'unknown_table'}",
+        ):
+            validate_schema_definitions(strict=True)
+
+    @patch("data.persistence.models.Base")
+    def test_strict_raises_value_error_on_extra_def(self, mock_base):
+        mock_metadata = MagicMock()
+        mock_metadata.tables = {}
+        mock_base.metadata = mock_metadata
+
+        import pytest
+
+        with pytest.raises(ValueError, match="The following tables are in TABLE_DEFINITIONS but not in ORM:"):
+            validate_schema_definitions(strict=True)
+
+    @patch("data.persistence.models.Base")
+    @patch("data.data_dictionary.TABLE_DEFINITIONS", new_callable=dict)
+    def test_strict_raises_value_error_on_missing_cols(self, mock_table_defs, mock_base):
+        mock_table_defs["stock_basic"] = {"columns": {}}
+
+        mock_col = MagicMock()
+        mock_col.name = "orm_only_col"
+        mock_table = MagicMock()
+        mock_table.columns = [mock_col]
+        mock_metadata = MagicMock()
+        mock_metadata.tables = {"stock_basic": mock_table}
+        mock_base.metadata = mock_metadata
+
+        import pytest
+
+        with pytest.raises(ValueError, match="Schema inconsistencies found"):
+            validate_schema_definitions(strict=True)
+
+    def test_real_schema_validation_strict_passes(self):
+        """Ensure that the actual ORM matches the actual data dictionary under strict mode. This is the main CI gate!"""
+        # If this fails, someone changed models.py without updating data_dictionary.py!
+        validate_schema_definitions(strict=True)
+
+
 class TestDataDictionaryConstants:
     def test_common_columns_has_ts_code(self):
         assert "ts_code" in COMMON_COLUMNS

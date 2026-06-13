@@ -1,7 +1,6 @@
-"""Alembic idempotent upgrade tests.
+"""Alembic schema idempotent tests based on real migration execution.
 
-Uses the session-scoped PostgreSQL test database (via test_engine fixture)
-instead of a temporary SQLite database.
+Uses the session-scoped PostgreSQL test database (via test_engine fixture).
 """
 
 import importlib.util

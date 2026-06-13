@@ -128,6 +128,7 @@
 | R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 |
 | R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` |
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) |
+| R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） |
 
 ### 3.2 ✅ 强制要求
 

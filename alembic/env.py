@@ -88,6 +88,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+        compare_server_default=True,
     )
 
     with context.begin_transaction():
@@ -98,6 +100,8 @@ def do_run_migrations(connection: Connection) -> None:
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
+        compare_type=True,
+        compare_server_default=True,
     )
 
     with context.begin_transaction():
@@ -119,15 +123,7 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    if sync_db_url and sync_db_url.startswith("sqlite"):
-        from sqlalchemy import create_engine as sync_create_engine
-
-        connectable = sync_create_engine(sync_db_url, poolclass=pool.NullPool)
-        with connectable.connect() as connection:
-            do_run_migrations(connection)
-        connectable.dispose()
-    else:
-        asyncio.run(run_async_migrations())
+    asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():
