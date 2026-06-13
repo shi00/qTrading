@@ -642,11 +642,14 @@ TABLE_DEFINITIONS = {
 }
 
 
-def validate_schema_definitions():
+def validate_schema_definitions(strict: bool = False):
     """
     Validates that all SQLAlchemy ORM models have a corresponding entry in TABLE_DEFINITIONS.
     Logs warnings for any missing definitions to help maintain data dictionary consistency.
     Also validates column-level consistency between ORM and data dictionary.
+
+    Args:
+        strict: If True, raises ValueError on any schema inconsistency.
     """
     import logging
 
@@ -664,21 +667,21 @@ def validate_schema_definitions():
         }
 
         missing_defs = db_tables - defined_tables - IGNORED_TABLES
-
         if missing_defs:
-            logger.warning(
-                f"[DataDict] The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}",
-            )
-            logger.warning(
-                "[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.",
-            )
+            msg = f"The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}"
+            logger.warning(f"[DataDict] {msg}")
+            logger.warning("[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.")
+            if strict:
+                raise ValueError(msg)
 
         extra_defs = defined_tables - db_tables - IGNORED_TABLES
         if extra_defs:
-            logger.warning(
-                f"[DataDict] The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}",
-            )
+            msg = f"The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}"
+            logger.warning(f"[DataDict] {msg}")
+            if strict:
+                raise ValueError(msg)
 
+        errors = []
         for table_name in defined_tables - IGNORED_TABLES:
             if table_name not in db_tables:
                 continue
@@ -692,15 +695,18 @@ def validate_schema_definitions():
 
             missing_cols = orm_cols - dd_cols_with_common - {"updated_at", "created_at"}
             if missing_cols:
-                logger.warning(
-                    f"[DataDict] Table '{table_name}': ORM columns missing from data dictionary: {missing_cols}",
-                )
+                msg = f"Table '{table_name}': ORM columns missing from data dictionary: {missing_cols}"
+                logger.warning(f"[DataDict] {msg}")
+                errors.append(msg)
 
             phantom_cols = dd_table_cols - orm_cols
             if phantom_cols:
-                logger.warning(
-                    f"[DataDict] Table '{table_name}': Data dictionary has phantom columns not in ORM: {phantom_cols}",
-                )
+                msg = f"Table '{table_name}': Data dictionary has phantom columns not in ORM: {phantom_cols}"
+                logger.warning(f"[DataDict] {msg}")
+                errors.append(msg)
+
+        if strict and errors:
+            raise ValueError("Schema inconsistencies found:\n" + "\n".join(errors))
 
         logger.info(
             f"[DataDict] Schema validation completed. {len(db_tables)} tables verified.",
@@ -708,3 +714,5 @@ def validate_schema_definitions():
 
     except Exception as e:
         logger.error(f"[DataDict] ORM validation failed: {e}")
+        if strict:
+            raise

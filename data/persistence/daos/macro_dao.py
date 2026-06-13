@@ -77,6 +77,9 @@ class MacroDao(BaseDao):
             DataFrame with latest shibor rates (date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y)
         """
         try:
+            # [DB-005] ShiborDaily contains reserved words ('on') and columns starting with digits ('1w' etc.).
+            # Since we are using raw SQL via _read_db (which uses exec_driver_sql), we MUST wrap these
+            # identifiers in double quotes to prevent syntax errors in PostgreSQL.
             if as_of_date is not None:
                 df = await self._read_db(
                     'SELECT date, "on", "1w", "2w", "1m", "3m", "6m", "9m", "1y" FROM shibor_daily WHERE date <= $1 ORDER BY date DESC LIMIT 1',
