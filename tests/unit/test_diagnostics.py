@@ -18,8 +18,8 @@ async def test_diagnostics_export(tmp_path):
     error_log = log_dir / "error.log"
 
     # 写入带有敏感 token 和 数据库密码 的日志
-    app_log.write_text("Some normal log\napi_key = secret_key_123456\nAnother log", encoding="utf-8")
-    error_log.write_text("Error occurred: postgresql://user:my_secret_password@localhost:5432/db", encoding="utf-8")
+    app_log.write_text("Some normal log\napi_key = test_token_123456\nAnother log", encoding="utf-8")
+    error_log.write_text("Error occurred: postgresql://user:mock_secret_password@localhost:5432/db", encoding="utf-8")
 
     # Mock config.APP_ROOT 让它指向 tmp_path
     with patch("config.APP_ROOT", str(tmp_path)):
@@ -67,8 +67,8 @@ async def test_diagnostics_export(tmp_path):
         # Mock ConfigHandler
         # 写入含有敏感字段的配置
         mock_config = {
-            "ts_token": "tushare_secret_token_123456",
-            "db_password": "super_secret_db_password",
+            "ts_token": "test_token_tushare_123456",
+            "db_password": "mock_secret_db_password",
             "db_user": "postgres",
             "db_host": "localhost",
             "log_level": "INFO",
@@ -115,20 +115,20 @@ async def test_diagnostics_export(tmp_path):
                 # 检查配置脱敏
                 assert "config" in summary_data
                 # 敏感字段应该被脱敏为 掩码
-                assert summary_data["config"]["ts_token"] != "tushare_secret_token_123456"
+                assert summary_data["config"]["ts_token"] != "test_token_tushare_123456"
                 assert "secret" not in summary_data["config"]["ts_token"]
                 assert "secret" not in summary_data["config"]["db_password"]
-                assert summary_data["config"]["db_password"] != "super_secret_db_password"
+                assert summary_data["config"]["db_password"] != "mock_secret_db_password"
                 # 非敏感字段保留原样
                 assert summary_data["config"]["db_user"] == "postgres"
 
                 # 读取脱敏后的日志，确保里面不含有敏感词
                 sanitized_app_content = zf.read("sanitized_app.log").decode("utf-8")
-                assert "secret_key_123456" not in sanitized_app_content
+                assert "test_token_123456" not in sanitized_app_content
                 assert "api_key=***" in sanitized_app_content.replace(" ", "")
 
                 sanitized_error_content = zf.read("sanitized_error.log").decode("utf-8")
-                assert "my_secret_password" not in sanitized_error_content
+                assert "mock_secret_password" not in sanitized_error_content
                 assert "postgresql://user:***@localhost:5432/db" in sanitized_error_content
 
             # 清理产生的 zip 文件
