@@ -2,8 +2,6 @@ import json
 import logging
 from pathlib import Path
 
-from utils.config_handler import ConfigHandler
-
 logger = logging.getLogger(__name__)
 
 LOCALE_MAP = {
@@ -72,12 +70,12 @@ class I18n:
         return cls._strings_cache[locale]
 
     @classmethod
-    def initialize(cls):
-        """Initialize locale from config. Safe to call multiple times."""
+    def initialize(cls, locale: str | None = None):
+        """Initialize locale. Safe to call multiple times."""
         if cls._initialized:
             return
 
-        config_locale = ConfigHandler.get_locale()
+        config_locale = locale or DEFAULT_LOCALE
         normalized_locale = LOCALE_MAP.get(config_locale, config_locale)
 
         if normalized_locale in SUPPORTED_LOCALES:
@@ -144,7 +142,6 @@ class I18n:
 
         if normalized_locale in SUPPORTED_LOCALES:
             cls._locale = normalized_locale
-            ConfigHandler.set_locale(locale)
             logger.info(f"[I18n] Locale changed to: {cls._locale}")
 
             if cls._listeners:

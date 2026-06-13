@@ -428,6 +428,7 @@ class SystemTab(ft.Container):
         try:
             new_locale = self.language_dropdown.value
             I18n.set_locale(new_locale)
+            ConfigHandler.set_locale(new_locale)
             self.show_snack(I18n.get("settings_language_changed"))
         except Exception as ex:
             logger.error("[SystemTab] Language | Change failed: %s", DataSanitizer.sanitize_error(ex))
