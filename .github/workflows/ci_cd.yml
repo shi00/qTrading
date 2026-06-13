@@ -660,7 +660,7 @@ jobs:
           output-file: sbom-${{ matrix.variant }}.cdx.json
 
       - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@619dbb2e39e1a4c781e6fa27a689fc2f5a6f3a7e  # v2.4.2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be  # v2.4.0
         with:
           subject-path: Output/AStockScreener-Setup-${{ matrix.variant }}.exe
 
