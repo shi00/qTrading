@@ -495,7 +495,7 @@ class StockSyncStatus(Base):
     __tablename__ = "stock_sync_status"
     ts_code = Column(String, primary_key=True)
     step4_completed_at = Column(DateTime(timezone=False))
-    sync_version = Column(Integer, default=1)
+    sync_version = Column(Integer, server_default=text("1"), default=1)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -600,7 +600,7 @@ class TaskHistory(Base):
     name = Column(String, nullable=False)
     task_type = Column(String, nullable=False)
     status = Column(String, nullable=False)
-    progress = Column(Numeric(5, 2), default=0)
+    progress = Column(Numeric(5, 2), server_default=text("0"), default=0)
     description = Column(String)
     error = Column(String)
     result = Column(String)
