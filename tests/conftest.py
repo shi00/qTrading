@@ -238,6 +238,7 @@ def mock_external_services(request):
     Avoids patching when testing the respective modules themselves.
     """
     from unittest.mock import patch, AsyncMock
+
     module_name = getattr(request.module, "__name__", "")
 
     # Only apply to unit tests. Do not intercept integration or E2E tests.
