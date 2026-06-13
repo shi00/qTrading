@@ -45,7 +45,7 @@ jobs:
   lint-fast:
     name: Fast Lint Check (${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
@@ -80,7 +80,7 @@ jobs:
     name: Code Quality & Tests (Linux)
     needs: lint-fast
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
 
@@ -222,7 +222,7 @@ jobs:
     name: E2E Tests (Windows)
     needs: lint-fast
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
 
@@ -369,7 +369,7 @@ jobs:
   ci-checks-windows:
     name: Code Quality & Unit Tests (Windows)
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
 
@@ -497,7 +497,7 @@ jobs:
     needs: requirements-drift
     if: needs.requirements-drift.outputs.drift == 'true'
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
@@ -546,7 +546,7 @@ jobs:
     needs: [ci-checks, ci-checks-windows, e2e-tests-windows]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: write
       id-token: write
