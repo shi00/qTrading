@@ -104,6 +104,10 @@ class ProviderCredential(BaseModel):
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    # WARNING: Providing a non-empty default for db_host ("127.0.0.1") causes
+    # ConfigHandler.get_db_url() to ALWAYS rebuild the database URL from these components,
+    # effectively bypassing the DATABASE_URL environment variable fallback unless
+    # explicitly overridden with an empty string in the JSON config.
     db_host: str = "127.0.0.1"
     db_port: int = Field(default=5432, ge=1, le=65535)
     db_user: str = "postgres"

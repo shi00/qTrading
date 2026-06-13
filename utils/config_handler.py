@@ -526,6 +526,12 @@ class ConfigHandler:
         via DatabaseConfigService.build_url(), which properly URL-encodes
         credentials. Falls back to config.DB_URL (from DATABASE_URL env var)
         only when no db_host is configured (pre-onboarding).
+
+        WARNING: Due to AppConfig defining a default `db_host` ("127.0.0.1"),
+        `get_typed("db_host")` will rarely return empty unless explicitly set
+        to `""`. This means the DATABASE_URL environment variable will be
+        completely ignored in most runtime scenarios, as the URL will be
+        rebuilt using defaults instead.
         """
         host = ConfigHandler.get_typed("db_host", str, "")
         if host:
