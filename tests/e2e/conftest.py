@@ -109,6 +109,12 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
     fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
 
+    # CRITICAL WORKAROUND for E2E Flakiness:
+    # Flet's web app downloads canvaskit.js and canvaskit.wasm from unpkg.com on startup.
+    # In CI and sometimes local environments, unpkg.com can be extremely slow or timeout,
+    # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
+    # To fix this, we intercept network requests and serve the canvaskit files directly from
+    # the local 'mock_assets' folder. We also abort font requests to speed up test execution.
     async def intercept_canvaskit(route):
         url = route.request.url
         if "fonts.gstatic.com" in url:
