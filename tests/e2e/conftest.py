@@ -115,8 +115,17 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
     # To fix this, we intercept network requests and serve the canvaskit files directly from
     # the local 'mock_assets' folder. We also abort font requests to speed up test execution.
-    async def intercept_canvaskit(route):
-        url = route.request.url
+    # [PITFALL FIX] 拦截并缓存 CanvasKit WASM 文件加载
+    # 坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
+    # Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
+    # 更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
+    # 解决方案：我们在 e2e 启动时拦截对 canvaskit 文件的请求，并使用本地预下载的版本进行响应。
+    # 这将原本需要数十秒的网络请求压缩至几毫秒，从而稳定保障 Flet UI 的秒级加载。
+    async def intercept_canvaskit(route, request):
+        url = request.url
+        if "fonts.googleapis.com" in url:
+            await route.abort()
+            return
         if "fonts.gstatic.com" in url:
             await route.abort()
             return

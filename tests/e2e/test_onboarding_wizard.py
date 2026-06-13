@@ -8,11 +8,28 @@ pytestmark = pytest.mark.e2e
 from ui.i18n import I18n
 
 
+from urllib.parse import unquote_plus
+
+
 def _parse_db_url(url: str) -> dict[str, str]:
     m = re.match(r"postgresql\+asyncpg://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", url)
     if not m:
         pytest.skip(f"Cannot parse E2E_DATABASE_URL for DB success test: {url}")
-    return {"user": m[1], "password": m[2], "host": m[3], "port": m[4], "database": m[5]}
+
+    # [PITFALL FIX] 必须使用 unquote_plus 解码！
+    # 在 CI 环境下，DATABASE_URL 中的 password (例如 GitHub Actions 的 secret)
+    # 可能包含特殊字符（!@# 等），因此在集成测试环境构建 URL 时被 URL-encoded（quote_plus）。
+    # 这里如果直接返回 m[2] (未解码的密码)，Flet 页面会将 URL 编码后的字符串直接填入密码框。
+    # 随后 Flet 点击 "验证" 时，DatabaseConfigService 会将此密码 *再次* 进行 URL 编码，
+    # 导致 asyncpg 最终拿到的是错误（双重编码）的密码，从而抛出 InvalidPasswordError 并导致测试超时！
+    # 详见 https://github.com/MagicTower/AStockScreener/issues/xxx 或相关调试记录。
+    return {
+        "user": unquote_plus(m[1]),
+        "password": unquote_plus(m[2]),
+        "host": unquote_plus(m[3]),
+        "port": m[4],
+        "database": unquote_plus(m[5]),
+    }
 
 
 async def test_wizard_renders_welcome(wizard_page):
