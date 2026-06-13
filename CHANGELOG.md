@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.7](https://github.com/shi00/qTrading/compare/v0.6.6...v0.6.7) (2026-06-13)
+
+
+### Bug Fixes
+
+* **db/daos:** resolve schema consistency issues and refactor query safety ([ffd2efa](https://github.com/shi00/qTrading/commit/ffd2efa6ca09db31443b3071a579dd12bf2d44f8))
+* **db/daos:** resolve schema consistency issues and refactor query safety ([1d538cf](https://github.com/shi00/qTrading/commit/1d538cf5be0199ea10144aa8698ae6f76bd188b1))
+* **db:** add missing ORM server_defaults for sync_version and progress to align with DB ([95b3780](https://github.com/shi00/qTrading/commit/95b3780e03cf78a93b1a6e6cbf81f9a36f9ebeda))
+* **db:** resolve schema consistency and align server defaults per architecture report ([429fb78](https://github.com/shi00/qTrading/commit/429fb78f9b68e381c24bbf09c264fd07da0b57e7))
+* **db:** resolve schema consistency and align server defaults per architecture report ([b6e422b](https://github.com/shi00/qTrading/commit/b6e422b0fa1fa19b53777965a3a44a0bbf85b7c2))
+
 ## [0.6.5](https://github.com/shi00/qTrading/compare/v0.6.4...v0.6.5) (2026-06-13)
 
 
