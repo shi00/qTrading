@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.5](https://github.com/shi00/qTrading/compare/v0.6.4...v0.6.5) (2026-06-13)
+
+
+### Bug Fixes
+
+* **test:** fix URL-decoding in test DB config for passwords with special characters ([0a44c59](https://github.com/shi00/qTrading/commit/0a44c59f68f4ef7a9fde17fe8d8682cbd69b4479))
+
+
+### Documentation
+
+* **test:** add detailed explanation for Playwright E2E canvaskit request interception workaround ([0a44c59](https://github.com/shi00/qTrading/commit/0a44c59f68f4ef7a9fde17fe8d8682cbd69b4479))
+
+
 ## [0.6.4](https://github.com/shi00/qTrading/compare/v0.6.3...v0.6.4) (2026-06-13)
 
 
