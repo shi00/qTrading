@@ -896,6 +896,100 @@ class TestChunkedInQuery:
         assert "extra_val" in call_params
 
 
+class TestChunkedInWrite:
+    """Verify chunked_in_write properly splits large IN clauses for write operations."""
+
+    @pytest.mark.asyncio
+    async def test_empty_values_returns_zero(self):
+        write_fn = AsyncMock()
+        result = await BaseDao.chunked_in_write(write_fn, "UPDATE t SET x=1 WHERE id IN ({placeholders})", [])
+        assert result == 0
+        write_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_small_list_single_write(self):
+        write_fn = AsyncMock(return_value=2)
+        result = await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x=1 WHERE id IN ({placeholders})",
+            ["A", "B"],
+            chunk_size=500,
+        )
+        assert result == 2
+        write_fn.assert_called_once()
+        call_args = write_fn.call_args[0]
+        sql = call_args[0]
+        assert "$1" in sql and "$2" in sql
+
+    @pytest.mark.asyncio
+    async def test_large_list_splits_into_chunks(self):
+        codes = [f"{i:06d}.SH" for i in range(1200)]
+        write_fn = AsyncMock(side_effect=[500, 500, 200])
+        result = await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x=1 WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=500,
+        )
+        assert write_fn.call_count == 3
+        assert result == 1200
+
+    @pytest.mark.asyncio
+    async def test_none_result_treated_as_zero(self):
+        write_fn = AsyncMock(return_value=None)
+        result = await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x=1 WHERE id IN ({placeholders})",
+            ["A"],
+        )
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_callable_sql_template(self):
+        write_fn = AsyncMock(return_value=1)
+
+        def sql_tpl(placeholders, chunk_len):
+            return f"UPDATE t SET x=1 WHERE id IN ({placeholders}) AND cnt = ${chunk_len + 1}"
+
+        await BaseDao.chunked_in_write(
+            write_fn,
+            sql_tpl,
+            ["A", "B"],
+        )
+        sql = write_fn.call_args[0][0]
+        assert "$3" in sql
+
+    @pytest.mark.asyncio
+    async def test_extra_params_and_params_fn(self):
+        write_fn = AsyncMock(return_value=1)
+
+        def params_fn(chunk):
+            return ["extra_suffix"]
+
+        await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x=1 WHERE id IN ({placeholders}) AND status = $1",
+            ["A"],
+            extra_params=["status_val"],
+            params_fn=params_fn,
+        )
+        call_params = write_fn.call_args[0][1]
+        assert call_params[0] == "status_val"
+        assert call_params[1] == "A"
+        assert call_params[2] == "extra_suffix"
+
+    @pytest.mark.asyncio
+    async def test_write_db_kwargs_forwarded(self):
+        write_fn = AsyncMock(return_value=1)
+        await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x=1 WHERE id IN ({placeholders})",
+            ["A"],
+            suppress_errors=True,
+        )
+        assert write_fn.call_args[1].get("suppress_errors") is True
+
+
 class TestBaseDaoSaveUpsertExtended:
     @pytest.mark.asyncio
     async def test_upsert_success_with_conn(self):

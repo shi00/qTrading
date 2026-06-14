@@ -34,40 +34,40 @@ class HolderDao(BaseDao):
             return
 
         try:
-            _CHUNK = 500
-            for i in range(0, len(ts_codes), _CHUNK):
-                chunk = ts_codes[i : i + _CHUNK]
-                placeholders = ",".join([f"${j + 1}" for j in range(len(chunk))])
-                sql = f"""
-                    UPDATE stk_holdernumber h
-                    SET holder_num_change = sub.holder_num_change,
-                        holder_num_ratio = sub.holder_num_ratio
-                    FROM (
-                        SELECT ts_code, end_date,
-                            holder_num - LAG(holder_num) OVER (
+            sql_template = """
+                UPDATE stk_holdernumber h
+                SET holder_num_change = sub.holder_num_change,
+                    holder_num_ratio = sub.holder_num_ratio
+                FROM (
+                    SELECT ts_code, end_date,
+                        holder_num - LAG(holder_num) OVER (
+                            PARTITION BY ts_code ORDER BY end_date
+                        ) as holder_num_change,
+                        CASE
+                            WHEN LAG(holder_num) OVER (
                                 PARTITION BY ts_code ORDER BY end_date
-                            ) as holder_num_change,
-                            CASE
-                                WHEN LAG(holder_num) OVER (
-                                    PARTITION BY ts_code ORDER BY end_date
-                                ) > 0 THEN
-                                    ROUND(
-                                        (holder_num - LAG(holder_num) OVER (
-                                            PARTITION BY ts_code ORDER BY end_date
-                                        ))::numeric / LAG(holder_num) OVER (
-                                            PARTITION BY ts_code ORDER BY end_date
-                                        ) * 100,
-                                        2
-                                    )
-                                ELSE NULL
-                            END as holder_num_ratio
-                        FROM stk_holdernumber
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
-                    WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
-                """
-                await self._write_db(sql, tuple(chunk))
-            logger.debug(f"[HolderDao] Calculated holder changes for {len(ts_codes)} stocks")
+                            ) > 0 THEN
+                                ROUND(
+                                    (holder_num - LAG(holder_num) OVER (
+                                        PARTITION BY ts_code ORDER BY end_date
+                                    ))::numeric / LAG(holder_num) OVER (
+                                        PARTITION BY ts_code ORDER BY end_date
+                                    ) * 100,
+                                    2
+                                )
+                            ELSE NULL
+                        END as holder_num_ratio
+                    FROM stk_holdernumber
+                    WHERE ts_code IN ({placeholders})
+                ) sub
+                WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
+            """
+            await self.chunked_in_write(
+                self._write_db,
+                sql_template,
+                ts_codes,
+            )
+            logger.debug("[HolderDao] Calculated holder changes for %d stocks", len(ts_codes))
         except asyncio.CancelledError:
             raise
         except EngineDisposedError:

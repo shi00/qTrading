@@ -152,6 +152,55 @@ class BaseDao:
         return pd.DataFrame()
 
     @staticmethod
+    async def chunked_in_write(
+        write_db_fn,
+        sql_template,
+        values,
+        *,
+        chunk_size=_IN_CHUNK_SIZE,
+        params_fn=None,
+        start_idx=1,
+        extra_params=None,
+        **write_db_kwargs,
+    ):
+        """
+        Execute a write SQL with IN clause in chunks to avoid PostgreSQL parameter limit.
+
+        Identical chunking logic to chunked_in_query but for write operations.
+        Returns the total number of affected rows (sum of write_db_fn return values).
+
+        Args:
+            write_db_fn: async _write_db method (or equivalent)
+            sql_template: SQL with {placeholders} marker or a callable(placeholders, chunk_len) -> sql_string
+            values: list of values for the IN clause
+            chunk_size: maximum items per IN clause (default 500)
+            params_fn: callable(values_chunk) -> extra params list, appended after values
+            start_idx: starting index for placeholders (default 1)
+            extra_params: prefix parameters list to prepend to query arguments
+            **write_db_kwargs: extra kwargs to pass to write_db_fn
+        """
+        if not values:
+            return 0
+
+        extra_prefix = extra_params or []
+        prefix_len = len(extra_prefix)
+        actual_start_idx = start_idx if extra_params is None else prefix_len + 1
+
+        total = 0
+        for i in range(0, len(values), chunk_size):
+            chunk = values[i : i + chunk_size]
+            placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
+            extra_suffix = params_fn(chunk) if params_fn else []
+            if callable(sql_template):
+                sql = sql_template(placeholders, len(chunk))
+            else:
+                sql = sql_template.format(placeholders=placeholders)
+            result = await write_db_fn(sql, extra_prefix + chunk + extra_suffix, **write_db_kwargs)
+            if isinstance(result, int):
+                total += result
+        return total
+
+    @staticmethod
     def _to_date_str(val: datetime.date | str | None) -> str | None:
         if val is None:
             return None
@@ -594,7 +643,9 @@ class BaseDao:
         Args:
             sql: SQL query string
             params: Query parameters
-            suppress_errors: If True, return empty DataFrame on error
+            suppress_errors: If True (default), return empty DataFrame on error.
+                Use suppress_errors=False for critical paths where "query failed"
+                must not be confused with "no data".
             max_rows: Safety valve - if set, raises ValueError when result
                       exceeds this row count to prevent accidental full-table loads
         """
